@@ -267,7 +267,8 @@ void Listener::PreShutdown() {
   // This shouldn't take a long time: All clients should reject incoming commands
   // at this stage since we're in SHUTDOWN mode.
   // If a command is running for too long we give up and proceed.
-  DispatchTracker tracker{{this}};
+  DispatchTracker tracker{
+      {this}, nullptr, false /* paused connections */, false /* blocking connections*/};
   tracker.TrackAll();
 
   if (!tracker.Wait(absl::Milliseconds(10))) {
@@ -373,11 +374,13 @@ void DispatchTracker::TrackOnThread() {
 bool DispatchTracker::Wait(absl::Duration duration) {
   bool res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
   if (!res && ignore_blocked_) {
+    LOG(INFO) << "Retrying DispatchTracker::Wait, as bc=" << bc_->DEBUG_Count();
     // We track all connections again because a connection might became blocked between the time
     // we call tracking the last time.
     bc_ = BlockingCounter{0};
     TrackAll();
     res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
+    LOG_IF(INFO, !res) << "DispatchTracker::Wait failed again, bc=" << bc_->DEBUG_Count();
   }
   return res;
 }

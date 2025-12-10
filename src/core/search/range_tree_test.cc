@@ -4,6 +4,8 @@
 
 #include "core/search/range_tree.h"
 
+#include <absl/random/random.h>
+#include <benchmark/benchmark.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -114,10 +116,12 @@ TEST_F(RangeTreeTest, Add) {
   tree.Add(3, 20.0);
   tree.Add(4, 30.0);
   tree.Add(5, 30.0);
+  tree.Add(6, 30.0);
 
   auto result = tree.RangeBlocks(10.0, 30.0);
-  EXPECT_THAT(result, UnorderedElementsAreDocPairs(
-                          {{1, 10.0}, {1, 20.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 30.0}}));
+  EXPECT_THAT(result,
+              UnorderedElementsAreDocPairs(
+                  {{1, 10.0}, {1, 20.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 30.0}, {6, 30.0}}));
 
   // Test that the ranges was split correctly
   result = tree.RangeBlocks(kMinRangeValue, 19.0);
@@ -127,7 +131,7 @@ TEST_F(RangeTreeTest, Add) {
   EXPECT_THAT(result, UnorderedElementsAreDocPairs({{1, 20.0}, {2, 20.0}, {3, 20.0}}));
 
   result = tree.RangeBlocks(30.0, kMaxRangeValue);
-  EXPECT_THAT(result, UnorderedElementsAreDocPairs({{4, 30.0}, {5, 30.0}}));
+  EXPECT_THAT(result, UnorderedElementsAreDocPairs({{4, 30.0}, {5, 30.0}, {6, 30.0}}));
 }
 
 TEST_F(RangeTreeTest, RemoveSimple) {
@@ -310,6 +314,71 @@ TEST_F(RangeTreeTest, Range) {
   }
 }
 
+// Don't split single block with same value
+TEST_F(RangeTreeTest, SingleBlockSplit) {
+  RangeTree tree{PMR_NS::get_default_resource(), 4};
+
+  for (DocId id = 1; id <= 16; id++)
+    tree.Add(id, 5.0);
+
+  // One split was made to create an empty leftmost block
+  auto stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 1u);
+  EXPECT_EQ(stats.block_count, 2u);
+
+  // Add value that causes a new block to be started
+  tree.Add(20, 6.0);
+
+  stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 1u);       // detected ahead, so no split
+  EXPECT_EQ(stats.block_count, 3u);  // but new block
+
+  // No more splits with same 5.0
+  tree.Add(17, 5.0);
+  stats = tree.GetStats();
+  EXPECT_EQ(stats.splits, 1u);
+
+  // Verify block sizes
+  auto blocks = tree.GetAllBlocks();
+  EXPECT_EQ(blocks[0]->Size(), 0u);
+  EXPECT_EQ(blocks[1]->Size(), 17u);
+  EXPECT_EQ(blocks[2]->Size(), 1u);
+}
+
+// Make tree split and then delete every nth value to see if blocks merge properly
+TEST_F(RangeTreeTest, BlockMerge) {
+  RangeTree tree{PMR_NS::get_default_resource(), 8};
+  for (DocId id = 1; id <= 64; id++)
+    tree.Add(id, id);
+
+  auto stats = tree.GetStats();
+  uint64_t splits = stats.splits;
+  EXPECT_GT(splits, 8u);
+
+  // Blocks have at least half occupancy
+  EXPECT_GT(stats.block_count, 64 / 8);
+  EXPECT_LT(stats.block_count, 2 * 64 / 8);
+
+  // Delete all except  %8 = 0, should trigger merge
+  std::vector<Entry> expected;
+  for (DocId id = 1; id <= 64; id++) {
+    if (id % 8)
+      tree.Remove(id, id);
+    else
+      expected.emplace_back(id, id);
+  }
+
+  // Only one block left now
+  stats = tree.GetStats();
+  size_t blocks = stats.block_count;
+  EXPECT_LT(blocks, 4u);
+  EXPECT_EQ(stats.merges + blocks - 1, splits);
+
+  // Check the two entries remained
+  auto result = tree.GetAllBlocks();
+  EXPECT_THAT(result, UnorderedElementsAreDocPairs(expected));
+}
+
 TEST_F(RangeTreeTest, BugNotUniqueDoubleValues) {
   // TODO: fix the bug
   GTEST_SKIP() << "Bug not fixed yet";
@@ -403,7 +472,7 @@ TEST_F(RangeTreeTest, RangeResultTwoBlocks) {
 }
 
 TEST_F(RangeTreeTest, FinalizeInitialization) {
-  RangeTree tree{PMR_NS::get_default_resource(), 1, false};
+  RangeTree tree{PMR_NS::get_default_resource(), 2, false};
 
   // Add some values
   tree.Add(1, 10.0);
@@ -422,10 +491,37 @@ TEST_F(RangeTreeTest, FinalizeInitialization) {
   tree.FinalizeInitialization();
 
   result = tree.RangeBlocks(10.0, 40.0);
-  EXPECT_THAT(
-      result,
-      BlocksAre(
-          {{{1, 10.0}}, {{2, 20.0}, {3, 20.0}, {5, 20.0}}, {{4, 30.0}, {6, 30.0}}, {{7, 40.0}}}));
+  EXPECT_THAT(result, BlocksAre({{{1, 10.0}, {2, 20.0}, {3, 20.0}, {5, 20.0}},
+                                 {{4, 30.0}, {6, 30.0}},
+                                 {{7, 40.0}}}));
 }
+
+// Test tree doesn't create unnecessary nodes after initialization
+TEST_F(RangeTreeTest, DiscreteIntialization) {
+  RangeTree tree{PMR_NS::get_default_resource(), 4, false};
+  for (size_t i = 0; i < 32; i++) {
+    tree.Add(i, i % 4);
+  }
+
+  tree.FinalizeInitialization();
+  auto result = tree.GetAllBlocks();
+  EXPECT_EQ(result.size(), 4u);
+}
+
+// Benchmark tree insertion performance with set of discrete values
+static void BM_DiscreteInsertion(benchmark::State& state) {
+  RangeTree tree{PMR_NS::get_default_resource()};
+
+  absl::InsecureBitGen gen{};
+  size_t variety = state.range(0);
+
+  DocId id = 0;
+  for (auto _ : state) {
+    double v = absl::Uniform(gen, 0u, variety);
+    tree.Add(id++, v);
+  }
+}
+
+BENCHMARK(BM_DiscreteInsertion)->Arg(2)->Arg(12)->Arg(128)->Arg(1024);
 
 }  // namespace dfly::search

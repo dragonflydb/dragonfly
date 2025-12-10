@@ -181,6 +181,14 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
             assert len(states) != 0 and all(state[2] in status for state in states), states
 
 
+async def wait_for_ft_index_creation(client, idx_name, timeout=5):
+    get_status = lambda: client.execute_command("FT.INFO", idx_name)
+
+    async for states, breaker in tick_timer(get_status, timeout=timeout):
+        with breaker:
+            assert len(states) != 0, states
+
+
 async def wait_for_error(admin_client, node_id, error, timeout=10):
     get_status = lambda: admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
@@ -3442,3 +3450,118 @@ async def test_replica_takeover_moved(
     await m1.client.execute_command(f"replicaof localhost {r1.instance.port}")
     await check_all_replicas_finished([m1.client], r1.client)
     assert await m1.client.execute_command("GET newk") == "foo"
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_search": "yes"})
+async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
+    """
+    Create cluster of 3 nodes.
+    Send FT.CREATE to first node and check that index was created on all nodes.
+    """
+
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="coordinator=2,search_family=3,redis_parser=3",
+        )
+        for i in range(3)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 5259)]
+    nodes[1].slots = [(5260, 10519)]
+    nodes[2].slots = [(10520, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert (
+        await nodes[0].client.execute_command(
+            "FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"
+        )
+        == "OK"
+    )
+
+    for node in nodes:
+        await wait_for_ft_index_creation(node.client, "idx")
+
+    cclient = instances[0].cluster_client()
+
+    docs_num = 2
+    for i in range(0, docs_num):
+        assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
+
+    async def search_test():
+        res = await nodes[0].client.execute_command("FT.SEARCH", "idx", "@title:test", "text")
+        assert res[0] == docs_num
+        for i in range(0, docs_num):
+            assert f"s{i}" in res
+
+    await asyncio.gather(*(search_test() for _ in range(docs_num)))
+
+
+async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
+    # Get number of docs in index
+    index_info = await client.execute_command(f"FT.INFO idx")
+    index_info_num_docs = index_info[9]
+
+    # Get number of keys in database
+    keyspace_info = await client.info("keyspace")
+    keyspace_keys = keyspace_info["db0"]["keys"]
+
+    assert index_info_num_docs == keyspace_keys
+    assert index_info_num_docs == expected_num_keys
+    assert keyspace_keys == expected_num_keys
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cluster_search": "yes"})
+async def test_remove_docs_on_cluster_migration(df_factory):
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # Create index on both nodes
+    await nodes[0].client.execute_command(
+        "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "v", "TEXT"
+    )
+
+    # Populate node 0
+    keys = 100
+    for i in range(0, keys):
+        random_string = "".join(random.choices(string.ascii_letters + string.digits, k=1_000))
+        await nodes[0].client.execute_command("HSET", f"doc:{i}", "v", random_string)
+
+    # Verify on node 0 that keys are added and index is populated
+    await verify_keys_match_number_of_index_docs(nodes[0].client, keys)
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
+    )
+    logging.debug("Start migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    logging.debug("finalize migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await asyncio.sleep(1)
+
+    # Verify on node 1 that keys are moved and index is populated
+    await verify_keys_match_number_of_index_docs(nodes[1].client, keys)
+
+    # Verify that node 0 doesn't have any keys and no index docs
+    await verify_keys_match_number_of_index_docs(nodes[0].client, 0)

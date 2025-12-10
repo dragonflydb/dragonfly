@@ -40,6 +40,18 @@ helm.sh/chart: {{ include "dragonfly.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- include "dragonfly.commonLabels" . }}
+{{- end }}
+
+{{/*
+User-defined common labels
+*/}}
+{{- define "dragonfly.commonLabels" -}}
+{{- if .Values.commonLabels }}
+{{- range $key, $value := .Values.commonLabels }}
+{{ $key }}: {{ $value }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/*

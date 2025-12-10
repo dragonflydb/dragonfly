@@ -7,11 +7,9 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <variant>
 
 #include "base/pmr/memory_resource.h"
@@ -23,6 +21,7 @@ namespace dfly::search {
 
 struct AstNode;
 struct TextIndex;
+struct AstKnnNode;
 
 // Optional FILTER
 struct OptionalNumericFilter : public OptionalFilterBase {
@@ -142,6 +141,8 @@ class FieldIndices {
 
   void FinalizeInitialization();
 
+  DefragmentResult Defragment(PageUsage* page_usage);
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);
@@ -152,6 +153,9 @@ class FieldIndices {
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
   const Synonyms* synonyms_;
+
+  std::string next_defrag_field_;
+  std::string next_defrag_sort_field_;
 };
 
 struct AlgorithmProfile {
@@ -197,16 +201,24 @@ class SearchAlgorithm {
   bool Init(std::string_view query, const QueryParams* params,
             const OptionalFilters* filters = nullptr);
 
-  SearchResult Search(const FieldIndices* index) const;
+  // Search on given index with predefined limit for cutting off result ids
+  SearchResult Search(const FieldIndices* index,
+                      size_t cuttoff_limit = std::numeric_limits<size_t>::max()) const;
 
-  // if enabled, return limit & alias for knn query
   std::optional<KnnScoreSortOption> GetKnnScoreSortOption() const;
+
+  bool IsKnnQuery() const;
+
+  AstKnnNode* GetKnnNode() const;
+
+  std::unique_ptr<AstNode> PopKnnNode();
 
   void EnableProfiling();
 
  private:
   bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
+  std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };
 
 }  // namespace dfly::search

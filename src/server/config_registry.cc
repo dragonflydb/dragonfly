@@ -4,6 +4,7 @@
 #include "server/config_registry.h"
 
 #include <absl/flags/reflection.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_replace.h>
 
 #include "base/logging.h"
@@ -15,9 +16,26 @@ namespace {
 using namespace std;
 
 string NormalizeConfigName(string_view name) {
-  return absl::StrReplaceAll(name, {{"-", "_"}});
+  return absl::StrReplaceAll(name, {{"-", "_"}, {".", "_"}});
 }
 }  // namespace
+
+// Convert internal flag name back to user-facing format
+// Example: search_query_string_bytes -> search.query-string-bytes
+string DenormalizeConfigName(string_view name) {
+  string result{name};
+  if (absl::StartsWith(result, "search_")) {
+    // Replace first underscore after "search" with dot
+    result.replace(6, 1, ".");
+    // Replace remaining underscores with dashes
+    for (size_t i = 7; i < result.size(); ++i) {
+      if (result[i] == '_') {
+        result[i] = '-';
+      }
+    }
+  }
+  return result;
+}
 
 // Returns true if the value was updated.
 auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResult {

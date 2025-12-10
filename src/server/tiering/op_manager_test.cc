@@ -58,9 +58,9 @@ struct OpManagerTest : PoolTestBase, OpManager {
 
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {
     util::fb2::Future<std::string> future;
-    Enqueue(id, segment, TestDecoder{}, [future](io::Result<TestDecoder*> res) mutable {
-      future.Resolve((*res)->value);
-      return false;
+    Enqueue(id, segment, TestDecoder{}, [future](io::Result<tiering::Decoder*> res) mutable {
+      auto* decoder = static_cast<TestDecoder*>(*res);
+      future.Resolve(decoder->value);
     });
     return future;
   }
@@ -109,10 +109,10 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     }
 
     EXPECT_EQ(GetStats().pending_stash_cnt, 100);
-
-    while (stashed_.size() < 100)
+    while (GetStats().disk_stats.pending_ops > 0)
       util::ThisFiber::SleepFor(1ms);
 
+    EXPECT_EQ(stashed_.size(), 100u);
     EXPECT_EQ(GetStats().disk_stats.allocated_bytes, 100 * kPageSize) << GetStats();
 
     for (unsigned i = 0; i < 100; i++) {
@@ -188,9 +188,9 @@ TEST_F(OpManagerTest, Modify) {
     // Atomically issue sequence of modify-read operations
     std::vector<util::fb2::Future<std::string>> futures;
     for (size_t i = 0; i < 10; i++) {
-      Enqueue(0u, stashed_[0u], TestDecoder{}, [i](io::Result<TestDecoder*> res) {
-        absl::StrAppend(&(*res)->value, i);
-        return true;
+      Enqueue(0u, stashed_[0u], TestDecoder{}, [i](io::Result<tiering::Decoder*> res) {
+        auto* decoder = static_cast<TestDecoder*>(*res);
+        absl::StrAppend(&decoder->value, i);
       });
       futures.emplace_back(Read(0u, stashed_[0u]));
     }

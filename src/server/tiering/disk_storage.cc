@@ -89,6 +89,8 @@ error_code DiskStorage::Open(string_view path) {
 
   alloc_.AddStorage(0, kInitialSize);
 
+  // TODO(vlad): Even though this is called only once for regular use,
+  // the testing code runs this initializer every time, never unregistering previous buffers
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
   auto registered_buffer_size = absl::GetFlag(FLAGS_registered_buffer_size);
   if (registered_buffer_size > 0) {

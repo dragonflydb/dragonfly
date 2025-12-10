@@ -74,9 +74,6 @@ bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func);
 // Get StringMap pointer from primetable value. Sets expire time from db_context
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);
 
-// Get string_view from listpack poiner. Intbuf to store integer values as strings.
-std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]);
-
 using BlockingResultCb =
     std::function<void(Transaction*, EngineShard*, std::string_view /* key */)>;
 

@@ -76,4 +76,8 @@ class ConfigRegistry {
 
 inline ConfigRegistry config_registry;
 
+// Convert internal flag name back to user-facing format for search parameters
+// Example: search_query_string_bytes -> search.query-string-bytes
+std::string DenormalizeConfigName(std::string_view name);
+
 }  // namespace dfly

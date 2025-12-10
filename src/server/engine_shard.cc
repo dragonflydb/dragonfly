@@ -4,13 +4,15 @@
 
 #include "server/engine_shard.h"
 
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include <memory>
 
 #include "base/flags.h"
-#include "core/page_usage_stats.h"
+#include "core/huff_coder.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -55,7 +57,7 @@ ABSL_FLAG(string, tiered_prefix, "",
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 ABSL_FLAG(bool, enable_heartbeat_rss_eviction, true,
-          "Enable eviction during heartbeat when rss memory is under pressure. Evicition based "
+          "Enable eviction during heartbeat when rss memory is under pressure. Eviction based "
           "on used_memory will still be enabled.");
 ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
           "Eviction starts when the free memory (including RSS memory) drops below "
@@ -116,6 +118,86 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
   return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
 }
 
+class HuffmanCheckTask {
+ public:
+  HuffmanCheckTask() {
+    hist_.fill(0);
+  }
+
+  int32_t Run(DbSlice* db_slice);
+
+ private:
+  PrimeTable::Cursor cursor_;
+
+  static constexpr unsigned kMaxSymbol = 255;
+  array<unsigned, kMaxSymbol + 1> hist_;  // histogram of symbols.
+  string scratch_;
+};
+
+int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
+  DbTable* db_table = db_slice->GetDBTable(0);  // we currently support only default db.
+  if (!db_table)
+    return -1;
+
+  // incrementally aggregate frequency histogram.
+  auto& prime = db_table->prime;
+
+  constexpr uint32_t kMaxTraverses = 512;
+  uint32_t traverses_count = 0;
+  do {
+    cursor_ = prime.Traverse(cursor_, [&](PrimeIterator it) {
+      if (!it->first.IsInline()) {
+        string_view val = it->first.GetSlice(&scratch_);
+        for (unsigned char c : val) {
+          hist_[c]++;
+        }
+
+        if (val.size() > 1024) {
+          traverses_count = kMaxTraverses;  // return early.
+          string{}.swap(scratch_);          // free memory.
+        }
+      }
+    });
+    traverses_count++;
+  } while (traverses_count < kMaxTraverses && cursor_);
+
+  if (cursor_)
+    return 4;  // priority to continue later.
+
+  // Finished scanning the table, now normalize the table.
+  constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
+  size_t total_freq = std::accumulate(hist_.begin(), hist_.end(), 0UL);
+  if (total_freq == 0)
+    return -1;
+
+  // to avoid overflow.
+  double scale = total_freq > kMaxFreqTotal ? static_cast<double>(total_freq) / kMaxFreqTotal : 1.0;
+  for (unsigned i = 0; i <= kMaxSymbol; i++) {
+    hist_[i] = static_cast<unsigned>(hist_[i] / scale);
+    if (hist_[i] == 0) {
+      hist_[i] = 1;  // Avoid zero frequency symbols.
+    }
+  }
+
+  // Build the huffman table. We currently output the table to logs and just increase
+  // the metric counter to signal that we built a table.
+
+  HuffmanEncoder huff_enc;
+  string error_msg;
+  if (huff_enc.Build(hist_.data(), kMaxSymbol, &error_msg)) {
+    size_t compressed_size = huff_enc.EstimateCompressedSize(hist_.data(), kMaxSymbol);
+    LOG(INFO) << "Huffman table built, reducing character count from " << total_freq << " to "
+              << compressed_size << ", compression ratio " << double(compressed_size) / total_freq;
+    string bintable = huff_enc.Export();
+    LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(bintable);
+    db_slice->shard_owner()->stats().huffman_tables_built++;
+  } else {
+    LOG(WARNING) << "Huffman build failed: " << error_msg;
+  }
+
+  return -1;  // task completed.
+}
+
 }  // namespace
 
 __thread EngineShard* EngineShard::shard_ = nullptr;
@@ -141,7 +223,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 96);
+  static_assert(sizeof(Stats) == 104);
 
 #define ADD(x) x += o.x
 
@@ -157,6 +239,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
   ADD(total_migrated_keys);
+  ADD(huffman_tables_built);
 
 #undef ADD
   return *this;
@@ -346,7 +429,9 @@ void EngineShard::Shutdown() {
 }
 
 void EngineShard::StopPeriodicFiber() {
-  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_id_);
+  ProactorBase::me()->RemoveOnIdleTask(huffman_check_task_id_);
+
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -383,7 +468,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   }
   auto heartbeat = [this]() { Heartbeat(); };
 
-  eviction_state_.rss_eviction_enabled_ = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
+  eviction_state_.rss_eviction_enabled = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
   std::chrono::milliseconds period_ms(*cycle_ms);
 
   fb2::Fiber::Opts fb_opts{.priority = absl::GetFlag(FLAGS_background_heartbeat)
@@ -393,7 +478,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -422,6 +507,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
+  InitTLStatelessAllocMR(shard_->memory_resource());
 
   shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
@@ -605,22 +691,57 @@ void EngineShard::Heartbeat() {
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-  // Skip heartbeat if we are serializing a big value
-  static auto start = std::chrono::system_clock::now();
+
   // Skip heartbeat if global transaction is in process.
   // This is determined by attempting to check if shard lock can be acquired.
   const bool can_acquire_global_lock = shard_lock()->Check(IntentLock::Mode::EXCLUSIVE);
 
   if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock) {
-    const auto elapsed = std::chrono::system_clock::now() - start;
-    if (elapsed > std::chrono::seconds(1)) {
-      const auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed);
-      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed_seconds.count()
+    uint64_t now = absl::GetCurrentTimeNanos();
+
+    uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;
+
+    if (stalled_start_ns_ && elapsed_ms > 1000) {
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed_ms / 1000
                               << " seconds";
     }
+    stalled_start_ns_ = now;
     return;
   }
-  start = std::chrono::system_clock::now();
+  stalled_start_ns_ = 0;
+
+  thread_local bool check_huffman = (shard_id_ == 0);  // run it only on shard 0.
+  if (check_huffman) {
+    auto* ptr = db_slice.GetDBTable(0);
+    if (ptr) {
+      size_t key_usage = ptr->stats.memory_usage_by_type[OBJ_KEY];
+      size_t obj_usage = ptr->stats.obj_memory_usage;
+
+#ifdef NDEBUG
+#define MB_THRESHOLD (50 * 1024 * 1024)
+#else
+#define MB_THRESHOLD (5 * 1024 * 1024)
+#endif
+
+      if (key_usage > MB_THRESHOLD && key_usage > obj_usage / 8) {
+        VLOG(1) << "Scheduling huffman check task, key usage: " << key_usage
+                << ", obj usage: " << obj_usage;
+
+        check_huffman = false;  // trigger only once.
+
+        // launch the task
+        huffman_check_task_id_ =
+            ProactorBase::me()->AddOnIdleTask([task = HuffmanCheckTask{}]() mutable {
+              if (!shard_ || !namespaces) {
+                return -1;
+              }
+
+              DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
+              return task.Run(&db_slice);
+            });
+      }
+    }
+  }
 
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
@@ -655,7 +776,7 @@ void EngineShard::RetireExpiredAndEvict() {
     // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
     // The higher ttl_delete_target the more likely we have lots of expired items that need
     // to be deleted.
-    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
+    ttl_delete_target = unsigned(kTtlDeleteLimit * double(deleted) / (double(traversed) + 10));
   }
 
   DbContext db_cntx;
@@ -688,7 +809,7 @@ void EngineShard::RetireExpiredAndEvict() {
     if (eviction_goal) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
       auto [evicted_items, evicted_bytes] =
-          db_slice.FreeMemWithEvictionStepAtomic(i, starting_segment_id, eviction_goal);
+          db_slice.FreeMemWithEvictionStepAtomic(i, db_cntx, starting_segment_id, eviction_goal);
 
       VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
               << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
@@ -701,8 +822,49 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 
   // Track deleted bytes only if we expect to lower memory
-  if (eviction_state_.track_deleted_bytes)
-    eviction_state_.deleted_bytes_before_rss_update += deleted_bytes;
+  if (eviction_state_.track_deleted_bytes) {
+    eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
+  }
+}
+
+// Adjust deleted bytes w.r.t shard used memory. If we increase shard used
+// memory in current heartbeat we can invalidate deleted_bytes. Otherwise we adjust deleted
+// bytes by diff.
+void EngineShard::EvictionTaskState::AdjustDeletedBytes(size_t shard_used_memory) {
+  if (shard_used_memory >= shard_used_memory_at_prev_eviction) {
+    deleted_bytes_at_prev_eviction = 0;
+  } else {
+    deleted_bytes_at_prev_eviction = std::min(
+        deleted_bytes_at_prev_eviction, shard_used_memory_at_prev_eviction - shard_used_memory);
+  }
+}
+
+// Check if adding value of previous deleted bytes will be higher than rss memory budget and
+// limit if needed.
+void EngineShard::EvictionTaskState::LimitAccumulatedDeletedBytes(
+    size_t shard_rss_over_memory_budget) {
+  const size_t next_acc_deleted_bytes =
+      acc_deleted_bytes_during_eviction + deleted_bytes_at_prev_eviction;
+  acc_deleted_bytes_during_eviction = shard_rss_over_memory_budget > next_acc_deleted_bytes
+                                          ? next_acc_deleted_bytes
+                                          : shard_rss_over_memory_budget;
+}
+
+// Once the rss memory is lowered we can start also decreasing accumulated total bytes.
+void EngineShard::EvictionTaskState::AdjustAccumulatedDeletedBytes(size_t global_used_rss_memory) {
+  if (global_used_rss_memory < global_rss_memory_at_prev_eviction) {
+    auto decrease_delete_bytes_before_rss_update =
+        std::min(acc_deleted_bytes_during_eviction,
+                 (global_rss_memory_at_prev_eviction - global_used_rss_memory) / shard_set->size());
+    VLOG(2) << "deleted_bytes_before_rss_update: " << acc_deleted_bytes_during_eviction
+            << " decrease_delete_bytes_before_rss_update: "
+            << decrease_delete_bytes_before_rss_update;
+    acc_deleted_bytes_during_eviction -= decrease_delete_bytes_before_rss_update;
+  }
+  LOG_IF(DFATAL, global_used_rss_memory < (acc_deleted_bytes_during_eviction * shard_set->size()))
+      << "RSS eviction underflow "
+      << "global_used_rss_memory: " << global_used_rss_memory
+      << " total_deleted_bytes_on_eviction: " << acc_deleted_bytes_during_eviction;
 }
 
 size_t EngineShard::CalculateEvictionBytes() {
@@ -710,7 +872,7 @@ size_t EngineShard::CalculateEvictionBytes() {
   const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
 
   // Calculate threshold for both used_memory and rss_memory
-  size_t limit = max_memory_limit.load(memory_order_relaxed);
+  const size_t limit = max_memory_limit.load(memory_order_relaxed);
   const size_t shard_memory_budget_threshold =
       size_t(limit * eviction_memory_budget_threshold) / shards_count;
 
@@ -727,39 +889,39 @@ size_t EngineShard::CalculateEvictionBytes() {
   // Check for `enable_heartbeat_rss_eviction` flag since it dynamic. And reset
   // state if flag has changed.
   bool rss_eviction_enabled_flag = GetFlag(FLAGS_enable_heartbeat_rss_eviction);
-  if (eviction_state_.rss_eviction_enabled_ != rss_eviction_enabled_flag) {
-    eviction_state_.global_rss_memory_at_prev_eviction =
-        eviction_state_.deleted_bytes_before_rss_update = 0;
-    eviction_state_.rss_eviction_enabled_ = rss_eviction_enabled_flag;
+  if (eviction_state_.rss_eviction_enabled != rss_eviction_enabled_flag) {
+    eviction_state_.Reset(rss_eviction_enabled_flag);
   }
-  if (eviction_state_.rss_eviction_enabled_) {
-    // Calculate how much rss memory is used by all shards
+  if (eviction_state_.rss_eviction_enabled) {
     const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
-    auto& global_rss_memory_at_prev_eviction = eviction_state_.global_rss_memory_at_prev_eviction;
-    auto& deleted_bytes_before_rss_update = eviction_state_.deleted_bytes_before_rss_update;
-    if (global_used_rss_memory < eviction_state_.global_rss_memory_at_prev_eviction) {
-      auto decrease_delete_bytes_before_rss_update =
-          std::min(deleted_bytes_before_rss_update,
-                   (global_rss_memory_at_prev_eviction - global_used_rss_memory) / shards_count);
-      VLOG(2) << "deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update
-              << " decrease_delete_bytes_before_rss_update: "
-              << decrease_delete_bytes_before_rss_update;
-      deleted_bytes_before_rss_update -= decrease_delete_bytes_before_rss_update;
-    }
+    const size_t rss_memory_threshold_start = limit * (1. - eviction_memory_budget_threshold);
+    const size_t shard_used_memory = UsedMemory();
 
-    global_rss_memory_at_prev_eviction = global_used_rss_memory;
+    // Adjust previous deleted bytes
+    eviction_state_.AdjustDeletedBytes(shard_used_memory);
 
-    LOG_IF(DFATAL, global_used_rss_memory < (deleted_bytes_before_rss_update * shards_count))
-        << "RSS evicition underflow "
-        << "global_used_rss_memory: " << global_used_rss_memory
-        << " deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+    // Calculate memory budget that is higher than rss_memory_threshold_start. This is our limit
+    // for accumulated_deleted_bytes.
+    const size_t shard_rss_over_memory_budget =
+        global_used_rss_memory > rss_memory_threshold_start
+            ? (global_used_rss_memory - rss_memory_threshold_start) / shards_count
+            : 0;
+    eviction_state_.LimitAccumulatedDeletedBytes(shard_rss_over_memory_budget);
+
+    // Once the rss memory is lowered we can start also decreasing accumulated total bytes.
+    eviction_state_.AdjustAccumulatedDeletedBytes(global_used_rss_memory);
+
+    // Update rss/used memory for this heartbeat
+    eviction_state_.global_rss_memory_at_prev_eviction = global_used_rss_memory;
+    eviction_state_.shard_used_memory_at_prev_eviction = shard_used_memory;
 
     // If we underflow use limit as used_memory
-    size_t used_rss_memory_with_deleted_bytes =
-        std::min(global_used_rss_memory - deleted_bytes_before_rss_update * shards_count, limit);
+    size_t used_rss_memory_with_deleted_bytes = std::min(
+        global_used_rss_memory - eviction_state_.acc_deleted_bytes_during_eviction * shards_count,
+        limit);
 
     // Try to evict more bytes if we are close to the rss memory limit
-    const size_t rss_goal_bytes = CalculateHowManyBytesToEvictOnShard(
+    size_t rss_goal_bytes = CalculateHowManyBytesToEvictOnShard(
         limit, used_rss_memory_with_deleted_bytes, shard_memory_budget_threshold);
 
     // RSS evictions starts so we should start tracking deleted_bytes
@@ -767,7 +929,7 @@ size_t EngineShard::CalculateEvictionBytes() {
       eviction_state_.track_deleted_bytes = true;
     } else {
       // There is no RSS eviction goal and we have cleared tracked deleted bytes
-      if (!deleted_bytes_before_rss_update) {
+      if (!eviction_state_.acc_deleted_bytes_during_eviction) {
         eviction_state_.track_deleted_bytes = false;
       }
     }
@@ -775,7 +937,8 @@ size_t EngineShard::CalculateEvictionBytes() {
     VLOG_IF(2, rss_goal_bytes > 0)
         << "Rss memory goal bytes: " << rss_goal_bytes
         << ", rss used memory: " << global_used_rss_memory << ", rss memory limit: " << limit
-        << ", deleted_bytes_before_rss_update: " << deleted_bytes_before_rss_update;
+        << ", accumulated_deleted_bytes_during_eviction: "
+        << eviction_state_.acc_deleted_bytes_during_eviction;
 
     goal_bytes = std::max(goal_bytes, rss_goal_bytes);
   }

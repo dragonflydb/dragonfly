@@ -14,10 +14,7 @@
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
-#include <hnswlib/hnswalg.h>
-#include <hnswlib/hnswlib.h>
-#include <hnswlib/space_ip.h>
-#include <hnswlib/space_l2.h>
+#include <absl/container/btree_set.h>
 #include <uni_algo/case.h>
 #include <uni_algo/ranges_word.h>
 
@@ -35,6 +32,7 @@ ABSL_FLAG(bool, use_numeric_range_tree, true,
 namespace dfly::search {
 
 using namespace std;
+using cmn::StringOrView;
 
 namespace {
 
@@ -66,18 +64,16 @@ absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
 }
 
 // Split taglist, remove duplicates and convert all to lowercase
-// TODO: introduce unicode support if needed
 absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensitive,
                                           char separator) {
-  LOG_IF(WARNING, !IsAllAscii(taglist)) << "Non ascii tag usage";
-
-  string tmp;
+  // Splitting utf8 by ascii character is safe
   absl::flat_hash_set<string> tags;
   for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
-    tmp = absl::StripAsciiWhitespace(tag);
-    if (!case_sensitive)
-      absl::AsciiStrToLower(&tmp);
-    tags.insert(std::move(tmp));
+    string_view str = absl::StripAsciiWhitespace(tag);
+    if (case_sensitive)
+      tags.insert(string{str});
+    else
+      tags.insert(ToLower(str));
   }
   return tags;
 }
@@ -464,6 +460,21 @@ absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) con
   return TokenizeWords(value, *stopwords_, synonyms_);
 }
 
+DefragmentResult TagIndex::Defragment(PageUsage* page_usage) {
+  auto defrag = [&](auto& tree, string* key) {
+    DefragmentMap dm{tree, [&] { return key->empty() ? tree.begin() : tree.lower_bound(*key); }};
+    return dm.Defragment(page_usage, key);
+  };
+
+  DefragmentResult result = defrag(entries_, &next_defrag_entry_);
+
+  if (suffix_trie_) {
+    result.Merge(defrag(suffix_trie_.value(), &next_defrag_suffix_entry_));
+  }
+
+  return result;
+}
+
 std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentAccessor& doc,
                                                                  std::string_view field) const {
   return doc.GetTags(field);
@@ -548,108 +559,6 @@ std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
   // Result is already sorted by id, no need to sort again
   // Also it has no duplicates
   return result;
-}
-
-struct HnswlibAdapter {
-  // Default setting of hnswlib/hnswalg
-  constexpr static size_t kDefaultEfRuntime = 10;
-
-  HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{MakeSpace(params.dim, params.sim)},
-        world_{GetSpacePtr(), params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/} {
-  }
-
-  void Add(const float* data, DocId id) {
-    if (world_.cur_element_count + 1 >= world_.max_elements_)
-      world_.resizeIndex(world_.cur_element_count * 2);
-    world_.addPoint(data, id);
-  }
-
-  void Remove(DocId id) {
-    try {
-      world_.markDelete(id);
-    } catch (const std::exception& e) {
-    }
-  }
-
-  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
-    return QueueToVec(world_.searchKnn(target, k));
-  }
-
-  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
-                                 const vector<DocId>& allowed) {
-    struct BinsearchFilter : hnswlib::BaseFilterFunctor {
-      virtual bool operator()(hnswlib::labeltype id) {
-        return binary_search(allowed->begin(), allowed->end(), id);
-      }
-
-      BinsearchFilter(const vector<DocId>* allowed) : allowed{allowed} {
-      }
-      const vector<DocId>* allowed;
-    };
-
-    world_.setEf(ef.value_or(kDefaultEfRuntime));
-    BinsearchFilter filter{&allowed};
-    return QueueToVec(world_.searchKnn(target, k, &filter));
-  }
-
- private:
-  using SpaceUnion = std::variant<hnswlib::L2Space, hnswlib::InnerProductSpace>;
-
-  static SpaceUnion MakeSpace(size_t dim, VectorSimilarity sim) {
-    if (sim == VectorSimilarity::L2)
-      return hnswlib::L2Space{dim};
-    else
-      return hnswlib::InnerProductSpace{dim};
-  }
-
-  hnswlib::SpaceInterface<float>* GetSpacePtr() {
-    return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
-  }
-
-  template <typename Q> static vector<pair<float, DocId>> QueueToVec(Q queue) {
-    vector<pair<float, DocId>> out(queue.size());
-    size_t idx = out.size();
-    while (!queue.empty()) {
-      out[--idx] = queue.top();
-      queue.pop();
-    }
-    return out;
-  }
-
-  SpaceUnion space_;
-  hnswlib::HierarchicalNSW<float> world_;
-};
-
-HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
-    : BaseVectorIndex{params.dim, params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
-  DCHECK(params.use_hnsw);
-  // TODO: Patch hnsw to use MR
-}
-
-HnswVectorIndex::~HnswVectorIndex() {
-}
-
-void HnswVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
-  if (vector) {
-    adapter_->Add(vector.get(), id);
-  }
-}
-
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                          std::optional<size_t> ef) const {
-  return adapter_->Knn(target, k, ef);
-}
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
-                                                          std::optional<size_t> ef,
-                                                          const std::vector<DocId>& allowed) const {
-  return adapter_->Knn(target, k, ef, allowed);
-}
-
-void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  adapter_->Remove(id);
 }
 
 GeoIndex::GeoIndex(PMR_NS::memory_resource* mr) : rtree_(make_unique<rtree>()) {

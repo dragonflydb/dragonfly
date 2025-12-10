@@ -272,13 +272,6 @@ StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
   return res;
 }
 
-string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
-  int64_t ele_len = 0;
-  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
-  DCHECK(elem);
-  return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
-}
-
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
                                               bool* block_flag, bool* pause_flag) {

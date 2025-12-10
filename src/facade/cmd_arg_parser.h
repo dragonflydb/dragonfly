@@ -56,7 +56,7 @@ struct CmdArgParser {
   };
 
  public:
-  CmdArgParser(CmdArgList args) : args_{args} {
+  CmdArgParser(ArgSlice args) : args_{args} {
   }
 
   // Debug asserts sure error was consumed
@@ -159,7 +159,7 @@ struct CmdArgParser {
   }
 
   // Return remaining arguments
-  CmdArgList Tail() const {
+  ArgSlice Tail() const {
     return args_.subspan(cur_i_);
   }
 
@@ -168,7 +168,7 @@ struct CmdArgParser {
     return cur_i_ < args_.size() && !error_;
   }
 
-  bool HasError() {
+  bool HasError() const {
     return error_.type != ErrorType::NO_ERROR;
   }
 
@@ -275,7 +275,7 @@ struct CmdArgParser {
 
  private:
   size_t cur_i_ = 0;
-  CmdArgList args_;
+  ArgSlice args_;
 
   ErrorInfo error_;
 };

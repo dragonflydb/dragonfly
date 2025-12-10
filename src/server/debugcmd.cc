@@ -41,6 +41,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
+
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
@@ -283,8 +284,8 @@ unsigned HufHist::MaxFreqCount() const {
   return max_freq;
 }
 
-unsigned kMaxFreqPerShard = 1U << 19;
-unsigned kMaxFreqTotal = 1U << 23;
+constexpr unsigned kMaxFreqPerShard = 1U << 20;
+constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
 
 void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* cntx,
                    HufHist* dest) {
@@ -307,7 +308,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
           it->first.GetString(&scratch);
         }
       } else if (type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
-        if (it->first.MallocUsed() > 0) {
+        if (it->second.MallocUsed() > 0) {
           it->second.GetString(&scratch);
         }
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
@@ -1403,23 +1404,20 @@ void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
 }
 
 static size_t PostProcessHist(HufHist* dest) {
-  size_t raw_size = 0;
+  size_t total_freq = 0;
   auto& hist = dest->hist;
   unsigned max_freq = 0;
 
   for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
     // raw_size may count less characters than the actual size because
     // we may cut the counting early.
-    raw_size += hist[i];
-    if (hist[i] > max_freq) {
-      max_freq = hist[i];
-    }
+    total_freq += hist[i];
     if (hist[i] == 0) {
       hist[i] = 1;  // Avoid zero frequency symbols.
     }
   }
 
-  if (max_freq > kMaxFreqTotal) {
+  if (total_freq > kMaxFreqTotal) {
     // huffman encoder has a bug with frequencies too high, so we scale down everything
     // to avoid overflow.
     double scale = static_cast<double>(max_freq) / kMaxFreqTotal;
@@ -1430,7 +1428,7 @@ static size_t PostProcessHist(HufHist* dest) {
       }
     }
   }
-  return raw_size;
+  return total_freq;
 }
 
 void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {

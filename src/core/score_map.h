@@ -40,7 +40,7 @@ class SdsScorePair {
 
 class ScoreMap : public DenseSet {
  public:
-  ScoreMap(MemoryResource* res = PMR_NS::get_default_resource()) : DenseSet(res) {
+  ScoreMap() {
   }
 
   ~ScoreMap();

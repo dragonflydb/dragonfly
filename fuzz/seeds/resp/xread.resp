@@ -1,0 +1,13 @@
+*5
+$5
+XREAD
+$5
+COUNT
+$1
+1
+$7
+STREAMS
+$6
+stream
+$1
+0

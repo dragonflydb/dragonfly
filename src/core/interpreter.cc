@@ -708,6 +708,18 @@ Interpreter::Interpreter() {
   lua_pushcfunction(lua_, RedisLogCommand);
   lua_settable(lua_, -3);
 
+  lua_pushinteger(lua_, LL_DEBUG);
+  lua_setfield(lua_, -2, "LOG_DEBUG");
+
+  lua_pushinteger(lua_, LL_VERBOSE);
+  lua_setfield(lua_, -2, "LOG_VERBOSE");
+
+  lua_pushinteger(lua_, LL_NOTICE);
+  lua_setfield(lua_, -2, "LOG_NOTICE");
+
+  lua_pushinteger(lua_, LL_WARNING);
+  lua_setfield(lua_, -2, "LOG_WARNING");
+
   /* Finally set the table as 'redis' global var. */
   lua_setglobal(lua_, "redis");
   CHECK(lua_checkstack(lua_, 64));

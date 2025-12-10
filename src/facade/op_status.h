@@ -66,6 +66,8 @@ class OpResultBase {
 
 template <typename V> class OpResult : public OpResultBase {
  public:
+  using Type = V;
+
   OpResult(V&& v) : v_(std::move(v)) {
   }
 

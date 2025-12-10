@@ -46,8 +46,11 @@ struct SerializedMap {
   Iterator end() const;
   size_t size() const;
 
+  // Number of bytes of pure keys or values
+  size_t DataBytes() const;
+
   // Input for serialization
-  using Input = const absl::Span<const std::pair<std::string_view, std::string_view>>;
+  using Input = const absl::Span<const std::pair<std::string, std::string>>;
 
   // Buffer size required for serialization
   static size_t SerializeSize(Input);

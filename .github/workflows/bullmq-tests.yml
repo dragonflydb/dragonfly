@@ -24,7 +24,7 @@ jobs:
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           submodules: true
 
@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: unit_logs
           path: /tmp/dragonfly.*

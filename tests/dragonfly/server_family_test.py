@@ -5,8 +5,6 @@ from typing import Callable
 import yaml
 from prometheus_client.samples import Sample
 from pymemcache import Client
-from testcontainers.core.container import DockerContainer
-from testcontainers.core.waiting_utils import wait_for_logs
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -247,9 +245,8 @@ async def test_latency_stats(async_client: aioredis.Redis):
     latency_stats = await async_client.info("LATENCYSTATS")
     # Only stats for the `config resetstat` command should remain in stats
     assert (
-        len(latency_stats) == 1 and "latency_percentiles_usec_config" in latency_stats,
-        f"unexpected latency stats after reset: {latency_stats}",
-    )
+        len(latency_stats) == 1 and "latency_percentiles_usec_config" in latency_stats
+    ), f"unexpected latency stats after reset: {latency_stats}"
 
 
 @dfly_args({"latency_tracking": False})
@@ -260,6 +257,8 @@ async def test_latency_stats_disabled(async_client: aioredis.Redis):
 
 
 async def test_metrics_sanity_check(df_server: DflyInstance):
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.waiting_utils import wait_for_logs
 
     def on_container_output(container: DockerContainer, fn: Callable):
         for entry in container.get_logs():
@@ -320,3 +319,20 @@ async def test_metrics_sanity_check(df_server: DflyInstance):
                 on_container_output(
                     prometheus, lambda entry: logging.info(f"prometheus log: {entry}")
                 )
+
+
+@pytest.mark.opt_only
+@dfly_args({"proactor_threads": "2"})
+async def test_huffman_tables_built(df_server: DflyInstance):
+    async_client = df_server.client()
+    # Insert enough data to trigger background huffman table building
+    key_name = "keyfooobarrsoooooooooooooooooooooooooooooooooooooooooooooooo"
+    await async_client.execute_command("DEBUG", "POPULATE", "1000000", key_name, "14")
+
+    @assert_eventually(times=500)
+    async def check_metrics():
+        metrics = await df_server.metrics()
+        m = metrics["dragonfly_huffman_tables_built"]
+        assert m.samples[0].value > 0
+
+    await check_metrics()

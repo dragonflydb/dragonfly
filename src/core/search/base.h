@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 
 #include <cstdint>
@@ -13,13 +14,29 @@
 #include <string_view>
 #include <vector>
 
-#include "absl/container/flat_hash_set.h"
-#include "base/pmr/memory_resource.h"
-#include "core/string_map.h"
+namespace dfly {
+class PageUsage;
+}
 
 namespace dfly::search {
 
+struct DefragmentResult {
+  bool quota_depleted{false};
+  size_t objects_moved{0};
+  DefragmentResult& Merge(DefragmentResult&& other);
+};
+
 using DocId = uint32_t;
+using GlobalDocId = uint64_t;
+using ShardId = uint16_t;
+
+inline GlobalDocId CreateGlobalDocId(ShardId shard_id, DocId local_doc_id) {
+  return ((uint64_t)shard_id << 32) | local_doc_id;
+}
+
+inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
+  return {(id >> 32), (id)&0xFFFFFFFF};
+}
 
 enum class VectorSimilarity { L2, IP, COSINE };
 
@@ -93,6 +110,11 @@ struct BaseIndex {
   /* Called at the end of indexes rebuilding after all initial Add calls are done.
      Some indices may need to finalize internal structures. See RangeTree for example. */
   virtual void FinalizeInitialization() {
+  }
+
+  // Defragments the index by moving objects in underutilized pages to the current malloc page.
+  virtual DefragmentResult Defragment(PageUsage* page_usage) {
+    return DefragmentResult{.quota_depleted = false, .objects_moved = 0};
   }
 };
 

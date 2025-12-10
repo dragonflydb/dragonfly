@@ -25,9 +25,9 @@
 ABSL_FLAG(std::string, default_lua_flags, "",
           "Configure default flags for running Lua scripts: \n - Use 'allow-undeclared-keys' to "
           "allow accessing undeclared keys, \n - Use 'disable-atomicity' to allow "
-          "running scripts non-atomically. \nSpecify multiple values "
-          "separated by space, for example 'allow-undeclared-keys disable-atomicity' runs scripts "
-          "non-atomically and allows accessing undeclared keys");
+          "running scripts non-atomically, \n - Use 'legacy-float' to return floats as integers.\n"
+          "Specify multiple values separated by space, for example 'allow-undeclared-keys "
+          "disable-atomicity' runs scripts non-atomically and allows accessing undeclared keys");
 
 ABSL_FLAG(
     bool, lua_auto_async, false,
@@ -39,20 +39,13 @@ ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "undeclared key.");
 
 ABSL_FLAG(
-    std::vector<std::string>, lua_undeclared_keys_shas,
-    std::vector<std::string>({"351130589c64523cb98978dc32c64173a31244f3",    // Sidekiq, see #2442
-                              "6ae15ef4678593dc61f991c9953722d67d822776",    // Sidekiq, see #2442
-                              "34b1048274c8e50a0cc587a3ed9c383a82bb78c5",    // Sidekiq
-                              "b725ca33e5b36f318ab1150b8ac955a3d997c872"}),  // Sentry, see #5495
+    std::vector<std::string>, lua_undeclared_keys_shas, {},
     "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys. SHAs are "
     "only looked at when loading the script, and new values do not affect already-loaded script.");
 
-ABSL_FLAG(std::vector<std::string>, lua_force_atomicity_shas,
-          std::vector<std::string>({
-              "f8133be7f04abd9dfefa83c3b29a9d837cfbda86",  // Sidekiq, see #4522
-          }),
-          "Comma-separated list of Lua script SHAs which are forced to run in atomic mode, even if "
-          "the script specifies disable-atomicity.");
+ABSL_FLAG(std::vector<std::string>, lua_float_as_int_shas, {},
+          "Comma-separated list of Lua script SHAs which should return floats as integers. "
+          "SHAs are only looked at when loading the script.");
 
 namespace dfly {
 using namespace std;
@@ -63,7 +56,8 @@ ScriptMgr::ScriptMgr() {
   // Build default script flags
   string flags = absl::GetFlag(FLAGS_default_lua_flags);
 
-  static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys);
+  static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys &&
+                !ScriptParams{}.float_as_int);
 
   auto err = ScriptParams::ApplyFlags(flags, &default_params_);
   CHECK(!err) << err.Format();
@@ -93,6 +87,7 @@ void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
         "   The following flags are possible: ",
         "      - Use 'allow-undeclared-keys' to allow accessing undeclared keys",
         "      - Use 'disable-atomicity' to allow running scripts non-atomically",
+        "      - Use 'legacy-float' to return floats as integers",
         "LIST",
         "   Lists loaded scripts.",
         "LATENCY",
@@ -272,15 +267,36 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   auto params = params_opt->value_or(default_params_);
 
   if (!params.atomic) {
-    auto force_atomic_shas = absl::GetFlag(FLAGS_lua_force_atomicity_shas);
-    if (find(force_atomic_shas.begin(), force_atomic_shas.end(), sha) != force_atomic_shas.end()) {
+    // override atomicity for a specific buggy script.
+    constexpr string_view sha_4522 =
+        "f8133be7f04abd9dfefa83c3b29a9d837cfbda86"sv;  // Sidekiq, see #4522
+    if (sha == sha_4522) {
       params.atomic = true;
     }
   }
 
-  auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
-  if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
+  const char* kUndeclaredShas[] = {
+      "351130589c64523cb98978dc32c64173a31244f3",  // Sidekiq, see #2442
+      "6ae15ef4678593dc61f991c9953722d67d822776",  // Sidekiq, see #2442
+      "34b1048274c8e50a0cc587a3ed9c383a82bb78c5",  // Sidekiq
+      "b725ca33e5b36f318ab1150b8ac955a3d997c872",  // Sentry, see #5495
+      "8c4dafdf9b6b7bcf511a0d1ec0518bed9260e16d",  // django-cacheops see #6119
+      "3fc258d735c924d5652fceb90b41bea1f1f29e4b",  // django-cacheops see #6119
+      "43d401bd2bd0ad864c3ca221512cda1b6215ec23",  // django-cacheops see #272
+  };
+
+  if (find(begin(kUndeclaredShas), end(kUndeclaredShas), sha) != end(kUndeclaredShas)) {
     params.undeclared_keys = true;
+  } else {
+    auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
+    if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
+      params.undeclared_keys = true;
+    }
+  }
+
+  auto float_as_int_shas = absl::GetFlag(FLAGS_lua_float_as_int_shas);
+  if (find(float_as_int_shas.begin(), float_as_int_shas.end(), sha) != float_as_int_shas.end()) {
+    params.float_as_int = true;
   }
 
   // If the script is atomic, check for possible squashing optimizations.
@@ -350,7 +366,7 @@ void ScriptMgr::FlushAllScript() {
 
   shard_set->pool()->AwaitFiberOnAll([](auto* pb) {
     ServerState* ss = ServerState::tlocal();
-    ss->ResetInterpreter();
+    ss->FlushScriptCache();
   });
 }
 
@@ -387,6 +403,11 @@ GenericError ScriptMgr::ScriptParams::ApplyFlags(string_view config, ScriptParam
 
     if (flag == "allow-undeclared-keys") {
       params->undeclared_keys = true;
+      continue;
+    }
+
+    if (flag == "legacy-float") {
+      params->float_as_int = true;
       continue;
     }
 

@@ -48,6 +48,9 @@ struct ListpackWrap {
   explicit ListpackWrap(uint8_t* lp) : lp_{lp} {
   }
 
+  // Create listpack with capacity
+  static ListpackWrap WithCapacity(size_t capacity);
+
   uint8_t* GetPointer();                      // Get new updated pointer
   Iterator Find(std::string_view key) const;  // Linear search
   bool Delete(std::string_view key);
@@ -56,6 +59,9 @@ struct ListpackWrap {
   Iterator begin() const;
   Iterator end() const;
   size_t size() const;  // number of entries
+
+  // Get view from raw listpack iterator
+  static std::string_view GetView(uint8_t* lp_it, uint8_t int_buf[]);
 
  private:
   uint8_t* lp_;            // the listpack itself

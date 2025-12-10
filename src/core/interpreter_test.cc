@@ -356,7 +356,7 @@ TEST_F(InterpreterTest, Modules) {
   EXPECT_TRUE(Execute("return cjson.encode({1, 2, 3})"));
   EXPECT_EQ("str([1,2,3])", ser_.res);
   EXPECT_TRUE(Execute("return cjson.decode('{\"a\": 1}')['a']"));
-  EXPECT_EQ("d(1)", ser_.res);
+  EXPECT_EQ("i(1)", ser_.res);
 
   // cmsgpack module
   EXPECT_TRUE(Execute("return cmsgpack.pack('ok', true)"));
@@ -493,7 +493,7 @@ TEST_F(InterpreterTest, ReplicateCommands) {
 TEST_F(InterpreterTest, Log) {
   EXPECT_FALSE(Execute(R"(redis.log('nonsense', 'nonsense'))"));
   EXPECT_THAT(error_, testing::HasSubstr("First argument must be a number (log level)."));
-  EXPECT_TRUE(Execute(R"(redis.log(0, 'warn'))"));
+  EXPECT_TRUE(Execute(R"(redis.log(redis.LOG_WARNING, 'warn'))"));
   EXPECT_EQ("nil", ser_.res);
   EXPECT_FALSE(Execute(R"(redis.log(4))"));
   EXPECT_THAT(error_, testing::HasSubstr("requires two arguments or more"));

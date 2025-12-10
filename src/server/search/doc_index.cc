@@ -16,6 +16,7 @@
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -219,17 +220,15 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   return id;
 }
 
-std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_view key) {
-  auto it = ids_.extract(key);
-  if (!it) {
-    return std::nullopt;
-  }
+std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Find(string_view key) const {
+  auto it = ids_.find(key);
+  return it != ids_.end() ? std::make_optional(it->second) : std::nullopt;
+}
 
-  const DocId id = it.mapped();
+void ShardDocIndex::DocKeyIndex::Remove(DocId id) {
+  ids_.extract(keys_[id]);
   keys_[id] = "";
   free_ids_.push_back(id);
-
-  return id;
 }
 
 string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
@@ -274,7 +273,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   auto cb = [this](string_view key, const BaseAccessor& doc) {
     DocId id = key_index_.Add(key);
     if (!indices_->Add(id, doc)) {
-      key_index_.Remove(key);
+      key_index_.Remove(id);
     }
   };
 
@@ -333,34 +332,115 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
   update_indices(false);
 }
 
-void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+std::optional<ShardDocIndex::DocId> ShardDocIndex::GetDocId(std::string_view key,
+                                                            const DbContext& db_cntx) {
   if (!indices_)
-    return;
+    return std::nullopt;
+
+  // Only handle documents from database 0
+  if (db_cntx.db_index != 0)
+    return std::nullopt;
+
+  return key_index_.Find(key);
+}
+
+std::optional<ShardDocIndex::DocId> ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx,
+                                                          const PrimeValue& pv) {
+  if (!indices_)
+    return std::nullopt;
 
   // Only index documents from database 0
   if (db_cntx.db_index != 0)
-    return;
+    return std::nullopt;
 
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Add(key);
   if (!indices_->Add(id, *accessor)) {
-    key_index_.Remove(key);
+    key_index_.Remove(id);
+    return std::nullopt;
+  }
+
+  return id;
+}
+
+void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeValue& pv) {
+  auto accessor = GetAccessor(db_cntx, pv);
+  key_index_.Remove(id);
+  indices_->Remove(id, *accessor);
+}
+
+void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
+                                              ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+                                              const PrimeValue& pv) {
+  auto accessor = GetAccessor(db_cntx, pv);
+
+  GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
+
+  for (const auto& [field_ident, field_info] : base_->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+          index) {
+        index->Add(global_id, *accessor, field_ident);
+      }
+    }
   }
 }
 
-void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
-  if (!indices_)
-    return;
-
-  // Only handle documents from database 0
-  if (db_cntx.db_index != 0)
-    return;
-
+void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
+                                                   ShardDocIndex::DocId doc_id,
+                                                   const DbContext& db_cntx, const PrimeValue& pv) {
   auto accessor = GetAccessor(db_cntx, pv);
-  auto id = key_index_.Remove(key);
-  if (id) {
-    indices_->Remove(id.value(), *accessor);
+  GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
+
+  for (const auto& [field_ident, field_info] : base_->schema.fields) {
+    if (field_info.type == search::SchemaField::VECTOR &&
+        !(field_info.flags & search::SchemaField::NOINDEX)) {
+      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+          index) {
+        index->Remove(global_id, *accessor, field_ident);
+      }
+    }
   }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
+  auto cb = [this, index_name](string_view key, const BaseAccessor& doc) {
+    auto local_id = key_index_.Find(key);
+
+    if (!local_id)
+      return;
+
+    GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), *local_id);
+
+    for (const auto& [field_ident, field_info] : base_->schema.fields) {
+      if (field_info.type == search::SchemaField::VECTOR &&
+          !(field_info.flags & search::SchemaField::NOINDEX)) {
+        if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+            index) {
+          index->Add(global_id, doc, field_ident);
+        }
+      }
+    }
+  };
+
+  TraverseAllMatching(*base_, op_args, cb);
+}
+
+ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
+    search::DocId id, const OpArgs& op_args, const search::Schema& schema,
+    const std::optional<std::vector<FieldReference>>& return_fields) {
+  auto entry = LoadEntry(id, op_args);
+  if (entry) {
+    if (return_fields) {
+      return std::optional<std::pair<std::string_view, SearchDocData>>{
+          std::make_pair(entry->first, entry->second->Serialize(schema, *return_fields))};
+    } else {
+      return std::optional<std::pair<std::string_view, SearchDocData>>{
+          std::make_pair(entry->first, entry->second->Serialize(schema))};
+    }
+  }
+  return std::nullopt;
 }
 
 bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
@@ -422,7 +502,12 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   size_t limit = params.limit_offset + params.limit_total;
-  auto result = search_algo->Search(&*indices_);
+
+  // If we don't sort the documents, we don't need to copy more ids than are requested
+  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption();
+  size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
+
+  auto result = search_algo->Search(&*indices_, id_cutoff_limit);
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
 
@@ -477,7 +562,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
       string_view key = key_index_.Get(result.ids[i]);
-      out.push_back({string{key}, {}, knn_score, sort_score});
+      out.push_back({result.ids[i], string{key}, {}, knn_score, sort_score});
       continue;
     }
 
@@ -496,7 +581,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     auto more_fields = accessor->Serialize(base_->schema, return_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
-    out.push_back({string{key}, std::move(fields), knn_score, sort_score});
+    out.push_back({result.ids[i], string{key}, std::move(fields), knn_score, sort_score});
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
@@ -693,8 +778,10 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 }
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
-  for (auto& [_, ptr] : indices_)
+  for (auto& [index_name, ptr] : indices_) {
     ptr->Rebuild(op_args, &local_mr_);
+    ptr->RebuildGlobalVectorIndices(index_name, op_args);
+  }
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {
@@ -707,17 +794,26 @@ vector<string> ShardDocIndices::GetIndexNames() const {
 
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(IsIndexedKeyType(pv));
-  for (auto& [_, index] : indices_) {
-    if (index->Matches(key, pv.ObjType()))
-      index->AddDoc(key, db_cntx, pv);
+  for (auto& [index_name, index] : indices_) {
+    if (index->Matches(key, pv.ObjType())) {
+      std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, pv);
+      if (doc_id) {
+        index->AddDocToGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
+      }
+    }
   }
 }
 
 void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(IsIndexedKeyType(pv));
-  for (auto& [_, index] : indices_) {
-    if (index->Matches(key, pv.ObjType()))
-      index->RemoveDoc(key, db_cntx, pv);
+  for (auto& [index_name, index] : indices_) {
+    if (index->Matches(key, pv.ObjType())) {
+      std::optional<search::DocId> doc_id = index->GetDocId(key, db_cntx);
+      if (doc_id) {
+        index->RemoveDocFromGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
+        index->RemoveDoc(*doc_id, db_cntx, pv);
+      }
+    }
   }
 }
 
@@ -731,6 +827,22 @@ SearchStats ShardDocIndices::GetStats() const {
     total_entries += index->GetInfo().num_docs;
 
   return {GetUsedMemory(), indices_.size(), total_entries};
+}
+
+search::DefragmentResult ShardDocIndices::Defragment(PageUsage* page_usage) {
+  // In case of resumed defragmentation, iteration order may change in case there were insertions
+  // after the last defragment operation completed, so there is no guarantee that an entry will only
+  // be defragmented once per cycle. This will only happen in case of a new index being added
+  // though, so it is an acceptable anomaly.
+  auto begin_it = [&] {
+    auto it = next_defrag_index_.empty() ? indices_.end() : indices_.find(next_defrag_index_);
+    if (it == indices_.end()) {
+      it = indices_.begin();
+    }
+    return it;
+  };
+  search::DefragmentMap dm{indices_, std::move(begin_it)};
+  return dm.Defragment(page_usage, &next_defrag_index_);
 }
 
 }  // namespace dfly

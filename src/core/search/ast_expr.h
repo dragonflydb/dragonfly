@@ -114,6 +114,8 @@ struct AstKnnNode {
   OwnedFtVector vec;
   std::string score_alias;
   std::optional<float> ef_runtime;
+
+  bool HasPreFilter() const;
 };
 
 using NodeVariants =

@@ -25,7 +25,8 @@ class DbSlice;
 
 namespace tiering {
 class SmallBins;
-};
+struct Decoder;
+};  // namespace tiering
 
 // Manages offloaded values
 class TieredStorage {
@@ -46,10 +47,21 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  // Read offloaded value. It must be of external type
+  // Enqueue read external value with generic decoder.
+  template <typename D, typename F>
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+    // TODO(vlad): untangle endless callback wrapping!
+    // Templates don't consider implicit conversions, so explicitly convert to std::function
+    auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
+      f(res.transform([](auto* d) { return static_cast<D*>(d); }));
+    };
+    ReadInternal(dbid, key, value, decoder, wrapped_cb);
+  }
+
+  // Read offloaded value. It must be of external string type
   TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
-  // Read offloaded value. It must be of external type
+  // Read offloaded value. It must be of external string type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
             std::function<void(io::Result<std::string>)> readf);
 
@@ -95,12 +107,16 @@ class TieredStorage {
   }
 
  private:
+  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                    const tiering::Decoder& decoder,
+                    std::function<void(io::Result<tiering::Decoder*>)> cb);
+
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
-                PrimeValue* pv);
+                CompactObj::ExternalRep rep, PrimeValue* pv);
 
   PrimeValue DeleteCool(detail::TieredColdRecord* record);
   detail::TieredColdRecord* PopCool();
@@ -122,12 +138,14 @@ class TieredStorage {
     unsigned write_depth_limit;
     float offload_threshold;
     float upload_threshold;
+    bool experimental_hash_offload;
   } config_;
   struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
     uint64_t offloading_steps = 0;
     uint64_t offloading_stashes = 0;
+    uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;
   } stats_;
 };
@@ -169,6 +187,10 @@ class TieredStorage {
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
             std::function<void(io::Result<std::string>)> readf) {
+  }
+
+  template <typename D, typename F>
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
   }
 
   template <typename T>

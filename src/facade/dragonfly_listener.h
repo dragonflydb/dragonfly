@@ -88,8 +88,8 @@ class Listener : public util::ListenerInterface {
 // visible to all commands and no commands are still running according to the old state / config.
 class DispatchTracker {
  public:
-  DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr,
-                  bool ignore_paused = false, bool ignore_blocked = false);
+  DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer,
+                  bool ignore_paused, bool ignore_blocked);
 
   void TrackAll();       // Track busy connection on all threads
   void TrackOnThread();  // Track busy connections on current thread

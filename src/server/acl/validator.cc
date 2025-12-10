@@ -119,7 +119,7 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   }
 
   const bool is_read_command = id.IsReadOnly();
-  const bool is_write_command = id.IsWriteOnly();
+  const bool is_write_command = id.IsJournaled();
 
   auto iterate_globs = [&](auto target) {
     for (auto& [elem, op] : keys.key_globs) {

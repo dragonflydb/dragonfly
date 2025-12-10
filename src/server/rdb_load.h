@@ -169,7 +169,9 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
   ::io::Result<OpaqueObj> ReadRedisJson();
+  ::io::Result<OpaqueObj> ReadSBFImpl(bool chunking);
   ::io::Result<OpaqueObj> ReadSBF();
+  ::io::Result<OpaqueObj> ReadSBF2();
 
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
@@ -363,6 +365,9 @@ class RdbLoader : protected RdbLoaderBase {
 
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
+
+  // Map of currently streamed big values
+  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
 };
 
 }  // namespace dfly

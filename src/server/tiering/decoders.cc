@@ -4,6 +4,14 @@
 
 #include "server/tiering/decoders.h"
 
+#include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
+#include "server/tiering/serialized_map.h"
+
+extern "C" {
+#include "redis/redis_aux.h"  // for OBJ_HASH
+}
+
 namespace dfly::tiering {
 
 std::unique_ptr<Decoder> BareDecoder::Clone() const {
@@ -16,6 +24,11 @@ void BareDecoder::Initialize(std::string_view slice) {
 
 void BareDecoder::Upload(CompactObj* obj) {
   ABSL_UNREACHABLE();
+}
+
+Decoder::UploadMetrics BareDecoder::GetMetrics() const {
+  ABSL_UNREACHABLE();
+  return UploadMetrics{};
 }
 
 StringDecoder::StringDecoder(const CompactObj& obj) : StringDecoder{obj.GetStrEncoding()} {
@@ -31,14 +44,20 @@ std::unique_ptr<Decoder> StringDecoder::Clone() const {
 void StringDecoder::Initialize(std::string_view slice) {
   slice_ = slice;
   value_ = encoding_.Decode(slice);
-  estimated_mem_usage = slice.length();  // will be encoded back
 }
 
 void StringDecoder::Upload(CompactObj* obj) {
-  if (modified)
+  if (modified_)
     obj->Materialize(value_.view(), false);
   else
     obj->Materialize(slice_, true);
+}
+
+Decoder::UploadMetrics StringDecoder::GetMetrics() const {
+  return UploadMetrics{
+      .modified = modified_,
+      .estimated_mem_usage = value_.view().size(),
+  };
 }
 
 std::string_view StringDecoder::Read() const {
@@ -46,8 +65,32 @@ std::string_view StringDecoder::Read() const {
 }
 
 std::string* StringDecoder::Write() {
-  modified = true;
+  modified_ = true;
   return value_.GetMutable();
+}
+
+std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
+  return std::make_unique<SerializedMapDecoder>();
+}
+
+void SerializedMapDecoder::Initialize(std::string_view slice) {
+  map_ = std::make_unique<SerializedMap>(slice);
+}
+
+Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
+  return UploadMetrics{.modified = false,
+                       .estimated_mem_usage = map_->DataBytes() + map_->size() * 2 * 8};
+}
+
+void SerializedMapDecoder::Upload(CompactObj* obj) {
+  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
+  for (const auto& [key, value] : *map_)
+    lw.Insert(key, value, true);
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, lw.GetPointer());
+}
+
+SerializedMap* SerializedMapDecoder::Get() const {
+  return map_.get();
 }
 
 }  // namespace dfly::tiering

@@ -61,6 +61,11 @@ error_code ProtocolClient::Recv(FiberSocketBase* input, base::IoBuf* dest) {
     return exp_size.error();
   }
 
+  if (*exp_size == 0) {
+    VLOG(1) << "Connection closed by peer";
+    return make_error_code(errc::connection_aborted);
+  }
+
   TouchIoTime();
 
   dest->CommitWrite(*exp_size);
@@ -72,21 +77,21 @@ std::string ProtocolClient::ServerContext::Description() const {
 }
 
 void ValidateClientTlsFlags() {
-  if (!absl::GetFlag(FLAGS_tls_replication)) {
+  if (!GetFlag(FLAGS_tls_replication)) {
     return;
   }
 
   bool has_auth = false;
 
-  if (!absl::GetFlag(FLAGS_tls_key_file).empty()) {
-    if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
+  if (!GetFlag(FLAGS_tls_key_file).empty()) {
+    if (GetFlag(FLAGS_tls_cert_file).empty()) {
       LOG(ERROR) << "tls_cert_file flag should be set";
       exit(1);
     }
     has_auth = true;
   }
 
-  if (!absl::GetFlag(FLAGS_masterauth).empty())
+  if (!GetFlag(FLAGS_masterauth).empty())
     has_auth = true;
 
   if (!has_auth) {
@@ -97,7 +102,7 @@ void ValidateClientTlsFlags() {
 
 void ProtocolClient::MaybeInitSslCtx() {
 #ifdef DFLY_USE_SSL
-  if (absl::GetFlag(FLAGS_tls_replication)) {
+  if (GetFlag(FLAGS_tls_replication)) {
     ssl_ctx_ = CreateSslCntx(facade::TlsContextRole::CLIENT);
   }
 #endif
@@ -207,8 +212,8 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
 
   // CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
 
-  auto masterauth = absl::GetFlag(FLAGS_masterauth);
-  auto masteruser = absl::GetFlag(FLAGS_masteruser);
+  auto masterauth = GetFlag(FLAGS_masterauth);
+  auto masteruser = GetFlag(FLAGS_masteruser);
   ResetParser(RedisParser::Mode::CLIENT);
   if (!masterauth.empty()) {
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
@@ -307,6 +312,63 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t t
   auto res = ReadRespReply();
   sock_->set_timeout(prev_timeout);
   return res;
+}
+
+io::Result<OwnedRespExpr::Vec> ProtocolClient::TakeRespReply(uint32_t timeout, base::IoBuf* buffer,
+                                                             bool copy_msg) {
+  DCHECK(parser_);
+
+  auto prev_timeout = sock_->timeout();
+  sock_->set_timeout(timeout);
+  absl::Cleanup on_exit([this, prev_timeout]() { sock_->set_timeout(prev_timeout); });
+
+  error_code ec;
+  if (!buffer) {
+    buffer = &resp_buf_;
+  }
+
+  last_resp_ = "";
+
+  uint32_t processed_bytes = 0;
+
+  RedisParser::Result result = RedisParser::OK;
+  OwnedRespExpr::Vec res_vec;
+  while (!ec) {
+    uint32_t consumed;
+    if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
+      DCHECK_GT(buffer->AppendLen(), 0u);
+      ec = Recv(sock_.get(), buffer);
+      if (ec) {
+        return nonstd::make_unexpected(ec);
+      }
+    }
+
+    result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
+    for (const auto& expr : resp_args_) {
+      res_vec.emplace_back(expr);
+    }
+    processed_bytes += consumed;
+    if (copy_msg)
+      last_resp_ +=
+          std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
+
+    buffer->ConsumeInput(consumed);
+    if (result == RedisParser::OK) {
+      return res_vec;  // success path
+    }
+
+    if (result != RedisParser::INPUT_PENDING) {
+      LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
+      return nonstd::make_unexpected(std::make_error_code(std::errc::bad_message));
+    }
+
+    // We need to read more data. Check that we have enough space.
+    if (buffer->AppendLen() < 64u) {
+      buffer->EnsureCapacity(buffer->Capacity() * 2);
+    }
+  }
+
+  return nonstd::make_unexpected(ec);
 }
 
 error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {

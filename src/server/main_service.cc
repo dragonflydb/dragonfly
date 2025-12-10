@@ -86,8 +86,6 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
-ABSL_RETIRED_FLAG(uint32_t, multi_exec_mode, 2, "DEPRECATED. Sets multi exec atomicity mode");
-
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
@@ -125,8 +123,9 @@ ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
 
 ABSL_FLAG(string, huffman_table, "",
           "a comma separated map: domain1:code1,domain2:code2,... where "
-          "domain can currently be only KEYS, code is base64 encoded huffman table exported via "
-          "DEBUG COMPRESSION EXPORT. if empty no huffman compression is appplied.");
+          "domain can currently be only KEYS or STRINGS, code is a base64-encoded huffman table"
+          " exported via "
+          "DEBUG COMPRESSION EXPORT. if the flag is empty no huffman compression is applied.");
 
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
@@ -377,7 +376,8 @@ class InterpreterReplier : public RedisReplyBuilder {
 // Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
-  explicit EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
+  explicit EvalSerializer(RedisReplyBuilder* rb, bool float_as_int)
+      : rb_(rb), float_as_int_(float_as_int) {
   }
 
   void OnBool(bool b) final {
@@ -393,7 +393,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    if (GetFlag(FLAGS_lua_resp2_legacy_float)) {
+    if (float_as_int_ || GetFlag(FLAGS_lua_resp2_legacy_float)) {
       const long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
     } else {
@@ -437,6 +437,7 @@ class EvalSerializer : public ObjectExplorer {
 
  private:
   RedisReplyBuilder* rb_;
+  bool float_as_int_;
 };
 
 void InterpreterReplier::PostItem() {
@@ -859,7 +860,7 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   }
 
   switch (opt) {
-    case WRITE:
+    case JOURNALED:
       return "write";
     case READONLY:
       return "readonly";
@@ -1015,6 +1016,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("managed_service_info");
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
+  config_registry.RegisterMutable("search_query_string_bytes");
 #endif
 
   config_registry.RegisterMutable(
@@ -1121,6 +1123,11 @@ void Service::Shutdown() {
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
+
+#ifdef WITH_SEARCH
+  SearchFamily::Shutdown();
+#endif
+
   Transaction::Shutdown();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
@@ -1144,18 +1151,18 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
   return DetermineKeys(cid, args);
 }
 
-optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid, CmdArgList args,
                                                  const ConnectionContext& dfly_cntx) {
   if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
     return nullopt;
   }
 
-  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
+  if (cid.first_key_pos() == 0 && cid.PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(&cid, args);
 
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
@@ -1185,13 +1192,13 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 }
 
 // TODO(kostas) refactor. Almost 1-1 with CheckKeyOwnership() above.
-std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId* cid, CmdArgList args,
+std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& cid, CmdArgList args,
                                                               const ConnectionContext& dfly_cntx) {
-  if (cid->first_key_pos() == 0 && cid->PubSubKind() != CO::PubSubKind::SHARDED) {
+  if (cid.first_key_pos() == 0 && cid.PubSubKind() != CO::PubSubKind::SHARDED) {
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(&cid, args);
 
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
@@ -1296,34 +1303,27 @@ optional<ErrorReply> Service::VerifyCommandExecution(const ConnectionContext* cn
                                    tail_args);
 }
 
-std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
                                                       const ConnectionContext& dfly_cntx) {
-  DCHECK(cid);
-
   ServerState& etl = *ServerState::tlocal();
 
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
-  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
-    VLOG(1) << "Non-admin attempt to execute " << cid->name() << " " << tail_args << " "
+  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid.IsRestricted()) {
+    VLOG(1) << "Non-admin attempt to execute " << cid.name() << " " << tail_args << " "
             << ConnectionLogContext(dfly_cntx.conn());
     return ErrorReply{"Cannot execute restricted command (admin only)", kRestrictDenied};
   }
 
-  if (auto err = cid->Validate(tail_args); err)
+  if (auto err = cid.Validate(tail_args); err)
     return err;
-
-  bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
-  bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool is_write_cmd = cid->IsWriteOnly();
-  bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
   bool allowed_by_state = true;
   const GlobalState gstate = etl.gstate();
   switch (gstate) {
     case GlobalState::LOADING:
-      allowed_by_state = dfly_cntx.journal_emulated || (cid->opt_mask() & CO::LOADING);
+      allowed_by_state = dfly_cntx.journal_emulated || (cid.opt_mask() & CO::LOADING);
       break;
     case GlobalState::SHUTTING_DOWN:
       allowed_by_state = false;
@@ -1332,15 +1332,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       // Only PING, admin commands, and all commands via admin connections are allowed
       // we prohibit even read commands, because read commands running in pipeline can take a while
       // to send all data to a client which leads to fail in takeover
-      allowed_by_state = dfly_cntx.conn()->IsPrivileged() || (cid->opt_mask() & CO::ADMIN) ||
-                         cid->name() == "PING";
+      allowed_by_state =
+          dfly_cntx.conn()->IsPrivileged() || (cid.opt_mask() & CO::ADMIN) || cid.name() == "PING";
       break;
     default:
       break;
   }
 
   if (!allowed_by_state) {
-    VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
+    VLOG(1) << "Command " << cid.name() << " not executed because global state is " << gstate;
 
     if (gstate == GlobalState::LOADING) {
       return ErrorReply(kLoadingErr);
@@ -1358,7 +1358,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     return ErrorReply{StrCat("Can not execute during ", GlobalStateName(gstate))};
   }
 
-  string_view cmd_name{cid->name()};
+  string_view cmd_name{cid.name()};
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
@@ -1369,6 +1369,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   // only reset and quit are allow if this connection is used for monitoring
   if (dfly_cntx.monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
     return ErrorReply{"Replica can't interact with the keyspace"};
+
+  bool is_write_cmd = cid.IsJournaled();
+  bool is_trans_cmd = cid.MultiControlKind() == CO::MultiControlKind::EXEC;
+  bool under_script = dfly_cntx.conn_state.script_info != nullptr;
+  bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
     return ErrorReply{"-READONLY You can't write against a read only replica."};
@@ -1384,7 +1389,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return err;
   }
 
-  if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
+  if (under_script && (cid.opt_mask() & CO::NOSCRIPT))
     return ErrorReply{"This Redis command is not allowed from script"};
 
   if (under_script) {
@@ -1392,17 +1397,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
     Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
-    bool shard_access = (cid->opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
+    bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
 
-    if (cid->IsTransactional()) {
-      auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, mode);
+    if (cid.IsTransactional()) {
+      auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, &cid, tail_args, mode);
 
       if (err.has_value()) {
         VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
-                << cid->name();
-        return err.value();
+                << cid.name();
+        return err;
       }
     }
 
@@ -1411,10 +1416,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     }
   }
 
-  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
+  return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilder* builder,
                                         facade::ConnectionContext* cntx) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1422,8 +1427,8 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
-  string cmd = absl::AsciiStrToUpper(args[0]);
-  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
+  string cmd = absl::AsciiStrToUpper(args.Front());
+  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
 
   if (cid == nullptr) {
     builder->SendError(ReportUnknownCmd(cmd));
@@ -1435,14 +1440,17 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
 
+  CmdArgVec tmp_vec;
+  ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
+
   if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
     LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
-              << args << " in dbid=" << dfly_cntx->conn_state.db_index;
+              << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
   // Don't interrupt running multi commands or admin connections.
   if (etl.IsPaused() && !dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
-    bool is_write = cid->IsWriteOnly();
+    bool is_write = cid->IsJournaled();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
@@ -1451,7 +1459,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     cntx->paused = false;
   }
 
-  if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
+  if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
     LOG_IF(WARNING, cntx->replica_conn || !cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1460,9 +1468,14 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
-    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      server_family_.GetDflyCmd()->OnClose(dfly_cntx->conn_state.replication_info.repl_session_id);
-      return DispatchResult::ERROR;
+
+    if (cid->name() == "REPLCONF") {
+      DCHECK_GE(args_no_cmd.size(), 1u);
+      if (absl::EqualsIgnoreCase(args_no_cmd.Front(), "ACK")) {
+        server_family_.GetDflyCmd()->OnClose(
+            dfly_cntx->conn_state.replication_info.repl_session_id);
+        return DispatchResult::ERROR;
+      }
     }
     builder->SendError(std::move(*err));
     return DispatchResult::ERROR;
@@ -1477,9 +1490,9 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     // TODO: protect against aggregating huge transactions.
     auto& exec_info = dfly_cntx->conn_state.exec_info;
     const size_t old_size = exec_info.GetStoredCmdBytes();
-    exec_info.AddStoredCmd(cid, true, args_no_cmd);
+    exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
     etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
-    if (cid->IsWriteOnly()) {
+    if (cid->IsJournaled()) {
       exec_info.is_write = true;
     }
     builder->SendSimpleString("QUEUED");
@@ -1494,7 +1507,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+          dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
 
       if (status != OpStatus::OK) {
         builder->SendError(status);
@@ -1510,7 +1523,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         CHECK(dfly_cntx->ns != nullptr);
         if (auto st =
-                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, args_no_cmd);
+                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
             st != OpStatus::OK) {
           builder->SendError(st);
           return DispatchResult::ERROR;
@@ -1526,8 +1539,7 @@ DispatchResult Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder
 
   dfly_cntx->cid = cid;
 
-  auto res =
-      InvokeCmd(cid, args_no_cmd, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
+  auto res = InvokeCmd(cid, tail_args, CommandContext{dfly_cntx->transaction, builder, dfly_cntx});
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
@@ -1667,7 +1679,9 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
       res = DispatchResult::OOM;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+    if (!absl::StartsWith(reason, "-BUSYGROUP")) {
+      LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+    }
   }
 
   auto cid_name = cid->name();
@@ -1711,13 +1725,13 @@ DispatchResult Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args,
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
-                                                 SinkReplyBuilder* builder,
+DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
+                                                 unsigned count, SinkReplyBuilder* builder,
                                                  facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
-  DCHECK_GT(args_list.size(), 1u);
+  DCHECK_GT(count, 1u);
 
   auto* ss = dfly::ServerState::tlocal();
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
@@ -1757,9 +1771,10 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
     stored_cmds.clear();
   };
 
-  for (auto args : args_list) {
-    string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.subspan(1));
+  for (unsigned i = 0; i < count; i++) {
+    ParsedArgs args = arg_gen();
+    string cmd = absl::AsciiStrToUpper(args.Front());
+    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.Tail());
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1775,8 +1790,8 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
     if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
-      stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, false /* do not deep-copy commands*/, tail_args);
+      stored_cmds.reserve(count);
+      stored_cmds.emplace_back(cid, tail_args);  // Shallow copy
       continue;
     }
 
@@ -1813,7 +1828,7 @@ DispatchManyResult Service::DispatchManyCommands(absl::Span<CmdArgList> args_lis
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                          MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
-  absl::InlinedVector<MutableSlice, 8> args;
+  absl::InlinedVector<string_view, 8> args;
   char cmd_name[16];
   char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
@@ -1874,7 +1889,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "QUIT");
       break;
     case MemcacheParser::STATS:
-      server_family_.StatsMC(cmd.key, mc_builder);
+      server_family_.StatsMC(cmd.key(), mc_builder);
       return;
     case MemcacheParser::VERSION:
       mc_builder->SendSimpleString("VERSION 1.6.0 DF");
@@ -1900,15 +1915,13 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     args.emplace_back(ttl, next - ttl);
   }
 
-  if (!cmd.key.empty()) {
-    char* key = const_cast<char*>(cmd.key.data());
-    args.emplace_back(key, cmd.key.size());
+  if (!cmd.empty()) {
+    args.emplace_back(cmd.Front());
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
-    char* v = const_cast<char*>(value.data());
-    args.emplace_back(v, value.size());
+    args.emplace_back(value);
 
     if (store_opt[0]) {
       args.emplace_back(store_opt, strlen(store_opt));
@@ -1921,9 +1934,12 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
     dfly_cntx->conn_state.memcache_flag = cmd.flags;
   } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
-    for (auto s : cmd.keys_ext) {
-      char* key = const_cast<char*>(s.data());
-      args.emplace_back(key, s.size());
+    if (cmd.size() > 1) {
+      auto it = cmd.begin();
+      ++it;  // skip first key
+      for (auto end = cmd.end(); it != end; ++it) {
+        args.emplace_back(*it);
+      }
     }
     if (cmd.type == MemcacheParser::GETS || cmd.type == MemcacheParser::GATS) {
       dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
@@ -1934,7 +1950,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
   }
 
-  DispatchCommand(CmdArgList{args}, mc_builder, cntx);
+  DispatchCommand(ParsedArgs{args}, mc_builder, cntx);
 
   // Reset back.
   dfly_cntx->conn_state.memcache_flag = 0;
@@ -2073,6 +2089,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   auto& info = cntx->conn_state.script_info;
   auto* tx = cntx->transaction;
   size_t used_mem = info->async_cmds_heap_mem + info->async_cmds.size() * sizeof(StoredCmd);
+
   if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
     return nullopt;
 
@@ -2110,8 +2127,8 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(cmd); cid != nullptr) {
-      auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
+      auto reply_mode = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ca.args[0]);
@@ -2132,7 +2149,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   if (ca.async)
     return;
 
-  DispatchCommand(ca.args, &replier, cntx);
+  DispatchCommand(ParsedArgs{ca.args}, &replier, cntx);
 }
 
 void Service::Eval(CmdArgList args, const CommandContext& cmd_cntx, bool read_only) {
@@ -2185,26 +2202,21 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-optional<ScriptMgr::ScriptParams> LoadScript(string_view sha, ScriptMgr* script_mgr,
-                                             Interpreter* interpreter) {
-  auto ss = ServerState::tlocal();
+void LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
+  if (interpreter->Exists(sha))
+    return;
 
-  if (!interpreter->Exists(sha)) {
-    auto script_data = script_mgr->Find(sha);
-    if (!script_data)
-      return std::nullopt;
-
-    string err;
-    Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
-    if (add_res != Interpreter::ADD_OK) {
-      LOG(ERROR) << "Error adding " << sha << " to database, err " << err;
-      return std::nullopt;
-    }
-
-    return script_data;
+  auto script_data = script_mgr->Find(sha);
+  if (!script_data) {
+    LOG(DFATAL) << "Script " << sha << " not found in script mgr";
+    return;
   }
 
-  return ss->GetScriptParams(sha);
+  string err;
+  Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
+  if (add_res != Interpreter::ADD_OK) {
+    LOG(DFATAL) << "Error adding " << sha << " to database, err " << err;
+  }
 }
 
 // Determine multi mode based on script params.
@@ -2243,13 +2255,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
   return false;
 }
 
-static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::ScriptParams& params,
+static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode multi_mode,
                                    const Transaction& tx) {
-  if (!sid.has_value()) {
-    return false;
-  }
-
-  if (DetermineMultiMode(params) != Transaction::LOCK_AHEAD) {
+  if (!sid.has_value() || multi_mode != Transaction::LOCK_AHEAD) {
     return false;
   }
 
@@ -2272,9 +2280,13 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     return builder->SendError(facade::kScriptNotFound);
   }
 
-  auto params = LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
-  if (!params)
+  auto* ss = ServerState::tlocal();
+  auto params = ss->GetScriptParams(eval_args.sha);
+  if (!params) {
     return builder->SendError(facade::kScriptNotFound);
+  }
+
+  LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
 
   string error;
 
@@ -2309,6 +2321,9 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
+  Interpreter::RunResult result;
+  Transaction::MultiMode script_mode = DetermineMultiMode(*params);
+
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
@@ -2317,9 +2332,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     sinfo.reset();
   };
 
-  Interpreter::RunResult result;
-
-  if (CanRunSingleShardMulti(sid, *params, *tx)) {
+  if (CanRunSingleShardMulti(sid, script_mode, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -2327,7 +2340,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       CallFromScript(cntx, args);
     });
 
-    ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
+    ++ss->stats.eval_shardlocal_coordination_cnt;
     tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, cntx->db_index(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
@@ -2340,13 +2353,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    if (*sid != ServerState::tlocal()->thread_index()) {
+    if (*sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
     }
   } else {
-    Transaction::MultiMode script_mode = DetermineMultiMode(*params);
     Transaction::MultiMode tx_mode = tx->GetMultiMode();
     bool scheduled = false;
 
@@ -2362,7 +2374,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       scheduled = StartMulti(cntx, script_mode, eval_args.keys);
     }
 
-    ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
+    ++ss->stats.eval_io_coordination_cnt;
     interpreter->SetRedisFunc(
         [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
 
@@ -2390,7 +2402,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // TODO(vlad): Investigate if using ReplyScope here is possible with a different serialization
   // strategy due to currently SerializeResult destructuring a value while serializing
   SinkReplyBuilder::ReplyAggregator agg(builder);
-  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder)};
+  EvalSerializer ser{static_cast<RedisReplyBuilder*>(builder), params->float_as_int};
   if (!interpreter->IsResultSafe()) {
     builder->SendError("reached lua stack limit");
   } else {

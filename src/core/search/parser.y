@@ -103,12 +103,20 @@ final_query:
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET
     {
+      // Accept any string as vector - validation happens later during search execution
+      uint32_t knn_count = toUint32($3);
+      auto field = std::move($4);
+      auto alias = std::move($7);
+      auto ef = $6;
+
       auto vec_result = BytesToFtVectorSafe($5);
       if (!vec_result) {
-        error(@5, "Invalid vector format");
-        YYERROR;
+        // Create empty vector for invalid data - will return empty results during search
+        auto empty_vec = std::make_unique<float[]>(0);
+        $$ = AstKnnNode(knn_count, std::move(field), std::make_pair(std::move(empty_vec), size_t{0}), std::move(alias), ef);
+      } else {
+        $$ = AstKnnNode(knn_count, std::move(field), std::move(*vec_result), std::move(alias), ef);
       }
-      $$ = AstKnnNode(toUint32($3), $4, std::move(*vec_result), $7, $6);
     }
 
 opt_knn_alias:

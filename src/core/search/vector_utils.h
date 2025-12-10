@@ -17,6 +17,8 @@ OwnedFtVector BytesToFtVector(std::string_view value);
 // TODO: Remove unsafe version
 std::optional<OwnedFtVector> BytesToFtVectorSafe(std::string_view value);
 
+float L2Distance(const float* u, const float* v, size_t dims);
+float IPDistance(const float* u, const float* v, size_t dims);
 float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilarity sim);
 
 }  // namespace dfly::search

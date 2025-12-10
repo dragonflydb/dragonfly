@@ -1,12 +1,8 @@
 #pragma once
 
-#include <absl/types/span.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
-#include <optional>
-#include <type_traits>
 #include <vector>
 
 #include "core/search/base.h"
@@ -130,6 +126,8 @@ template <typename Container /* underlying container */> class BlockList {
     return BlockListIterator{blocks_.end(), blocks_.end()};
   }
 
+  DefragmentResult Defragment(PageUsage* page_usage);
+
  private:
   // Find block that should contain t. Returns end() only if empty
   BlockIt FindBlock(const ElementType& t);
@@ -197,6 +195,8 @@ template <typename T> class SortedVector {
     return entries_.cend();
   }
 
+  DefragmentResult Defragment(PageUsage* page_usage);
+
  private:
   SortedVector(PMR_NS::vector<T>&& v) : entries_{std::move(v)} {
   }
@@ -217,6 +217,11 @@ struct SplitResult {
 
   Container left;
   Container right;
+
+  // Median value of split, used as minimum value of right block
   double median;
+
+  // Min/max values of left (lmin, lmax) and right (rmin=median, rmax) blocks
+  double lmin, lmax, rmax;
 };
 }  // namespace dfly::search

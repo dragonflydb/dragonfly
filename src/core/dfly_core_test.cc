@@ -405,11 +405,14 @@ TEST_F(HuffCoderTest, HugeHistogram) {
   // The bug is in the following code in huf_compress.c:
   // huffNode0[0].count = (U32)(1U<<31);  /* fake entry, strong barrier */
   // where it uses the count as a sentinel assuming that no other counts can be larger than 2^31.
-  // this may not be true for histograms with huge counts, so we need to make sure that
-  // all counts are smaller than 2^31 / 256.
+  // this may not be true for histograms with huge counts, so we need to make sure that sum of all
+  // counts is smaller than 2^31.
+  uint64_t sum = 0;
   for (unsigned i = 0; i < hist.size(); ++i) {
-    hist[i] >>= 2;  // Without this the algorithm causes a data race and crash.
+    sum += hist[i];
+    hist[i] /= 4;  // Without this the algorithm causes a data race and crash.
   }
+  LOG(INFO) << "Total sum: " << sum << " reduced sum: " << sum / 4;
   ASSERT_TRUE(encoder_.Build(hist.data(), hist.size() - 1, &error_msg_)) << error_msg_;
 
   string bindata = encoder_.Export();

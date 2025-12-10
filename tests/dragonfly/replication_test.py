@@ -1,6 +1,9 @@
+import os
 import platform
 import shutil
+import signal
 import tarfile
+import time
 import urllib.request
 from itertools import chain, repeat
 
@@ -1418,7 +1421,10 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
     try:
         await c_replica.execute_command(f"REPLTAKEOVER 0")
     except redis.exceptions.ResponseError as e:
-        assert str(e) == "Couldn't execute takeover"
+        # Should fail with detailed error message
+        assert str(e).startswith("Couldn't execute takeover")
+        # Verify it includes diagnostic information
+        assert ":" in str(e), "Error message should include diagnostic details"
     else:
         assert False, "Takeover should not succeed."
     seeder.stop()
@@ -3052,6 +3058,42 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
+@pytest.mark.skip("too heavy")
+@pytest.mark.opt_only
+@dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
+async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
+    """
+    Restart replicating instance with huge values. Tests that interrupting the streaming process doesn't hinder retrying replication
+    """
+
+    master, replica = df_factory.create(), df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+    c_master, c_replica = master.client(), replica.client()
+
+    # Create huge values
+    await c_master.execute_command(
+        "debug", "populate", "2", "test", "1000", "rand", "type", "zset", "elements", "1000000"
+    )
+
+    # Restart replication a few times
+    for _ in range(3):
+        assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await asyncio.sleep(random.random() + 0.5)
+
+    # Wait for it to finish finally
+    async with async_timeout.timeout(60):
+        await wait_for_replicas_state(c_replica)
+
+    # Check that everything is in sync
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
+    assert len(set(hashes)) == 1
+
+    # No in-between errors occured
+    replica.stop()
+    lines = replica.find_in_logs("Duplicate zset fields detected")
+    assert len(lines) == 0
+
+
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
@@ -3523,3 +3565,104 @@ async def test_big_strings(df_factory):
     line = lines[0]
     peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
     assert peak_bytes < value_size
+
+
+@pytest.mark.slow
+async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
+    master = df_factory.create(proactor_threads=4, vmodule="dflycmd=1")
+    replicas = [df_factory.create(proactor_threads=2) for _ in range(3)]
+    df_factory.start_all([master] + replicas)
+
+    c_master = master.client()
+    clients = [r.client() for r in replicas]
+
+    # Connect all replicas
+    for c in clients:
+        await c.execute_command(f"REPLICAOF localhost {master.port}")
+    await asyncio.gather(*[wait_available_async(c) for c in clients])
+
+    # Disconnect replica[1] to create lag
+    await clients[1].execute_command("REPLICAOF NO ONE")
+
+    # Write data that replica[1] will miss
+    pipe = c_master.pipeline()
+    for i in range(10000):
+        pipe.set(f"k{i}", "x" * 100)
+    await pipe.execute()
+
+    # Reconnect replica[1] and immediately takeover from replica[0]
+    await clients[1].execute_command(f"REPLICAOF localhost {master.port}")
+
+    await check_all_replicas_finished(clients, c_master)
+
+    await clients[0].execute_command("REPLTAKEOVER 10")
+
+    # Check master logs
+    master.stop(kill=False)
+
+    timeout_logs = master.find_in_logs(
+        f"Couldn't synchronize with replica for takeover in time: 127.0.0.1:{replicas[0].port}"
+    )
+    assert not timeout_logs
+
+
+@pytest.mark.slow
+async def test_takeover_timeout_on_unresponsive_master(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Setup replication
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Write some data
+    for i in range(10):
+        await c_master.set(f"key{i}", f"val{i}")
+    await asyncio.sleep(0.2)
+
+    # PAUSE master process (SIGSTOP) - socket stays open but doesn't respondExpand commentComment on line R3629Code has comments. Press enter to view.
+    os.kill(master.proc.pid, signal.SIGSTOP)
+    logging.info(f"Paused master process {master.proc.pid}")
+
+    # Try takeover with 5 second timeout
+    # BUG: This will hang forever because SendNextPhaseRequest has no timeout
+    # FIXED: Should return error within ~15 seconds (5 + buffer)
+    start_time = time.time()
+    try:
+        await asyncio.wait_for(
+            c_replica.execute_command("REPLTAKEOVER 5"),
+            timeout=20,  # Should complete within 20 seconds
+        )
+        elapsed = time.time() - start_time
+        logging.info(f"Takeover completed in {elapsed:.1f}s")
+    except asyncio.TimeoutError:
+        elapsed = time.time() - start_time
+        pytest.fail(
+            f"BUG: REPLTAKEOVER hung for {elapsed:.1f}s without timeout. "
+            f"SendNextPhaseRequest in replica.cc has no socket timeout."
+        )
+    except Exception as e:
+        # Expected: connection error or timeout error
+        elapsed = time.time() - start_time
+        logging.info(f"Takeover failed after {elapsed:.1f}s: {e}")
+        # Should fail quickly, not hang
+        assert elapsed < 20, f"Took too long: {elapsed:.1f}s"
+    finally:
+        # Resume master so it can be stopped properly
+        try:
+            os.kill(master.proc.pid, signal.SIGCONT)
+        except Exception:
+            pass
+
+
+async def test_replica_of_self(async_client):
+    port = async_client.connection_pool.connection_kwargs["port"]
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command(f"replicaof localhost {port}")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command(f"replicaof 127.0.0.1 {port}")

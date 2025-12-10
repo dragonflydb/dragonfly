@@ -97,7 +97,7 @@ std::string TestConnection::RemoteEndpointStr() const {
 }
 
 void TransactionSuspension::Start() {
-  static CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
+  static CommandId cid{"TEST", CO::JOURNALED | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 
@@ -454,7 +454,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   DCHECK(context->transaction == nullptr) << id;
 
-  service_->DispatchCommand(CmdArgList{args}, conn_wrapper->builder(), context);
+  service_->DispatchCommand(ParsedArgs{args}, conn_wrapper->builder(), context);
 
   DCHECK(context->transaction == nullptr);
 
@@ -486,15 +486,16 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
   auto* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
-  vector<ArgSlice> args_vec(cmds.size());
-  vector<vector<string_view>> cmd_views(cmds.size());
+  vector<cmn::BackedArguments> backed_args_vec(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
-    for (const auto& arg : cmds[i]) {
-      cmd_views[i].emplace_back(arg);
-    }
-    args_vec[i] = absl::MakeSpan(cmd_views[i]);
+    backed_args_vec[i] = cmn::BackedArguments(cmds[i].begin(), cmds[i].end(), cmds[i].size());
   }
-  service_->DispatchManyCommands(absl::MakeSpan(args_vec), conn_wrapper->builder(), context);
+  auto next_fn = [it = backed_args_vec.begin()]() mutable {
+    ParsedArgs args(*it);
+    ++it;
+    return args;
+  };
+  service_->DispatchManyCommands(next_fn, cmds.size(), conn_wrapper->builder(), context);
   DCHECK(context->transaction == nullptr);
 }
 
@@ -506,7 +507,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   MP::Command cmd;
   cmd.type = cmd_type;
-  cmd.key = key;
+  cmd.Assign(&key, &key + 1, 1);
   cmd.flags = flags;
   cmd.bytes_len = value.size();
   cmd.expire_ts = ttl.count();
@@ -546,13 +547,9 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   auto src = list.begin();
   if (cmd.type == MP::GAT || cmd.type == MP::GATS) {
     CHECK(absl::SimpleAtoi(*src++, &cmd.expire_ts));
-  } else {
-    cmd.key = *src++;
   }
 
-  for (; src != list.end(); ++src) {
-    cmd.keys_ext.push_back(*src);
-  }
+  cmd.Assign(src, list.end(), list.end() - src);
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 

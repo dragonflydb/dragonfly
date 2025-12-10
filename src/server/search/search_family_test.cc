@@ -22,6 +22,7 @@ using namespace util;
 using namespace facade;
 
 ABSL_DECLARE_FLAG(bool, search_reject_legacy_field);
+ABSL_DECLARE_FLAG(size_t, search_query_string_bytes);
 
 namespace dfly {
 
@@ -322,8 +323,6 @@ TEST_F(SearchFamilyTest, Stats) {
   EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
 }
 
-// todo: ASAN fails heres on arm
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, Simple) {
   Run({"hset", "d:1", "foo", "baz", "k", "v"});
   Run({"hset", "d:2", "foo", "bar", "k", "v"});
@@ -345,7 +344,6 @@ TEST_F(SearchFamilyTest, Simple) {
   Run({"hset", "w:2", "foo", "this", "k", "v"});
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:this"}), kNoResults);
 }
-#endif
 
 TEST_F(SearchFamilyTest, Errors) {
   Run({"ft.create", "i1", "PREFIX", "1", "d:", "SCHEMA", "foo", "TAG", "bar", "TEXT"});
@@ -418,8 +416,6 @@ TEST_F(SearchFamilyTest, JsonIdentifierWithBrackets) {
   EXPECT_THAT(Run({"ft.search", "i1", "(@continent:{Europe})"}), AreDocIds("k1", "k2"));
 }
 
-// todo: fails on arm build
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, JsonArrayValues) {
   string_view D1 = R"(
 {
@@ -494,7 +490,6 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
   EXPECT_THAT(res, IsMapWithSize("k1", IsMap()));
 }
-#endif
 
 TEST_F(SearchFamilyTest, Tags) {
   Run({"hset", "d:1", "color", "red, green"});
@@ -838,6 +833,16 @@ TEST_F(SearchFamilyTest, Unicode) {
   auto resp = Run({"ft.search", "i1", "λιβελλούλη"});
   EXPECT_THAT(resp,
               IsMapWithSize("d:4", IsMap("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας")));
+
+  // Repeat with tags
+  Run({"ft.create", "i2", "schema", "color", "tag", "separator", "/"});
+
+  Run({"hset", "d:5", "color", "зеЛеный/żółtY"});
+  Run({"hset", "d:6", "color", "κόκκινος/Білий"});
+
+  auto tagvals = Run({"ft.tagvals", "i2", "color"});
+  EXPECT_THAT(tagvals.GetVec(), UnorderedElementsAre("зеленый", "żółty", "κόκκινος", "білий"));
+  EXPECT_THAT(Run({"ft.search", "i2", "@color:{зеленый|білий}"}), AreDocIds("d:5", "d:6"));
 }
 
 TEST_F(SearchFamilyTest, UnicodeWords) {
@@ -952,7 +957,6 @@ TEST_F(SearchFamilyTest, FtProfile) {
   ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 }
 
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   Run({"json.set", "j1", ".", R"({"id":"1"})"});
   Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
@@ -965,7 +969,6 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   resp = Run({"ft.profile", "i1", "search", "query", "@{invalid13289}"});
   EXPECT_THAT(resp, ErrArg("query syntax error"));
 }
-#endif
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
@@ -1275,8 +1278,6 @@ TEST_F(SearchFamilyTest, FlushSearchIndices) {
   EXPECT_THAT(resp, ErrArg("ERR Index already exists"));
 }
 
-// todo: ASAN fails heres on arm
-#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
   // Test HASH
   Run({"HSET", "h1", "word", "item1", "foo", "10", "text", "first key"});
@@ -1316,7 +1317,6 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
                                          IsMap("foo_total", "10", "word", "item1")));
 }
-#endif
 
 TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   // Test simple
@@ -3330,11 +3330,15 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
                             "Maximum number of results from ft.search command", "Value", "1"));
 
   resp = Run({"FT.CONFIG", "GET", "*"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+  // Should contain MAXSEARCHRESULTS among other search config parameters
+  EXPECT_THAT(resp, RespArray(Contains("MAXSEARCHRESULTS")));
+  EXPECT_THAT(resp, RespArray(Contains("1")));
 
   resp = Run({"FT.CONFIG", "HELP", "*"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "Description",
-                            "Maximum number of results from ft.search command", "Value", "1"));
+  // Should contain MAXSEARCHRESULTS description among other search configs
+  EXPECT_THAT(resp.GetVec(),
+              Contains(IsArray("MAXSEARCHRESULTS", "Description",
+                               "Maximum number of results from ft.search command", "Value", "1")));
 
   // restore normal value for other tests
   Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1000000"});
@@ -3504,6 +3508,69 @@ TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
 
   // Search on database 0 should still find the original document
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "value1"}), AreDocIds("hash1"));
+}
+
+TEST_F(SearchFamilyTest, QueryStringBytesLimit) {
+  Run({"hset", "doc1", "name", "alice", "age", "30"});
+  Run({"hset", "doc2", "name", "bob", "age", "25"});
+
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC"}),
+            "OK");
+
+  absl::FlagSaver fs;
+
+  string query = "@name:alice @age:[25 30]";
+  size_t query_len = query.size();
+
+  // Set limit to query_len - 1 (just below query length)
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len - 1);
+
+  auto resp = Run({"ft.search", "idx", query});
+  EXPECT_THAT(resp, ErrArg(absl::StrCat("Query string is too long, max length is ", query_len - 1,
+                                        " bytes")));
+
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len);
+
+  resp = Run({"ft.search", "idx", query});
+  EXPECT_THAT(resp, AreDocIds("doc1"));
+
+  // Test FT.AGGREGATE with same query
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len - 1);
+
+  resp = Run({"ft.aggregate", "idx", query, "LOAD", "1", "name"});
+  EXPECT_THAT(resp, ErrArg(absl::StrCat("Query string is too long, max length is ", query_len - 1,
+                                        " bytes")));
+
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len);
+
+  resp = Run({"ft.aggregate", "idx", query, "LOAD", "1", "name"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "alice")));
+}
+
+TEST_F(SearchFamilyTest, KnnHnsw) {
+  // Create an index with a vector field using HASH documents
+  auto resp = Run({"FT.CREATE", "knn_idx", "ON", "HASH", "SCHEMA", "even", "TAG", "pos", "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "1", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  // Helper to convert float to binary format
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // Add some test documents with vector data
+  Run({"HSET", "doc1", "even", "yes", "pos", FloatToBytes(1.0f)});
+  Run({"HSET", "doc2", "even", "no", "pos", FloatToBytes(2.0f)});
+  Run({"HSET", "doc3", "even", "yes", "pos", FloatToBytes(3.0f)});
+
+  // Query vector (2.0f - should find doc2 closest, but filtered to "yes" docs)
+  string query_vec = FloatToBytes(2.0f);
+
+  // Perform KNN search with tag filter
+  resp = Run({"FT.SEARCH", "knn_idx", "@even:{yes} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
+              query_vec});
+  // Should return documents with "even": "yes" sorted by vector distance to 2.0
+  EXPECT_THAT(resp, AreDocIds("doc3", "doc1"));
 }
 
 }  // namespace dfly

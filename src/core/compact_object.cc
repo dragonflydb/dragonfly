@@ -24,7 +24,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -380,7 +380,6 @@ struct TL {
 
 thread_local TL tl;
 
-constexpr bool kUseSmallStrings = true;
 constexpr bool kUseAsciiEncoding = true;
 
 }  // namespace
@@ -723,7 +722,7 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, MemoryResour
 }  // namespace detail
 
 uint32_t JsonEnconding() {
-  static thread_local uint32_t json_enc =
+  thread_local uint32_t json_enc =
       absl::GetFlag(FLAGS_experimental_flat_json) ? kEncodingJsonFlat : kEncodingJsonCons;
   return json_enc;
 }
@@ -813,7 +812,7 @@ size_t CompactObj::Size() const {
       }
       case EXTERNAL_TAG:
         raw_size = u_.ext_ptr.serialized_size;
-        CHECK(mask_bits_.encoding != HUFFMAN_ENC);
+        first_byte = GetFirstByte();
         break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
@@ -861,7 +860,10 @@ uint64_t CompactObj::HashCode() const {
   DCHECK(mask_bits_.encoding);
 
   if (IsInline()) {
-    char buf[kInlineLen * 3];  // should suffice for most huffman decodings.
+    // Buffer must accommodate maximum decompressed size from inline storage
+    // Highly compressible data can achieve ~8x compression (e.g., repeated character)
+    // kInlineLen (16 bytes) compressed -> up to 128 bytes decompressed
+    char buf[kInlineLen * 8];
     size_t decoded_len = GetStrEncoding().Decode(string_view{u_.inline_str, taglen_}, buf);
     return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
   }
@@ -1094,6 +1096,8 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
       return false;
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
+    case JSON_TAG:
+      return u_.json_obj.DefragIfNeeded(page_usage);
     case INT_TAG:
       page_usage->RecordNotRequired();
       // this is not relevant in this case
@@ -1143,40 +1147,32 @@ void CompactObj::GetString(char* dest) const {
   }
 
   if (mask_bits_.encoding) {
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view decode_blob;
+
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      string_view blob{(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-      GetStrEncoding().Decode(blob, dest);
-      return;
+      decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
     } else {
       CHECK_EQ(SMALL_TAG, taglen_);
-      string_view slices[2];
-      unsigned num = u_.small_str.GetV(slices);
-      DCHECK_EQ(2u, num);
-      size_t decoded_len = GetStrEncoding().DecodedSize(u_.small_str.size(), slices[0][0]);
+      auto& ss = u_.small_str;
 
-      if (mask_bits_.encoding == HUFFMAN_ENC) {
-        tl.tmp_buf.resize(slices[0].size() + slices[1].size() - 1);
-        uint8_t* next = tl.tmp_buf.data();
-        memcpy(next, slices[0].data() + 1, slices[0].size() - 1);
-        next += slices[0].size() - 1;
-        memcpy(next, slices[1].data(), slices[1].size());
-        string_view src(reinterpret_cast<const char*>(tl.tmp_buf.data()), tl.tmp_buf.size());
-        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
-        CHECK(decoder.Decode(src, decoded_len, dest));
-        return;
+      char* copy_dest;
+      if (str_encoding.enc_ == HUFFMAN_ENC) {
+        tl.tmp_buf.resize(ss.size());
+        copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+      } else {
+        // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
+        size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
+        copy_dest = dest + (decoded_len - ss.size());
       }
 
-      // we left some space on the left to allow inplace ascii unpacking.
-      size_t space_left = decoded_len - u_.small_str.size();
-
-      char* next = dest + space_left;
-      memcpy(next, slices[0].data(), slices[0].size());
-      next += slices[0].size();
-      memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
+      ss.Get(copy_dest);
+      decode_blob = {copy_dest, ss.size()};
     }
+
+    str_encoding.Decode(decode_blob, dest);
     return;
   }
 
@@ -1188,24 +1184,23 @@ void CompactObj::GetString(char* dest) const {
     return;
   }
 
-  if (taglen_ == SMALL_TAG) {
-    string_view slices[2];
-    unsigned num = u_.small_str.GetV(slices);
-    DCHECK_EQ(2u, num);
-    memcpy(dest, slices[0].data(), slices[0].size());
-    dest += slices[0].size();
-    memcpy(dest, slices[1].data(), slices[1].size());
-    return;
-  }
+  if (taglen_ == SMALL_TAG)
+    return u_.small_str.Get(dest);
 
   LOG(FATAL) << "Bad tag " << int(taglen_);
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
+  uint8_t first_byte = 0;
+  if (mask_bits_.encoding == HUFFMAN_ENC) {
+    CHECK(rep == ExternalRep::STRING);
+    first_byte = GetFirstByte();
+  }
   SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
+  u_.ext_ptr.first_byte = first_byte;
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.offload.page_index = offset / 4096;
@@ -1216,11 +1211,13 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
   return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
 }
 
-void CompactObj::SetCool(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
+void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
+                         detail::TieredColdRecord* record) {
   // We copy the mask of the "cooled" referenced object because it contains the encoding info.
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
   u_.ext_ptr.is_cool = 1;
+  u_.ext_ptr.representation = static_cast<uint8_t>(rep);
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
   u_.ext_ptr.cool_record = record;
@@ -1236,6 +1233,10 @@ auto CompactObj::GetCool() const -> CoolItem {
   return res;
 }
 
+void CompactObj::Freeze(size_t offset, size_t sz) {
+  SetExternal(offset, sz, GetExternalRep());
+}
+
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
   auto& ext = u_.ext_ptr;
@@ -1247,11 +1248,10 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   CHECK(IsExternal()) << int(taglen_);
   DCHECK_EQ(u_.ext_ptr.representation, static_cast<uint8_t>(ExternalRep::STRING));
-
-  DCHECK_GT(blob.size(), kInlineLen);
+  DCHECK_GT(blob.size(), kInlineLen);  // There are no mutable commands that shrink strings
 
   if (is_raw) {
-    if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
+    if (SmallString::CanAllocate(blob.size())) {
       SetMeta(SMALL_TAG, mask_);
       tl.small_str_bytes += u_.small_str.Assign(blob);
     } else {
@@ -1259,6 +1259,7 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
+    mask_bits_.encoding = NONE_ENC;  // reset encoding
     EncodeString(blob, false);
   }
 }
@@ -1269,6 +1270,35 @@ void CompactObj::Reset() {
   }
   tagbyte_ = 0;
   mask_ = 0;
+}
+
+uint8_t CompactObj::GetFirstByte() const {
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  if (IsInline()) {
+    return u_.inline_str[0];
+  }
+
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    return *(uint8_t*)u_.r_obj.inner_obj();
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    return u_.small_str.first_byte();
+  }
+
+  if (taglen_ == EXTERNAL_TAG) {
+    if (u_.ext_ptr.is_cool) {
+      const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
+      return cooled_obj.GetFirstByte();
+    }
+    return u_.ext_ptr.first_byte;
+  }
+
+  LOG(DFATAL) << "Bad tag " << int(taglen_);
+  return 0;
 }
 
 // Frees all resources if owns.
@@ -1374,7 +1404,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       return false;
 
     if (IsInline()) {
-      constexpr size_t kMaxHuffLen = kInlineLen * 3;
+      // Buffer must accommodate maximum decompressed size from inline storage (~8x compression)
+      constexpr size_t kMaxHuffLen = kInlineLen * 8;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
         const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
@@ -1434,8 +1465,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     DCHECK_GT(sv.size(), 16u);  // we would not be in SMALL_TAG, otherwise.
 
     string_view slice[2];
-    unsigned num = u_.small_str.GetV(slice);
-    DCHECK_EQ(2u, num);
+    u_.small_str.Get(slice);
     DCHECK_LT(slice[0].size(), 14u);
 
     uint8_t tmpbuf[14];
@@ -1544,18 +1574,14 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
 
   DCHECK_GT(encoded.size(), kInlineLen);
 
-  if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
-    if (taglen_ == 0) {
-      SetMeta(SMALL_TAG, mask_);
-      tl.small_str_bytes += u_.small_str.Assign(encoded);
-      return;
-    }
-
-    if (taglen_ == SMALL_TAG && encoded.size() <= u_.small_str.size()) {
+  if (SmallString::CanAllocate(encoded.size())) {
+    if (taglen_ == SMALL_TAG)
       tl.small_str_bytes -= u_.small_str.MallocUsed();
-      tl.small_str_bytes += u_.small_str.Assign(encoded);
-      return;
-    }
+    else
+      SetMeta(SMALL_TAG, mask_);
+
+    tl.small_str_bytes += u_.small_str.Assign(encoded);
+    return;
   }
 
   SetMeta(ROBJ_TAG, mask_);
@@ -1577,7 +1603,7 @@ StringOrView CompactObj::GetRawString() const {
     return StringOrView::FromString(std::move(tmp));
   }
 
-  LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
+  LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);
   return {};
 }
 
@@ -1585,10 +1611,50 @@ MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
 }
 
-constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
-    {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
-    {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
-    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
+bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
+    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old));
+    DeleteMR<JsonType>(old);
+    return true;
+  }
+  return false;
+}
+
+bool CompactObj::JsonConsT::ShouldDefragment(PageUsage* page_usage) const {
+  bool should_defragment = false;
+  json_ptr->compute_memory_size([&page_usage, &should_defragment](const void* p) {
+    should_defragment |= page_usage->IsPageForObjectUnderUtilized(const_cast<void*>(p));
+    return 0;
+  });
+  return should_defragment;
+}
+
+bool CompactObj::FlatJsonT::DefragIfNeeded(PageUsage* page_usage) {
+  if (uint8_t* old = flat_ptr; page_usage->IsPageForObjectUnderUtilized(old)) {
+    const uint32_t size = json_len;
+    flat_ptr = static_cast<uint8_t*>(tl.local_mr->allocate(size, kAlignSize));
+    memcpy(flat_ptr, old, size);
+    tl.local_mr->deallocate(old, size, kAlignSize);
+    return true;
+  }
+
+  return false;
+}
+
+bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
+  if (JsonEnconding() == kEncodingJsonCons) {
+    return cons.DefragIfNeeded(page_usage);
+  }
+
+  return flat.DefragIfNeeded(page_usage);
+}
+
+constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] =
+    {
+        {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
+        {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
+        {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
+        {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
 
 std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {

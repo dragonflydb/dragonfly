@@ -49,6 +49,9 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
 ABSL_RETIRED_FLAG(bool, stream_rdb_encode_v2, true,
                   "Retired. Uses format, compatible with redis 7.2 and Dragonfly v1.26+");
 
+// Flip this value to 'true' in March 2026.
+ABSL_FLAG(bool, rdb_sbf_chunked, false, "Enable new save format for saving SBFs in chunks.");
+
 namespace dfly {
 
 using namespace std;
@@ -198,7 +201,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_JSON:
       return RDB_TYPE_JSON;
     case OBJ_SBF:
-      return RDB_TYPE_SBF;
+      return absl::GetFlag(FLAGS_rdb_sbf_chunked) ? RDB_TYPE_SBF2 : RDB_TYPE_SBF;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -623,11 +626,20 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(sbf->hashfunc_cnt(i)));
 
     string_view blob = sbf->data(i);
-    RETURN_ON_ERR(SaveString(blob));
+    if (absl::GetFlag(FLAGS_rdb_sbf_chunked)) {
+      RETURN_ON_ERR(SaveLen(blob.size()));
+
+      for (size_t offset = 0; offset < blob.size(); offset += kFilterChunkSize) {
+        size_t chunk_len = std::min(kFilterChunkSize, blob.size() - offset);
+        RETURN_ON_ERR(SaveString(blob.substr(offset, chunk_len)));
+      }
+    } else {
+      RETURN_ON_ERR(SaveString(blob));
+    }
+
     FlushState flush_state = FlushState::kFlushMidEntry;
     if ((i + 1) == sbf->num_filters())
       flush_state = FlushState::kFlushEndEntry;
-
     FlushIfNeeded(flush_state);
   }
 

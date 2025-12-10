@@ -8,7 +8,6 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"
-#include "core/overloaded.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
@@ -28,43 +27,47 @@ struct FlowInfo;
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
  public:
-  StoredCmd(const CommandId* cid, bool own_args, CmdArgList args);
+  // Deep copy of args, creates backing storage internally.
+  StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
 
-  // Create on top of already filled tightly-packed buffer.
-  StoredCmd(std::string&& buffer, const CommandId* cid, CmdArgList args, facade::ReplyMode mode);
-
-  size_t NumArgs() const {
-    return std::visit(Overloaded{//
-                                 [](const OwnStorage& s) { return s.sizes.size(); },
-                                 [](const CmdArgList& s) { return s.size(); }},
-                      args_);
+  // Shallow copy of args.
+  StoredCmd(const CommandId* cid, facade::ParsedArgs args)
+      : cid_{cid}, args_{args}, reply_mode_(facade::ReplyMode::FULL) {
   }
 
-  size_t UsedMemory() const;
+  size_t NumArgs() const {
+    return args_.size();
+  }
+
+  size_t UsedMemory() const {
+    return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
+  }
+
   facade::CmdArgList ArgList(CmdArgVec* scratch) const;
   std::string FirstArg() const;
 
-  const CommandId* Cid() const;
+  const CommandId* Cid() const {
+    return cid_;
+  }
 
-  facade::ReplyMode ReplyMode() const;
+  facade::ReplyMode ReplyMode() const {
+    return reply_mode_;
+  }
 
  private:
-  const CommandId* cid_;  // underlying command
-  struct OwnStorage {
-    std::string buffer;                   // underlying buffer
-    absl::FixedArray<uint32_t, 4> sizes;  // sizes of arg part
-    explicit OwnStorage(size_t sz) : sizes(sz) {
-    }
-  };
+  const CommandId* cid_;     // underlying command
+  facade::ParsedArgs args_;  // arguments
 
-  std::variant<OwnStorage, CmdArgList> args_;  // args storage
-  facade::ReplyMode reply_mode_;               // reply mode
+  // TODO: we could optimize the storage further by introducing StoredCmdCollection and
+  // keep the backing storage there. Then this class will only use shallow copies.
+  std::unique_ptr<cmn::BackedArguments> backed_;
+  facade::ReplyMode reply_mode_;  // reply mode
 };
 
 struct ConnectionState {
   // MULTI-EXEC transaction related data.
   struct ExecInfo {
-    enum ExecState { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING, EXEC_ERROR };
+    enum ExecState : uint8_t { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING, EXEC_ERROR };
 
     ExecInfo() = default;
     // ExecInfo is immovable due to being referenced from DbSlice.
@@ -86,10 +89,10 @@ struct ConnectionState {
 
     size_t UsedMemory() const;
 
-    // Adds a StoredCmd and updates the stored_cmds_size
-    void AddStoredCmd(const CommandId* cid, bool own_args, CmdArgList args);
+    // Deep copies arguments and updates the stored_cmd_bytes.
+    void AddStoredCmd(const CommandId* cid, ArgSlice args);
 
-    // Empties the body vector and resets stored_cmds_size to 0. Returns the size before data was
+    // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
     // cleared.
     size_t ClearStoredCmds();
 

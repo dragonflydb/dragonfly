@@ -1,5 +1,25 @@
 #include "core/search/block_list.h"
 
+#include "core/page_usage/page_usage_stats.h"
+
+namespace {
+
+template <typename T> bool DefragmentVector(PMR_NS::vector<T>& vec, dfly::PageUsage* page_usage) {
+  if (vec.empty() || !page_usage->IsPageForObjectUnderUtilized(vec.data())) {
+    return false;
+  }
+
+  PMR_NS::vector<T> new_vec(vec.get_allocator());
+  new_vec.reserve(vec.size());
+  for (auto&& element : vec) {
+    new_vec.push_back(std::move(element));
+  }
+  vec = std::move(new_vec);
+  return true;
+}
+
+}  // namespace
+
 namespace dfly::search {
 
 using namespace std;
@@ -40,15 +60,18 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   left.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
   right.ReserveBlocks(block_list.blocks_.size() / 2 + 1);
 
-  double min_value_in_right_part = std::numeric_limits<double>::infinity();
+  double lmin = std::numeric_limits<double>::infinity(), rmin = lmin;
+  double lmax = -std::numeric_limits<double>::infinity(), rmax = lmax;
+
   for (const Entry& entry : block_list) {
     if (entry.second < median_value) {
       left.PushBack(entry);
+      lmin = std::min(lmin, entry.second);
+      lmax = std::max(lmax, entry.second);
     } else if (entry.second > median_value) {
       right.PushBack(entry);
-      if (entry.second < min_value_in_right_part) {
-        min_value_in_right_part = entry.second;
-      }
+      rmin = std::min(rmin, entry.second);
+      rmax = std::max(rmax, entry.second);
     } else {
       median_entries.push_back(entry);
     }
@@ -57,20 +80,23 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
 
   if (left.Size() < right.Size()) {
     // If left is smaller, we can add median entries to it
-    // We need to change median value to the right part
-    median_value = min_value_in_right_part;
+    // We need to change median value to the right part and update lmax
+    lmax = median_value;
+    lmin = std::min(lmin, median_value);
+    median_value = rmin;
     for (const auto& entry : median_entries) {
       left.Insert(entry);
     }
   } else {
     // If right part is smaller, we can add median entries to it
     // Median value is still the same
+    rmax = std::max(rmax, median_value);
     for (const auto& entry : median_entries) {
       right.Insert(entry);
     }
   }
 
-  return {std::move(left), std::move(right), median_value};
+  return {std::move(left), std::move(right), median_value, lmin, lmax, rmax};
 }
 
 template <typename C> bool BlockList<C>::Insert(ElementType t) {
@@ -108,6 +134,25 @@ template <typename C> bool BlockList<C>::Remove(ElementType t) {
   }
 
   return false;
+}
+
+template <typename Container>
+DefragmentResult BlockList<Container>::Defragment(PageUsage* page_usage) {
+  if (page_usage->QuotaDepleted()) {
+    return DefragmentResult{.quota_depleted = true, .objects_moved = 0};
+  }
+
+  DefragmentResult result;
+  if (DefragmentVector(blocks_, page_usage)) {
+    result.objects_moved += 1;
+  }
+
+  for (Container& block : blocks_) {
+    if (result.Merge(block.Defragment(page_usage)).quota_depleted) {
+      break;
+    }
+  }
+  return result;
 }
 
 template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(const ElementType& t) {
@@ -260,6 +305,13 @@ template <typename T> std::pair<SortedVector<T>, SortedVector<T>> SortedVector<T
   entries_.resize(entries_.size() / 2);
 
   return std::make_pair(std::move(*this), SortedVector<T>{std::move(tail)});
+}
+
+template <typename T> DefragmentResult SortedVector<T>::Defragment(PageUsage* page_usage) {
+  if (DefragmentVector(entries_, page_usage)) {
+    return DefragmentResult{.quota_depleted = false, .objects_moved = 1};
+  }
+  return DefragmentResult{};
 }
 
 template class SortedVector<DocId>;

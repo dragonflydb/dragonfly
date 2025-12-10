@@ -63,6 +63,9 @@ ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
 ABSL_FLAG(string, command, "",
           "custom command with __key__ placeholder for keys, "
           "__data__ for values, __score__ for doubles");
+ABSL_FLAG(bool, random_data, true,
+          "If true, generate random data for each request, otherwise uses incremental sequences."
+          "Applies for __score__ and __data__ placeholders.");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
@@ -94,6 +97,8 @@ using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
 
 thread_local base::Xoroshiro128p bit_gen;
+thread_local uint64_t seq_val = 1;
+
 atomic_bool terminate_requested = false;
 
 #if __INTELLISENSE__
@@ -104,22 +109,28 @@ enum Protocol { RESP, MC_TEXT } protocol;
 enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
 constexpr uint16_t kNumSlots = 16384;
 
-static string GetRandomHex(size_t len, bool ascii) {
+static string GetRandomBlob(size_t len, bool ascii) {
+  static bool is_random = GetFlag(FLAGS_random_data);
+
   std::string res(len, '\0');
   size_t indx = 0;
 
   for (; indx + 16 <= len; indx += 16) {  // 2 chars per byte
-    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), res.data() + indx);
+    absl::numbers_internal::FastHexToBufferZeroPad16(is_random ? bit_gen() : seq_val++,
+                                                     res.data() + indx);
   }
 
   DCHECK_LE(indx, len);
 
   if (indx < len) {
-    char buf[24];
-    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), buf);
+    uint64_t next_val = is_random ? bit_gen() : seq_val++;
+    unsigned count = len - indx;
 
-    for (unsigned j = 0; indx < len;) {
-      res[indx++] = buf[j++];
+    // extract hex chars from least significant nibble, as it's the one that changes
+    // with sequential values.
+    for (unsigned j = 0; j < count; ++j) {
+      res[indx++] = (next_val & 0x0F) + 'A';  // to ascii (not really hex, but ok for random data)
+      next_val >>= 4;
     }
   }
 
@@ -255,7 +266,7 @@ class CommandGenerator {
   }
 
  private:
-  enum TemplateType { KEY, VALUE, SCORE };
+  enum TemplateType : uint8_t { KEY, VALUE, SCORE };
 
   string FillSet(string_view key);
   string FillGet(string_view key);
@@ -364,7 +375,7 @@ string CommandGenerator::Next(SlotRange range) {
           size_t value_len = IsRandomValueLen()
                                  ? absl::Uniform(bit_gen, value_len_min_, value_len_max_)
                                  : fixed_len_value_.size();
-          str = GetRandomHex(value_len, is_ascii_);
+          str = GetRandomBlob(value_len, is_ascii_);
           break;
         }
         case SCORE: {
@@ -385,7 +396,7 @@ string CommandGenerator::FillSet(string_view key) {
   string random_len_value;
 
   if (IsRandomValueLen()) {
-    random_len_value = GetRandomHex(absl::Uniform(bit_gen, value_len_min_, value_len_max_), true);
+    random_len_value = GetRandomBlob(absl::Uniform(bit_gen, value_len_min_, value_len_max_), true);
     value = random_len_value;
   }
 
@@ -413,6 +424,7 @@ struct ClientStats {
   base::Histogram total_hist, online_hist;
 
   uint64_t num_responses = 0;
+  uint64_t qps = 0;
   uint64_t hit_count = 0;
   uint64_t hit_opportunities = 0;
   uint64_t num_errors = 0;
@@ -423,10 +435,12 @@ struct ClientStats {
     online_hist.Merge(o.online_hist);
 
     num_responses += o.num_responses;
+    qps += o.qps;
     hit_count += o.hit_count;
     hit_opportunities += o.hit_opportunities;
     num_errors += o.num_errors;
     num_clients += o.num_clients;
+
     return *this;
   }
 };
@@ -485,6 +499,7 @@ class Driver {
 
   facade::RedisParser parser_{RedisParser::Mode::CLIENT, 1 << 16};
   io::IoBuf io_buf_{512};
+  unsigned blob_len_ = 0;
 };
 
 // Per thread client.
@@ -690,6 +705,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       pipeline = num_reqs_ - i * pipeline;
     }
 
+    string out_buf;
     for (unsigned j = 0; j < pipeline; ++j) {
       // TODO: this skews the distribution if slot ranges are uneven.
       // Ideally we would like to pick randomly a single slot from all the ranges we have
@@ -698,7 +714,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
         slot_range = shard_slots_.NextSlotRange(ep_, i);
       }
 
-      string cmd = cmd_gen->Next(slot_range);
+      absl::StrAppend(&out_buf, cmd_gen->Next(slot_range));
 
       Req req;
       req.start = absl::GetCurrentTimeNanos();
@@ -706,16 +722,24 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
 
       reqs_.push(req);
 
-      error_code ec = socket_->Write(io::Buffer(cmd));
-      if (ec && FiberSocketBase::IsConnClosed(ec)) {
-        // TODO: report failure
-        VLOG(1) << "Connection closed";
-        break;
+      if (out_buf.size() >= 8192) {
+        error_code ec = socket_->Write(io::Buffer(out_buf));
+        out_buf.clear();
+        if (ec && FiberSocketBase::IsConnClosed(ec)) {
+          // TODO: report failure
+          VLOG(1) << "Connection closed";
+          break;
+        }
+        CHECK(!ec) << ec.message();
       }
-      CHECK(!ec) << ec.message();
       if (cmd_gen->noreply()) {
         PopRequest();
       }
+    }
+
+    if (!out_buf.empty()) {
+      error_code ec = socket_->Write(io::Buffer(out_buf));
+      CHECK(!ec || FiberSocketBase::IsConnClosed(ec)) << ec.message();
     }
 
     now = absl::GetCurrentTimeNanos();
@@ -789,13 +813,16 @@ void Driver::PopRequest() {
 }
 
 void Driver::ReceiveFb() {
+  uint64_t now = absl::GetCurrentTimeNanos();
   while (true) {
     io_buf_.EnsureCapacity(256);
     auto buf = io_buf_.AppendBuffer();
     VLOG(3) << "Socket read: " << reqs_.size();
 
     ::io::Result<size_t> recv_sz = socket_->Recv(buf);
-    if (!recv_sz && FiberSocketBase::IsConnClosed(recv_sz.error())) {
+    CHECK(recv_sz) << recv_sz.error().message();
+
+    if (*recv_sz == 0) {
       LOG_IF(DFATAL, !reqs_.empty())
           << "Broke with " << reqs_.size() << " requests,  received: " << received_;
       // clear reqs - to prevent Driver::Run block on them indefinitely.
@@ -803,7 +830,6 @@ void Driver::ReceiveFb() {
       break;
     }
 
-    CHECK(recv_sz) << recv_sz.error().message();
     io_buf_.CommitWrite(*recv_sz);
 
     if (protocol == RESP) {
@@ -813,6 +839,9 @@ void Driver::ReceiveFb() {
       ParseMC();
     }
   }
+  double usec = (absl::GetCurrentTimeNanos() - now) / 1000;
+  if (usec > 0)
+    stats_.qps += uint64_t(double(received_) * 1e6 / usec);
   VLOG(1) << "ReceiveFb done";
 }
 
@@ -863,8 +892,6 @@ void Driver::ParseRESP() {
 }
 
 void Driver::ParseMC() {
-  unsigned blob_len = 0;
-
   while (true) {
     string_view line = FindLine(io_buf_.InputBuffer());
     if (line.empty())
@@ -873,7 +900,7 @@ void Driver::ParseMC() {
     CHECK_EQ(line.back(), '\n');
     if (line == "STORED\r\n" || line == "END\r\n") {
       PopRequest();
-      blob_len = 0;
+      blob_len_ = 0;
     } else if (absl::StartsWith(line, "VALUE")) {
       // last token is a blob length.
       auto it = line.rbegin();
@@ -881,7 +908,7 @@ void Driver::ParseMC() {
         ++it;
       size_t len = it - line.rbegin() - 2;
       const char* start = &(*it) + 1;
-      if (!absl::SimpleAtoi(string(start, len), &blob_len)) {
+      if (!absl::SimpleAtoi(string(start, len), &blob_len_)) {
         LOG(ERROR) << "Invalid blob len " << line;
         return;
       }
@@ -889,11 +916,11 @@ void Driver::ParseMC() {
     } else if (absl::StartsWith(line, "SERVER_ERROR")) {
       ++stats_.num_errors;
       PopRequest();
-      blob_len = 0;
+      blob_len_ = 0;
     } else {
       auto handle = socket_->native_handle();
-      CHECK_EQ(blob_len + 2, line.size()) << line;
-      blob_len = 0;
+      CHECK_EQ(blob_len_ + 2, line.size()) << line;
+      blob_len_ = 0;
       VLOG(2) << "Got line " << handle << ": " << line;
     }
     io_buf_.ConsumeInput(line.size());
@@ -1218,9 +1245,9 @@ int main(int argc, char* argv[]) {
     CHECK_LE(key_minimum, key_maximum);
 
     uint32_t thread_key_step = 0;
-    uint32_t qps = abs(GetFlag(FLAGS_qps));
+    uint32_t desired_qps = abs(GetFlag(FLAGS_qps));
     bool throttle = GetFlag(FLAGS_qps) > 0;
-    const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
+    const int64_t interval = desired_qps ? 1'000'000'000LL / desired_qps : 0;
     uint64_t num_reqs = GetFlag(FLAGS_n);
 
     uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
@@ -1242,9 +1269,9 @@ int main(int argc, char* argv[]) {
                    << (throttle ? "with" : "without") << " throttling";
     }
     if (interval) {
-      CONSOLE_INFO << "At a rate of " << qps << " rps per connection, i.e. request every "
+      CONSOLE_INFO << "At a rate of " << desired_qps << " rps per connection, i.e. request every "
                    << interval / 1000 << "us";
-      CONSOLE_INFO << "Overall scheduled RPS: " << qps * total_conn_num;
+      CONSOLE_INFO << "Overall scheduled RPS: " << desired_qps * total_conn_num;
     } else {
       CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
     }
@@ -1281,12 +1308,10 @@ int main(int argc, char* argv[]) {
     client.reset();
   });
 
-  unsigned dur_sec = duration / absl::Seconds(1);
-
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
-               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan")
-               << ", P99 lat: " << summary.total_hist.Percentile(99) << "us";
+               << ", QPS: " << summary.qps << ", P99 lat: " << summary.total_hist.Percentile(99)
+               << "us";
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";

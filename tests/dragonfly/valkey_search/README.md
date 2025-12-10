@@ -57,3 +57,4 @@ tests/dragonfly/valkey_search/
 3. **Mock framework** (`__init__.py`) replaces valkey-search imports with Dragonfly equivalents
 4. **Adapter** (`valkey_search_test_case_dragonfly.py`) creates real Dragonfly instances with replicas
 5. **Original tests run unchanged** - all adaptation happens in infrastructure layer
+6. **Python 3.8 compatibility** - sync script patches all `.py` files to add `from __future__ import annotations`

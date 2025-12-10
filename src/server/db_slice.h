@@ -4,8 +4,8 @@
 
 #pragma once
 
+#include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
-#include "core/string_or_view.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
 #include "server/common.h"
@@ -39,7 +39,7 @@ struct DbStats : public DbTableStats {
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
-  using DbTableStats::operator+=;
+  // We override additional DbStats fields explicitly in DbSlice::GetStats().
   using DbTableStats::operator=;
 
   DbStats& operator+=(const DbStats& o);
@@ -174,7 +174,7 @@ class DbSlice {
       std::string_view key;
 
       // The following fields are calculated at init time
-      size_t orig_heap_size = 0;
+      size_t orig_value_heap_size = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
@@ -322,11 +322,11 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Delete a key referred by its iterator.
-  void PerformDeletion(Iterator del_it, DbTable* table);
-
   // Deletes the iterator. The iterator must be valid.
-  void Del(Context cntx, Iterator it);
+  // Context argument is used only for document removal and it just needs
+  // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
+  // If async is set, AsyncDeleter will enqueue deletion of the object
+  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr, bool async = false);
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.
@@ -456,7 +456,7 @@ class DbSlice {
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
   // Returns number of (elements,bytes) freed due to evictions.
-  std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx,
+  std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
                                                             size_t increase_goal_bytes);
 
@@ -570,9 +570,10 @@ class DbSlice {
 
   // Clear tiered storage entries for the specified indices. Called during flushing some indices.
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
-                                               const DbTableArray& db_arr);
+                                               const DbTableArray& db_arr) const;
 
-  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table);
+  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table,
+                             bool async = false);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);

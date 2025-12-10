@@ -33,15 +33,31 @@ class RangeTree {
  public:
   friend class RangeResult;
 
-  using RangeNumber = double;
-  using Key = RangeNumber;
   using Entry = std::pair<DocId, double>;
-  using RangeBlock = BlockList<SortedVector<Entry>>;
-  using Map = absl::btree_map<Key, RangeBlock, std::less<Key>,
-                              PMR_NS::polymorphic_allocator<std::pair<const Key, RangeBlock>>>;
 
-  static constexpr size_t kDefaultMaxRangeBlockSize = 7000;
-  static constexpr size_t kBlockSize = 400;
+  // Main node of numeric tree
+  struct RangeBlock : public BlockList<SortedVector<Entry>> {
+    template <typename... Ts>
+    explicit RangeBlock(PMR_NS::memory_resource* mr, Ts... ts) : BlockList{mr, ts...} {
+    }
+
+    RangeBlock(BlockList<SortedVector<Entry>>&& bs, double maxv)
+        : BlockList{std::move(bs)}, max_seen{maxv} {
+    }
+
+    bool Insert(Entry e) {
+      max_seen = std::max(max_seen, e.second);
+      return BlockList::Insert(e);
+    }
+
+    // Max value seen, might be not present anymore
+    double max_seen = -std::numeric_limits<double>::infinity();
+  };
+
+  using Map = absl::btree_map<double, RangeBlock, std::less<>,
+                              PMR_NS::polymorphic_allocator<std::pair<double, RangeBlock>>>;
+
+  static constexpr size_t kDefaultMaxRangeBlockSize = 10'000;
 
   explicit RangeTree(PMR_NS::memory_resource* mr,
                      size_t max_range_block_size = kDefaultMaxRangeBlockSize,
@@ -62,12 +78,22 @@ class RangeTree {
   // Returns all blocks in the tree.
   absl::InlinedVector<const RangeBlock*, 5> GetAllBlocks() const;
 
+  // Build tree ouf of a single block after replication
   void FinalizeInitialization();
+
+  struct Stats {
+    size_t splits = 0;
+    size_t merges = 0;
+    size_t block_count = 0;
+  };
+
+  Stats GetStats() const;
 
  private:
   Map::iterator FindRangeBlock(double value);
   Map::const_iterator FindRangeBlock(double value) const;
 
+  Map::iterator CreateEmptyBlock(double lb);
   void SplitBlock(Map::iterator it);
 
   // Used for DCHECKs
@@ -77,6 +103,11 @@ class RangeTree {
   // The maximum size of a range block. If a block exceeds this size, it will be split
   size_t max_range_block_size_;
   Map entries_;
+
+  struct {
+    size_t splits = 0;
+    size_t merges = 0;
+  } stats_;
 
   /* During index initialization, we are using temporary buffer to store all entries.
      That is needed to avoid unnecessary complexity of splitting blocks.

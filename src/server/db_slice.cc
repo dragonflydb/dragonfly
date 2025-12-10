@@ -4,6 +4,8 @@
 
 #include "server/db_slice.h"
 
+#include "core/dense_set.h"
+
 extern "C" {
 #include "redis/hyperloglog.h"
 }
@@ -230,7 +232,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiryBlocking(cntx_.db_index, key);
     }
-    db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
+    db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
 
     ++evicted_;
   }
@@ -483,9 +485,9 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_heap_size,
+  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_value_heap_size,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_heap_size = 0;  // Reset to avoid double accounting.
+  fields_.orig_value_heap_size = 0;  // Reset to avoid double accounting.
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -501,7 +503,7 @@ void DbSlice::AutoUpdater::Run() {
   CHECK_NE(fields_.db_slice, nullptr);
 
   ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
-                  static_cast<int64_t>(fields_.orig_heap_size);
+                  static_cast<int64_t>(fields_.orig_value_heap_size);
   AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), delta,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -518,7 +520,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_heap_size = it->second.MallocUsed()} {
+              .orig_value_heap_size = it->second.MallocUsed()} {
   DCHECK(IsValid(it));
 }
 
@@ -770,7 +772,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (it->first.IsInline()) {
     ++db.stats.inline_keys;
   } else {
-    AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
+    AccountObjectMemory(key, OBJ_KEY, it->first.MallocUsed(), &db);  // Account for key
   }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
@@ -802,10 +804,11 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-void DbSlice::Del(Context cntx, Iterator it) {
+void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
   CHECK(IsValid(it));
 
-  auto& db = db_arr_[cntx.db_index];
+  ExpIterator exp_it;
+  DbTable* table = db_table ? db_table : db_arr_[cntx.db_index].get();
   auto obj_type = it->second.ObjType();
 
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -813,7 +816,13 @@ void DbSlice::Del(Context cntx, Iterator it) {
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
   }
-  PerformDeletion(it, db.get());
+
+  if (it->second.HasExpire()) {
+    exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
+    DCHECK(!exp_it.is_done());
+  }
+
+  PerformDeletionAtomic(it, exp_it, table, async);
 }
 
 void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
@@ -833,6 +842,10 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   boost::intrusive_ptr<DbTable> table = db_arr_.front();
   size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
 
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+  db_cntx.db_index = table->index;
+
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
     it.AdvanceIfNotOccupied();
@@ -840,7 +853,8 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       std::string_view key = it->first.GetSlice(&tmp);
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        PerformDeletion(Iterator::FromPrime(it), table.get());
+        // We use copy of table smart pointer and pass it as table because FLLUSHALL can drop table.
+        Del(db_cntx, Iterator::FromPrime(it), table.get());
         ++del_count;
       }
       ++it;
@@ -1413,7 +1427,7 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
          db_arr_[db_ind]->prime.GetSegmentCount();
 }
 
-pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
+pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, const Context& cntx,
                                                               size_t starting_segment_id,
                                                               size_t increase_goal_bytes) {
   // Disable flush journal changes to prevent preemtion
@@ -1476,7 +1490,8 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind,
 
         evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
         ++evicted_items;
-        PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
+
+        Del(cntx, Iterator(evict_it, StringOrView::FromView(key)));
 
         // returns when whichever condition is met first
         if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
@@ -1553,7 +1568,7 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
 }
 
 void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
-                                                      const DbTableArray& db_arr) {
+                                                      const DbTableArray& db_arr) const {
   // Currently being used only for tiered storage.
   TieredStorage* tiered_storage = shard_owner()->tiered_storage();
   string scratch;
@@ -1758,7 +1773,7 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
 }
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it,
-                                    DbTable* table) {
+                                    DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
   if (!exp_it.is_done()) {
@@ -1787,12 +1802,11 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   if (del_it->first.IsInline()) {
     --stats.inline_keys;
   } else {
-    AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
-                        table);  // Key
+    AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
 
-  if (del_it->first.IsAsyncDelete() && MayDeleteAsynchronously(pv)) {
+  if (async && MayDeleteAsynchronously(pv)) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
     const size_t kClearStepSize = 512;
@@ -1803,7 +1817,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
     } else {
       CompactObj::DeleteMR<DenseSet>(ds);
     }
-  }  // del_it->first.IsAsyncDelete()
+  }
 
   if (table->slots_stats) {
     SlotId sid = KeySlot(del_it.key());
@@ -1823,16 +1837,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   if (!client_tracking_map_.empty()) {
     QueueInvalidationTrackingMessageAtomic(del_it.key());
   }
-}
-
-void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
-  ExpIterator exp_it;
-  if (del_it->second.HasExpire()) {
-    exp_it = ExpIterator::FromPrime(table->expire.Find(del_it->first));
-    DCHECK(!exp_it.is_done());
-  }
-
-  PerformDeletionAtomic(del_it, exp_it, table);
 }
 
 void DbSlice::OnCbFinishBlocking() {

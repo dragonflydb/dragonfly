@@ -200,12 +200,21 @@ void Replica::Pause(bool pause) {
   });
 }
 
-std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
-  VLOG(1) << "Taking over";
+std::error_code Replica::TakeOver(unsigned timeout_sec, bool save_flag) {
+  VLOG(1) << "Taking over " << timeout_sec << " seconds, save_flag=" << save_flag;
 
   std::error_code ec;
-  auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
-  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd)] { ec = SendNextPhaseRequest(cmd); });
+  auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout_sec, (save_flag ? " SAVE" : ""));
+  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd), timeout_sec] {
+    // Set socket timeout to prevent hanging on unresponsive master
+    // Add buffer time for master processing (timeout + 10 seconds)
+    auto prev_timeout = Sock()->timeout();
+    Sock()->set_timeout((timeout_sec + 10) * 1000);  // milliseconds
+
+    ec = SendNextPhaseRequest(cmd);
+
+    Sock()->set_timeout(prev_timeout);
+  });
 
   // If we successfully taken over, return and let server_family stop the replication.
   return ec;
@@ -370,6 +379,13 @@ std::error_code Replica::HandleCapaDflyResp() {
 
   // If we're syncing a different replication ID, drop the saved LSNs.
   string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+
+  // If we tried to replicate from ourself return an error
+  if (master_repl_id == id_) {
+    LOG(WARNING) << "Can't connect to myself";
+    return make_error_code(errc::connection_aborted);
+  }
+
   if (master_context_.master_repl_id != master_repl_id) {
     if (absl::GetFlag(FLAGS_break_replication_on_master_restart) &&
         !master_context_.master_repl_id.empty()) {
@@ -745,8 +761,7 @@ error_code Replica::ConsumeRedisStream() {
         }
 
         facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
-        CmdArgList arg_list{args_vector.data(), args_vector.size()};
-        service_.DispatchCommand(arg_list, &null_builder, &conn_context);
+        service_.DispatchCommand(facade::ParsedArgs{args_vector}, &null_builder, &conn_context);
       }
     }
 

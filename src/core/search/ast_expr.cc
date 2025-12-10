@@ -73,6 +73,12 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
   this->filter = make_unique<AstNode>(std::move(filter));
 }
 
+bool AstKnnNode::HasPreFilter() const {
+  // If we have pre filter knn query should not hold filter variable. It will be
+  // moved to SearchAlgorithm::query_ variable.
+  return filter == nullptr;
+}
+
 }  // namespace dfly::search
 
 namespace std {

@@ -202,7 +202,7 @@ class ServerState {  // public struct - to allow initialization.
   // Return interpreter to internal manager to be re-used.
   void ReturnInterpreter(Interpreter*);
 
-  void ResetInterpreter();
+  void FlushScriptCache();
 
   // Invoke function on all free interpreters. They are marked atomically as
   // used and the function is allowed to suspend.

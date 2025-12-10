@@ -22,8 +22,7 @@ class PageUsage;
 
 class StringSet : public DenseSet {
  public:
-  StringSet(MemoryResource* res = PMR_NS::get_default_resource()) : DenseSet(res) {
-  }
+  StringSet() = default;
 
   ~StringSet();
 

@@ -96,25 +96,25 @@ async def test_mixed_append(async_client: aioredis.Redis):
     {
         "proactor_threads": 2,
         "tiered_prefix": "/tmp/tiered/backing_master",
-        "maxmemory": "2.0G",
+        "maxmemory": "1.0G",
         "cache_mode": True,
         "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
-        "tiered_storage_write_depth": 1000,
+        "tiered_storage_write_depth": 1500,
     }
 )
 async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceFactory):
     replica = df_factory.create(
         proactor_threads=2,
         cache_mode=True,
-        maxmemory="2.0G",
+        maxmemory="1.0G",
         tiered_prefix="/tmp/tiered/backing_replica",
         tiered_offload_threshold="0.5",
-        tiered_storage_write_depth=1000,
+        tiered_storage_write_depth=1500,
     )
     replica.start()
     replica_client = replica.client()
-    await async_client.execute_command("debug", "populate", "1700000", "key", "2000")
+    await async_client.execute_command("debug", "populate", "800000", "key", "2000")
     await replica_client.replicaof(
         "localhost", async_client.connection_pool.connection_kwargs["port"]
     )

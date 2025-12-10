@@ -573,8 +573,8 @@ unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
   return nullptr;
 }
 
-SortedMap::SortedMap(PMR_NS::memory_resource* mr)
-    : score_map(new ScoreMap(mr)), score_tree(new ScoreTree(mr)) {
+SortedMap::SortedMap()
+    : score_map(new ScoreMap), score_tree(new ScoreTree(StatelessAllocator<char>::resource())) {
 }
 
 SortedMap::~SortedMap() {
@@ -1124,7 +1124,7 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   long long vlong;
 
   void* ptr = res->allocate(sizeof(SortedMap), alignof(SortedMap));
-  SortedMap* zs = new (ptr) SortedMap{res};
+  SortedMap* zs = new (ptr) SortedMap;
 
   eptr = lpSeek(zl, 0);
   if (eptr != NULL) {

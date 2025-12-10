@@ -139,7 +139,17 @@ async def test_management(async_client: aioredis.Redis):
     assert i1info["num_docs"] == 10
     assert sorted(i1info["attributes"]) == [
         ["identifier", "f1", "attribute", "f1", "type", "TEXT"],
-        ["identifier", "f2", "attribute", "f2", "type", "NUMERIC", "SORTABLE", "blocksize", "7000"],
+        [
+            "identifier",
+            "f2",
+            "attribute",
+            "f2",
+            "type",
+            "NUMERIC",
+            "SORTABLE",
+            "blocksize",
+            "10000",
+        ],
     ]
 
     i2info = await i2.info()
@@ -163,7 +173,7 @@ async def test_management(async_client: aioredis.Redis):
             "NOINDEX",
             "SORTABLE",
             "blocksize",
-            "7000",
+            "10000",
         ],
         ["identifier", "f4", "attribute", "f4", "type", "TAG"],
         ["identifier", "f5", "attribute", "f5", "type", "VECTOR"],
@@ -247,6 +257,12 @@ async def test_big_json(async_client: aioredis.Redis):
 async def knn_query(idx, query, vector):
     params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
     result = await idx.search(query, params)
+    return {doc["id"] for doc in result.docs}
+
+
+async def knn_query_with_limit(idx, query, vector, limit):
+    params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
+    result = await idx.search(Query(query).paging(0, limit), params)
     return {doc["id"] for doc in result.docs}
 
 
@@ -351,7 +367,15 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
             for i, point in sorted(points, key=lambda p: np.linalg.norm(center - p[1]))[:limit]
         ]
 
-        got_ids = await knn_query(i3, f"* => [KNN {limit} @pos $vec]", center)
+        if algo_type == "HNSW":
+            # We need to search all points because results can be different between expected_ids that
+            # distance is  calculated on all points and hnsw which is approximate greedy search
+            knn_limit = NUM_POINTS
+            got_ids = await knn_query_with_limit(
+                i3, f"* => [KNN {knn_limit} @pos $vec]", center, limit
+            )
+        else:
+            got_ids = await knn_query(i3, f"* => [KNN {limit} @pos $vec]", center)
 
         assert set(expected_ids) == set(got_ids)
 

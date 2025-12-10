@@ -32,7 +32,7 @@ jobs:
       image: ghcr.io/romange/ubuntu-dev:20
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
       with:
         submodules: true
     - name: Build artifacts
@@ -45,7 +45,7 @@ jobs:
             mv dragonfly_*.deb ${{ env.RELEASE_DIR }}/
 
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: dragonfly-aarch64
         path: |
@@ -67,8 +67,13 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # Some tests which launch their own containers need a mounted volume to write through files
+      # into child containers
+      volumes:
+        - /mnt:/mnt
+
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v6
       with:
         submodules: true
     - name: Configure
@@ -115,7 +120,7 @@ jobs:
           fi
 
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: dragonfly-amd64-${{ matrix.name }}
         path: results-artifacts/*
@@ -123,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-native, build-arm]
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
         name: Download files
         with:
           path: artifacts

@@ -10,7 +10,7 @@
 #include <memory>
 
 #include "base/logging.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/segment_allocator.h"
 
 namespace dfly {
@@ -54,55 +54,39 @@ size_t SmallString::UsedThreadLocal() {
 
 static_assert(sizeof(SmallString) == 16);
 
-// we should use only for sizes greater than kPrefLen
 size_t SmallString::Assign(std::string_view s) {
   DCHECK_GT(s.size(), kPrefLen);
-
+  DCHECK(CanAllocate(s.size()));
   uint8_t* realptr = nullptr;
 
-  if (size_ == 0) {
-    // packed structs can not be tied here.
-    auto [sp, rp] = tl.seg_alloc->Allocate(s.size() - kPrefLen);
+  // reallocate if we need a larger allocation or it becomes space-inefficient
+  size_t heap_len = s.size() - kPrefLen;
+  if (size_t available = MallocUsed(); available < heap_len || heap_len * 2 < available) {
+    Free();
+
+    auto [sp, rp] = tl.seg_alloc->Allocate(heap_len);
     small_ptr_ = sp;
     realptr = rp;
-    size_ = s.size();
-  } else if (s.size() <= size_) {
-    realptr = tl.seg_alloc->Translate(small_ptr_);
-
-    if (s.size() < size_) {
-      size_t capacity = mi_usable_size(realptr);
-      if (s.size() * 2 < capacity) {
-        tl.seg_alloc->Free(small_ptr_);
-        auto [sp, rp] = tl.seg_alloc->Allocate(s.size() - kPrefLen);
-        small_ptr_ = sp;
-        realptr = rp;
-      }
-      size_ = s.size();
-    }
   } else {
-    LOG(FATAL) << "TBD: Bad usage";
+    realptr = tl.seg_alloc->Translate(small_ptr_);
   }
 
+  size_ = s.size();
   memcpy(prefix_, s.data(), kPrefLen);
-  memcpy(realptr, s.data() + kPrefLen, s.size() - kPrefLen);
-
+  memcpy(realptr, s.data() + kPrefLen, heap_len);
   return mi_malloc_usable_size(realptr);
 }
 
 void SmallString::Free() {
-  if (size_ <= kPrefLen)
-    return;
-
-  tl.seg_alloc->Free(small_ptr_);
+  if (size_)
+    tl.seg_alloc->Free(small_ptr_);
   size_ = 0;
 }
 
 uint16_t SmallString::MallocUsed() const {
-  if (size_ <= kPrefLen)
-    return 0;
-  auto* realptr = tl.seg_alloc->Translate(small_ptr_);
-
-  return mi_malloc_usable_size(realptr);
+  if (size_)
+    return mi_malloc_usable_size(tl.seg_alloc->Translate(small_ptr_));
+  return 0;
 }
 
 bool SmallString::Equal(std::string_view o) const {
@@ -112,13 +96,10 @@ bool SmallString::Equal(std::string_view o) const {
   if (size_ == 0)
     return true;
 
-  DCHECK_GT(size_, kPrefLen);
-
   if (memcmp(prefix_, o.data(), kPrefLen) != 0)
     return false;
 
   uint8_t* realp = tl.seg_alloc->Translate(small_ptr_);
-
   return memcmp(realp, o.data() + kPrefLen, size_ - kPrefLen) == 0;
 }
 
@@ -127,21 +108,16 @@ bool SmallString::Equal(const SmallString& os) const {
     return false;
 
   string_view me[2], other[2];
-  unsigned n1 = GetV(me);
-  unsigned n2 = os.GetV(other);
-
-  if (n1 != n2)
-    return false;
+  Get(me);
+  os.Get(other);
 
   return me[0] == other[0] && me[1] == other[1];
 }
 
 uint64_t SmallString::HashCode() const {
-  DCHECK_GT(size_, kPrefLen);
-
   string_view slice[2];
+  Get(slice);
 
-  GetV(slice);
   XXH3_state_t* state = tl.xxh_state.get();
   XXH3_64bits_reset_withSeed(state, kHashSeed);
   XXH3_64bits_update(state, slice[0].data(), slice[0].size());
@@ -150,41 +126,35 @@ uint64_t SmallString::HashCode() const {
   return XXH3_64bits_digest(state);
 }
 
-void SmallString::Get(std::string* dest) const {
-  dest->resize(size_);
-  if (size_) {
-    DCHECK_GT(size_, kPrefLen);
-    memcpy(dest->data(), prefix_, kPrefLen);
-    uint8_t* ptr = tl.seg_alloc->Translate(small_ptr_);
-    memcpy(dest->data() + kPrefLen, ptr, size_ - kPrefLen);
-  }
-}
-
-unsigned SmallString::GetV(string_view dest[2]) const {
-  DCHECK_GT(size_, kPrefLen);
-  if (size_ <= kPrefLen) {
-    dest[0] = string_view{prefix_, size_};
-    return 1;
-  }
+void SmallString::Get(string_view dest[2]) const {
+  DCHECK(size_);
 
   dest[0] = string_view{prefix_, kPrefLen};
   uint8_t* ptr = tl.seg_alloc->Translate(small_ptr_);
   dest[1] = string_view{reinterpret_cast<char*>(ptr), size_ - kPrefLen};
-  return 2;
+}
+
+void SmallString::Get(char* out) const {
+  string_view strs[2];
+  Get(strs);
+  memcpy(out, strs[0].data(), strs[0].size());
+  memcpy(out + strs[0].size(), strs[1].data(), strs[1].size());
+}
+
+void SmallString::Get(std::string* dest) const {
+  dest->resize(size_);
+  Get(dest->data());
 }
 
 bool SmallString::DefragIfNeeded(PageUsage* page_usage) {
-  DCHECK_GT(size_, kPrefLen);
-  if (size_ <= kPrefLen) {
-    return false;
-  }
-
   uint8_t* cur_real_ptr = tl.seg_alloc->Translate(small_ptr_);
   if (!page_usage->IsPageForObjectUnderUtilized(tl.seg_alloc->heap(), cur_real_ptr))
     return false;
 
-  auto [sp, rp] = tl.seg_alloc->Allocate(size_ - kPrefLen);
+  if (!CanAllocate(size_ - kPrefLen))  // Forced
+    return false;
 
+  auto [sp, rp] = tl.seg_alloc->Allocate(size_ - kPrefLen);
   memcpy(rp, cur_real_ptr, size_ - kPrefLen);
   tl.seg_alloc->Free(small_ptr_);
   small_ptr_ = sp;

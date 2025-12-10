@@ -13,6 +13,7 @@
 #include <utility>
 #include <variant>
 
+#include "common/backed_args.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
@@ -81,32 +82,14 @@ class Connection : public util::Connection {
   };
 
   // Pipeline message, accumulated Redis command to be executed.
-  struct PipelineMessage {
-    PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
-    }
-
-    void Reset(size_t nargs, size_t capacity);
-
-    void SetArgs(const RespVec& args);
-
-    size_t StorageCapacity() const;
-
-    // mi_stl_allocator uses mi heap internally.
-    // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    using StorageType = absl::InlinedVector<char, kReqStorageSize>;
-
-    absl::InlinedVector<std::string_view, 6> args;
-    StorageType storage;
-  };
+  using PipelineMessage = cmn::BackedArguments;
 
   // Pipeline message, accumulated Memcached command to be executed.
   struct MCPipelineMessage {
-    MCPipelineMessage(MemcacheParser::Command cmd, std::string_view value);
+    MCPipelineMessage(MemcacheParser::Command&& cmd, std::string_view value);
 
     MemcacheParser::Command cmd;
-    std::string_view value;
-    size_t backing_size;
-    std::unique_ptr<char[]> backing;  // backing for cmd and value
+    std::string value;
   };
 
   // Monitor message, carries a simple payload with the registered event to be sent.
@@ -383,7 +366,7 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
   void HandleMigrateRequest();
-  std::error_code HandleRecvSocket();
+  io::Result<size_t> HandleRecvSocket();
 
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
 
@@ -400,8 +383,6 @@ class Connection : public util::Connection {
   void DecreaseStatsOnClose();
   void BreakOnce(uint32_t ev_mask);
 
-  void ConfigureProvidedBuffer();
-
   // The read buffer with read data that needs to be parsed and processed.
   // For io_uring bundles we may have available_bytes larger than slice.size()
   // which means that there are more buffers available to read.
@@ -409,19 +390,11 @@ class Connection : public util::Connection {
     size_t available_bytes;
     io::Bytes slice;
 
-    bool ShouldAdvance() const {
-      return slice.empty();
-    }
-
     void Consume(size_t len) {
       available_bytes -= len;
       slice.remove_prefix(len);
     }
   };
-
-  ReadBuffer GetReadBuffer();
-  io::Bytes NextBundleBuffer(size_t total_len);
-  void MarkReadBufferConsumed();
 
   void IncrNumConns();
   void DecrNumConns();
@@ -499,7 +472,6 @@ class Connection : public util::Connection {
       // whether the connection is TLS. We can be sure our socket is TlsSocket
       // if the flag is set.
       bool is_tls_ : 1;
-      bool recv_provided_ : 1;
       bool is_main_ : 1;
     };
   };

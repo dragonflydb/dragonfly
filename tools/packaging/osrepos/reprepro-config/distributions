@@ -1,0 +1,8 @@
+Codename: noble
+Suite: stable
+Architectures: amd64 arm64
+Components: main
+Origin: Dragonfly
+Label: Dragonfly
+Description: Dragonfly APT repository
+SignWith: 60BD83C2EE84DD8A4C6F306712304018BC3D2ABA

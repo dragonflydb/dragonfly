@@ -65,8 +65,8 @@ void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
 }
 
 facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
-  auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
-  return service_->DispatchCommand(span, &reply_builder_, &conn_context_);
+  return service_->DispatchCommand(facade::ParsedArgs{cmd.cmd_args}, &reply_builder_,
+                                   &conn_context_);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {

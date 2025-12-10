@@ -235,11 +235,12 @@ void Send(const std::vector<std::string>& vec, RedisReplyBuilder* rb) {
   Send(vec.begin(), vec.end(), rb);
 }
 
-void Send(const JsonType& value, RedisReplyBuilder* rb) {
+template <typename Allocator>
+void Send(const JsonWithAllocator<Allocator>& value, RedisReplyBuilder* rb) {
   if (value.is_double()) {
     Send(value.as_double(), rb);
   } else if (value.is_number()) {
-    Send(value.as_integer<long>(), rb);
+    Send(value.template as_integer<long>(), rb);
   } else if (value.is_bool()) {
     rb->SendSimpleString(value.as_bool() ? "true" : "false");
   } else if (value.is_null()) {
@@ -341,9 +342,7 @@ void SendJsonString(const OpResult<string>& result, RedisReplyBuilder* rb) {
   if (result) {
     const string& json_str = result.value();
     if (rb->IsResp3()) {
-      std::optional<JsonType> parsed_json =
-          JsonFromString(json_str, PMR_NS::get_default_resource());
-      if (parsed_json) {
+      if (const std::optional<TmpJson> parsed_json = JsonFromString(json_str)) {
         Send(parsed_json.value(), rb);
         return;
       }
@@ -470,18 +469,13 @@ std::optional<std::string> ConvertJsonPathToJsonPointer(string_view json_path) {
   return pointer;
 }
 
-// Use this method on the coordinator thread
-std::optional<JsonType> JsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, PMR_NS::get_default_resource());
-}
-
 /* Use this method on the shard thread
 
    If you do memory tracking, make sure to initialize it before calling this method, and reset the
    result before invoking SetJsonSize. Note that even after calling std::move on an optional, it may
    still hold the JSON value, which can lead to incorrect memory tracking. */
 std::optional<JsonType> ShardJsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, CompactObj::memory_resource());
+  return ParseJsonUsingShardHeap(input);
 }
 
 OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_str) {
@@ -562,8 +556,7 @@ OpResult<bool> SetPartialJson(const OpArgs& op_args, string_view key,
     path_exists = true;
     if (!is_nx_condition) {
       value_was_set = true;
-      *val = JsonType(parsed_json.value(),
-                      std::pmr::polymorphic_allocator<char>{CompactObj::memory_resource()});
+      *val = JsonType(parsed_json.value(), StatelessAllocator<char>{});
     }
     return {};
   };
@@ -1307,7 +1300,19 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
 // Returns numeric vector that represents the new length of the array at each path.
 OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_view key,
                                                   const WrappedJsonPath& json_path, int index,
-                                                  const vector<JsonType>& new_values) {
+                                                  const vector<string_view>& new_values) {
+  vector<JsonType> parsed_values;
+  parsed_values.reserve(new_values.size());
+
+  for (const auto& nv : new_values) {
+    const optional<JsonType> v = ShardJsonFromString(nv);
+    if (!v) {
+      return OpStatus::SYNTAX_ERR;
+    }
+
+    parsed_values.emplace_back(std::move(*v));
+  }
+
   bool out_of_boundaries_encountered = false;
 
   // Insert user-supplied value into the supplied index that should be valid.
@@ -1336,7 +1341,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
     }
 
     auto it = GetJsonArrayIterator(val, insert_before_index);
-    for (auto& new_val : new_values) {
+    for (auto& new_val : parsed_values) {
       it = val->insert(it, new_val);
       it++;
     }
@@ -1350,14 +1355,26 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
   return res;
 }
 
-auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
-                 const vector<JsonType>& append_values) {
+OpResult<JsonCallbackResult<optional<optional<unsigned long>>>> OpArrAppend(
+    const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
+    const vector<string_view>& append_values) {
+  vector<JsonType> parsed_values;
+  parsed_values.reserve(append_values.size());
+
+  for (const auto& v : append_values) {
+    const optional<JsonType> parsed = ShardJsonFromString(v);
+    if (!parsed) {
+      return OpStatus::SYNTAX_ERR;
+    }
+    parsed_values.emplace_back(std::move(*parsed));
+  }
+
   auto cb = [&](std::optional<std::string_view>,
                 JsonType* val) -> MutateCallbackResult<std::optional<std::size_t>> {
     if (!val->is_array()) {
       return {};
     }
-    for (auto& new_val : append_values) {
+    for (auto& new_val : parsed_values) {
       val->emplace_back(new_val);
     }
     return {false, val->size()};
@@ -1368,8 +1385,15 @@ auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& 
 // Returns a numeric vector representing each JSON value first index of the JSON scalar.
 // An index value of -1 represents unfound in the array.
 // JSON scalar has types of string, boolean, null, and number.
-auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path,
-                const JsonType& search_val, int start_index, int end_index) {
+OpResult<JsonCallbackResult<optional<long>>> OpArrIndex(const OpArgs& op_args, string_view key,
+                                                        const WrappedJsonPath& json_path,
+                                                        string_view search_val, int start_index,
+                                                        int end_index) {
+  const optional<JsonType> search_value_json = ShardJsonFromString(search_val);
+  if (!search_value_json) {
+    return OpStatus::SYNTAX_ERR;
+  }
+
   auto cb = [&](const string_view&, const JsonType& val) -> std::optional<long> {
     if (!val.is_array()) {
       return std::nullopt;
@@ -1403,7 +1427,7 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     size_t pos = -1;
     auto it = GetJsonArrayIterator(val, pos_start_index);
     while (it != val.array_range().end()) {
-      if (JsonAreEquals(search_val, *it)) {
+      if (JsonAreEquals(search_value_json, *it)) {
         pos = pos_start_index;
         break;
       }
@@ -1501,10 +1525,19 @@ auto OpMemory(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
       ReadOnlyOperationOptions{false, CallbackResultOptions::DefaultReadOnlyOptions()});
 }
 
-// Returns json vector that represents the result of the json query.
-auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
-  auto cb = [](const string_view&, const JsonType& val) { return val; };
-  return JsonReadOnlyOperation<JsonType>(op_args, key, json_path, std::move(cb));
+// Returns json vector that represents the result of the json query. A shard local
+// heap allocated JSON cannot be copied and then destroyed on another shard because we use stateless
+// allocators which forward all requests to thread local memory resource. This resource is
+// initialized by the engine shard, and it is possible that the coordinator thread may not have this
+// resource initialized. So the value is first copied to the std allocator-backed type TmpJson.
+OpResult<JsonCallbackResult<TmpJson>> OpResp(const OpArgs& op_args, string_view key,
+                                             const WrappedJsonPath& json_path) {
+  auto cb = [](const string_view&, const JsonType& val) {
+    string s;
+    val.dump(s);
+    return JsonFromString(s);
+  };
+  return JsonReadOnlyOperation<TmpJson>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns boolean that represents the result of the operation.
@@ -1710,8 +1743,7 @@ void JsonFamily::Resp(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1826,11 +1858,7 @@ void JsonFamily::ArrIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value = JsonFromString(parser.Next());
-  if (!search_value) {
-    builder->SendError(kSyntaxErr);
-    return;
-  }
+  string_view search_value = parser.Next();
 
   int start_index = 0;
   if (parser.HasNext()) {
@@ -1851,12 +1879,11 @@ void JsonFamily::ArrIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrIndex(t->GetOpArgs(shard), key, json_path, *search_value, start_index, end_index);
+    return OpArrIndex(t->GetOpArgs(shard), key, json_path, search_value, start_index, end_index);
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1873,15 +1900,9 @@ void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  vector<JsonType> new_values;
+  vector<string_view> new_values;
   for (size_t i = 3; i < args.size(); i++) {
-    optional<JsonType> val = JsonFromString(ArgS(args, i));
-    if (!val) {
-      builder->SendError(kSyntaxErr);
-      return;
-    }
-
-    new_values.emplace_back(std::move(*val));
+    new_values.emplace_back(ArgS(args, i));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1900,17 +1921,9 @@ void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  vector<JsonType> append_values;
-
-  // TODO: there is a bug here, because we parse json using the allocator from
-  // the coordinator thread, and we pass it to the shard thread, which is not safe.
+  vector<string_view> append_values;
   for (size_t i = 2; i < args.size(); ++i) {
-    optional<JsonType> converted_val = JsonFromString(ArgS(args, i));
-    if (!converted_val) {
-      builder->SendError(kSyntaxErr);
-      return;
-    }
-    append_values.emplace_back(converted_val);
+    append_values.emplace_back(ArgS(args, i));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1918,8 +1931,7 @@ void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::ArrTrim(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2000,7 +2012,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
-  optional<JsonType> parsed_json = JsonFromString(value);
+  optional<TmpJson> parsed_json = JsonFromString(value);
   if (!parsed_json || !parsed_json->is_string()) {
     return builder->SendError("expected string value", kSyntaxErrType);
   };
@@ -2011,8 +2023,7 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
   };
 
   auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  reply_generic::Send(result, builder);
 }
 
 void JsonFamily::ObjKeys(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2205,7 +2216,7 @@ void JsonFamily::Get(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void JsonFamily::Register(CommandRegistry* registry) {
   constexpr size_t kMsetFlags =
-      CO::WRITE | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
+      CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, -2, acl::JSON}.HFUNC(MGet);
@@ -2213,29 +2224,29 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(StrLen);
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjLen);
   *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrLen);
-  *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Toggle);
-  *registry << CI{"JSON.NUMINCRBY", CO::WRITE | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumIncrBy);
-  *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumMultBy);
-  *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(Del);
-  *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(
+  *registry << CI{"JSON.TOGGLE", CO::JOURNALED | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Toggle);
+  *registry << CI{"JSON.NUMINCRBY", CO::JOURNALED | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumIncrBy);
+  *registry << CI{"JSON.NUMMULTBY", CO::JOURNALED | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumMultBy);
+  *registry << CI{"JSON.DEL", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(Del);
+  *registry << CI{"JSON.FORGET", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
   *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjKeys);
-  *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(
-      StrAppend);
-  *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
-  *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
-  *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::FAST, 5, 1, 1, acl::JSON}.HFUNC(ArrTrim);
-  *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(
-      ArrInsert);
-  *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(
-      ArrAppend);
+  *registry << CI{"JSON.STRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}
+                   .HFUNC(StrAppend);
+  *registry << CI{"JSON.CLEAR", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
+  *registry << CI{"JSON.ARRPOP", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
+  *registry << CI{"JSON.ARRTRIM", CO::JOURNALED | CO::FAST, 5, 1, 1, acl::JSON}.HFUNC(ArrTrim);
+  *registry << CI{"JSON.ARRINSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}
+                   .HFUNC(ArrInsert);
+  *registry << CI{"JSON.ARRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}
+                   .HFUNC(ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(ArrIndex);
-  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
-            << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
-            << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
-            << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
-            << CI{"JSON.MERGE", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(
-                   Merge);
+  *registry
+      << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
+      << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
+      << CI{"JSON.SET", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
+      << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
+      << CI{"JSON.MERGE", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(Merge);
 }
 
 }  // namespace dfly

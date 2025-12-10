@@ -20,7 +20,7 @@
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
-#include "core/heap_size.h"
+#include "common/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/disk_backed_queue.h"
 #include "facade/dragonfly_listener.h"
@@ -154,6 +154,10 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
+}
+
+size_t UsedMemoryInternal(const Connection::PipelineMessage& msg) {
+  return sizeof(msg) + msg.HeapMemory();
 }
 
 struct TrafficLogger {
@@ -381,61 +385,9 @@ class PipelineCacheSizeTracker {
 
 thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
 
-void Connection::PipelineMessage::SetArgs(const RespVec& args) {
-  auto* next = storage.data();
-  for (size_t i = 0; i < args.size(); ++i) {
-    RespExpr::Buffer buf = args[i].GetBuf();
-    size_t s = buf.size();
-    if (s)
-      memcpy(next, buf.data(), s);
-    next[s] = '\0';
-    this->args[i] = MutableSlice(next, s);
-    next += (s + 1);
-  }
-}
-
-Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
+Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command&& cmd_in,
                                                  std::string_view value_in)
-    : cmd{std::move(cmd_in)}, value{value_in}, backing_size{0} {
-  // Note: The process of laundering string_views should be placed in an utility function,
-  // but there are no other uses like this so far.
-
-  // Compute total size and create backing
-  backing_size = cmd.key.size() + value.size();
-  for (const auto& ext_key : cmd.keys_ext)
-    backing_size += ext_key.size();
-
-  backing = make_unique<char[]>(backing_size);
-
-  // Copy everything into backing
-  if (!cmd.key.empty())
-    memcpy(backing.get(), cmd.key.data(), cmd.key.size());
-  if (!value.empty())
-    memcpy(backing.get() + cmd.key.size(), value.data(), value.size());
-  size_t offset = cmd.key.size() + value.size();
-  for (const auto& ext_key : cmd.keys_ext) {
-    if (!ext_key.empty())
-      memcpy(backing.get() + offset, ext_key.data(), ext_key.size());
-    offset += ext_key.size();
-  }
-
-  // Update string_views
-  cmd.key = string_view{backing.get(), cmd.key.size()};
-  value = string_view{backing.get() + cmd.key.size(), value.size()};
-  offset = cmd.key.size() + value.size();
-  for (auto& key : cmd.keys_ext) {
-    key = {backing.get() + offset, key.size()};
-    offset += key.size();
-  }
-}
-
-void Connection::PipelineMessage::Reset(size_t nargs, size_t capacity) {
-  storage.resize(capacity);
-  args.resize(nargs);
-}
-
-size_t Connection::PipelineMessage::StorageCapacity() const {
-  return storage.capacity() + args.capacity();
+    : cmd{std::move(cmd_in)}, value{value_in} {
 }
 
 size_t Connection::MessageHandle::UsedMemory() const {
@@ -444,8 +396,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return sizeof(PubMessage) + (msg->channel.size() + msg->message.size());
     }
     size_t operator()(const PipelineMessagePtr& msg) {
-      return sizeof(PipelineMessage) + msg->args.capacity() * sizeof(MutableSlice) +
-             msg->storage.capacity();
+      return UsedMemoryInternal(*msg);
     }
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
@@ -468,8 +419,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return 0;
     }
     size_t operator()(const MCPipelineMessagePtr& msg) {
-      return sizeof(MCPipelineMessage) + msg->backing_size +
-             msg->cmd.keys_ext.size() * sizeof(string_view);
+      return sizeof(MCPipelineMessage) + msg->cmd.HeapMemory() + msg->value.capacity();
     }
   };
 
@@ -559,11 +509,10 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 }
 
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
-  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
+  DVLOG(2) << "Dispatching pipeline: " << msg.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
-                                  self->reply_builder_.get(), self->cc_.get());
+  self->service_->DispatchCommand(ParsedArgs{msg}, self->reply_builder_.get(), self->cc_.get());
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -648,7 +597,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   static atomic_uint32_t next_id{1};
 
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
-  static_assert(kReqSz <= 256 && kReqSz >= 200);
+  static_assert(kReqSz <= 256);
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -1052,6 +1001,11 @@ io::Result<bool> Connection::CheckForHttpProto() {
     if (!recv_sz) {
       return make_unexpected(recv_sz.error());
     }
+    if (recv_sz == 0) {
+      // Peer closed connection.
+      return false;
+    }
+
     io_buf_.CommitWrite(*recv_sz);
     string_view ib = ToSV(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
@@ -1079,8 +1033,6 @@ io::Result<bool> Connection::CheckForHttpProto() {
 
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
-
-  ConfigureProvidedBuffer();
 
   IncrNumConns();
   ++stats_->conn_received_cnt;
@@ -1156,13 +1108,12 @@ void Connection::ConnectionFlow() {
     // to reproduce: nc localhost 6379  and then run invalid sequence: *1 <enter> *1 <enter>
     error_code ec2 = socket_->Shutdown(SHUT_WR);
     LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
-    if (!ec2) {
-      while (true) {
-        // Discard any received data.
-        io_buf_.Clear();
-        if (!socket_->Recv(io_buf_.AppendBuffer())) {
-          break;
-        }
+    while (!ec2) {
+      // Discard any received data.
+      io_buf_.Clear();
+      auto recv_sz = socket_->Recv(io_buf_.AppendBuffer());
+      if (!recv_sz || *recv_sz == 0) {
+        break;  // Peer closed connection.
       }
     }
   }
@@ -1232,18 +1183,14 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 
   auto dispatch_sync = [this] {
     RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
-    service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), reply_builder_.get(), cc_.get());
+    service_->DispatchCommand(ParsedArgs{tmp_cmd_vec_}, reply_builder_.get(), cc_.get());
   };
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
 
-  ReadBuffer read_buffer = GetReadBuffer();
-
+  io::Bytes read_buffer = io_buf_.InputBuffer();
   do {
-    if (read_buffer.ShouldAdvance()) {  // can happen only with io_uring/bundles
-      read_buffer.slice = NextBundleBuffer(read_buffer.available_bytes);
-    }
-    result = redis_parser_->Parse(read_buffer.slice, &consumed, &tmp_parse_args_);
+    result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
     request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
       // If we get a non-STRING type (e.g., NIL, ARRAY), it's a protocol error.
@@ -1260,7 +1207,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
       request_consumed_bytes_ = 0;
-      bool has_more = consumed < read_buffer.available_bytes;
+      bool has_more = consumed < read_buffer.size();
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
         LogTraffic(id_, has_more, absl::MakeSpan(tmp_parse_args_),
@@ -1272,9 +1219,9 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
-          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer.slice);
+          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
     }
-    read_buffer.Consume(consumed);
+    read_buffer.remove_prefix(consumed);
 
     // We must yield from time to time to allow other fibers to run.
     // Specifically, if a client sends a huge chunk of data resulting in a very long pipeline,
@@ -1283,17 +1230,16 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       stats_->num_read_yields++;
       ThisFiber::Yield();
     }
-  } while (RedisParser::OK == result && read_buffer.available_bytes > 0 &&
-           !reply_builder_->GetError());
+  } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
 
-  MarkReadBufferConsumed();
+  io_buf_.ConsumeInput(io_buf_.InputLen());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
     return OK;
 
   if (result == RedisParser::INPUT_PENDING) {
-    DCHECK_EQ(read_buffer.available_bytes, 0u);
+    DCHECK_EQ(read_buffer.size(), 0u);
 
     return NEED_MORE;
   }
@@ -1426,45 +1372,26 @@ void Connection::HandleMigrateRequest() {
   }
 }
 
-error_code Connection::HandleRecvSocket() {
+io::Result<size_t> Connection::HandleRecvSocket() {
   phase_ = READ_SOCKET;
 
-  // We can use provided buffers only after we emptied io_buf_.
-  if (recv_provided_ && io_buf_.InputBuffer().empty()) {
-    stats_->num_recv_provided_calls++;
+  io::MutableBytes append_buf = io_buf_.AppendBuffer();
+  DCHECK(!append_buf.empty());
+  ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
+  last_interaction_ = time(nullptr);
 
-    unsigned res = socket_->RecvProvided(1, &recv_buf_);
-    CHECK_EQ(res, 1u);
-    if (recv_buf_.res_len < 0) {
-      return error_code{-recv_buf_.res_len, system_category()};
-    }
-
-    CHECK_EQ(recv_buf_.type, FiberSocketBase::kBufRingType);  // We only support this type.
-    CHECK_GT(recv_buf_.res_len, 0);
-
-    stats_->io_read_bytes += recv_buf_.res_len;
-    local_stats_.net_bytes_in += recv_buf_.res_len;
-  } else {
-    io::MutableBytes append_buf = io_buf_.AppendBuffer();
-    DCHECK(!append_buf.empty());
-    ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
-    last_interaction_ = time(nullptr);
-
-    if (!recv_sz) {
-      return recv_sz.error();
-    }
-
+  // In case the socket was closed orderly, we get 0 bytes read.
+  if (recv_sz && *recv_sz) {
     size_t commit_sz = *recv_sz;
     io_buf_.CommitWrite(commit_sz);
 
     stats_->io_read_bytes += commit_sz;
     local_stats_.net_bytes_in += commit_sz;
+
+    ++stats_->io_read_cnt;
+    ++local_stats_.read_cnt;
   }
-
-  ++stats_->io_read_cnt;
-  ++local_stats_.read_cnt;
-
-  return {};
+  return recv_sz;
 }
 
 auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
@@ -1478,10 +1405,13 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
 
   do {
     HandleMigrateRequest();
-    ec = HandleRecvSocket();
-    if (ec) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << ec;
-      return ec;
+    auto recv_sz = HandleRecvSocket();
+    if (!recv_sz) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << recv_sz.error();
+      return recv_sz.error();
+    }
+    if (*recv_sz == 0) {
+      break;
     }
 
     phase_ = PROCESS;
@@ -1570,36 +1500,32 @@ void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
 
-  vector<ArgSlice> squash_cmds;
-  squash_cmds.reserve(dispatch_q_.size());
+  unsigned pipeline_count = std::min<uint32_t>(dispatch_q_.size(), pipeline_squash_limit_cached);
 
   uint64_t start = CycleClock::Now();
 
-  for (const auto& msg : dispatch_q_) {
-    CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
-        << msg.handle.index() << " on " << DebugInfo();
+  // We use indexes as iterators are invalidated when pushing into the queue.
+  auto get_next_fn = [i = 0, this]() mutable -> ParsedArgs {
+    const auto& elem = dispatch_q_[i++];
+    CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
+    const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
 
-    auto& pmsg = get<PipelineMessagePtr>(msg.handle);
-    squash_cmds.emplace_back(absl::MakeSpan(pmsg->args));
-    if (squash_cmds.size() >= pipeline_squash_limit_cached) {
-      // We reached the limit of commands to squash, so we dispatch them.
-      break;
-    }
-  }
+    return *pmsg;
+  };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
   // it must guard the Flush() as well.
   cc_->async_dispatch = true;
 
   DispatchManyResult result =
-      service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
+      service_->DispatchManyCommands(get_next_fn, pipeline_count, reply_builder_.get(), cc_.get());
 
   uint32_t dispatched = result.processed;
   uint64_t before_flush = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
-  if (pending_pipeline_cmd_cnt_ == squash_cmds.size() ||
+  if (pending_pipeline_cmd_cnt_ == pipeline_count ||
       always_flush_pipeline_cached) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
@@ -1631,7 +1557,7 @@ void Connection::SquashPipeline() {
   dispatch_q_.erase(it, it + dispatched);
 
   // If interrupted due to pause, fall back to regular dispatch
-  skip_next_squashing_ = dispatched != squash_cmds.size();
+  skip_next_squashing_ = dispatched != pipeline_count;
 }
 
 void Connection::ClearPipelinedMessages() {
@@ -1655,19 +1581,19 @@ void Connection::ClearPipelinedMessages() {
 string Connection::DebugInfo() const {
   string info = "{";
 
-  absl::StrAppend(&info, "address=", uint64_t(this), ", ");
+  absl::StrAppend(&info, "id=", id_, ", ");
   absl::StrAppend(&info, "phase=", phase_, ", ");
   if (cc_) {
     // In some rare cases cc_ can be null, see https://github.com/dragonflydb/dragonfly/pull/3873
     absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
     absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
   }
-  absl::StrAppend(&info, "dispatch_fiber:joinable=", async_fb_.IsJoinable(), ", ");
+  absl::StrAppend(&info, "df:joinable=", async_fb_.IsJoinable(), ", ");
 
   bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
-  absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
-  absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
-  absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
+  absl::StrAppend(&info, "dq:size=", dispatch_q_.size(), ", ");
+  absl::StrAppend(&info, "dq:pipelined=", pending_pipeline_cmd_cnt_, ", ");
+  absl::StrAppend(&info, "dq:intrusive=", intrusive_front, ", ");
 
   if (cc_) {
     absl::StrAppend(&info, "state=");
@@ -1676,8 +1602,9 @@ string Connection::DebugInfo() const {
     if (cc_->blocked)
       absl::StrAppend(&info, "b");
   }
+  time_t now = time(nullptr);
+  absl::StrAppend(&info, " age=", now - creation_time_, " idle=", now - last_interaction_, "}");
 
-  absl::StrAppend(&info, "}");
   return info;
 }
 
@@ -1788,25 +1715,15 @@ void Connection::AsyncFiber() {
 }
 
 Connection::PipelineMessagePtr Connection::FromArgs(const RespVec& args) {
-  DCHECK(!args.empty());
-  size_t backed_sz = 0;
-  for (const auto& arg : args) {
-    CHECK_EQ(RespExpr::STRING, arg.type);
-    backed_sz += arg.GetBuf().size() + 1;  // for '\0'
-  }
-  DCHECK(backed_sz);
-
-  static_assert(alignof(PipelineMessage) == 8);
-
   PipelineMessagePtr ptr;
-  if (ptr = GetFromPipelinePool(); ptr) {
-    ptr->Reset(args.size(), backed_sz);
-  } else {
+  if (ptr = GetFromPipelinePool(); !ptr) {
     // We must construct in place here, since there is a slice that uses memory locations
-    ptr = make_unique<PipelineMessage>(args.size(), backed_sz);
+    ptr = make_unique<PipelineMessage>();
   }
 
-  ptr->SetArgs(args);
+  auto map = [](const RespExpr& expr) { return expr.GetView(); };
+  auto range = base::it::Transform(map, base::it::Range(args.begin(), args.end()));
+  ptr->Assign(range.begin(), range.end(), args.size());
   return ptr;
 }
 
@@ -1815,7 +1732,7 @@ void Connection::ShrinkPipelinePool() {
     return;
 
   if (tl_pipe_cache_sz_tracker.CheckAndUpdateWatermark(pipeline_req_pool_.size())) {
-    stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
+    stats_->pipeline_cmd_cache_bytes -= UsedMemoryInternal(*pipeline_req_pool_.back());
     pipeline_req_pool_.pop_back();
   }
 }
@@ -1825,7 +1742,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
     return nullptr;
 
   auto ptr = std::move(pipeline_req_pool_.back());
-  stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
+  stats_->pipeline_cmd_cache_bytes -= UsedMemoryInternal(*ptr);
   pipeline_req_pool_.pop_back();
   return ptr;
 }
@@ -2001,7 +1918,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
     pending_pipeline_cmd_cnt_--;
     pending_pipeline_bytes_ -= used_mem;
     if (stats_->pipeline_cmd_cache_bytes < qbp.pipeline_cache_limit) {
-      stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
+      stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*(*pipe));
       pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
@@ -2067,10 +1984,10 @@ bool Connection::IsHttp() const {
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
-  size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
-               dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
-               dfly::HeapSize(memcache_parser_) + dfly::HeapSize(redis_parser_) +
-               dfly::HeapSize(cc_) + dfly::HeapSize(reply_builder_);
+  size_t mem = sizeof(*this) + cmn::HeapSize(dispatch_q_) + cmn::HeapSize(name_) +
+               cmn::HeapSize(tmp_parse_args_) + cmn::HeapSize(tmp_cmd_vec_) +
+               cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
+               cmn::HeapSize(reply_builder_);
 
   // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
@@ -2094,66 +2011,6 @@ void Connection::BreakOnce(uint32_t ev_mask) {
     auto fun = std::move(breaker_cb_);
     DCHECK(!breaker_cb_);
     fun(ev_mask);
-  }
-}
-
-void Connection::ConfigureProvidedBuffer() {
-  // Provided buffers are supported by IOURING.
-  // We currently support them for TCP sockets only.
-  if (socket_->proactor()->GetKind() == ProactorBase::IOURING && !is_tls_) {
-#ifdef __linux__
-    auto* up = static_cast<fb2::UringProactor*>(socket_->proactor());
-
-    // If bufring is enabled, configure the socket to use it.
-    recv_provided_ = up->BufRingEntrySize(kRecvSockGid) > 0;
-    if (recv_provided_) {
-      auto* us = static_cast<fb2::UringSocket*>(socket_.get());
-      us->set_bufring_id(kRecvSockGid);
-      us->EnableRecvMultishot();
-    }
-#endif
-  }
-}
-
-auto Connection::GetReadBuffer() -> ReadBuffer {
-  bool use_recv_buf = recv_provided_ && recv_buf_.res_len > 0;
-  ReadBuffer res;
-
-  if (use_recv_buf) {
-    uint8_t* src = nullptr;
-#ifdef __linux__
-    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
-    src = up->GetBufRingPtr(kRecvSockGid, recv_buf_.buf_id);
-#endif
-    res.available_bytes = recv_buf_.res_len;
-    res.slice = {src, std::min<size_t>(kRecvBufSize, res.available_bytes)};
-  } else {
-    res.slice = io_buf_.InputBuffer();
-    res.available_bytes = io_buf_.InputLen();
-  }
-  return res;
-}
-
-io::Bytes Connection::NextBundleBuffer(size_t total_len) {
-  ++recv_buf_.buf_pos;
-  io::Bytes res;
-#ifdef __linux__
-  fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
-  recv_buf_.buf_id = up->GetBufIdByPos(kRecvSockGid, recv_buf_.buf_pos);
-  uint8_t* src = up->GetBufRingPtr(kRecvSockGid, recv_buf_.buf_id);
-  res = {src, std::min<size_t>(kRecvBufSize, total_len)};
-#endif
-
-  return res;
-}
-
-void Connection::MarkReadBufferConsumed() {
-  bool use_recv_buf = recv_provided_ && recv_buf_.res_len > 0;
-  if (use_recv_buf) {
-    socket_->ReturnProvided(recv_buf_);
-    recv_buf_.res_len = 0;
-  } else {
-    io_buf_.ConsumeInput(io_buf_.InputLen());
   }
 }
 

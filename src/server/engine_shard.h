@@ -6,7 +6,7 @@
 
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
-#include "core/page_usage_stats.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common.h"
@@ -52,6 +52,9 @@ class EngineShard {
 
     // cluster stats
     uint64_t total_migrated_keys = 0;
+
+    // how many huffman tables were built successfully in the background
+    uint32_t huffman_tables_built = 0;
 
     Stats& operator+=(const Stats&);
   };
@@ -135,7 +138,7 @@ class EngineShard {
   }
 
   // Moving average counters.
-  enum MovingCnt { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
+  enum MovingCnt : uint8_t { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
 
   // Returns moving sum over the last 6 seconds.
   uint32_t GetMovingSum6(MovingCnt type) const {
@@ -226,9 +229,19 @@ class EngineShard {
   };
 
   struct EvictionTaskState {
-    bool rss_eviction_enabled_ = true;
+    void Reset(bool rss_eviction_enabled_flag) {
+      rss_eviction_enabled = rss_eviction_enabled_flag;
+      shard_used_memory_at_prev_eviction = global_rss_memory_at_prev_eviction =
+          acc_deleted_bytes_during_eviction = deleted_bytes_at_prev_eviction = 0;
+    }
+    void AdjustDeletedBytes(size_t shard_used_memory);
+    void LimitAccumulatedDeletedBytes(size_t shard_rss_over_memory_budget);
+    void AdjustAccumulatedDeletedBytes(size_t global_used_rss_memory);
+    bool rss_eviction_enabled = true;
     bool track_deleted_bytes = false;
-    size_t deleted_bytes_before_rss_update = 0;
+    size_t acc_deleted_bytes_during_eviction = 0;  // Accumulated deleted bytes during eviction
+    size_t deleted_bytes_at_prev_eviction = 0;     // Bytes deleted in previous eviction
+    size_t shard_used_memory_at_prev_eviction = 0;
     size_t global_rss_memory_at_prev_eviction = 0;
   };
 
@@ -284,7 +297,7 @@ class EngineShard {
   journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 
-  uint32_t defrag_task_ = 0;
+  uint32_t defrag_task_id_ = UINT32_MAX, huffman_check_task_id_ = UINT32_MAX;
   EvictionTaskState eviction_state_;  // Used on eviction fiber
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
@@ -296,7 +309,7 @@ class EngineShard {
   std::unique_ptr<TieredStorage> tiered_storage_;
   // TODO: Move indices to Namespace
   std::unique_ptr<ShardDocIndices> shard_search_indices_;
-
+  uint64_t stalled_start_ns_ = 0;
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];

@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 45
 
     container:
-      image: ghcr.io/romange/ubuntu-dev:24
+      image: ghcr.io/romange/ubuntu-dev:24-afl
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       credentials:
         username: ${{ github.repository_owner }}
@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           submodules: true
 

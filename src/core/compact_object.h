@@ -11,10 +11,10 @@
 #include <type_traits>
 
 #include "base/pmr/memory_resource.h"
+#include "common/string_or_view.h"
 #include "core/json/json_object.h"
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
-#include "core/string_or_view.h"
 
 namespace dfly {
 
@@ -28,6 +28,7 @@ constexpr unsigned kEncodingJsonFlat = 1;
 class SBF;
 class PageUsage;
 
+using cmn::StringOrView;
 namespace detail {
 
 // redis objects or blobs of upto 4GB size.
@@ -255,14 +256,6 @@ class CompactObj {
 
   bool DefragIfNeeded(PageUsage* page_usage);
 
-  void SetAsyncDelete() {
-    mask_bits_.io_pending = 1;  // io_pending flag is used for async delete for keys.
-  }
-
-  bool IsAsyncDelete() const {
-    return mask_bits_.io_pending;
-  }
-
   bool HasStashPending() const {
     return mask_bits_.io_pending;
   }
@@ -364,7 +357,8 @@ class CompactObj {
   }
 
   // Assigns a cooling record to the object together with its external slice.
-  void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
+  void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
+               detail::TieredColdRecord* record);
 
   struct CoolItem {
     uint16_t page_offset;
@@ -375,6 +369,10 @@ class CompactObj {
   // Prerequisite: IsCool() is true.
   // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
+
+  // Prequisite: IsCool() is true.
+  // Keeps cool record only as external value and discard in-memory part.
+  void Freeze(size_t offset, size_t sz);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
 
@@ -394,6 +392,8 @@ class CompactObj {
   bool IsInline() const {
     return taglen_ <= kInlineLen;
   }
+
+  uint8_t GetFirstByte() const;
 
   static constexpr unsigned InlineLen() {
     return kInlineLen;
@@ -430,8 +430,7 @@ class CompactObj {
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
-  // returns raw (non-decoded) string together with the encoding mask.
-  // Used to bypass decoding layer.
+  // returns raw (non-decoded) string. Used to bypass decoding layer.
   // Precondition: the object is a non-inline string.
   StringOrView GetRawString() const;
 
@@ -467,13 +466,13 @@ class CompactObj {
     mask_ = mask;
   }
 
-  // Must be 16 bytes.
   struct ExternalPtr {
     uint32_t serialized_size;
     uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
     uint8_t is_cool : 1;
     uint8_t representation : 2;  // See ExternalRep
-    uint16_t is_reserved : 13;
+    uint8_t is_reserved : 5;
+    uint8_t first_byte;
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
@@ -487,15 +486,23 @@ class CompactObj {
       detail::TieredColdRecord* cool_record;
     };
   } __attribute__((packed));
-
+  static_assert(sizeof(ExternalPtr) == 16);
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
+
+    bool DefragIfNeeded(PageUsage* page_usage);
+
+    // Computes if the contained object should be defragmented, by examining pointers within it and
+    // returning true if any of them reside in an underutilized page.
+    bool ShouldDefragment(PageUsage* page_usage) const;
   };
 
   struct FlatJsonT {
     uint32_t json_len;
     uint8_t* flat_ptr;
+
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   struct JsonWrapper {
@@ -503,6 +510,8 @@ class CompactObj {
       JsonConsT cons;
       FlatJsonT flat;
     };
+
+    bool DefragIfNeeded(PageUsage* page_usage);
   };
 
   // My main data structure. Union of representations.
@@ -531,16 +540,16 @@ class CompactObj {
   union {
     uint8_t mask_ = 0;
     struct {
-      uint8_t ref : 1;  // Mark objects that have expiry timestamp assigned.
-      uint8_t expire : 1;
+      uint8_t ref : 1;      // Mark objects that don't own their allocation.
+      uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
-      // See the Encoding enum for the meaning of these bits.
+      // See the EncodingEnum for the meaning of these bits.
       uint8_t encoding : 2;
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
       // It is cleared when the io request finishes or is cancelled.
-      uint8_t io_pending : 1;  // also serves as async-delete for keys.
+      uint8_t io_pending : 1;
       uint8_t sticky : 1;
 
       // TOUCHED used to determin which items are hot/cold.
