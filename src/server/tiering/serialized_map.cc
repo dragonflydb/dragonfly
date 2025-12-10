@@ -56,7 +56,7 @@ size_t SerializedMap::DataBytes() const {
 }
 
 size_t SerializedMap::EstimateSize(size_t data_bytes, size_t entries) {
-  return kLenBytes /* entry number */ + data_bytes + entries * 2 * kLenBytes /* string lenghts */;
+  return kLenBytes /* entry number */ + data_bytes + entries * 2 * kLenBytes /* string lengths */;
 }
 
 size_t SerializedMap::Serialize(const detail::ListpackWrap& lw, absl::Span<char> buffer) {
