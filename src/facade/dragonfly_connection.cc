@@ -655,11 +655,6 @@ void Connection::OnShutdown() {
 void Connection::OnPreMigrateThread() {
   DVLOG(1) << "OnPreMigrateThread " << GetClientId();
 
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
-    socket_->ResetOnRecvHook();
-  }
-
   CHECK(!cc_->conn_closing);
 
   DCHECK(!migration_in_process_);
@@ -1377,6 +1372,12 @@ void Connection::HandleMigrateRequest(bool unregister) {
   if (async_fb_.IsJoinable()) {
     SendAsync({MigrationRequestMessage{}});
     async_fb_.Join();
+  }
+
+  // Must be done here because it's a preemption point
+  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+    socket_->ResetOnRecvHook();
   }
 
   // RegisterOnErrorCb might be called on POLLHUP and the join above is a preemption point.
