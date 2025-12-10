@@ -1379,6 +1379,12 @@ void Connection::HandleMigrateRequest(bool unregister) {
     async_fb_.Join();
   }
 
+  // RegisterOnErrorCb might be called on POLLHUP and the join above is a preemption point.
+  // So, it could be the case that after this fiber wakes up the connection might be closing.
+  if (cc_->conn_closing) {
+    return;
+  }
+
   // We don't support migrating with subscriptions as it would require moving thread local
   // handles. We can't check above, as the queue might have contained a subscribe request.
 
