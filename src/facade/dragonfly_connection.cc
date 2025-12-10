@@ -648,6 +648,8 @@ void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
   BreakOnce(POLLHUP);
+  io_ec_ = make_error_code(errc::connection_aborted);
+  io_event_.notify_one();
 }
 
 void Connection::OnPreMigrateThread() {
