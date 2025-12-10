@@ -369,7 +369,7 @@ class Connection : public util::Connection {
   // Returns non-null request ptr if pool has vacant entries.
   PipelineMessagePtr GetFromPipelinePool();
 
-  void HandleMigrateRequest(bool unregister = false);
+  void HandleMigrateRequest();
   io::Result<size_t> HandleRecvSocket();
 
   bool ShouldEndAsyncFiber(const MessageHandle& msg);

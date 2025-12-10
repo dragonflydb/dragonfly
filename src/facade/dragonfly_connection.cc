@@ -648,8 +648,6 @@ void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
   BreakOnce(POLLHUP);
-  io_ec_ = make_error_code(errc::connection_aborted);
-  io_event_.notify_one();
 }
 
 void Connection::OnPreMigrateThread() {
@@ -671,7 +669,7 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread " << GetClientId();
+  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
@@ -679,9 +677,8 @@ void Connection::OnPostMigrateThread() {
   }
 
   const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen() && allowed_to_register_) {
+  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-      CHECK(this);
       DoReadOnRecv(n);
       io_event_.notify_one();
     });
@@ -1362,7 +1359,7 @@ void Connection::OnBreakCb(int32_t mask) {
   cnd_.notify_one();  // Notify dispatch fiber.
 }
 
-void Connection::HandleMigrateRequest(bool unregister) {
+void Connection::HandleMigrateRequest() {
   if (cc_->conn_closing || !migration_request_) {
     return;
   }
@@ -2199,7 +2196,6 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
-  error_code ec;
   ParserStatus parse_status = OK;
 
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);

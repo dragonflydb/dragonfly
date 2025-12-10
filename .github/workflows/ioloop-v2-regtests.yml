@@ -70,7 +70,7 @@ jobs:
           if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
             cd ${GITHUB_WORKSPACE}/build
             timestamp=$(date +%Y-%m-%d_%H:%M:%S)
-            mv ./dragonfly /var/crash/dragonfy_${timestamp}
+            mv ./dragonfly /var/crash/dragonfly_${timestamp}
           fi
 
   lint-test-chart:
