@@ -122,7 +122,7 @@ struct HMapWrap {
   }
 
   void AddOrUpdate(std::string_view key, std::string_view value) {
-    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value); },
+    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value, UINT32_MAX, true); },
                   [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
     VisitMut(ov);
   }
@@ -320,7 +320,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   optional<string_view> res;
   if (!add_res.is_new) {
     if (auto it = hw.Find(field); it)
-      res = (*it).second;
+      res = it->second;
   }
 
   if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK)
