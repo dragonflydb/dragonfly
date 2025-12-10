@@ -1694,6 +1694,8 @@ size_t CompactObj::StrEncoding::DecodedSize(size_t blob_size, uint8_t first_byte
 }
 
 size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const {
+  if (blob.empty())
+    return 0;
   size_t decoded_len = DecodedSize(blob);
   switch (enc_) {
     case NONE_ENC:

@@ -342,3 +342,15 @@ async def test_key_bump_ups(df_factory):
         new_slot_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["slot"])
         assert new_slot_id + 1 == slot_id
         break
+
+
+@pytest.mark.debug_only
+@pytest.mark.asyncio
+async def test_command_empty_key(df_factory):
+    df_server = df_factory.create()
+    df_server.start()
+    client = df_server.client()
+    res = await client.lpush("", "a")
+    assert res == 1
+    res = await client.execute_command("KEYS *")
+    assert len(res) == 1
