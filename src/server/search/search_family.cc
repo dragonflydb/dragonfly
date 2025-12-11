@@ -1405,9 +1405,11 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   });
 
-  DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
+  // If index is not found on at least one shard, return error.
+  // This can happen during concurrent FT.CREATE/FT.DROPINDEX operations
+  // where some shards may have the index while others don't.
   if (num_notfound > 0u)
     return rb->SendError(IndexNotFoundMsg(idx_name));
 
