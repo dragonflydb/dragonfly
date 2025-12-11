@@ -31,7 +31,7 @@ class SmallString {
   uint64_t HashCode() const;
   uint16_t MallocUsed() const;
 
-  void Get(std::string_view dest[2]) const;
+  std::array<std::string_view, 2> Get() const;
   void Get(char* out) const;
   void Get(std::string* dest) const;
 

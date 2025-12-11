@@ -1466,8 +1466,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     //    has only 9-10 bytes in its inline prefix storage.
     DCHECK_GT(sv.size(), 16u);  // we would not be in SMALL_TAG, otherwise.
 
-    string_view slice[2];
-    u_.small_str.Get(slice);
+    auto slice = u_.small_str.Get();
     DCHECK_LT(slice[0].size(), 14u);
 
     uint8_t tmpbuf[14];
@@ -1600,12 +1599,7 @@ std::array<std::string_view, 2> CompactObj::GetRawString() const {
   }
 
   if (taglen_ == SMALL_TAG) {
-    std::string_view arr[2];
-    u_.small_str.GetV(arr);
-    std::array<std::string_view, 2> out;  // TODO: use c++ 20 to_array
-    out[0] = arr[0];
-    out[1] = arr[1];
-    return out;
+    return u_.small_str.Get();
   }
 
   LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);
