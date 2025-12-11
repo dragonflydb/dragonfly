@@ -84,12 +84,7 @@ class Connection : public util::Connection {
   using PipelineMessage = cmn::BackedArguments;
 
   // Pipeline message, accumulated Memcached command to be executed.
-  struct MCPipelineMessage {
-    MCPipelineMessage(MemcacheParser::Command&& cmd, std::string_view value);
-
-    MemcacheParser::Command cmd;
-    std::string value;
-  };
+  using MCPipelineMessage = MemcacheParser::Command;
 
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
@@ -414,6 +409,7 @@ class Connection : public util::Connection {
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
+  MemcacheParser::Command mc_cmd_;
 
   uint32_t id_;
   Protocol protocol_;

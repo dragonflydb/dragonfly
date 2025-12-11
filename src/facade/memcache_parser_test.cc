@@ -19,6 +19,7 @@ namespace facade {
 class MCParserTest : public testing::Test {
  protected:
   MemcacheParser::Result Parse(string_view input) {
+    parser_.Reset();
     return parser_.Parse(input, &consumed_, &cmd_);
   }
 
@@ -33,11 +34,11 @@ class MCParserTest : public testing::Test {
 
 TEST_F(MCParserTest, Basic) {
   MemcacheParser::Result st = Parse("set a 1 20 3\r\n");
-  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
   EXPECT_EQ("a", cmd_.key());
   EXPECT_EQ(1, cmd_.flags);
   EXPECT_EQ(20, cmd_.expire_ts);
-  EXPECT_EQ(3, cmd_.bytes_len);
+  EXPECT_EQ(3, cmd_.value().size());
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
 
   st = Parse("quit\r\n");
@@ -85,21 +86,21 @@ TEST_F(MCParserTest, Stats) {
 TEST_F(MCParserTest, NoreplyBasic) {
   MemcacheParser::Result st = Parse("set mykey 1 2 3 noreply\r\n");
 
-  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
   EXPECT_EQ("mykey", cmd_.key());
   EXPECT_EQ(1, cmd_.flags);
   EXPECT_EQ(2, cmd_.expire_ts);
-  EXPECT_EQ(3, cmd_.bytes_len);
+  EXPECT_EQ(3, cmd_.value().size());
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_TRUE(cmd_.no_reply);
 
   st = Parse("set mykey2 4 5 6\r\n");
 
-  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
   EXPECT_EQ("mykey2", cmd_.key());
   EXPECT_EQ(4, cmd_.flags);
   EXPECT_EQ(5, cmd_.expire_ts);
-  EXPECT_EQ(6, cmd_.bytes_len);
+  EXPECT_EQ(6, cmd_.value().size());
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_FALSE(cmd_.no_reply);
 }
@@ -108,19 +109,19 @@ TEST_F(MCParserTest, Meta) {
   MemcacheParser::Result st = Parse("ms key1 ");
   EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
   EXPECT_EQ(0, consumed_);
-  st = Parse("ms key1 6 T1 F2\r\n");
+  st = Parse("ms key1 6 T1 F2\r\naaaaaa\r\n");
   EXPECT_EQ(MemcacheParser::OK, st);
-  EXPECT_EQ(17, consumed_);
+  EXPECT_EQ(25, consumed_);
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_EQ("key1", cmd_.key());
   EXPECT_EQ(2, cmd_.flags);
   EXPECT_EQ(1, cmd_.expire_ts);
-  st = Parse("ms 16nXnNeV150= 5 b ME\r\n");
-  EXPECT_EQ(MemcacheParser::OK, st);
-  EXPECT_EQ(24, consumed_);
+  st = Parse("ms 16nXnNeV150= 5 b ME\r\nbbbbb");
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+  EXPECT_EQ(29, consumed_);
   EXPECT_EQ(MemcacheParser::ADD, cmd_.type);
   EXPECT_EQ("שלום", cmd_.key());
-  EXPECT_EQ(5, cmd_.bytes_len);
+  EXPECT_EQ(5, cmd_.value().size());
 
   st = Parse("mg 16nXnNeV150= b\r\n");
   EXPECT_EQ(MemcacheParser::OK, st);
@@ -170,23 +171,50 @@ TEST_F(MCParserTest, Gat) {
   EXPECT_EQ(cmd_.expire_ts, 1000);
 }
 
+TEST_F(MCParserTest, ValueState) {
+  auto st = Parse("ms key1 6\r\nabc");
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+  EXPECT_EQ(consumed_, 14);
+  st = parser_.Parse("de", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+  EXPECT_EQ(consumed_, 2);
+
+  st = parser_.Parse("f\r", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+  EXPECT_EQ(consumed_, 2);
+  EXPECT_EQ(cmd_.value(), "abcdef");
+
+  st = parser_.Parse("\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(consumed_, 1);
+}
+
+TEST_F(MCParserTest, ParseError) {
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, Parse("ms key1 3\r\nabcd"));
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, Parse("ms key1 3\r\nabc"));
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, parser_.Parse("\ra", &consumed_, &cmd_));
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, Parse("ms key1 3\r\nabc\r"));
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, parser_.Parse("\r", &consumed_, &cmd_));
+}
+
 class MCParserNoreplyTest : public MCParserTest {
  protected:
-  void RunTest(string_view str, bool noreply) {
+  void RunTest(string_view str, bool noreply,
+               MemcacheParser::Result expected_res = MemcacheParser::OK) {
     MemcacheParser::Result st = Parse(str);
 
-    EXPECT_EQ(MemcacheParser::OK, st);
+    EXPECT_EQ(expected_res, st);
     EXPECT_EQ(cmd_.no_reply, noreply);
   }
 };
 
 TEST_F(MCParserNoreplyTest, StoreCommands) {
-  RunTest("set mykey 0 0 3 noreply\r\n", true);
-  RunTest("set mykey 0 0 3\r\n", false);
-  RunTest("add mykey 0 0 3\r\n", false);
-  RunTest("replace mykey 0 0 3\r\n", false);
-  RunTest("append mykey 0 0 3\r\n", false);
-  RunTest("prepend mykey 0 0 3\r\n", false);
+  RunTest("set mykey 0 0 3 noreply\r\n", true, MemcacheParser::INPUT_PENDING);
+  RunTest("set mykey 0 0 3\r\n", false, MemcacheParser::INPUT_PENDING);
+  RunTest("add mykey 0 0 3\r\n", false, MemcacheParser::INPUT_PENDING);
+  RunTest("replace mykey 0 0 3\r\n", false, MemcacheParser::INPUT_PENDING);
+  RunTest("append mykey 0 0 3\r\n", false, MemcacheParser::INPUT_PENDING);
+  RunTest("prepend mykey 0 0 3\r\n", false, MemcacheParser::INPUT_PENDING);
 }
 
 TEST_F(MCParserNoreplyTest, Other) {

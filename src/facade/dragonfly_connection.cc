@@ -381,11 +381,6 @@ class PipelineCacheSizeTracker {
 
 thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
 
-Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command&& cmd_in,
-                                                 std::string_view value_in)
-    : cmd{std::move(cmd_in)}, value{value_in} {
-}
-
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
     size_t operator()(const PubMessagePtr& msg) {
@@ -415,7 +410,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return 0;
     }
     size_t operator()(const MCPipelineMessagePtr& msg) {
-      return sizeof(MCPipelineMessage) + msg->cmd.HeapMemory() + msg->value.capacity();
+      return sizeof(MCPipelineMessage) + msg->HeapMemory();
     }
   };
 
@@ -426,7 +421,7 @@ bool Connection::MessageHandle::IsReplying() const {
   return IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
          holds_alternative<PipelineMessagePtr>(handle) ||
          (holds_alternative<MCPipelineMessagePtr>(handle) &&
-          !get<MCPipelineMessagePtr>(handle)->cmd.no_reply);
+          !get<MCPipelineMessagePtr>(handle)->no_reply);
 }
 
 struct Connection::AsyncOperations {
@@ -516,9 +511,8 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 
 void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
   ++self->local_stats_.cmds;
-  self->service_->DispatchMC(msg.cmd, msg.value,
-                             static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
-                             self->cc_.get());
+  self->service_->DispatchMC(
+      msg, msg.value(), static_cast<MCReplyBuilder*>(self->reply_builder_.get()), self->cc_.get());
   self->last_interaction_ = time(nullptr);
 }
 
@@ -1238,16 +1232,16 @@ auto Connection::ParseMemcache() -> ParserStatus {
   uint32_t consumed = 0;
   MemcacheParser::Result result = MemcacheParser::OK;
 
-  MemcacheParser::Command cmd;
-  string_view value;
-
-  auto dispatch_sync = [this, &cmd, &value] {
-    service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(reply_builder_.get()), cc_.get());
+  auto dispatch_sync = [this] {
+    service_->DispatchMC(mc_cmd_, mc_cmd_.value(),
+                         static_cast<MCReplyBuilder*>(reply_builder_.get()), cc_.get());
   };
 
-  auto dispatch_async = [&cmd, &value]() -> MessageHandle {
-    return {make_unique<MCPipelineMessage>(std::move(cmd), value)};
+  auto dispatch_async = [this]() -> MessageHandle {
+    return {make_unique<MCPipelineMessage>(std::move(mc_cmd_))};
   };
+
+  DCHECK(io_buf_.InputLen() > 0);
 
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
 
@@ -1258,48 +1252,35 @@ auto Connection::ParseMemcache() -> ParserStatus {
       return OK;
     }
 
-    result = memcache_parser_->Parse(str, &consumed, &cmd);
+    result = memcache_parser_->Parse(str, &consumed, &mc_cmd_);
 
-    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type " << cmd.type;
-    if (result != MemcacheParser::OK) {
-      io_buf_.ConsumeInput(consumed);
+    io_buf_.ConsumeInput(consumed);
+
+    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type " << mc_cmd_.type;
+    if (result == MemcacheParser::INPUT_PENDING) {
       break;
     }
 
-    size_t total_len = consumed;
-    if (MemcacheParser::IsStoreCmd(cmd.type)) {
-      total_len += cmd.bytes_len + 2;
-      if (io_buf_.InputLen() >= total_len) {
-        string_view parsed_value = str.substr(consumed, cmd.bytes_len + 2);
-        if (parsed_value[cmd.bytes_len] != '\r' && parsed_value[cmd.bytes_len + 1] != '\n') {
-          builder->SendClientError("bad data chunk");
-          // We consume the whole buffer because we don't really know where it ends
-          // since the value length exceeds the cmd.bytes_len.
-          io_buf_.ConsumeInput(io_buf_.InputLen());
-          return OK;
-        }
-
-        value = parsed_value.substr(0, cmd.bytes_len);
-      } else {
-        return NEED_MORE;
+    memcache_parser_->Reset();
+    if (result == MemcacheParser::OK) {
+      DispatchSingle(io_buf_.InputLen() > 0, dispatch_sync, dispatch_async);
+    } else {
+      if (result == MemcacheParser::UNKNOWN_CMD) {
+        builder->SendSimpleString("ERROR");
+      } else if (result == MemcacheParser::PARSE_ERROR) {
+        builder->SendClientError("bad data chunk");
+      } else if (result == MemcacheParser::BAD_DELTA) {
+        builder->SendClientError("invalid numeric delta argument");
+      } else if (result != MemcacheParser::OK) {
+        builder->SendClientError("bad command line format");
       }
     }
-    DispatchSingle(total_len < io_buf_.InputLen(), dispatch_sync, dispatch_async);
-    io_buf_.ConsumeInput(total_len);
   } while (!builder->GetError());
 
   parser_error_ = result;
 
   if (result == MemcacheParser::INPUT_PENDING) {
     return NEED_MORE;
-  }
-
-  if (result == MemcacheParser::PARSE_ERROR || result == MemcacheParser::UNKNOWN_CMD) {
-    builder->SendSimpleString("ERROR");
-  } else if (result == MemcacheParser::BAD_DELTA) {
-    builder->SendClientError("invalid numeric delta argument");
-  } else if (result != MemcacheParser::OK) {
-    builder->SendClientError("bad command line format");
   }
 
   return OK;

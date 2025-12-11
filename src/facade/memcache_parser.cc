@@ -71,9 +71,10 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   }
 
   // tokens[0] is key
+  uint32_t bytes_len = 0;
   uint32_t flags;
   if (!absl::SimpleAtoi(tokens[1], &flags) || !absl::SimpleAtoi(tokens[2], &res->expire_ts) ||
-      !absl::SimpleAtoi(tokens[3], &res->bytes_len))
+      !absl::SimpleAtoi(tokens[3], &bytes_len))
     return MP::BAD_INT;
 
   if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[4], &res->cas_unique)) {
@@ -93,6 +94,7 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
 
   string_view key = tokens[0];
   res->Assign(&key, &key + 1, 1);
+  res->PushArg(bytes_len);
 
   return MP::OK;
 }
@@ -199,12 +201,12 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
     return MP::PARSE_ERROR;
 
   res->meta = true;
-  res->bytes_len = 0;
   res->flags = 0;
   res->expire_ts = 0;
 
   string_view arg0 = tokens[0];
   tokens.remove_prefix(1);
+  uint32_t bytes_len = 0;
 
   // We emulate the behavior by returning the high level commands.
   // TODO: we should reverse the interface in the future, so that a high level command
@@ -218,10 +220,9 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
       res->type = MP::DELETE;
       break;
     case MP::META_SET:
-      if (tokens.empty()) {
+      if (tokens.empty())
         return MP::PARSE_ERROR;
-      }
-      if (!absl::SimpleAtoi(tokens[0], &res->bytes_len))
+      if (!absl::SimpleAtoi(tokens[0], &bytes_len))
         return MP::BAD_INT;
 
       res->type = MP::SET;
@@ -292,16 +293,25 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
     }
   }
   res->Assign(&arg0, &arg0 + 1, 1);
-
+  if (MP::IsStoreCmd(res->type)) {
+    res->PushArg(bytes_len);
+  }
   return MP::OK;
 }
 
 }  // namespace
 
 auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
+  DVLOG(1) << "Parsing memcache input: [" << str << "]";
+
+  *consumed = 0;
+
+  if (val_len_to_read_ > 0) {
+    return ConsumeValue(str, consumed, cmd);
+  }
+
   cmd->no_reply = false;  // re-initialize
   auto pos = str.find("\r\n");
-  *consumed = 0;
   if (pos == string_view::npos) {
     // We need more data to parse the command. For get/gets commands this line can be very long.
     // we limit maximum buffer capacity in the higher levels using max_client_iobuf_len.
@@ -338,11 +348,26 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
       return MP::PARSE_ERROR;
     }
 
-    return ParseStore(tokens_view, cmd);
+    auto res = ParseStore(tokens_view, cmd);
+    if (res != MP::OK)
+      return res;
+    val_len_to_read_ = cmd->value().size() + 2;
+    return ConsumeValue(str.substr(pos + 2), consumed, cmd);
   }
 
   if (cmd->type >= META_SET) {
-    return tokens_view.empty() ? MP::PARSE_ERROR : ParseMeta(tokens_view, cmd);
+    if (tokens_view.empty())
+      return MP::PARSE_ERROR;
+
+    auto res = ParseMeta(tokens_view, cmd);
+    if (res != MP::OK)
+      return res;
+
+    if (IsStoreCmd(cmd->type)) {
+      val_len_to_read_ = cmd->value().size() + 2;
+      res = ConsumeValue(str.substr(pos + 2), consumed, cmd);
+    }
+    return res;
   }
 
   if (tokens_view.empty()) {
@@ -355,5 +380,44 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   tmp_args_.clear();
   return ParseValueless(tokens_view, &tmp_args_, cmd);
 };
+
+auto MP::ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest) -> Result {
+  DCHECK_EQ(dest->size(), 2u);  // key and value
+  DCHECK_GT(val_len_to_read_, 0u);
+
+  if (val_len_to_read_ > 2) {
+    uint32_t need_copy = val_len_to_read_ - 2;
+    uint32_t dest_len = dest->elem_len(1);
+    DCHECK_GE(dest_len, need_copy);  // should be ensured during parsing
+
+    char* start = dest->value_ptr() + (dest_len - need_copy);
+    uint32_t to_fill = std::min<uint32_t>(need_copy, str.size());
+    if (to_fill) {
+      memcpy(start, str.data(), to_fill);
+      val_len_to_read_ -= to_fill;
+      *consumed += to_fill;
+      str.remove_prefix(to_fill);
+    }
+  }
+
+  if (str.empty()) {
+    return MP::INPUT_PENDING;
+  }
+
+  DCHECK(val_len_to_read_ <= 2u && val_len_to_read_ > 0);
+  // consume \r\n
+  char end[] = "\r\n";
+
+  do {
+    if (str.front() != end[2 - val_len_to_read_])  // val_len_to_read_ 2 -> '\r', 1 -> '\n'
+      return MP::PARSE_ERROR;
+
+    ++(*consumed);
+    --val_len_to_read_;
+    str.remove_prefix(1);
+  } while (val_len_to_read_ && !str.empty());
+
+  return val_len_to_read_ > 0 ? MP::INPUT_PENDING : MP::OK;
+}
 
 }  // namespace facade
