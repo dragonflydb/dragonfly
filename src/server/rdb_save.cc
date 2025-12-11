@@ -1475,8 +1475,13 @@ void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, E
   impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
 
-error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard) {
+error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard, bool skip_epilog) {
   impl_->WaitForSnapshottingFinish(shard);
+  if (skip_epilog) {
+    RETURN_ON_ERR(impl_->FlushSerializer());
+    return impl_->FlushSink();
+  }
+
   return SaveEpilog();
 }
 

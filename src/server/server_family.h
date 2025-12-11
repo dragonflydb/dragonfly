@@ -364,6 +364,7 @@ class ServerFamily {
   void Script(CmdArgList args, const CommandContext& cmd_cntx);
   void SlowLog(CmdArgList args, const CommandContext& cmd_cntx);
   void Module(CmdArgList args, const CommandContext& cmd_cntx);
+  void PSync(CmdArgList args, const CommandContext& cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 

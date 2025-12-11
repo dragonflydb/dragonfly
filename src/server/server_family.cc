@@ -3901,6 +3901,14 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   return builder->SendOk();
 }
 
+void ServerFamily::PSync(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto response = absl::StrFormat("FULLRESYNC %s %ld", master_replid_, 0);
+  rb->SendSimpleString(response);
+
+  dfly_cmd_->StartValkeySync();
+}
+
 void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = cmd_cntx.rb;
   {
@@ -3986,6 +3994,9 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
       VLOG(2) << "Received client ACK=" << ack;
       cntx->replication_flow->last_acked_lsn = ack;
       return;
+    } else if (cmd == "VERSION" && args.size() == 2) {
+      cntx->conn_state.replication_info.is_valkey = true;
+      dfly_cmd_->CreateValkeySyncSession(cntx->conn());
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
       return err_cb();
@@ -4292,7 +4303,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
-      << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
+      << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module)
+      << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kDfly}.HFUNC(PSync);
 }
 
 }  // namespace dfly
