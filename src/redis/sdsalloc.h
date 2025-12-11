@@ -42,6 +42,7 @@
 #include "zmalloc.h"
 #define s_malloc zmalloc
 #define s_realloc zrealloc
+#define s_calloc zcalloc
 #define s_trymalloc ztrymalloc
 #define s_tryrealloc ztryrealloc
 #define s_free zfree
