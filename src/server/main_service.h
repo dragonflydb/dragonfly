@@ -45,12 +45,11 @@ class Service : public facade::ServiceInterface {
                                                   facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
-  facade::DispatchResult InvokeCmd(const CommandId* cid, CmdArgList tail_args,
-                                   const CommandContext& cmd_cntx);
+  facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
-  std::optional<facade::ErrorReply> VerifyCommandExecution(const ConnectionContext* cntx,
+  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandContext& cmd_cntx,
                                                            CmdArgList tail_args);
 
   // Verify command prepares excution in correct state.

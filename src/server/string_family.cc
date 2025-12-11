@@ -722,7 +722,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
 OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
                     const CommandContext& ctx) {
-  bool explicit_journal = ctx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  bool explicit_journal = ctx.cid->opt_mask() & CO::NO_AUTOJOURNAL;
   return ctx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   });
@@ -1093,7 +1093,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 
 /// (P)SETEX key seconds (milliseconds) value
 void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
-  string_view cmd_name = cmd_cntx.conn_cntx->cid->name();
+  string_view cmd_name = cmd_cntx.cid->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
