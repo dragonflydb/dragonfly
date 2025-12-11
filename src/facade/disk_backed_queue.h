@@ -40,6 +40,7 @@ class DiskBackedQueue {
   std::unique_ptr<io::ReadonlyFile> reader_;
 
   size_t total_backing_bytes_ = 0;
+  size_t total_backing_block_bytes_ = 0;
   size_t next_read_offset_ = 0;
 
   // Read only constants

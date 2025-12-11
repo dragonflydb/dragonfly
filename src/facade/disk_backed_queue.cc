@@ -14,6 +14,7 @@
 #include "facade/facade_types.h"
 #include "io/io.h"
 #include "util/fibers/uring_file.h"
+#include "util/fibers/uring_proactor.h"
 
 using facade::operator""_MB;
 
@@ -67,6 +68,11 @@ std::error_code DiskBackedQueue::Close() {
 
     auto ec2 = reader_->Close();
     LOG_IF(WARNING, ec2) << ec.message();
+
+    std::string backing = absl::StrCat(absl::GetFlag(FLAGS_disk_backpressure_folder), id_);
+    int errc = unlink(backing.c_str());
+    LOG_IF(ERROR, errc != 0) << "Failed to unlink backing file: "
+                             << std::error_code{errc, std::system_category()};
     // Return the first error.
     return ec ? ec : ec2;
   }
@@ -92,6 +98,7 @@ std::error_code DiskBackedQueue::Write(io::Bytes bytes) {
   }
 
   total_backing_bytes_ += bytes.size();
+  total_backing_block_bytes_ += bytes.size();
 
   VLOG(2) << "Offload connection " << this << " backpressure of " << bytes.size();
   return {};
@@ -111,6 +118,17 @@ io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
 
   VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << to_read
           << " for connection " << this;
+
+  if (total_backing_block_bytes_ >= 4096) {
+    // Respect allignment
+    const size_t punch = (total_backing_block_bytes_ % 4096) * 4096;
+    // fallocate is not cpu only.
+    // TODO: do this via iouring, potentially merge both read/writer and use linux file instead.
+    int res = fallocate(reader_->Handle(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, punch);
+    // Should not fail, it is alligned
+    DCHECK(res == 0);
+    total_backing_block_bytes_ -= punch;
+  }
 
   next_read_offset_ += to_read;
   total_backing_bytes_ -= to_read;
