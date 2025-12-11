@@ -284,7 +284,6 @@ struct ConnectionState {
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
   ClientTracking tracking_info_;
-  uint64_t cmd_start_time_ns = 0;  // time when the last command started executing
 };
 
 class ConnectionContext : public facade::ConnectionContext {
@@ -295,9 +294,6 @@ class ConnectionContext : public facade::ConnectionContext {
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
-
-    // number of commands in the last exec body.
-    unsigned exec_body_len = 0;
   };
 
   DebugInfo last_command_debug;
@@ -305,7 +301,7 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Namespace* ns = nullptr;
   Transaction* transaction = nullptr;
-  const CommandId* cid = nullptr;
+  // const CommandId* cid = nullptr;
 
   ConnectionState conn_state;
 

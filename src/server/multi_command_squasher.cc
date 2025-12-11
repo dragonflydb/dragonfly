@@ -186,7 +186,8 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
       return !opts_.error_abort;
     }
   }
-  service_->InvokeCmd(cmd->Cid(), args, CommandContext{tx, rb, cntx_});
+  CommandContext cmd_cntx{cmd->Cid(), tx, rb, cntx_};
+  service_->InvokeCmd(args, &cmd_cntx);
   return true;
 }
 
@@ -229,8 +230,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     if (status != OpStatus::OK) {
       crb.SendError(status);
     } else {
-      service_->InvokeCmd(dispatched.cmd->Cid(), args,
-                          CommandContext{local_cntx.transaction, &crb, &local_cntx});
+      CommandContext cmd_cntx{dispatched.cmd->Cid(), local_cntx.transaction, &crb, &local_cntx};
+      service_->InvokeCmd(args, &cmd_cntx);
     }
     move_reply(crb.Take(), &dispatched.reply);
 
@@ -267,7 +268,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
   if (IsAtomic()) {
-    cntx_->cid = base_cid_;
     auto cb = [this](ShardId sid) { return !sharded_[sid].dispatched.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop(
