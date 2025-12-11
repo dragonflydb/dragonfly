@@ -2608,7 +2608,8 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
 }
 
 void HelpSubCmd(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
-  XGroupHelp(parser->Tail(), CommandContext{tx, builder, nullptr});
+  CommandContext cmd_cntx{nullptr, tx, builder, nullptr};
+  XGroupHelp(parser->Tail(), cmd_cntx);
 }
 
 bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
