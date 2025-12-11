@@ -29,7 +29,6 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-// #include "fmacros.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -42,7 +41,6 @@
 #include <limits.h>
 #include <math.h>
 
-// #include "alloc.h"
 #include "sdsalloc.h"
 #include "read.h"
 #include "sds.h"
