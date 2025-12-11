@@ -3575,34 +3575,80 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
 }
 
 TEST_F(SearchFamilyTest, ParseCSSResponse) {
-  {
-    redisReader* reader = redisReaderCreate();
-    std::string msg1 =
-        "*17\r\n:8\r\n$2\r\ns0\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-        "0\r\n$2\r\ns3\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-        "3\r\n$2\r\ns7\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-        "7\r\n$2\r\ns8\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-        "8\r\n$2\r\ns4\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-        "4\r\n$2\r\ns9\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 9\r\n";
-    std::string msg2 =
-        "$2\r\ns1\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
-        "1\r\n$2\r\ns5\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 5\r\n";
+  using Fields = std::map<std::string, std::string>;
+  using Docs = std::map<std::string, Fields>;
 
-    redisReaderFeed(reader, msg1.c_str(), msg1.size());
+  const auto parse_redis_reply = [&](redisReply* reply) {
+    Docs search_results;
+    for (size_t i = 1; i < reply->elements; i += 2) {
+      if (reply->element[i]->type != REDIS_REPLY_STRING)
+        break;
+      auto& fields = search_results[reply->element[i]->str];
 
-    void* reply_obj = nullptr;
-    int status = redisReaderGetReply(reader, &reply_obj);
+      redisReply* field_array = reply->element[i + 1];
+      if (field_array->type != REDIS_REPLY_ARRAY)
+        break;
 
-    redisReaderFeed(reader, msg2.c_str(), msg2.size());
+      // Loop through the Field/Value array in pairs
+      for (size_t j = 0; j < field_array->elements; j += 2) {
+        if (field_array->element[j]->type == REDIS_REPLY_STRING &&
+            field_array->element[j + 1]->type == REDIS_REPLY_STRING) {
+          std::string field_name = field_array->element[j]->str;
+          std::string field_value = field_array->element[j + 1]->str;
 
-    status = redisReaderGetReply(reader, &reply_obj);
+          fields[field_name] = field_value;
+        }
+      }
+    }
+    return search_results;
+  };
 
-    redisReply* r = (redisReply*)reply_obj;
+  std::string msg1 =
+      "*17\r\n:8\r\n$2\r\ns0\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "0\r\n$2\r\ns3\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "3\r\n$2\r\ns7\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "7\r\n$2\r\ns8\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "8\r\n$2\r\ns4\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "4\r\n$2\r\ns9\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 9\r\n";
 
-    freeReplyObject(r);
+  std::string msg2 =
+      "$2\r\ns1\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest "
+      "1\r\n$2\r\ns5\r\n*2\r\n$5\r\ntitle\r\n$6\r\ntest 5\r\n";
 
-    redisReaderFree(reader);
-  }
+  redisReader* reader = redisReaderCreate();
+  redisReaderFeed(reader, msg1.c_str(), msg1.size());
+
+  void* reply_obj = nullptr;
+  int status = redisReaderGetReply(reader, &reply_obj);
+
+  redisReaderFeed(reader, msg2.c_str(), msg2.size());
+
+  status = redisReaderGetReply(reader, &reply_obj);
+
+  ASSERT_EQ(status, REDIS_OK);
+  ASSERT_NE(reply_obj, nullptr);
+  redisReply* r = (redisReply*)reply_obj;
+
+  EXPECT_EQ(r->type, REDIS_REPLY_ARRAY);
+  EXPECT_GE(r->elements, 1);
+  EXPECT_EQ(r->element[0]->type, REDIS_REPLY_INTEGER);
+
+  auto search_results = parse_redis_reply(r);
+
+  EXPECT_EQ(search_results.size(), 8);
+
+  EXPECT_EQ(search_results["s0"]["title"], "test 0");
+  EXPECT_EQ(search_results["s1"]["title"], "test 1");
+  EXPECT_EQ(search_results["s3"]["title"], "test 3");
+  EXPECT_EQ(search_results["s4"]["title"], "test 4");
+  EXPECT_EQ(search_results["s5"]["title"], "test 5");
+  EXPECT_EQ(search_results["s7"]["title"], "test 7");
+  EXPECT_EQ(search_results["s8"]["title"], "test 8");
+  EXPECT_EQ(search_results["s9"]["title"], "test 9");
+
+  freeReplyObject(reply_obj);
+
+  redisReaderFree(reader);
 }
 
 }  // namespace dfly
