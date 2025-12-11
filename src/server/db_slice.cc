@@ -1060,7 +1060,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
   DCHECK(IsValid(prime_it));
-  // If this need to persist, then only set persist value and return
+
   if (params.persist) {
     RemoveExpire(cntx.db_index, prime_it);
     return kPersistValue;
@@ -1071,29 +1071,43 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::OUT_OF_RANGE;
   }
 
-  if (rel_msec <= 0) {  // implicit - don't persist
-    Del(cntx, prime_it);
-    return -1;
-  } else if (IsValid(expire_it) && !params.persist) {
+  if (IsValid(expire_it)) {
     int64_t current = ExpireTime(expire_it->second);
-    if (params.expire_options & ExpireFlags::EXPIRE_NX) {
-      return OpStatus::SKIPPED;
-    }
-    if ((params.expire_options & ExpireFlags::EXPIRE_LT) && current <= abs_msec) {
-      return OpStatus::SKIPPED;
-    } else if ((params.expire_options & ExpireFlags::EXPIRE_GT) && current >= abs_msec) {
-      return OpStatus::SKIPPED;
+
+    bool satisfied = false;
+    if ((params.expire_options & ExpireFlags::EXPIRE_LT)) {
+      if (current <= abs_msec)
+        return OpStatus::SKIPPED;
+      satisfied |= true;
     }
 
-    expire_it->second = FromAbsoluteTime(abs_msec);
-    return abs_msec;
+    if ((params.expire_options & ExpireFlags::EXPIRE_GT)) {
+      if (current >= abs_msec)
+        return OpStatus::SKIPPED;
+      satisfied |= true;
+    }
+
+    if (!satisfied && (params.expire_options & ExpireFlags::EXPIRE_NX)) {
+      return OpStatus::SKIPPED;
+    }
   } else {
     if (params.expire_options & ExpireFlags::EXPIRE_XX) {
       return OpStatus::SKIPPED;
     }
-    AddExpire(cntx.db_index, prime_it, abs_msec);
-    return abs_msec;
   }
+
+  // If we update and the new value is already expired, delete the key
+  if (rel_msec <= 0) {
+    Del(cntx, prime_it);
+    return -1;
+  }
+
+  // Update or add expiration
+  if (IsValid(expire_it))
+    expire_it->second = FromAbsoluteTime(abs_msec);
+  else
+    AddExpire(cntx.db_index, prime_it, abs_msec);
+  return abs_msec;
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,

@@ -218,7 +218,7 @@ class DbSlice {
     TimeUnit unit = TimeUnit::SEC;
 
     bool absolute = false;
-    bool persist = false;
+    bool persist = false;        // persist means remove all expiry
     int32_t expire_options = 0;  // ExpireFlags
   };
 
