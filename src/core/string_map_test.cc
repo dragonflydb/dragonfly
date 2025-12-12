@@ -245,4 +245,33 @@ TEST_F(StringMapTest, ExpiryChangesSize) {
   EXPECT_EQ(new_size, sm_->ObjMallocUsed());
 }
 
+TEST_F(StringMapTest, ExpiryWithMaxAndKeepTTL) {
+  sm_->AddOrUpdate("field", "value", 100);
+  auto k = sm_->Find("field");
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 100);
+
+  // ttl is copied from prev. if max value is supplied
+  sm_->AddOrUpdate("field", "value", UINT32_MAX, true);
+  k = sm_->Find("field");
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 100);
+
+  // max ttl value results in no expiry without keepttl
+  sm_->AddOrUpdate("field", "value", UINT32_MAX);
+  EXPECT_FALSE(sm_->Find("field").HasExpiry());
+
+  // No prev. expiry, supplied ttl_sec value is used
+  sm_->AddOrUpdate("field", "value", 10, true);
+  k = sm_->Find("field");
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 10);
+
+  // object removed while adding due to expiry
+  sm_->set_time(11);
+  sm_->AddOrUpdate("field", "value", UINT32_MAX, true);
+  k = sm_->Find("field");
+  EXPECT_FALSE(k.HasExpiry());
+}
+
 }  // namespace dfly

@@ -190,6 +190,22 @@ TEST_F(HSetFamilyTest, HIncrRespected) {
   EXPECT_EQ(11, CheckedInt({"hget", "key", "a"}));
 }
 
+TEST_F(HSetFamilyTest, HIncrCmdsPreserveTtl) {
+  Run({"hsetex", "key", "5", "a", "1"});
+  EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "a"}));
+  EXPECT_EQ(2, CheckedInt({"hincrby", "key", "a", "1"}));
+  EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "a"}));
+
+  // If the field has already expired by the time hincrby runs, the TTL is default
+  AdvanceTime(5 * 1000);
+  EXPECT_EQ(1, CheckedInt({"hincrby", "key", "a", "1"}));
+  EXPECT_EQ(-1, CheckedInt({"fieldttl", "key", "a"}));
+
+  Run({"hsetex", "key", "5", "fl", "1.1"});
+  EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "fl"}));
+  EXPECT_EQ("2.2", Run({"hincrbyfloat", "key", "fl", "1.1"}));
+}
+
 TEST_F(HSetFamilyTest, HScan) {
   auto resp = Run("hscan non-existing-key 100 count 5");
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
