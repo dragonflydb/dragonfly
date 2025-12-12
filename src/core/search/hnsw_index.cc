@@ -65,6 +65,7 @@ struct HnswlibAdapter {
   }
 
   void Add(const float* data, GlobalDocId id) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
     // Check if we need to resize the index
     // We keep the size of the index in a separate atomic to avoid
     // locking exclusively when checking
@@ -91,11 +92,13 @@ struct HnswlibAdapter {
   }
 
   void Remove(GlobalDocId id) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
     std::shared_lock lk(mutex_);
     index_.remove(id);
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     std::shared_lock lk(mutex_);
     std::vector<pair<float, GlobalDocId>> results;
     auto search_result = index_.search(target, k, unum::usearch::index_dense_t::any_thread(), false,
@@ -109,7 +112,6 @@ struct HnswlibAdapter {
                                        const vector<GlobalDocId>& allowed) {
     // to implement
     return {};
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
   }
 
  private:
