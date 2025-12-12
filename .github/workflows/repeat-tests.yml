@@ -48,6 +48,10 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
 
+    permissions:
+      id-token: write
+      contents: read
+
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
@@ -89,14 +93,18 @@ jobs:
           pwd
           ls -l ..
 
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+
       - name: Run tests on repeat
         uses: ./.github/actions/repeat
         with:
           run-only-on-ubuntu-latest: true
           dfly-executable: dragonfly
           build-folder-name: build
-          aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           expression: ${{ inputs.expression }}
           count: ${{ inputs.count }}
