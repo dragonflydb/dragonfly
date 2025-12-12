@@ -1611,11 +1611,18 @@ MemoryResource* CompactObj::memory_resource() {
 }
 
 bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
-  if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
+  JsonType* old = json_ptr;
+  if (ShouldDefragment(page_usage)) {
+    const MiMemoryResource* mr = static_cast<MiMemoryResource*>(memory_resource());
+    const ssize_t before = mr->used();
     json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old));
     DeleteMR<JsonType>(old);
+    if (const ssize_t delta = mr->used() - before; delta != 0) {
+      bytes_used += delta;
+    }
     return true;
   }
+
   return false;
 }
 
