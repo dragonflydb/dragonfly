@@ -3651,4 +3651,31 @@ TEST_F(SearchFamilyTest, ParseCSSResponse) {
   redisReaderFree(reader);
 }
 
+TEST_F(SearchFamilyTest, WithSortKeysOption) {
+  EXPECT_EQ(Run({"ft.create", "users", "SCHEMA", "first_name", "TEXT", "SORTABLE", "last_name",
+                 "TEXT", "age", "NUMERIC", "SORTABLE"}),
+            "OK");
+
+  Run({"HSET", "user1", "first_name", "alice", "last_name", "jones", "age", "35"});
+  Run({"HSET", "user2", "first_name", "bob", "last_name", "jones", "age", "36"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "users", "jones", "SORTBY", "age", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(2), "user1", "#35", "user2", "#36"));
+
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "users", "jones", "SORTBY", "first_name", "WITHSORTKEYS", "NOCONTENT"}),
+      IsArray(IntArg(2), "user1", "$alice", "user2", "$bob"));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "users", "jones", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)));
+
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "users", "jones", "SORTBY", "last_name", "WITHSORTKEYS"}),
+      IsUnordArray(IntArg(2),
+
+                   "user2", "$jones", IsMap("last_name", "jones", "first_name", "bob", "age", "36"),
+                   "user1", "$jones",
+                   IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
+}
+
 }  // namespace dfly
