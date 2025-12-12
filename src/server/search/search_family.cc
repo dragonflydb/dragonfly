@@ -442,6 +442,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
           SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
     } else if (parser->Check("FILTER")) {
       ParseNumericFilter(parser, &params);
+    } else if (parser->Check("WITHSORTKEYS")) {
+      params.with_sortkeys = true;
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -958,7 +960,6 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   auto sortable_value_sender = SortableValueSender(rb);
 
-  rb->SendBulkString(doc.key);
   rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : doc.values) {
     rb->SendBulkString(k);
@@ -1013,19 +1014,28 @@ void SearchReply(const SearchParams& params,
 
   const bool reply_with_ids_only = params.IdsOnly();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
+  const size_t items_per_field = (reply_with_ids_only ? 1 : 2) + params.with_sortkeys;
+  RedisReplyBuilder::ArrayScope scope{rb, limit * items_per_field + 1};
+
+  Overloaded sortable_value_sender{
+      [rb](monostate) { rb->SendNull(); },
+      [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
+      [rb](const string& s) { rb->SendBulkString("$" + s); },
+  };
 
   rb->SendLong(total_hits);
   for (size_t i = offset; i < end; i++) {
-    if (reply_with_ids_only) {
-      rb->SendBulkString(docs[i]->key);
-      continue;
+    rb->SendBulkString(docs[i]->key);
+    if (params.with_sortkeys) {
+      visit(sortable_value_sender, docs[i]->sort_score);
     }
 
-    if (knn_score_ret_field)
-      docs[i]->values[*knn_score_ret_field] = docs[i]->knn_score;
+    if (!reply_with_ids_only) {
+      if (knn_score_ret_field)
+        docs[i]->values[*knn_score_ret_field] = docs[i]->knn_score;
 
-    SendSerializedDoc(*docs[i], builder);
+      SendSerializedDoc(*docs[i], builder);
+    }
   }
 }
 
