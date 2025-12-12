@@ -7,6 +7,8 @@
 // #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <array>
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -1463,8 +1465,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     //    has only 9-10 bytes in its inline prefix storage.
     DCHECK_GT(sv.size(), 16u);  // we would not be in SMALL_TAG, otherwise.
 
-    string_view slice[2];
-    u_.small_str.Get(slice);
+    auto slice = u_.small_str.Get();
     DCHECK_LT(slice[0].size(), 14u);
 
     uint8_t tmpbuf[14];
@@ -1587,19 +1588,17 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
   u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
-StringOrView CompactObj::GetRawString() const {
+std::array<std::string_view, 2> CompactObj::GetRawString() const {
   DCHECK(!IsExternal());
 
   if (taglen_ == ROBJ_TAG) {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return StringOrView::FromView(u_.r_obj.AsView());
+    return {u_.r_obj.AsView(), {}};
   }
 
   if (taglen_ == SMALL_TAG) {
-    string tmp;
-    u_.small_str.Get(&tmp);
-    return StringOrView::FromString(std::move(tmp));
+    return u_.small_str.Get();
   }
 
   LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);

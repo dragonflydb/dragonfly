@@ -99,6 +99,17 @@ void OpManager::Stash(EntryId id_ref, tiering::DiskSegment segment, util::fb2::U
   storage_.Stash(segment, buf, std::move(io_cb));
 }
 
+std::error_code OpManager::PrepareAndStash(EntryId id, size_t length,
+                                           const std::function<size_t(io::MutableBytes)>& writer) {
+  auto buf = PrepareStash(length);
+  if (!buf.has_value())
+    return buf.error();
+
+  size_t written = writer(buf->second.bytes);
+  Stash(id, {buf->first, written}, buf->second);
+  return {};
+}
+
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
   DCHECK_EQ(aligned_segment.offset % kPageSize, 0u);
   DCHECK_EQ(aligned_segment.length % kPageSize, 0u);
