@@ -132,7 +132,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   return std::min(updated, 1);
 }
 
-void PFAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+void PFAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -140,8 +140,8 @@ void PFAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     return AddToHll(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<int> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, cmd_cntx.rb);
+  OpResult<int> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  HandleOpValueResult(res, cmd_cntx->rb);
 }
 
 OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
@@ -211,7 +211,7 @@ vector<HllBufferPtr> ConvertShardVector(const vector<vector<string>>& hlls) {
   return ptrs;
 }
 
-OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) {
+OpResult<int64_t> PFCountMulti(CmdArgList args, CommandContext* cmd_cntx) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
@@ -228,7 +228,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
     return OpStatus::OK;
   };
 
-  OpStatus cb_status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus cb_status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   if (cb_status != OpStatus::OK) {
     return cb_status;
   }
@@ -247,17 +247,17 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 }
 
-void PFCount(CmdArgList args, const CommandContext& cmd_cntx) {
+void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
   if (args.size() == 1) {
     string_view key = ArgS(args, 0);
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return CountHllsSingle(t->GetOpArgs(shard), key);
     };
 
-    OpResult<int64_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-    HandleOpValueResult(res, cmd_cntx.rb);
+    OpResult<int64_t> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+    HandleOpValueResult(res, cmd_cntx->rb);
   } else {
-    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx.rb);
+    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx->rb);
   }
 }
 
@@ -313,16 +313,17 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   return result;
 }
 
-void PFMerge(CmdArgList args, const CommandContext& cmd_cntx) {
-  OpResult<int> result = PFMergeInternal(args, cmd_cntx.tx, cmd_cntx.rb);
+void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  OpResult<int> result = PFMergeInternal(args, cmd_cntx->tx, rb);
   if (result.ok()) {
     if (result.value() == 0) {
-      cmd_cntx.rb->SendOk();
+      rb->SendOk();
     } else {
-      cmd_cntx.rb->SendError(HllFamily::kInvalidHllErr);
+      rb->SendError(HllFamily::kInvalidHllErr);
     }
   } else {
-    HandleOpValueResult(result, cmd_cntx.rb);
+    HandleOpValueResult(result, rb);
   }
 }
 

@@ -221,7 +221,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx);
+  void ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx);
 
   Service& service() {
     return service_;
@@ -340,30 +340,29 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  void Auth(CmdArgList args, const CommandContext& cmd_cntx);
-  void Client(CmdArgList args, const CommandContext& cmd_cntx);
-  void Config(CmdArgList args, const CommandContext& cmd_cntx);
-  void DbSize(CmdArgList args, const CommandContext& cmd_cntx);
-  void Debug(CmdArgList args, const CommandContext& cmd_cntx);
-  void Dfly(CmdArgList args, const CommandContext& cmd_cntx);
-  void Memory(CmdArgList args, const CommandContext& cmd_cntx);
-  void Shrink(CmdArgList args, const CommandContext& cmd_cntx);
-  void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
-  void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Hello(CmdArgList args, const CommandContext& cmd_cntx);
-  void LastSave(CmdArgList args, const CommandContext& cmd_cntx);
-  void Latency(CmdArgList args, const CommandContext& cmd_cntx);
-  void ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
-  void AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
-  void ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void ReplConf(CmdArgList args, const CommandContext& cmd_cntx);
-  void Role(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Save(CmdArgList args, const CommandContext& cmd_cntx);
-  void BgSave(CmdArgList args, const CommandContext& cmd_cntx);
-  void Script(CmdArgList args, const CommandContext& cmd_cntx);
-  void SlowLog(CmdArgList args, const CommandContext& cmd_cntx);
-  void Module(CmdArgList args, const CommandContext& cmd_cntx);
+  void Auth(CmdArgList args, CommandContext* cmd_cntx);
+  void Client(CmdArgList args, CommandContext* cmd_cntx);
+  void Config(CmdArgList args, CommandContext* cmd_cntx);
+  void DbSize(CmdArgList args, CommandContext* cmd_cntx);
+  void Debug(CmdArgList args, CommandContext* cmd_cntx);
+  void Dfly(CmdArgList args, CommandContext* cmd_cntx);
+  void Memory(CmdArgList args, CommandContext* cmd_cntx);
+  void Shrink(CmdArgList args, CommandContext* cmd_cntx);
+  void FlushDb(CmdArgList args, CommandContext* cmd_cntx);
+  void Info(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Hello(CmdArgList args, CommandContext* cmd_cntx);
+  void LastSave(CmdArgList args, CommandContext* cmd_cntx);
+  void Latency(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
+  void AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplConf(CmdArgList args, CommandContext* cmd_cntx);
+  void Role(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Save(CmdArgList args, CommandContext* cmd_cntx);
+  void BgSave(CmdArgList args, CommandContext* cmd_cntx);
+  void Script(CmdArgList args, CommandContext* cmd_cntx);
+  void SlowLog(CmdArgList args, CommandContext* cmd_cntx);
+  void Module(CmdArgList args, CommandContext* cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 

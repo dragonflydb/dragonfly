@@ -136,13 +136,13 @@ class CommandId : public facade::CommandId {
     command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
   }
 
-  using Handler3 = fu2::function_base<true, true, fu2::capacity_default, false, false,
-                                      void(CmdArgList, const CommandContext&) const>;
+  using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
+                                     void(CmdArgList, CommandContext*) const>;
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
   // Returns the invoke time in usec.
-  void Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
+  void Invoke(CmdArgList args, CommandContext* cmd_cntx) const {
     handler_(args, cmd_cntx);
   }
 
@@ -169,7 +169,7 @@ class CommandId : public facade::CommandId {
     return can_be_monitored_;
   }
 
-  CommandId&& SetHandler(Handler3 f) && {
+  CommandId&& SetHandler(Handler f) && {
     handler_ = std::move(f);
     return std::move(*this);
   }
@@ -223,7 +223,7 @@ class CommandId : public facade::CommandId {
   bool can_be_monitored_{true};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
-  Handler3 handler_;
+  Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };

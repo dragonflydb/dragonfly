@@ -411,12 +411,12 @@ void ClusterFamily::KeySlot(CmdArgList args, SinkReplyBuilder* builder) {
   return builder->SendLong(id);
 }
 
-void ClusterFamily::Cluster(CmdArgList args, const CommandContext& cmd_cntx) {
+void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
   // In emulated cluster mode, all slots are mapped to the same host, and number of cluster
   // instances is thus 1.
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (!IsClusterEnabledOrEmulated()) {
     return builder->SendError(kClusterDisabled);
   }
@@ -429,37 +429,38 @@ void ClusterFamily::Cluster(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError(WrongNumArgsError(absl::StrCat("CLUSTER ", sub_cmd)));
   }
 
+  auto* cntx = cmd_cntx->conn_cntx;
   if (sub_cmd == "HELP") {
     return ClusterHelp(builder);
   } else if (sub_cmd == "MYID") {
     return ClusterMyId(builder);
   } else if (sub_cmd == "SHARDS") {
-    return ClusterShards(builder, cmd_cntx.conn_cntx);
+    return ClusterShards(builder, cntx);
   } else if (sub_cmd == "SLOTS") {
-    return ClusterSlots(builder, cmd_cntx.conn_cntx);
+    return ClusterSlots(builder, cntx);
   } else if (sub_cmd == "NODES") {
-    return ClusterNodes(builder, cmd_cntx.conn_cntx);
+    return ClusterNodes(builder, cntx);
   } else if (sub_cmd == "INFO") {
-    return ClusterInfo(builder, cmd_cntx.conn_cntx);
+    return ClusterInfo(builder, cntx);
   } else {
     return builder->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
   }
 }
 
-void ClusterFamily::ReadOnly(CmdArgList args, const CommandContext& cmd_cntx) {
-  cmd_cntx.rb->SendOk();
+void ClusterFamily::ReadOnly(CmdArgList args, CommandContext* cmd_cntx) {
+  cmd_cntx->rb->SendOk();
 }
 
-void ClusterFamily::ReadWrite(CmdArgList args, const CommandContext& cmd_cntx) {
+void ClusterFamily::ReadWrite(CmdArgList args, CommandContext* cmd_cntx) {
   if (!IsClusterEmulated()) {
-    return cmd_cntx.rb->SendError(kClusterDisabled);
+    return cmd_cntx->rb->SendError(kClusterDisabled);
   }
-  cmd_cntx.rb->SendOk();
+  cmd_cntx->rb->SendOk();
 }
 
-void ClusterFamily::DflyCluster(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* builder = cmd_cntx.rb;
-  auto* cntx = cmd_cntx.conn_cntx;
+void ClusterFamily::DflyCluster(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* builder = cmd_cntx->rb;
+  auto* cntx = cmd_cntx->conn_cntx;
   if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
     return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
@@ -793,15 +794,15 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* b
   }
 }
 
-void ClusterFamily::DflyMigrate(CmdArgList args, const CommandContext& cmd_cntx) {
+void ClusterFamily::DflyMigrate(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   args.remove_prefix(1);
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (sub_cmd == "INIT") {
     InitMigration(args, builder);
   } else if (sub_cmd == "FLOW") {
-    DflyMigrateFlow(args, builder, cmd_cntx.conn_cntx);
+    DflyMigrateFlow(args, builder, cmd_cntx->conn_cntx);
   } else if (sub_cmd == "ACK") {
     DflyMigrateAck(args, builder);
   } else {
@@ -1167,10 +1168,10 @@ void ClusterFamily::ReconcileReplicaSlots() {
       [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
 }
 
-using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
+using EngineFunc = void (ClusterFamily::*)(CmdArgList args, CommandContext* cmd_cntx);
 
-inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {
-  return [=](CmdArgList args, const CommandContext& cmd_cntx) { return (se->*f)(args, cmd_cntx); };
+inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
+  return [=](CmdArgList args, CommandContext* cmd_cntx) { return (se->*f)(args, cmd_cntx); };
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))

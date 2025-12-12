@@ -22,11 +22,11 @@ class BloomFamily {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Reserve(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Add(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MAdd(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Exists(CmdArgList args, const CommandContext& cmd_cntx);
-  static void MExists(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Reserve(CmdArgList args, CommandContext* cmd_cntx);
+  static void Add(CmdArgList args, CommandContext* cmd_cntx);
+  static void MAdd(CmdArgList args, CommandContext* cmd_cntx);
+  static void Exists(CmdArgList args, CommandContext* cmd_cntx);
+  static void MExists(CmdArgList args, CommandContext* cmd_cntx);
 };
 
 }  // namespace dfly
