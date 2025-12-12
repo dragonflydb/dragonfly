@@ -1198,11 +1198,11 @@ vector<SearchResult> SearchGlobalHnswIndex(
 
 }  // namespace
 
-void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   WarmupQueryParser();
 
-  auto* builder = cmd_cntx.rb;
-  if (cmd_cntx.conn_cntx->conn_state.db_index != 0) {
+  auto* builder = cmd_cntx->rb;
+  if (cmd_cntx->conn_cntx->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
   }
 
@@ -1218,7 +1218,7 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Check if index already exists
   atomic_uint exists_cnt = 0;
-  cmd_cntx.tx->Execute(
+  cmd_cntx->tx->Execute(
       [idx_name, &exists_cnt](auto* tx, auto* es) {
         if (es->search_indices()->GetIndex(idx_name) != nullptr)
           exists_cnt.fetch_add(1, std::memory_order_relaxed);
@@ -1229,7 +1229,7 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   DCHECK(exists_cnt == 0u || exists_cnt == shard_set->size());
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
-    cmd_cntx.tx->Conclude();
+    cmd_cntx->tx->Conclude();
     return builder->SendError("Index already exists");
   }
 
@@ -1253,13 +1253,13 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
       const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
       if (vparams.use_hnsw &&
           !GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name, vparams)) {
-        cmd_cntx.tx->Conclude();
+        cmd_cntx->tx->Conclude();
         return builder->SendError("Index already exists");
       }
     }
   }
 
-  cmd_cntx.tx->Execute(
+  cmd_cntx->tx->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
         if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
@@ -1272,12 +1272,12 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   builder->SendOk();
 }
 
-void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (auto err = parser.TakeError(); err)
     return builder->SendError(err.MakeReply());
 
@@ -1291,10 +1291,10 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
       index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
     return OpStatus::OK;
   };
-  cmd_cntx.tx->Execute(idx_cb, false);
+  cmd_cntx->tx->Execute(idx_cb, false);
 
   if (!index_info) {
-    cmd_cntx.tx->Conclude();
+    cmd_cntx->tx->Conclude();
     return builder->SendError("Index not found");
   }
 
@@ -1303,7 +1303,7 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   new_index.type = index_info->type;
   auto parse_result = ParseSchema(&parser, &new_index);
   if (SendErrorIfOccurred(parse_result, &parser, builder)) {
-    cmd_cntx.tx->Conclude();
+    cmd_cntx->tx->Conclude();
     return;
   }
 
@@ -1325,12 +1325,12 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
   };
-  cmd_cntx.tx->Execute(upd_cb, true);
+  cmd_cntx->tx->Execute(upd_cb, true);
 
   builder->SendOk();
 }
 
-void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   // Parse optional DD (Delete Documents) parameter
@@ -1372,7 +1372,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(cb, true);
+  cmd_cntx->tx->Execute(cb, true);
 
   if (index_info) {
     for (const auto& [field_ident, field_info] : index_info->schema.fields) {
@@ -1386,17 +1386,17 @@ void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   if (num_deleted == 0u)
-    return cmd_cntx.rb->SendError(IndexNotFoundMsg(idx_name));
-  return cmd_cntx.rb->SendOk();
+    return cmd_cntx->rb->SendError(IndexNotFoundMsg(idx_name));
+  return cmd_cntx->rb->SendOk();
 }
 
-void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   atomic_uint num_notfound{0};
   vector<DocIndexInfo> infos(shard_set->size());
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
     if (index == nullptr)
       num_notfound.fetch_add(1);
@@ -1406,7 +1406,7 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (num_notfound > 0u)
     return rb->SendError(IndexNotFoundMsg(idx_name));
@@ -1473,17 +1473,17 @@ void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendLong(total_num_docs);
 }
 
-void SearchFamily::FtList(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtList(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     // Using `first` to assign `names` only once without a race
     if (first.fetch_add(1) == 0)
       names = es->search_indices()->GetIndexNames();
     return OpStatus::OK;
   });
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   rb->SendBulkStrArr(names);
 }
 
@@ -1553,14 +1553,14 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   return results;
 }
 
-void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
 
   bool is_cross_shard = parser.Check("CSS");
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   auto params = ParseSearchParams(&parser);
   if (SendErrorIfOccurred(params, &parser, builder))
     return;
@@ -1600,7 +1600,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // If the query does not contain knn component, or it is a hybrid query
   if (!knn || (knn && knn->HasPreFilter())) {
-    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
         docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
       else
@@ -1623,7 +1623,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
     docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
-                                 docs, *params, cmd_cntx);
+                                 docs, *params, *cmd_cntx);
   }
 
   // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
@@ -1633,11 +1633,11 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
 }
 
-void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view index_name = parser.Next();
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (!parser.Check("SEARCH") && !parser.Check("AGGREGATE")) {
     return rb->SendError("no `SEARCH` or `AGGREGATE` provided");
@@ -1666,7 +1666,7 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
@@ -1769,14 +1769,14 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   string_view field_name = ArgS(args, 1);
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
@@ -1787,7 +1787,7 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
   });
 
   absl::flat_hash_set<string> result_set;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   // Check first if either shard had errors. Also merge the results into a single set.
   for (auto& res : shard_results) {
@@ -1805,9 +1805,9 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendBulkStrArr(vec, RedisReplyBuilder::SET);
 }
 
-void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
 
   const auto params = ParseAggregatorParams(&parser);
   if (SendErrorIfOccurred(params, &parser, builder))
@@ -1832,7 +1832,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
 
     vector<ResultContainer> query_results(shard_set->size());
 
-    cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(params->index); index) {
         query_results[es->shard_id()] =
             index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
@@ -1889,7 +1889,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
     using JoinDataVector = join::Vector<join::OwnedEntry>;
     std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
         shard_set->size(), std::vector<JoinDataVector>(indexes_count));
-    cmd_cntx.tx->Execute(
+    cmd_cntx->tx->Execute(
         [&](Transaction* t, EngineShard* es) {
           auto& shard_data = preaggregated_shard_data[es->shard_id()];
           for (size_t i = 0; i < indexes_count; ++i) {
@@ -1920,7 +1920,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
     // Load fields for keys that were joined
     std::vector<std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data_per_index(
         shard_set->size(), std::vector<ShardDocIndex::FieldsValuesPerDocId>(indexes_count));
-    cmd_cntx.tx->Execute(
+    cmd_cntx->tx->Execute(
         [&](Transaction* t, EngineShard* es) {
           const ShardId shard_id = es->shard_id();
           auto& shard_keys_data = shard_keys_data_per_index[shard_id];
@@ -1952,7 +1952,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
 
   auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   auto sortable_value_sender = SortableValueSender(rb);
 
   const size_t result_size = agg_results.values.size();
@@ -1978,9 +1978,9 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 }
 
-void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   atomic_bool index_not_found{true};
   // Store per-shard synonym data
@@ -1988,7 +1988,7 @@ void SearchFamily::FtSynDump(CmdArgList args, const CommandContext& cmd_cntx) {
       shard_set->size());
 
   // Collect synonym data from all shards
-  cmd_cntx.tx->Execute(
+  cmd_cntx->tx->Execute(
       [&](Transaction* t, EngineShard* es) {
         auto* index = es->search_indices()->GetIndex(index_name);
         if (!index)
@@ -2121,9 +2121,9 @@ void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
   ABSL_UNREACHABLE();
 }
 
-void SearchFamily::FtConfig(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
 
@@ -2134,7 +2134,7 @@ void SearchFamily::FtConfig(CmdArgList args, const CommandContext& cmd_cntx) {
   func(&parser, rb);
 }
 
-void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [index_name, group_id] = parser.Next<string_view, string>();
 
@@ -2148,17 +2148,17 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   if (terms.empty()) {
-    return cmd_cntx.rb->SendError("No terms specified");
+    return cmd_cntx->rb->SendError("No terms specified");
   }
 
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->rb->SendError(parser.TakeError().MakeReply());
   }
 
   std::atomic_bool index_not_found{true};
 
   // Update synonym groups in all shards
-  cmd_cntx.tx->Execute(
+  cmd_cntx->tx->Execute(
       [&](Transaction* t, EngineShard* es) {
         auto* index = es->search_indices()->GetIndex(index_name);
         if (!index)
@@ -2177,16 +2177,16 @@ void SearchFamily::FtSynUpdate(CmdArgList args, const CommandContext& cmd_cntx) 
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return cmd_cntx.rb->SendError(string{index_name} + ": no such index");
+    return cmd_cntx->rb->SendError(string{index_name} + ": no such index");
 
-  cmd_cntx.rb->SendOk();
+  cmd_cntx->rb->SendOk();
 }
 
-void SearchFamily::FtDebug(CmdArgList args, const CommandContext& cmd_cntx) {
+void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   // FT._DEBUG command stub for test compatibility
   // This command is used by integration tests to control internal behavior
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (args.empty() || parser.Check("HELP")) {
     rb->SendSimpleString("FT._DEBUG - Debug command stub (not fully implemented)");

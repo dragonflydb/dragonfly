@@ -27,6 +27,7 @@ cxx_test(range_tree_test dfly_search_core absl::random_random LABELS DFLY)
 cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
 cxx_test(search_parser_test dfly_search_core LABELS DFLY)
 cxx_test(search_test redis_test_lib dfly_search_core LABELS DFLY)
+cxx_test(mrmw_mutex_test redis_test_lib dfly_search_core fibers2 LABELS DFLY)
 
 if(WITH_SIMSIMD)
   target_link_libraries(search_test TRDP::simsimd)
