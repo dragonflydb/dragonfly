@@ -63,7 +63,7 @@ Dragonfly is a high-performance, Redis and Memcached compatible in-memory data s
 
 ### 5. Workflow Tips
 - **Submodules**: If build fails with missing headers, ensure submodules are updated: `git submodule update --init --recursive`.
-- **Dependencies**: The environment should have dependencies pre-installed. If not, refer to `copilot-instructions.md` for the `apt` command.
+- **Dependencies**: The environment should have dependencies pre-installed. If not, refer to `docs/build-from-source.md` for the `apt` command.
 - **Sanitizers**: Debug builds often include ASAN/UBSAN. Watch out for memory leaks or undefined behavior in output.
 
 ## Agent Behavior
