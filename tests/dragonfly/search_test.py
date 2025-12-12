@@ -636,3 +636,59 @@ async def test_synonym_persistence(df_server):
 
     # Verify synonyms still work after restart
     assert (await idx.search(Query("car"))).total == 2
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_ft_info_concurrent_create_drop(df_server):
+    """
+    Test that FT.INFO doesn't crash when called concurrently with FT.CREATE/FT.DROPINDEX.
+    The bug was a DCHECK failure when some shards have the index while others don't.
+    """
+    ITERATIONS = 500
+
+    async def create_drop_worker(port):
+        client = aioredis.Redis(port=port)
+        for _ in range(ITERATIONS):
+            try:
+                await client.execute_command(
+                    "FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "f", "TEXT"
+                )
+            except Exception:
+                pass  # Index might already exist
+            try:
+                await client.execute_command("FT.DROPINDEX", "idx")
+            except Exception:
+                pass  # Index might not exist
+        await client.close()
+
+    async def info_worker(port):
+        client = aioredis.Redis(port=port)
+        for _ in range(ITERATIONS):
+            try:
+                await client.execute_command("FT.INFO", "idx")
+            except Exception:
+                pass  # Index might not exist - that's OK
+        await client.close()
+
+    # Run multiple workers concurrently with separate connections
+    port = df_server.port
+    tasks = [
+        create_drop_worker(port),
+        create_drop_worker(port),
+        create_drop_worker(port),
+        create_drop_worker(port),
+        create_drop_worker(port),
+        info_worker(port),
+        info_worker(port),
+        info_worker(port),
+        info_worker(port),
+        info_worker(port),
+    ]
+
+    # If there's a crash, this will fail
+    await asyncio.gather(*tasks)
+
+    # Verify server is still alive
+    client = aioredis.Redis(port=port)
+    assert await client.ping()
+    await client.close()
