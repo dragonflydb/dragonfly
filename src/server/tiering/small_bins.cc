@@ -76,7 +76,8 @@ size_t SmallBins::SerializeBin(FilledBin* bin, io::MutableBytes dest) {
 
   // Steal backing array from bin if relevant
   if (current_bin_.entries.empty()) {
-    bin->entries.erase(bin->entries.begin(), bin->entries.end());  // erase doesn't shrink backing, so we can reuse the allocated capacity
+    // erase doesn't shrink backing, so we can reuse the allocated capacity
+    bin->entries.erase(bin->entries.begin(), bin->entries.end());
     current_bin_.entries = std::move(bin->entries);
   }
 
