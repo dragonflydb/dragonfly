@@ -52,7 +52,7 @@ Dragonfly is a high-performance, Redis and Memcached compatible in-memory data s
 - **Commits**:
   - **Must be signed**: `git commit -s`.
   - **Format**: Conventional Commits (`type(scope): description`).
-    - Types: `feat`, `fix`, `chore`, `test`, `refactor`, `perf`, `docs`.
+    - Types: `feat`, `fix`, `build`, `chore`, `ci`, `docs`, `perf`, `refactor`, `revert`, `style`, `test`.
 
 ### 4. Key Directories
 - `src/server`: Core server logic (`dfly_main.cc`, `main_service.cc`).
