@@ -2,8 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
+#include <condition_variable>
+
 #include "base/logging.h"
-#include "util/fibers/synchronization.h"
+#include "base/spinlock.h"
 
 namespace dfly::search {
 
@@ -50,7 +52,7 @@ class MRMWMutex {
     return target_mode == LockMode::kReadLock ? reader_waiters_ : writer_waiters_;
   };
 
-  inline util::fb2::CondVar& GetCondVar(LockMode target_mode) {
+  inline std::condition_variable_any& GetCondVar(LockMode target_mode) {
     return target_mode == LockMode::kReadLock ? reader_cond_var_ : writer_cond_var_;
   };
 
@@ -58,8 +60,10 @@ class MRMWMutex {
     return mode == LockMode::kReadLock ? LockMode::kWriteLock : LockMode::kReadLock;
   }
 
-  util::fb2::Mutex mutex_;
-  util::fb2::CondVar reader_cond_var_, writer_cond_var_;
+  // TODO: use fiber sync primitives in future
+  base::SpinLock mutex_;
+  std::condition_variable_any reader_cond_var_, writer_cond_var_;
+
   size_t writer_waiters_ = 0, reader_waiters_ = 0;
   size_t active_runners_ = 0;
   LockMode lock_mode_;

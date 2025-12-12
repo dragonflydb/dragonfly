@@ -722,7 +722,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
 OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
                     const CommandContext& ctx) {
-  bool explicit_journal = ctx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  bool explicit_journal = ctx.cid->opt_mask() & CO::NO_AUTOJOURNAL;
   return ctx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   });
@@ -984,14 +984,14 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::Set(CmdArgList args, CommandContext* cmnd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
-  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
-  auto* builder = cmnd_cntx.rb;
+  sparams.memcache_flags = cmnd_cntx->conn_cntx->conn_state.memcache_flag;
+  auto* builder = cmnd_cntx->rb;
 
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
@@ -1027,7 +1027,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {
-        cmnd_cntx.tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
+        cmnd_cntx->tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
           ShardArgs args = tx->GetShardArgs(es->shard_id());
           GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
           return OpStatus::OK;
@@ -1064,7 +1064,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   optional<util::fb2::Future<bool>> backpressure;
   sparams.backpressure = &backpressure;
 
-  OpStatus result = SetGeneric(sparams, key, value, cmnd_cntx);
+  OpStatus result = SetGeneric(sparams, key, value, *cmnd_cntx);
   if (result == OpStatus::WRONG_TYPE) {
     return builder->SendError(kWrongTypeErr);
   }
@@ -1075,7 +1075,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
+    return GetReplies{cmnd_cntx->rb}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -1092,13 +1092,13 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
-  string_view cmd_name = cmd_cntx.conn_cntx->cid->name();
+void StringFamily::SetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view cmd_name = cmd_cntx->cid->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (auto err = parser.TakeError(); err)
     return builder->SendError(err.MakeReply());
 
@@ -1119,30 +1119,30 @@ void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx)
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
   sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-  builder->SendError(SetGeneric(sparams, key, value, cmd_cntx));
+  builder->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
 }
 
-void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::SetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
+  sparams.memcache_flags = cmnd_cntx->conn_cntx->conn_state.memcache_flag;
 
-  switch (SetGeneric(sparams, key, value, cmnd_cntx)) {
+  switch (SetGeneric(sparams, key, value, *cmnd_cntx)) {
     case OpStatus::OK:
-      return cmnd_cntx.rb->SendLong(1);  // Successfully set the value
+      return cmnd_cntx->rb->SendLong(1);  // Successfully set the value
     case OpStatus::OUT_OF_MEMORY:
-      return cmnd_cntx.rb->SendError(kOutOfMemory);
+      return cmnd_cntx->rb->SendError(kOutOfMemory);
     case OpStatus::SKIPPED:
-      return cmnd_cntx.rb->SendLong(0);  // Existed, zero updates performed
+      return cmnd_cntx->rb->SendLong(0);  // Existed, zero updates performed
     default:
       LOG(FATAL) << "Invalid result";
   }
 }
 
-void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::Get(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1151,10 +1151,10 @@ void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
     return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::GetDel(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1166,37 +1166,37 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::GetSet(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   optional<StringResult> prev;
   SetCmd::SetParams sparams{.prev_val = &prev};
 
-  if (OpStatus status = SetGeneric(sparams, key, value, cmnd_cntx); status != OpStatus::OK)
-    return cmnd_cntx.rb->SendError(status);
+  if (OpStatus status = SetGeneric(sparams, key, value, *cmnd_cntx); status != OpStatus::OK)
+    return cmnd_cntx->rb->SendError(status);
 
-  GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
+  GetReplies{cmnd_cntx->rb}.Send(std::move(prev));
 }
 
-void StringFamily::Append(CmdArgList args, const CommandContext& cmnd_cntx) {
-  ExtendGeneric(args, false, cmnd_cntx.tx, cmnd_cntx.rb);
+void StringFamily::Append(CmdArgList args, CommandContext* cmnd_cntx) {
+  ExtendGeneric(args, false, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::Prepend(CmdArgList args, const CommandContext& cmnd_cntx) {
-  ExtendGeneric(args, true, cmnd_cntx.tx, cmnd_cntx.rb);
+void StringFamily::Prepend(CmdArgList args, CommandContext* cmnd_cntx) {
+  ExtendGeneric(args, true, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::GetEx(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
-  auto* builder = cmnd_cntx.rb;
+  auto* builder = cmnd_cntx->rb;
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
@@ -1255,40 +1255,40 @@ void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::Incr(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::Incr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, 1, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::IncrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::IncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb->SendError(kInvalidIntErr);
   }
-  return IncrByGeneric(key, val, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, val, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::IncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::IncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return cmnd_cntx.rb->SendError(kInvalidFloatErr);
+    return cmnd_cntx->rb->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrFloat(t->GetOpArgs(shard), key, val);
   };
 
-  OpResult<double> result = cmnd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx.rb);
+  OpResult<double> result = cmnd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
@@ -1298,24 +1298,24 @@ void StringFamily::IncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx)
   rb->SendDouble(result.value());
 }
 
-void StringFamily::Decr(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::Decr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, -1, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::DecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return cmnd_cntx.rb->SendError(kIncrOverflow);
+    return cmnd_cntx->rb->SendError(kIncrOverflow);
   }
 
-  return IncrByGeneric(key, -val, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, -val, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
 // Reorder per-shard results according to argument order of primary command
@@ -1340,16 +1340,16 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::MGet(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   uint8_t fetch_mask = 0;
-  auto* builder = cmnd_cntx.rb;
+  auto* builder = cmnd_cntx->rb;
   const bool is_memcache = builder->GetProtocol() == Protocol::MEMCACHE;
 
   if (is_memcache) {
     fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+    if (cmnd_cntx->conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
   }
 
@@ -1362,7 +1362,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
     return OpStatus::OK;
   };
 
-  OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
   // wait for all tiered reads to finish and check for errors
@@ -1372,7 +1372,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
 
   // reorder shard results back according to argument order
   absl::FixedArray<optional<GetResp>, 8> res(args.size());
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx.tx, is_memcache, absl::MakeSpan(res));
+  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, is_memcache, absl::MakeSpan(res));
 
   SinkReplyBuilder::ReplyScope scope(builder);
   if (is_memcache) {
@@ -1398,13 +1398,13 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 }
 
-void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::MSet(CmdArgList args, CommandContext* cmnd_cntx) {
   if (VLOG_IS_ON(2)) {
     string str;
     for (size_t i = 1; i < args.size(); ++i) {
       absl::StrAppend(&str, " ", ArgS(args, i));
     }
-    LOG(INFO) << "MSET/" << cmnd_cntx.tx->GetUniqueShardCnt() << str;
+    LOG(INFO) << "MSET/" << cmnd_cntx->tx->GetUniqueShardCnt() << str;
   }
 
   AggregateStatus result;
@@ -1415,17 +1415,17 @@ void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
     return OpStatus::OK;
   };
 
-  if (auto status = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
+  if (auto status = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
     result = status;
 
   if (*result == OpStatus::OK) {
-    cmnd_cntx.rb->SendOk();
+    cmnd_cntx->rb->SendOk();
   } else {
-    cmnd_cntx.rb->SendError(*result);
+    cmnd_cntx->rb->SendError(*result);
   }
 }
 
-void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::MSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1444,7 +1444,7 @@ void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
     return OpStatus::OK;
   };
 
-  cmnd_cntx.tx->Execute(std::move(cb), false);
+  cmnd_cntx->tx->Execute(std::move(cb), false);
   const bool to_skip = exists.load(memory_order_relaxed);
 
   AggregateStatus result;
@@ -1457,37 +1457,37 @@ void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
       result = status;
     return OpStatus::OK;
   };
-  cmnd_cntx.tx->Execute(std::move(epilog_cb), true);
+  cmnd_cntx->tx->Execute(std::move(epilog_cb), true);
 
-  cmnd_cntx.rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmnd_cntx->rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void StringFamily::StrLen(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::StrLen(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::GetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
   if (auto err = parser.TakeError(); err) {
-    return cmnd_cntx.rb->SendError(err.MakeReply());
+    return cmnd_cntx->rb->SendError(err.MakeReply());
   }
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::SetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
-  auto* builder = cmnd_cntx.rb;
+  auto* builder = cmnd_cntx->rb;
 
   if (auto err = parser.TakeError(); err) {
     return builder->SendError(err.MakeReply());
@@ -1504,7 +1504,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{builder}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{builder}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
@@ -1520,29 +1520,30 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::ClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   // Allow max burst in number of tokens
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Emit count of tokens per period
   uint64_t count;
   const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Apply quantity of tokens now
@@ -1551,43 +1552,43 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
     const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      return cmnd_cntx.rb->SendError(kInvalidIntErr);
+      return rb->SendError(kInvalidIntErr);
     }
   }
 
   if (max_burst > INT64_MAX - 1) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
   const int64_t limit = max_burst + 1;
 
   if (period > UINT64_MAX / kSecondToNanoSecond || count == 0 ||
       period * kSecondToNanoSecond / count > INT64_MAX) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   const int64_t emission_interval_ns = period * kSecondToNanoSecond / count;
 
   if (emission_interval_ns == 0) {
-    return cmnd_cntx.rb->SendError("zero rates are not supported");
+    return rb->SendError("zero rates are not supported");
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb->SendError(kInvalidIntErr);
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
     return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity);
   };
 
-  Transaction* trans = cmnd_cntx.tx;
+  Transaction* trans = cmnd_cntx->tx;
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmnd_cntx.rb);
+    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
     redis_builder->StartArray(result->size());
     auto& array = result.value();
 
@@ -1609,17 +1610,17 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmnd_cntx.rb->SendError(kWrongTypeErr);
+        cmnd_cntx->rb->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmnd_cntx.rb->SendError(kInvalidIntErr);
+        cmnd_cntx->rb->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmnd_cntx.rb->SendError(kOutOfMemory);
+        cmnd_cntx->rb->SendError(kOutOfMemory);
         break;
       default:
-        cmnd_cntx.rb->SendError(result.status());
+        cmnd_cntx->rb->SendError(result.status());
         break;
     }
   }
@@ -1627,15 +1628,15 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
 
 // Implements the memcache GAT command. The expected input is
 // GAT <expiry-in-seconds> key [keys...]
-void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
+void StringFamily::GAT(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
-  auto* builder = cmnd_cntx.rb;
+  auto* builder = cmnd_cntx->rb;
   const Protocol protocol = builder->GetProtocol();
   DCHECK(protocol == Protocol::MEMCACHE);
 
   uint8_t fetch_mask = FETCH_MCFLAG;
-  if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+  if (cmnd_cntx->conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
     fetch_mask |= FETCH_MCVER;
 
   SinkReplyBuilder::ReplyScope scope(builder);
@@ -1660,7 +1661,7 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
     return OpStatus::OK;
   };
 
-  const OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  const OpStatus result = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
   tiering_bc->Wait();
@@ -1668,7 +1669,7 @@ void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
     return builder->SendError(err.message());
 
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx.tx, true,
+  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, true,
                       absl::MakeSpan(ordered_by_shard));
   for (const auto& entry : ordered_by_shard) {
     if (entry) {

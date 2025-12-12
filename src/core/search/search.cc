@@ -622,14 +622,8 @@ void FieldIndices::FinalizeInitialization() {
 
 DefragmentResult FieldIndices::Defragment(PageUsage* page_usage) {
   auto defrag = [&](auto& indices, string* key) {
-    DefragmentMap dm{indices, [&] {
-                       auto it = key->empty() ? indices.end() : indices.find(*key);
-                       if (it == indices.end()) {
-                         it = indices.begin();
-                       }
-                       return it;
-                     }};
-    return dm.Defragment(page_usage, key);
+    DefragmentMap dm{indices, key};
+    return dm.Defragment(page_usage);
   };
 
   DefragmentResult result = defrag(indices_, &next_defrag_field_);

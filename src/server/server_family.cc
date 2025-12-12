@@ -244,6 +244,12 @@ using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
+using EngineFunc = void (ServerFamily::*)(CmdArgList args, CommandContext*);
+
+inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
+  return [=](CmdArgList args, CommandContext* cntx) { return (se->*f)(args, cntx); };
+}
+
 namespace {
 
 // TODO these should be configurable as command line flag and at runtime via config set
@@ -254,12 +260,6 @@ bool is_histogram_empty(const hdr_histogram* h) {
 }
 
 const auto kRedisVersion = "7.4.0";
-
-using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&);
-
-inline CommandId::Handler3 HandlerFunc(ServerFamily* se, EngineFunc f) {
-  return [=](CmdArgList args, const CommandContext& cntx) { return (se->*f)(args, cntx); };
-}
 
 // Captured memory peaks
 struct {
@@ -2285,18 +2285,18 @@ SaveInfoData ServerFamily::GetLastSaveInfo() const {
   return thread_safe_save_info_.Get();
 }
 
-void ServerFamily::DbSize(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::DbSize(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_ulong num_keys{0};
 
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
-        auto db_size = cmd_cntx.conn_cntx->ns->GetDbSlice(shard->shard_id())
-                           .DbSize(cmd_cntx.conn_cntx->conn_state.db_index);
+        auto db_size = cmd_cntx->conn_cntx->ns->GetDbSlice(shard->shard_id())
+                           .DbSize(cmd_cntx->conn_cntx->conn_state.db_index);
         num_keys.fetch_add(db_size, memory_order_relaxed);
       },
       [](ShardId) { return true; });
 
-  return cmd_cntx.rb->SendLong(num_keys.load(memory_order_relaxed));
+  return cmd_cntx->rb->SendLong(num_keys.load(memory_order_relaxed));
 }
 
 void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
@@ -2347,17 +2347,16 @@ void ServerFamily::SendInvalidationMessages() const {
   }
 }
 
-void ServerFamily::FlushDb(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::FlushDb(CmdArgList args, CommandContext* cmd_cntx) {
   if (args.size() > 1)
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx->rb->SendError(kSyntaxErr);
 
   bool sync = CmdArgParser{args}.Check("SYNC");
-  string_view cmd_name = cmd_cntx.tx->GetCId()->name();
-  DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx.tx->GetDbIndex();
-
-  Drakarys(cmd_cntx.tx, index, sync);
+  string_view cmd_name = cmd_cntx->tx->GetCId()->name();
+  DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmd_cntx->tx->GetDbIndex();
+  Drakarys(cmd_cntx->tx, index, sync);
   SendInvalidationMessages();
-  cmd_cntx.rb->SendOk();
+  cmd_cntx->rb->SendOk();
 }
 
 bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
@@ -2389,12 +2388,12 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
   return is_authorized;
 }
 
-void ServerFamily::Auth(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
   if (args.size() > 2) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx->rb->SendError(kSyntaxErr);
   }
 
-  ConnectionContext* cntx = cmd_cntx.conn_cntx;
+  ConnectionContext* cntx = cmd_cntx->conn_cntx;
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
     const bool one_arg = args.size() == 1;
@@ -2402,16 +2401,16 @@ void ServerFamily::Auth(CmdArgList args, const CommandContext& cmd_cntx) {
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
     if (DoAuth(cntx, username, password)) {
-      return cmd_cntx.rb->SendOk();
+      return cmd_cntx->rb->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return cmd_cntx.rb->SendError(facade::kAuthRejected);
+    return cmd_cntx->rb->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {
-    return cmd_cntx.rb->SendError(
+    return cmd_cntx->rb->SendError(
         "AUTH <password> called without any password configured for "
         "admin port. Are you sure your configuration is correct?");
   }
@@ -2419,9 +2418,9 @@ void ServerFamily::Auth(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view pass = ArgS(args, 0);
   if (pass == GetPassword()) {
     cntx->authenticated = true;
-    cmd_cntx.rb->SendOk();
+    cmd_cntx->rb->SendOk();
   } else {
-    cmd_cntx.rb->SendError(facade::kAuthRejected);
+    cmd_cntx->rb->SendError(facade::kAuthRejected);
   }
 }
 
@@ -2483,11 +2482,11 @@ void ClientHelp(SinkReplyBuilder* builder) {
   return rb->SendSimpleStrArr(help_arr);
 }
 
-void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
-  auto* builder = cmd_cntx.rb;
-  auto* cntx = cmd_cntx.conn_cntx;
+  auto* builder = cmd_cntx->rb;
+  auto* cntx = cmd_cntx->conn_cntx;
 
   if (sub_cmd == "SETNAME") {
     return ClientSetName(sub_args, builder, cntx);
@@ -2504,7 +2503,7 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "CACHING") {
-    return ClientCaching(sub_args, builder, cmd_cntx.tx, cntx);
+    return ClientCaching(sub_args, builder, cmd_cntx->tx, cntx);
   } else if (sub_cmd == "SETINFO") {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
@@ -2518,10 +2517,10 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   return builder->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
-void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Config(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
         "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -2604,28 +2603,28 @@ void ServerFamily::Config(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   if (sub_cmd == "RESETSTAT") {
-    ResetStat(cmd_cntx.conn_cntx->ns);
+    ResetStat(cmd_cntx->conn_cntx->ns);
     return builder->SendOk();
   } else {
     return builder->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
 }
 
-void ServerFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
-  DebugCmd dbg_cmd{this, &service_.cluster_family(), cmd_cntx.conn_cntx};
+void ServerFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
+  DebugCmd dbg_cmd{this, &service_.cluster_family(), cmd_cntx->conn_cntx};
 
-  return dbg_cmd.Run(args, cmd_cntx.rb);
+  return dbg_cmd.Run(args, cmd_cntx->rb);
 }
 
-void ServerFamily::Memory(CmdArgList args, const CommandContext& cmd_cntx) {
-  MemoryCmd mem_cmd{this, cmd_cntx.rb, cmd_cntx.conn_cntx};
+void ServerFamily::Memory(CmdArgList args, CommandContext* cmd_cntx) {
+  MemoryCmd mem_cmd{this, cmd_cntx->rb, cmd_cntx->conn_cntx};
 
   return mem_cmd.Run(args);
 }
 
-void ServerFamily::Shrink(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -2664,7 +2663,7 @@ void ServerFamily::Shrink(CmdArgList args, const CommandContext& cmd_cntx) {
     return bucket_bytes_before - bucket_bytes_after;
   };
 
-  OpResult<int64_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return rb->SendNull();
@@ -2734,37 +2733,38 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
 
 // SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // TODO add missing [SCHEDULE]
-void ServerFamily::BgSave(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx.rb);
+void ServerFamily::BgSave(CmdArgList args, CommandContext* cmd_cntx) {
+  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx->rb);
   if (!maybe_res) {
     return;
   }
 
   DoSaveCheckAndStartOpts opts{.bg_save = true};
-  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx.tx, opts); ec) {
-    cmd_cntx.rb->SendError(ec.Format());
+  if (auto ec = DoSaveCheckAndStart(*maybe_res, cmd_cntx->tx, opts); ec) {
+    cmd_cntx->rb->SendError(ec.Format());
     return;
   }
   bg_save_fb_.JoinIfNeeded();
   bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
-                           boost::intrusive_ptr<Transaction>(cmd_cntx.tx));
-  cmd_cntx.rb->SendOk();
+                           boost::intrusive_ptr<Transaction>(cmd_cntx->tx));
+  cmd_cntx->rb->SendOk();
 }
 
 // SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
-void ServerFamily::Save(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto maybe_res = GetSaveCmdOpts(args, cmd_cntx.rb);
+void ServerFamily::Save(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto maybe_res = GetSaveCmdOpts(args, rb);
   if (!maybe_res) {
     return;
   }
 
-  GenericError ec = DoSave(*maybe_res, cmd_cntx.tx);
+  GenericError ec = DoSave(*maybe_res, cmd_cntx->tx);
   if (ec) {
-    cmd_cntx.rb->SendError(ec.Format());
+    rb->SendError(ec.Format());
   } else {
-    cmd_cntx.rb->SendOk();
+    rb->SendOk();
   }
 }
 
@@ -3434,7 +3434,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
   return info;
 }
 
-void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
   std::vector<std::string> sections;
   bool need_metrics{false};  // Save time - do not fetch metrics if we don't need them.
   Metrics metrics;
@@ -3449,23 +3449,23 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   if (need_metrics || sections.empty()) {
-    metrics = GetMetrics(cmd_cntx.conn_cntx->ns);
+    metrics = GetMetrics(cmd_cntx->conn_cntx->ns);
   } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }
 
   std::string info;
+  bool is_priveleged = cmd_cntx->conn_cntx->conn()->IsPrivileged();
   // For multiple requested sections, invalid section names are ignored (not included in the
   // output). The command does not abort or return an error if some sections are invalid. This
   // matches Valkey behavior.
   if (sections.empty()) {  // No sections: default to all sections.
-    info = FormatInfoMetrics(metrics, "", cmd_cntx.conn_cntx->conn()->IsPrivileged());
+    info = FormatInfoMetrics(metrics, "", is_priveleged);
   } else if (sections.size() == 1) {  // Single section
-    info = FormatInfoMetrics(metrics, sections[0], cmd_cntx.conn_cntx->conn()->IsPrivileged());
+    info = FormatInfoMetrics(metrics, sections[0], is_priveleged);
   } else {  // Multiple sections: concatenate results for each requested section.
     for (const auto& section : sections) {
-      const std::string section_str =
-          FormatInfoMetrics(metrics, section, cmd_cntx.conn_cntx->conn()->IsPrivileged());
+      const std::string section_str = FormatInfoMetrics(metrics, section, is_priveleged);
       if (!section_str.empty()) {
         if (!info.empty()) {
           absl::StrAppend(&info, "\r\n", section_str);
@@ -3476,11 +3476,11 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   rb->SendVerbatimString(info);
 }
 
-void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Hello(CmdArgList args, CommandContext* cmd_cntx) {
   // If no arguments are provided default to RESP2.
   bool is_resp3 = false;
   bool has_auth = false;
@@ -3489,7 +3489,7 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view password;
   string_view clientname;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!args.empty()) {
     string_view proto_version = ArgS(args, 0);
     is_resp3 = proto_version == "3";
@@ -3518,7 +3518,7 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  auto* cntx = cmd_cntx.conn_cntx;
+  auto* cntx = cmd_cntx->conn_cntx;
   if (has_auth && !DoAuth(cntx, username, password)) {
     return rb->SendError(facade::kAuthRejected);
   }
@@ -3573,20 +3573,21 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx) {
   util::fb2::LockGuard lk(replicaof_mu_);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (IsMaster()) {
-    cmd_cntx.rb->SendError("Calling ADDREPLICAOFF allowed only after server is already a replica");
+    rb->SendError("Calling ADDREPLICAOFF allowed only after server is already a replica");
     return;
   }
   CHECK(replica_);
 
-  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cmd_cntx.rb);
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, rb);
   if (!replicaof_args.has_value()) {
     return;
   }
   if (replicaof_args->IsReplicaOfNoOne()) {
-    return cmd_cntx.rb->SendError("ADDREPLICAOF does not support no one");
+    return rb->SendError("ADDREPLICAOF does not support no one");
   }
   LOG(INFO) << "Add Replica " << *replicaof_args;
 
@@ -3594,12 +3595,12 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
                                           master_replid(), replicaof_args->slot_range);
   GenericError ec = add_replica->Start();
   if (ec) {
-    cmd_cntx.rb->SendError(ec.Format());
+    rb->SendError(ec.Format());
     return;
   }
   add_replica->StartMainReplicationFiber(nullopt);
   cluster_replicas_.push_back(std::move(add_replica));
-  cmd_cntx.rb->SendOk();
+  rb->SendOk();
 }
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -3717,13 +3718,13 @@ void ServerFamily::StopAllClusterReplicas() {
   cluster_replicas_.clear();
 }
 
-void ServerFamily::ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::ReplicaOf(CmdArgList args, CommandContext* cmd_cntx) {
   const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
   if (use_replica_of_v2) {
-    ReplicaOfInternalV2(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
+    ReplicaOfInternalV2(args, cmd_cntx->tx, cmd_cntx->rb, ActionOnConnectionFail::kReturnOnError);
     return;
   }
-  ReplicaOfInternal(args, cmd_cntx.tx, cmd_cntx.rb, ActionOnConnectionFail::kReturnOnError);
+  ReplicaOfInternal(args, cmd_cntx->tx, cmd_cntx->rb, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -3840,7 +3841,7 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkRep
 
 // REPLTAKEOVER <seconds> [SAVE]
 // SAVE is used only by tests.
-void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   VLOG(1) << "ReplTakeOver start";
 
   CmdArgParser parser{args};
@@ -3848,7 +3849,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   int timeout_sec = parser.Next<int>();
   bool save_flag = static_cast<bool>(parser.Check("SAVE"));
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (parser.HasNext())
     return builder->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
@@ -3901,8 +3902,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
   return builder->SendOk();
 }
 
-void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* builder = cmd_cntx.rb;
+void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* builder = cmd_cntx->rb;
   {
     util::fb2::LockGuard lk(replicaof_mu_);
     if (!IsMaster()) {
@@ -3918,7 +3919,7 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
   if (args.size() % 2 == 1)
     return err_cb();
 
-  auto* cntx = cmd_cntx.conn_cntx;
+  auto* cntx = cmd_cntx->conn_cntx;
   for (unsigned i = 0; i < args.size(); i += 2) {
     DCHECK_LT(i + 1, args.size());
 
@@ -3995,8 +3996,8 @@ void ServerFamily::ReplConf(CmdArgList args, const CommandContext& cmd_cntx) {
   return builder->SendOk();
 }
 
-void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void ServerFamily::Role(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
   // ensuring eventual consistency of is_master. When determining if the server is a replica and
@@ -4039,17 +4040,17 @@ void ServerFamily::Role(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ServerFamily::Script(CmdArgList args, const CommandContext& cmd_cntx) {
-  script_mgr_->Run(args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void ServerFamily::Script(CmdArgList args, CommandContext* cmd_cntx) {
+  script_mgr_->Run(args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void ServerFamily::LastSave(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::LastSave(CmdArgList args, CommandContext* cmd_cntx) {
   auto info = thread_safe_save_info_.Get();
-  cmd_cntx.rb->SendLong(info.save_time);
+  cmd_cntx->rb->SendLong(info.save_time);
 }
 
-void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void ServerFamily::Latency(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "LATEST" || sub_cmd == "HISTOGRAM") {
@@ -4059,7 +4060,7 @@ void ServerFamily::Latency(CmdArgList args, const CommandContext& cmd_cntx) {
   return rb->SendError(UnknownSubCmd(sub_cmd, "LATENCY"), kSyntaxErrType);
 }
 
-void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx) {
   // Supported options (case-insensitive):
   // SAVE | NOSAVE, NOW, FORCE, ABORT, SAFE (Valkey-specific, the same as SAVE in Dragonfly)
   enum ShutBits : uint32_t {
@@ -4081,18 +4082,18 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
   }
 
   if (auto perr = parser.TakeError(); perr) {
-    return cmd_cntx.rb->SendError(perr.MakeReply());
+    return cmd_cntx->rb->SendError(perr.MakeReply());
   }
 
   // Conflicting toggles
   if ((sb & SB_SAVE) && (sb & SB_NOSAVE)) {
-    cmd_cntx.rb->SendError(kSyntaxErr);
+    cmd_cntx->rb->SendError(kSyntaxErr);
     return;
   }
 
   if (sb & SB_ABORT) {
     // We currently do not support aborting an in-progress shutdown sequence.
-    cmd_cntx.rb->SendError("SHUTDOWN ABORT is not supported");
+    cmd_cntx->rb->SendError("SHUTDOWN ABORT is not supported");
     return;
   }
 
@@ -4110,20 +4111,20 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
   facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
-  cmd_cntx.rb->SendOk();
+  cmd_cntx->rb->SendOk();
 
   // Reset flag for any subsequent restarts (mainly for tests).
   facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
-void ServerFamily::Dfly(CmdArgList args, const CommandContext& cmd_cntx) {
-  dfly_cmd_->Run(args, cmd_cntx.tx, static_cast<RedisReplyBuilder*>(cmd_cntx.rb),
-                 cmd_cntx.conn_cntx);
+void ServerFamily::Dfly(CmdArgList args, CommandContext* cmd_cntx) {
+  dfly_cmd_->Run(args, cmd_cntx->tx, static_cast<RedisReplyBuilder*>(cmd_cntx->rb),
+                 cmd_cntx->conn_cntx);
 }
 
-void ServerFamily::SlowLog(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (sub_cmd == "HELP") {
     string_view help[] = {
         "SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -4165,9 +4166,9 @@ void ServerFamily::SlowLog(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
-void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
+void ServerFamily::Module(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (sub_cmd != "LIST")
     return rb->SendError(kSyntaxErr);

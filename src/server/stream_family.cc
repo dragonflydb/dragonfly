@@ -2003,7 +2003,7 @@ void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* buil
   }
 }
 
-void XGroupHelp(CmdArgList args, const CommandContext& cmd_cntx) {
+void XGroupHelp(CmdArgList args, CommandContext* cmd_cntx) {
   string_view help_arr[] = {"XGROUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
                             "CREATE <key> <groupname> <id|$> [option]",
                             "    Create a new consumer group. Options are:",
@@ -2021,7 +2021,7 @@ void XGroupHelp(CmdArgList args, const CommandContext& cmd_cntx) {
                             "    Set the current group ID and entries_read counter.",
                             "HELP",
                             "    Print this help."};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   return rb->SendSimpleStrArr(help_arr);
 }
 
@@ -2608,7 +2608,8 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
 }
 
 void HelpSubCmd(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
-  XGroupHelp(parser->Tail(), CommandContext{tx, builder, nullptr});
+  CommandContext cmd_cntx{nullptr, tx, builder, nullptr};
+  XGroupHelp(parser->Tail(), &cmd_cntx);
 }
 
 bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
@@ -2672,9 +2673,9 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
 
 }  // namespace
 
-void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XAdd(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   string_view key = parser.Next();
 
@@ -2701,7 +2702,7 @@ void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), fields, journaler);
   };
 
-  OpResult<streamID> add_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<streamID> add_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
 
   if (add_result) {
     rb->SendBulkString(StreamIdRepr(*add_result));
@@ -2786,13 +2787,13 @@ bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* bui
   return true;
 }
 
-void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XClaim(CmdArgList args, CommandContext* cmd_cntx) {
   ClaimOpts opts;
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx->rb->SendError(kSyntaxErr);
   }
   // Ignore negative min-idle-time
   opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64>(0));
@@ -2801,14 +2802,14 @@ void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   auto ids = GetXclaimIds(args);
   if (ids.empty()) {
     // No ids given.
-    return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   // parse the options
-  if (!ParseXclaimOptions(args, opts, cmd_cntx.rb))
+  if (!ParseXclaimOptions(args, opts, cmd_cntx->rb))
     return;
 
-  uint64_t now = cmd_cntx.tx->GetDbContext().time_now_ms;
+  uint64_t now = cmd_cntx->tx->GetDbContext().time_now_ms;
   DCHECK_GT(now, 0u);
 
   if (opts.delivery_time < 0 || static_cast<uint64_t>(opts.delivery_time) > now)
@@ -2817,21 +2818,21 @@ void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
-  OpResult<ClaimInfo> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (!result) {
     if (result.status() == OpStatus::SKIPPED) {
       // Return empty result when operation is skipped
-      StreamReplies{cmd_cntx.rb}.SendClaimInfo(ClaimInfo{});
+      StreamReplies{cmd_cntx->rb}.SendClaimInfo(ClaimInfo{});
       return;
     }
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->rb->SendError(result.status());
     return;
   }
 
-  StreamReplies{cmd_cntx.rb}.SendClaimInfo(result.value());
+  StreamReplies{cmd_cntx->rb}.SendClaimInfo(result.value());
 }
 
-void StreamFamily::XDel(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XDel(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -2841,7 +2842,7 @@ void StreamFamily::XDel(CmdArgList args, const CommandContext& cmd_cntx) {
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);
     if (!ParseID(str_id, true, 0, &parsed_id)) {
-      return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
+      return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
     }
     ids[i] = parsed_id.val;
   }
@@ -2850,15 +2851,15 @@ void StreamFamily::XDel(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx.rb->SendLong(*result);
+    return cmd_cntx->rb->SendLong(*result);
   }
 
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->rb->SendError(result.status());
 }
 
-void StreamFamily::XGroup(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XGroup(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto sub_cmd_func = parser.MapNext("HELP", &HelpSubCmd, "CREATE", &CreateGroup, "DESTROY",
@@ -2866,13 +2867,13 @@ void StreamFamily::XGroup(CmdArgList args, const CommandContext& cmd_cntx) {
                                      "DELCONSUMER", &DelConsumer, "SETID", &SetId);
 
   if (auto err = parser.TakeError(); err)
-    return cmd_cntx.rb->SendError(err.MakeReply());
+    return cmd_cntx->rb->SendError(err.MakeReply());
 
-  sub_cmd_func(&parser, cmd_cntx.tx, cmd_cntx.rb);
+  sub_cmd_func(&parser, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void StreamFamily::XInfo(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
@@ -2895,7 +2896,7 @@ void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->db_index(),
+        DbContext db_context{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->db_index(),
                              GetCurrentTimeMs()};
         return OpListGroups(db_context, key, shard);
       };
@@ -2964,7 +2965,7 @@ void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
         return OpStreams(
-            DbContext{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->db_index(), GetCurrentTimeMs()},
+            DbContext{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->db_index(), GetCurrentTimeMs()},
             key, shard, full, count);
       };
 
@@ -3096,7 +3097,7 @@ void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
         return OpConsumers(
-            DbContext{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->db_index(), GetCurrentTimeMs()},
+            DbContext{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->db_index(), GetCurrentTimeMs()},
             EngineShard::tlocal(), stream_name, group_name);
       };
 
@@ -3129,25 +3130,25 @@ void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
-void StreamFamily::XLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx.rb->SendLong(*result);
+    return cmd_cntx->rb->SendLong(*result);
   }
 
-  return cmd_cntx.rb->SendError(result.status());
+  return cmd_cntx->rb->SendError(result.status());
 }
 
-void StreamFamily::XPending(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XPending(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   PendingOpts opts;
   opts.group_name = ArgS(args, 1);
   args.remove_prefix(2);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!args.empty() && !ParseXpendingOptions(args, opts, rb)) {
     return;
   }
@@ -3155,7 +3156,7 @@ void StreamFamily::XPending(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPending(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<PendingResult> op_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<PendingResult> op_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
       return rb->SendError(NoGroupError(key, opts.group_name));
@@ -3199,20 +3200,20 @@ void StreamFamily::XPending(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void StreamFamily::XRange(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = args[0];
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx.tx, cmd_cntx.rb);
+  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void StreamFamily::XRevRange(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XRevRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = args[0];
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx.tx, cmd_cntx.rb);
+  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx->tx, cmd_cntx->rb);
 }
 
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
@@ -3277,21 +3278,21 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
 }
 
-void StreamFamily::XRead(CmdArgList args, const CommandContext& cmd_cntx) {
-  return XReadGeneric2(args, false, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void StreamFamily::XRead(CmdArgList args, CommandContext* cmd_cntx) {
+  return XReadGeneric2(args, false, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void StreamFamily::XReadGroup(CmdArgList args, const CommandContext& cmd_cntx) {
-  return XReadGeneric2(args, true, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void StreamFamily::XReadGroup(CmdArgList args, CommandContext* cmd_cntx) {
+  return XReadGeneric2(args, true, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void StreamFamily::XSetId(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XSetId(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view idstr = ArgS(args, 1);
 
   ParsedStreamId parsed_id;
   if (!ParseID(idstr, true, 0, &parsed_id)) {
-    return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   facade::ErrorReply reply(OpStatus::OK);
@@ -3300,16 +3301,16 @@ void StreamFamily::XSetId(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   if (reply.status == OpStatus::STREAM_ID_SMALL) {
-    return cmd_cntx.rb->SendError(LeqTopIdError("XSETID"));
+    return cmd_cntx->rb->SendError(LeqTopIdError("XSETID"));
   }
-  return cmd_cntx.rb->SendError(reply);
+  return cmd_cntx->rb->SendError(reply);
 }
 
-void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XTrim(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   std::string_view key = parser.Next();
 
@@ -3325,14 +3326,14 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   // We can auto-journal if we are not trimming approximately or by maxlen
   const bool enable_auto_journaling = !JournalAsMinId(trim_opts);
   if (enable_auto_journaling) {
-    cmd_cntx.tx->ReviveAutoJournal();
+    cmd_cntx->tx->ReviveAutoJournal();
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, trim_opts, !enable_auto_journaling);
   };
 
-  OpResult<int64_t> trim_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<int64_t> trim_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (trim_result) {
     rb->SendLong(*trim_result);
   } else {
@@ -3340,7 +3341,7 @@ void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void StreamFamily::XAck(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XAck(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view group = ArgS(args, 1);
   args.remove_prefix(2);
@@ -3350,7 +3351,7 @@ void StreamFamily::XAck(CmdArgList args, const CommandContext& cmd_cntx) {
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);
     if (!ParseID(str_id, true, 0, &parsed_id)) {
-      return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
+      return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
     }
     ids[i] = parsed_id.val;
   }
@@ -3359,20 +3360,20 @@ void StreamFamily::XAck(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpAck(t->GetOpArgs(shard), key, group, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx.rb->SendLong(*result);
+    return cmd_cntx->rb->SendLong(*result);
   }
 
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->rb->SendError(result.status());
 }
 
-void StreamFamily::XAutoClaim(CmdArgList args, const CommandContext& cmd_cntx) {
+void StreamFamily::XAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   ClaimOpts opts;
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
     return rb->SendError(kSyntaxErr);
@@ -3412,14 +3413,14 @@ void StreamFamily::XAutoClaim(CmdArgList args, const CommandContext& cmd_cntx) {
     if (arg == "JUSTID") {
       opts.flags |= kClaimJustID;
     } else {
-      return cmd_cntx.rb->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
+      return cmd_cntx->rb->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
     }
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAutoClaim(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<ClaimInfo> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendError(NoGroupOrKey(key, opts.group));

@@ -89,31 +89,31 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
 
 }  // namespace
 
-void BloomFamily::Reserve(CmdArgList args, const CommandContext& cmd_cntx) {
+void BloomFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   string_view key = parser.Next();
   SbfParams params;
 
   tie(params.error, params.init_capacity) = parser.Next<double, uint32_t>();
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (parser.TakeError())
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return rb->SendError(kSyntaxErr);
 
   if (!params.ok())
-    return cmd_cntx.rb->SendError("error rate is out of range", kSyntaxErrType);
+    return rb->SendError("error rate is out of range", kSyntaxErrType);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpReserve(params, t->GetOpArgs(shard), key);
   };
 
-  OpStatus res = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus res = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   if (res == OpStatus::KEY_EXISTS) {
-    return cmd_cntx.rb->SendError("item exists");
+    return rb->SendError("item exists");
   }
-  return cmd_cntx.rb->SendError(res);
+  return rb->SendError(res);
 }
 
-void BloomFamily::Add(CmdArgList args, const CommandContext& cmd_cntx) {
+void BloomFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -121,30 +121,30 @@ void BloomFamily::Add(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   OpStatus status = res.status();
   if (res) {
     if (res->front())
-      return cmd_cntx.rb->SendLong(*res->front());
+      return cmd_cntx->rb->SendLong(*res->front());
     else
       status = res->front().status();
   }
 
-  return cmd_cntx.rb->SendError(status);
+  return cmd_cntx->rb->SendError(status);
 }
 
-void BloomFamily::Exists(CmdArgList args, const CommandContext& cmd_cntx) {
+void BloomFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  return cmd_cntx.rb->SendLong(res ? res->front() : 0);
+  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  return cmd_cntx->rb->SendLong(res ? res->front() : 0);
 }
 
-void BloomFamily::MAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+void BloomFamily::MAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -152,8 +152,8 @@ void BloomFamily::MAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     return rb->SendError(res.status());
   }
@@ -169,7 +169,7 @@ void BloomFamily::MAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void BloomFamily::MExists(CmdArgList args, const CommandContext& cmd_cntx) {
+void BloomFamily::MExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -177,9 +177,9 @@ void BloomFamily::MExists(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   RedisReplyBuilder::ArrayScope scope{rb, args.size()};
   for (size_t i = 0; i < args.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);
