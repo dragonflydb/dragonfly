@@ -547,7 +547,7 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   OpSetParams op_sp;
 
   const auto option_already_set = [&cmd_cntx] {
-    return cmd_cntx.rb->SendError(WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()));
+    return cmd_cntx.rb->SendError(WrongNumArgsError(cmd_cntx.cid->name()));
   };
 
   while (true) {
@@ -580,8 +580,7 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgList fields = parser.Tail();
 
   if (fields.size() % 2 != 0) {
-    return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()),
-                                  kSyntaxErrType);
+    return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd_cntx.cid->name()), kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -851,7 +850,7 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
 void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  string_view cmd{cmd_cntx.conn_cntx->cid->name()};
+  string_view cmd{cmd_cntx.cid->name()};
 
   if (args.size() % 2 != 1) {
     return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);

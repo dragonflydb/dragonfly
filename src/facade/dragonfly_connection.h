@@ -21,6 +21,7 @@
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
@@ -84,14 +85,7 @@ class Connection : public util::Connection {
   using PipelineMessage = cmn::BackedArguments;
 
   // Pipeline message, accumulated Memcached command to be executed.
-  struct MCPipelineMessage {
-    MCPipelineMessage(MemcacheParser::Command cmd, std::string_view value);
-
-    MemcacheParser::Command cmd;
-    std::string_view value;
-    size_t backing_size;
-    std::unique_ptr<char[]> backing;  // backing for cmd and value
-  };
+  using MCPipelineMessage = MemcacheParser::Command;
 
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
@@ -334,6 +328,10 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
+  void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  // Main loop reading client messages and passing requests to dispatch queue.
+  std::variant<std::error_code, ParserStatus> IoLoopV2();
+
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();
 
@@ -406,6 +404,9 @@ class Connection : public util::Connection {
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
 
+  std::error_code io_ec_;
+  util::fb2::CondVarAny io_event_;
+
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
   size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
 
@@ -416,6 +417,7 @@ class Connection : public util::Connection {
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
+  MemcacheParser::Command mc_cmd_;
 
   uint32_t id_;
   Protocol protocol_;
@@ -474,6 +476,8 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
+      // If post migration is allowed to call RegisterRecv
+      bool migration_allowed_to_register_ : 1;
     };
   };
 

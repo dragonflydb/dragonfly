@@ -17,7 +17,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$FUZZ_DIR/artifacts/$TARGET}"
 CORPUS_DIR="${CORPUS_DIR:-$FUZZ_DIR/corpus/$TARGET}"
 SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
-TIMEOUT="10000+"
+TIMEOUT="500"
 FUZZ_TARGET="$BUILD_DIR/dragonfly"
 AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
 
@@ -79,9 +79,10 @@ run_fuzzer() {
 
     AFL_CMD=(
         afl-fuzz -D
+        -l 2
         -o "${OUTPUT_DIR}"
         -t "${TIMEOUT}"
-        -m none
+        -m 4096
         -i "${CORPUS_DIR}"
     )
 
@@ -99,6 +100,10 @@ run_fuzzer() {
         --bind=::
         --dbfilename=""
         --omit_basic_usage
+        --rename_command=SHUTDOWN=
+        --rename_command=DEBUG=
+        --rename_command=FLUSHALL=
+        --rename_command=FLUSHDB=
     )
 
     print_info "Running: ${AFL_CMD[*]}"
@@ -107,6 +112,9 @@ run_fuzzer() {
     cd "${OUTPUT_DIR}"
 
     # Run AFL++ - fuzzing integrated in dragonfly via USE_AFL
+    # AFL_HANG_TMOUT: Only consider it a hang if no response for 60 seconds
+    # This prevents false positives from slow but legitimate operations
+    export AFL_HANG_TMOUT=60000
     exec "${AFL_CMD[@]}"
 }
 

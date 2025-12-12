@@ -105,23 +105,24 @@ def test_length_in_set_command(df_server: DflyInstance, memcached_client: MCClie
     """
     Test parser correctly reads value based on length and complains about bad chunks
     """
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(("127.0.0.1", int(df_server["memcached_port"])))
-
     cases = [b"NOTFOUR", b"FOUR", b"F4\r\n", b"\r\n\r\n"]
 
-    # TODO: \r\n hangs
-
     for case in cases:
-        print("case", case)
-        client.sendall(b"set foo 0 0 4\r\n" + case + b"\r\n")
-        response = client.recv(256)
-        if len(case) == 4:
-            assert response == b"STORED\r\n"
-        else:
-            assert response == b"CLIENT_ERROR bad data chunk\r\n"
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(("127.0.0.1", int(df_server["memcached_port"])))
 
-    client.close()
+        logging.info(f"Case {case}")
+        client.sendall(b"set foo 0 0 4\r\n" + case + b"\r\n")
+        response = client.recv(256).decode()
+        if len(case) == 4:
+            assert response == "STORED\r\n"
+        else:
+            # response should follow up with ERROR due to OUR\r\n being
+            # parsed as unknown command but we can not guarantee that
+            # it will be read in the same recv call, so just check the prefix.
+            assert response.startswith("CLIENT_ERROR bad data chunk\r\n")
+
+        client.close()
 
 
 # Auxiliary tests

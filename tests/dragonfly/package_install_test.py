@@ -11,17 +11,19 @@ def check(container: DockerContainer, cmd: str):
 
 @pytest.mark.skipif(platform.processor() != "x86_64", reason="rpm is only built for x86_64")
 async def test_install_package_on_fedora():
-    with DockerContainer(image="public.ecr.aws/docker/library/fedora:latest", tty=True) as fedora:
+    with DockerContainer(image="ghcr.io/romange/fedora:30", tty=True) as fedora:
         check(
             fedora,
-            "dnf config-manager addrepo --from-repofile=https://packages.dragonflydb.io/dragonfly.repo",
+            "curl -Lo /etc/yum.repos.d/dragonfly.repo https://packages.dragonflydb.io/dragonfly.repo",
         )
+        check(fedora, "dnf clean all")
+        check(fedora, "dnf makecache")
         check(fedora, "dnf -y install dragonfly")
         check(fedora, "dragonfly --version")
 
 
 async def test_install_package_on_ubuntu():
-    with DockerContainer(image="public.ecr.aws/docker/library/ubuntu:noble", tty=True) as ubuntu:
+    with DockerContainer(image="ghcr.io/romange/ubuntu:noble", tty=True) as ubuntu:
         check(ubuntu, "apt update")
         check(ubuntu, "apt install -y curl")
         check(

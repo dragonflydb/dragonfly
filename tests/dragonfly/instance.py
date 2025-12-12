@@ -402,6 +402,9 @@ class DflyInstance:
         mem_info = process.memory_info()
         return mem_info.rss
 
+    def has_arg(self, arg):
+        return arg in self.args
+
 
 class DflyInstanceFactory:
     """
@@ -446,6 +449,9 @@ class DflyInstanceFactory:
 
         if path is not None:
             params = dataclasses.replace(self.params, path=path)
+
+        if version < 1.35:
+            params.args.pop("experimental_io_loop_v2", None)
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)

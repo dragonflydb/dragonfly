@@ -181,33 +181,29 @@ void RangeTree::FinalizeInitialization() {
   DCHECK_EQ(entries_.size(), 1u);
 
   auto& block = entries_.begin()->second;
-  const size_t total_size = block.Size();
-
-  std::vector<Entry> entries(total_size);
-  size_t index = 0;
-  for (const auto& [id, value] : block) {
-    entries[index++] = {id, value};
-  }
+  std::vector<Entry> entries(block.Size());
+  std::copy(block.begin(), block.end(), entries.begin());  // avoid std::distance call
 
   enable_splitting_ = true;
   block.Clear();
+  block.max_seen = -std::numeric_limits<double>::infinity();  // reset right bound
 
   std::sort(entries.begin(), entries.end(),
             [](const auto& a, const auto& b) { return a.second < b.second; });
 
-  for (size_t b = 0; b < entries.size(); b += max_range_block_size_) {
-    RangeBlock* range_block;
-    if (b) {
-      range_block = &CreateEmptyBlock(entries[b].second)->second;
-    } else {
-      range_block = &block;
-    }
+  // Add sorted elements in batches
+  for (size_t idx = 0; idx < entries.size();) {
+    // Select existing leftmost block for first batch, otherwise create new empty block
+    RangeBlock* range_block = idx ? &CreateEmptyBlock(entries[idx].second)->second : &block;
 
-    DCHECK(range_block);
+    while (idx < entries.size()) {
+      // Stop if we filled a block and a new value started (equal value must be in same block)
+      if (range_block->Size() >= max_range_block_size_ &&
+          entries[idx - 1].second != entries[idx].second)
+        break;
 
-    const size_t end = std::min(b + max_range_block_size_, total_size);
-    for (size_t i = b; i < end; ++i) {
-      range_block->Insert(entries[i]);
+      range_block->Insert(entries[idx]);
+      idx++;
     }
   }
 }

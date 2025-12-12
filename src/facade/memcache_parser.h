@@ -9,6 +9,9 @@
 #include <string_view>
 #include <vector>
 
+#include "common/backed_args.h"
+#include "facade/facade_types.h"
+
 namespace facade {
 
 // Memcache parser does not parse value blobs, only the commands.
@@ -51,10 +54,23 @@ class MemcacheParser {
   };
 
   // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol
-  struct Command {
+  struct Command : public cmn::BackedArguments {
+    Command() = default;
+    Command(const Command&) = delete;
+    Command(Command&&) noexcept = default;
+
     CmdType type = INVALID;
-    std::string_view key;
-    std::vector<std::string_view> keys_ext;
+
+    std::string_view key() const {
+      return empty() ? std::string_view{} : Front();
+    }
+
+    // For STORE commands, value is at index 1.
+    // For both key and value we provide convenience accessors that return empty string_view
+    // if not present.
+    std::string_view value() const {
+      return size() < 2 ? std::string_view{} : at(1);
+    }
 
     union {
       uint64_t cas_unique = 0;  // for CAS COMMAND
@@ -63,7 +79,6 @@ class MemcacheParser {
 
     uint32_t expire_ts =
         0;  // relative (expire_ts <= month) or unix time (expire_ts > month) in seconds
-    uint32_t bytes_len = 0;
     uint32_t flags = 0;
     bool no_reply = false;  // q
     bool meta = false;
@@ -77,11 +92,12 @@ class MemcacheParser {
     bool return_hit = false;          // h
     bool return_version = false;      // c
 
-    // Used internally by meta parsing.
-    std::string blob;
+    char* value_ptr() {
+      return storage_.data() + elem_capacity(0);
+    }
   };
 
-  enum Result {
+  enum Result : uint8_t {
     OK,
     INPUT_PENDING,
     UNKNOWN_CMD,
@@ -94,7 +110,21 @@ class MemcacheParser {
     return type >= SET && type <= CAS;
   }
 
+  size_t UsedMemory() const {
+    return tmp_args_.capacity() * sizeof(std::string_view);
+  }
+
+  void Reset() {
+    val_len_to_read_ = 0;
+  }
+
   Result Parse(std::string_view str, uint32_t* consumed, Command* res);
+
+ private:
+  Result ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest);
+
+  uint32_t val_len_to_read_ = 0;
+  std::vector<std::string_view> tmp_args_;
 };
 
 }  // namespace facade

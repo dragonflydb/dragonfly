@@ -592,7 +592,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     VLOG(1) << "Takeover accepted, shutting down.";
     std::string save_arg = "NOSAVE";
     MutableSlice sargs(save_arg);
-    sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, rb, nullptr});
+    sf_->ShutdownCmd(CmdArgList(&sargs, 1), CommandContext{nullptr, nullptr, rb, nullptr});
     return;
   }
 

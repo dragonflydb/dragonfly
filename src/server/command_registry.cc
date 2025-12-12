@@ -41,6 +41,7 @@ using namespace facade;
 
 using absl::AsciiStrToUpper;
 using absl::GetFlag;
+using absl::StrCat;
 using absl::StrSplit;
 
 namespace {
@@ -128,16 +129,56 @@ constexpr int32_t kLatencyHistogramPrecision = 2;
 
 }  // namespace
 
+void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
+  DCHECK_GT(start_time_ns, 0u);
+  int64_t after = absl::GetCurrentTimeNanos();
+
+  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
+  int64_t execution_time_usec = (after - start_time_ns) / 1000;
+
+  cid->RecordLatency(ss->thread_index(), execution_time_usec);
+
+  DCHECK(conn_cntx != nullptr);
+
+  // TODO: we should probably discard more commands here,
+  // not just the blocking ones
+  const auto* conn = conn_cntx->conn();
+  if (conn_cntx->conn_state.squashing_info) {
+    // We run from the squashed transaction.
+    conn = conn_cntx->conn_state.squashing_info->owner->conn();
+  }
+
+  if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
+      // Use SafeTLocal() to avoid accessing the wrong thread local instance
+      ServerState::SafeTLocal()->ShouldLogSlowCmd(execution_time_usec)) {
+    vector<string> aux_params;
+    CmdArgVec aux_slices;
+
+    if (tail_args.empty() && cid->name() == "EXEC") {
+      // abuse tail_args to pass more information about the slow EXEC.
+      aux_params.emplace_back(StrCat("CMDCOUNT/", exec_body_len));
+      aux_slices.emplace_back(aux_params.back());
+      tail_args = absl::MakeSpan(aux_slices);
+    }
+    ServerState::SafeTLocal()->GetSlowLog().Add(cid->name(), tail_args, conn->GetName(),
+                                                conn->RemoteEndpointStr(), execution_time_usec,
+                                                absl::GetCurrentTimeNanos() / 1000);
+  }
+}
+
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
                         acl_categories.value_or(ImplicitAclCategories(mask))) {
   implicit_acl_ = !acl_categories.has_value();
-  hdr_histogram* hist = nullptr;
-  const int init_result = hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue,
-                                   kLatencyHistogramPrecision, &hist);
-  CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;
-  latency_histogram_ = hist;
+  bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
+  if (is_latency_tracked) {
+    hdr_histogram* hist = nullptr;
+    const int init_result = hdr_init(kLatencyHistogramMinValue, kLatencyHistogramMaxValue,
+                                     kLatencyHistogramPrecision, &hist);
+    CHECK_EQ(init_result, 0) << "failed to initialize histogram for command " << name;
+    latency_histogram_ = hist;
+  }
 
   if (name_.rfind("EVAL", 0) == 0)
     kind_multi_ctr_ = CO::MultiControlKind::EVAL;
@@ -149,6 +190,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     kind_pubsub_ = CO::PubSubKind::PATTERN;
   else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"}))
     kind_pubsub_ = CO::PubSubKind::SHARDED;
+  can_be_monitored_ = (opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC";
 }
 
 CommandId::~CommandId() {
@@ -169,8 +211,10 @@ CommandId CommandId::Clone(const std::string_view name) const {
 
   // explicit sharing of the object since it's an alias we can do that.
   // I am assuming that the source object lifetime is at least as of the cloned object.
-  hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
-  cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
+  if (cloned.latency_histogram_) {
+    hdr_close(cloned.latency_histogram_);  // Free the histogram in the cloned object.
+    cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
+  }
   return cloned;
 }
 
@@ -187,28 +231,6 @@ bool CommandId::IsTransactional() const {
 
 bool CommandId::IsMultiTransactional() const {
   return kind_multi_ctr_.has_value();
-}
-
-uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
-  uint64_t before = cmd_cntx.conn_cntx->conn_state.cmd_start_time_ns;
-  DCHECK_GT(before, 0u);
-  handler_(args, cmd_cntx);
-  int64_t after = absl::GetCurrentTimeNanos();
-
-  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = (after - before) / 1000;
-
-  auto& ent = command_stats_[ss->thread_index()];
-
-  ++ent.first;
-  ent.second += execution_time_usec;
-  static const bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
-  if (is_latency_tracked) {
-    if (hdr_histogram* cmd_histogram = latency_histogram_; cmd_histogram != nullptr) {
-      hdr_record_value(cmd_histogram, execution_time_usec);
-    }
-  }
-  return execution_time_usec;
 }
 
 optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
@@ -238,8 +260,15 @@ void CommandId::ResetStats(unsigned thread_index) {
   }
 }
 
-hdr_histogram* CommandId::LatencyHist() const {
-  return latency_histogram_;
+void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
+  auto& ent = command_stats_[tid];
+
+  ++ent.first;
+  ent.second += latency_usec;
+
+  if (latency_histogram_) {
+    hdr_record_value(latency_histogram_, latency_usec);
+  }
 }
 
 CommandRegistry::CommandRegistry() {
@@ -280,7 +309,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
-    k = is_sub_command ? absl::StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
+    k = is_sub_command ? StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
   }
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
@@ -333,7 +362,7 @@ std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(string_vie
     }
 
     auto second_cmd = absl::AsciiStrToUpper(tail_args.Front());
-    string full_cmd = absl::StrCat(cmd, " ", second_cmd);
+    string full_cmd = StrCat(cmd, " ", second_cmd);
 
     return {Find(full_cmd), tail_args.Tail()};
   }
@@ -355,7 +384,7 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latencies;
   cmd_latencies.reserve(cmd_map_.size());
   for (const auto& [cmd_name, cmd] : cmd_map_) {
-    cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.LatencyHist()});
+    cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.GetLatencyHist()});
   }
   return cmd_latencies;
 }

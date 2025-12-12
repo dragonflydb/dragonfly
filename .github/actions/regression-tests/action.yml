@@ -31,6 +31,11 @@ inputs:
   epoll:
     required: false
     type: string
+  df-arg:
+    default: ""
+    required: false
+    type: string
+
 runs:
   using: "composite"
   # bring back timeouts once composite actions start supporting them
@@ -46,8 +51,17 @@ runs:
       shell: bash
       run: |
         DOCKER_VERSION="26.1.4"
-        curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
-        registry="public.ecr.aws/docker/library" && for image in fedora:latest ubuntu:noble; do ./docker pull "$registry/$image"; done
+        RUNNER_ARCH="${{ runner.arch }}"
+        if [ "$RUNNER_ARCH" == "X64" ]; then
+          ARCH="x86_64"
+        elif [ "$RUNNER_ARCH" == "ARM64" ]; then
+          ARCH="aarch64"
+        else
+          echo "Unknown architecture: ${RUNNER_ARCH}"
+          exit 1
+        fi
+        curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
+        registry="ghcr.io/romange" && for image in fedora:30 ubuntu:noble; do ./docker pull "$registry/$image"; done
     - name: Run PyTests
       id: main
       shell: bash
@@ -61,14 +75,19 @@ runs:
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
+        if [[ "${{inputs.df-arg}}" == 'experimental_io_loop_v2' ]]; then
+          echo "df-arg: experimental io loop v2"
+          export DF_ARG="--df experimental_io_loop_v2=true"
+        fi
+
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
           export FILTER="${{inputs.filter}} and not exclude_epoll"
           # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           export FILTER="${{inputs.filter}}"
           # Run only replication tests with iouring
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --log-cli-level=INFO || code=$?
         fi
 
         # timeout returns 124 if we exceeded the timeout duration

@@ -61,8 +61,6 @@ option(DF_USE_SSL "Provide support for SSL connections" ON)
 
 find_package(OpenSSL)
 
-SET(SANITIZERS OFF)
-
 # AFL++ configuration - must be before sanitizer checks
 if(USE_AFL)
   message(STATUS "AFL++ fuzzing mode active")
@@ -91,18 +89,12 @@ option(WITH_ASAN "Enable -fsanitize=address" OFF)
 if (SUPPORT_ASAN AND WITH_ASAN)
   message(STATUS "address sanitizer enabled")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
-  set(SANITIZERS ON)
 endif()
 
 option(WITH_USAN "Enable -fsanitize=undefined" OFF)
 if (SUPPORT_USAN AND WITH_USAN)
   message(STATUS "ub sanitizer enabled")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
-  set(SANITIZERS ON)
-endif()
-
-if(SANITIZERS)
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 endif()
 
 include(third_party)

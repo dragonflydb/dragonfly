@@ -491,7 +491,6 @@ TEST_F(DflyEngineTest, OOM) {
   }
 }
 
-#ifndef SANITIZERS
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
@@ -560,8 +559,6 @@ TEST_F(DflyEngineTest, StickyEviction) {
     ASSERT_THAT(Run({"exists", StrCat("key", i)}), IntArg(1));
   }
 }
-
-#endif
 
 TEST_F(DflyEngineTest, ZeroAllocationEviction) {
   max_memory_limit = 500000;  // 0.5mb

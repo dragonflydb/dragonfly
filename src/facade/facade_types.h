@@ -85,13 +85,11 @@ class ParsedArgs {
 
     const cmn::BackedArguments* args_;
     uint32_t index_ = 0;
-    uint32_t ofs_bytes_ = 0;
 
     ParsedArgs Tail() const {
       ParsedArgs res(*args_);
       WrapperBacked* wb = std::get_if<WrapperBacked>(&res.args_);
       wb->index_ = index_ + 1;
-      wb->ofs_bytes_ = ofs_bytes_ + args_->elem_capacity(index_);
       return res;
     };
 
@@ -100,16 +98,11 @@ class ParsedArgs {
     }
 
     std::string_view front() const {
-      return args_->at(index_, ofs_bytes_);
+      return args_->at(index_);
     }
 
     ArgSlice ToSlice(CmdArgVec* scratch) const {
-      scratch->resize(size());
-      size_t offset = ofs_bytes_;
-      for (size_t i = 0; i < scratch->size(); ++i) {
-        (*scratch)[i] = args_->at(index_ + i, offset);
-        offset += args_->elem_capacity(index_ + i);
-      }
+      scratch->assign(args_->begin() + index_, args_->end());
       return ArgSlice{scratch->data(), scratch->size()};
     }
   };
