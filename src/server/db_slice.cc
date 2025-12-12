@@ -1071,30 +1071,21 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::OUT_OF_RANGE;
   }
 
+  int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
+  bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
+
   if (IsValid(expire_it)) {
-    int64_t current = ExpireTime(expire_it->second);
-
-    bool satisfied = false;
-    if ((params.expire_options & ExpireFlags::EXPIRE_LT)) {
-      if (current <= abs_msec)
-        return OpStatus::SKIPPED;
-      satisfied |= true;
-    }
-
-    if ((params.expire_options & ExpireFlags::EXPIRE_GT)) {
-      if (current >= abs_msec)
-        return OpStatus::SKIPPED;
-      satisfied |= true;
-    }
-
-    if (!satisfied && (params.expire_options & ExpireFlags::EXPIRE_NX)) {
-      return OpStatus::SKIPPED;
-    }
+    current_cmp = ExpireTime(expire_it->second);
+    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
   } else {
-    if (params.expire_options & ExpireFlags::EXPIRE_XX) {
-      return OpStatus::SKIPPED;
-    }
+    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
   }
+
+  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_LT) && (abs_msec < current_cmp);
+  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_GT) && (abs_msec > current_cmp);
+
+  if (!satisfied)
+    return OpStatus::SKIPPED;
 
   // If we update and the new value is already expired, delete the key
   if (rel_msec <= 0) {
