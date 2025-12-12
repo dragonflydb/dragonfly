@@ -34,22 +34,22 @@ class HSetFamily {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void HExpire(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HDel(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HLen(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HExists(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HGet(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HMGet(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HIncrBy(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HKeys(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HVals(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HGetAll(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HIncrByFloat(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HScan(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HSet(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HSetNx(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HStrLen(CmdArgList args, const CommandContext& cmd_cntx);
-  static void HRandField(CmdArgList args, const CommandContext& cmd_cntx);
+  static void HExpire(CmdArgList args, CommandContext* cmd_cntx);
+  static void HDel(CmdArgList args, CommandContext* cmd_cntx);
+  static void HLen(CmdArgList args, CommandContext* cmd_cntx);
+  static void HExists(CmdArgList args, CommandContext* cmd_cntx);
+  static void HGet(CmdArgList args, CommandContext* cmd_cntx);
+  static void HMGet(CmdArgList args, CommandContext* cmd_cntx);
+  static void HIncrBy(CmdArgList args, CommandContext* cmd_cntx);
+  static void HKeys(CmdArgList args, CommandContext* cmd_cntx);
+  static void HVals(CmdArgList args, CommandContext* cmd_cntx);
+  static void HGetAll(CmdArgList args, CommandContext* cmd_cntx);
+  static void HIncrByFloat(CmdArgList args, CommandContext* cmd_cntx);
+  static void HScan(CmdArgList args, CommandContext* cmd_cntx);
+  static void HSet(CmdArgList args, CommandContext* cmd_cntx);
+  static void HSetNx(CmdArgList args, CommandContext* cmd_cntx);
+  static void HStrLen(CmdArgList args, CommandContext* cmd_cntx);
+  static void HRandField(CmdArgList args, CommandContext* cmd_cntx);
 };
 
 }  // namespace dfly

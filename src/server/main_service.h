@@ -126,27 +126,27 @@ class Service : public facade::ServiceInterface {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Quit(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Multi(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Quit(CmdArgList args, CommandContext* cmd_cntx);
+  static void Multi(CmdArgList args, CommandContext* cmd_cntx);
 
-  static void Watch(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Unwatch(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Watch(CmdArgList args, CommandContext* cmd_cntx);
+  static void Unwatch(CmdArgList args, CommandContext* cmd_cntx);
 
-  void Discard(CmdArgList args, const CommandContext& cmd_cntx);
-  void Eval(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
-  void EvalRo(CmdArgList args, const CommandContext& cmd_cntx);
-  void EvalSha(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
-  void EvalShaRo(CmdArgList args, const CommandContext& cmd_cntx);
-  void Exec(CmdArgList args, const CommandContext& cmd_cntx);
-  void Publish(CmdArgList args, const CommandContext& cmd_cntx);
-  void Subscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void PSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void Function(CmdArgList args, const CommandContext& cmd_cntx);
-  void Monitor(CmdArgList args, const CommandContext& cmd_cntx);
-  void Pubsub(CmdArgList args, const CommandContext& cmd_cntx);
-  void Command(CmdArgList args, const CommandContext& cmd_cntx);
+  void Discard(CmdArgList args, CommandContext* cmd_cntx);
+  void Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalRo(CmdArgList args, CommandContext* cmd_cntx);
+  void EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalShaRo(CmdArgList args, CommandContext* cmd_cntx);
+  void Exec(CmdArgList args, CommandContext* cmd_cntx);
+  void Publish(CmdArgList args, CommandContext* cmd_cntx);
+  void Subscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void Unsubscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void PSubscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void PUnsubscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void Function(CmdArgList args, CommandContext* cmd_cntx);
+  void Monitor(CmdArgList args, CommandContext* cmd_cntx);
+  void Pubsub(CmdArgList args, CommandContext* cmd_cntx);
+  void Command(CmdArgList args, CommandContext* cmd_cntx);
 
   void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);

@@ -2088,15 +2088,15 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
   return *res;
 }
 
-void ZSetFamily::BZPopMin(CmdArgList args, const CommandContext& cmd_cntx) {
-  BZPopMinMax(args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx, false);
+void ZSetFamily::BZPopMin(CmdArgList args, CommandContext* cmd_cntx) {
+  BZPopMinMax(args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx, false);
 }
 
-void ZSetFamily::BZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
-  BZPopMinMax(args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx, true);
+void ZSetFamily::BZPopMax(CmdArgList args, CommandContext* cmd_cntx) {
+  BZPopMinMax(args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx, true);
 }
 
-void ZSetFamily::ZAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   ZSetFamily::ZParams zparams;
@@ -2121,7 +2121,7 @@ void ZSetFamily::ZAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if ((args.size() - i) % 2 != 0) {
     builder->SendError(kSyntaxErr);
     return;
@@ -2177,7 +2177,7 @@ void ZSetFamily::ZAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     }
     members.emplace_back(val, member);
   }
-  DCHECK(cmd_cntx.tx);
+  DCHECK(cmd_cntx->tx);
 
   if (to_sort_fields) {
     if (num_members == 2) {  // fix unique_members for this special case.
@@ -2191,10 +2191,10 @@ void ZSetFamily::ZAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   absl::Span memb_sp{members.data(), members.size()};
-  ZAddGeneric(key, zparams, memb_sp, cmd_cntx.tx, builder);
+  ZAddGeneric(key, zparams, memb_sp, cmd_cntx->tx, builder);
 }
 
-void ZSetFamily::ZCard(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZCard(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
@@ -2206,16 +2206,16 @@ void ZSetFamily::ZCard(CmdArgList args, const CommandContext& cmd_cntx) {
     return find_res.value()->second.Size();
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx.rb->SendError(kWrongTypeErr);
+    cmd_cntx->rb->SendError(kWrongTypeErr);
     return;
   }
 
-  cmd_cntx.rb->SendLong(result.value());
+  cmd_cntx->rb->SendLong(result.value());
 }
 
-void ZSetFamily::ZCount(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZCount(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   string_view min_s = ArgS(args, 1);
@@ -2223,18 +2223,18 @@ void ZSetFamily::ZCount(CmdArgList args, const CommandContext& cmd_cntx) {
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return cmd_cntx.rb->SendError(kFloatRangeErr);
+    return cmd_cntx->rb->SendError(kFloatRangeErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCount(t->GetOpArgs(shard), key, si);
   };
 
-  OpResult<unsigned> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx.rb->SendError(kWrongTypeErr);
+    cmd_cntx->rb->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx.rb->SendLong(*result);
+    cmd_cntx->rb->SendLong(*result);
   }
 }
 
@@ -2283,7 +2283,7 @@ vector<ScoredMemberView> ZDiffOp(ShardId key_sid, vector<OpResult<vector<ScoredM
   return smvec;
 }
 
-void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZDiff(CmdArgList args, CommandContext* cmd_cntx) {
   vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2291,9 +2291,9 @@ void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   // Check shard results for WRONG_TYPE returned
   for (auto& sm_map : maps) {
@@ -2331,7 +2331,7 @@ void ZSetFamily::ZDiff(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ZSetFamily::ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   vector<OpResult<vector<ScoredMap>>> maps(shard_set->size(), OpStatus::OK);
   const string_view dest_key = ArgS(args, 0);
   const ShardId dest_shard = Shard(dest_key, shard_set->size());
@@ -2343,14 +2343,14 @@ void ZSetFamily::ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(cb), false);
+  cmd_cntx->tx->Execute(std::move(cb), false);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   // Check shard results for WRONG_TYPE returned
   for (auto& sm_map : maps) {
     if (sm_map.status() == OpStatus::WRONG_TYPE) {
-      cmd_cntx.tx->Conclude();
+      cmd_cntx->tx->Conclude();
       return rb->SendError(sm_map.status());
     }
   }
@@ -2372,18 +2372,18 @@ void ZSetFamily::ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(store_cb, true);
+  cmd_cntx->tx->Execute(store_cb, true);
   rb->SendLong(smvec.size());
 }
 
-void ZSetFamily::ZIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view score_arg = ArgS(args, 1);
 
   ScoredMemberView scored_member;
   scored_member.second = ArgS(args, 2);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (!absl::SimpleAtod(score_arg, &scored_member.first)) {
     VLOG(1) << "Bad score:" << score_arg << "|";
@@ -2401,7 +2401,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), zparams, key, ScoredMemberSpan{&scored_member, 1});
   };
 
-  OpResult<AddResult> add_result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<AddResult> add_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (add_result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
   }
@@ -2417,17 +2417,17 @@ void ZSetFamily::ZIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendDouble(add_result->new_score);
 }
 
-void ZSetFamily::ZInter(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZBooleanOperation(args, "zinter", false, false, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZInter(CmdArgList args, CommandContext* cmd_cntx) {
+  ZBooleanOperation(args, "zinter", false, false, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZInterStore(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZBooleanOperation(args, "zinterstore", false, true, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZInterStore(CmdArgList args, CommandContext* cmd_cntx) {
+  ZBooleanOperation(args, "zinterstore", false, true, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
   unsigned num_keys;
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
 
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys)) {
     return builder->SendError(OpStatus::SYNTAX_ERR);
@@ -2449,7 +2449,7 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   OpResult<ScoredMap> result = IntersectResults(maps, AggType::NOOP);
   if (!result)
@@ -2563,23 +2563,23 @@ void ZMPopGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_block
   response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
 }
 
-void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZMPopGeneric(args, cmd_cntx, false);
+void ZSetFamily::ZMPop(CmdArgList args, CommandContext* cmd_cntx) {
+  ZMPopGeneric(args, *cmd_cntx, false);
 }
 
-void ZSetFamily::BZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZMPopGeneric(args, cmd_cntx, true);
+void ZSetFamily::BZMPop(CmdArgList args, CommandContext* cmd_cntx) {
+  ZMPopGeneric(args, *cmd_cntx, true);
 }
 
-void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZPopMinMaxFromArgs(args, true, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZPopMax(CmdArgList args, CommandContext* cmd_cntx) {
+  ZPopMinMaxFromArgs(args, true, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZPopMin(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZPopMinMaxFromArgs(args, false, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZPopMin(CmdArgList args, CommandContext* cmd_cntx) {
+  ZPopMinMaxFromArgs(args, false, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZLexCount(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   string_view min_s = ArgS(args, 1);
@@ -2587,126 +2587,126 @@ void ZSetFamily::ZLexCount(CmdArgList args, const CommandContext& cmd_cntx) {
 
   LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-    return cmd_cntx.rb->SendError(kLexRangeErr);
+    return cmd_cntx->rb->SendError(kLexRangeErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpLexCount(t->GetOpArgs(shard), key, li);
   };
 
-  OpResult<unsigned> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx.rb->SendError(kWrongTypeErr);
+    cmd_cntx->rb->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx.rb->SendLong(*result);
+    cmd_cntx->rb->SendLong(*result);
   }
 }
 
-void ZSetFamily::ZRange(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx.tx, cmd_cntx.rb, RangeParams{});
+void ZSetFamily::ZRange(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{});
 }
 
-void ZSetFamily::ZRank(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRankGeneric(args, false, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZRank(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRankGeneric(args, false, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZRevRange(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx.tx, cmd_cntx.rb, RangeParams{.reverse = true});
+void ZSetFamily::ZRevRange(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{.reverse = true});
 }
 
-void ZSetFamily::ZRangeByScore(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx.tx, cmd_cntx.rb, RangeParams{.interval_type = RangeParams::SCORE});
+void ZSetFamily::ZRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{.interval_type = RangeParams::SCORE});
 }
 
-void ZSetFamily::ZRangeStore(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args.subspan(1), cmd_cntx.tx, cmd_cntx.rb,
+void ZSetFamily::ZRangeStore(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args.subspan(1), cmd_cntx->tx, cmd_cntx->rb,
                 RangeParams{.with_scores = true, .store_key = ArgS(args, 0)});
 }
 
-void ZSetFamily::ZRevRangeByScore(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx.tx, cmd_cntx.rb,
+void ZSetFamily::ZRevRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb,
                 RangeParams{.reverse = true, .interval_type = RangeParams::SCORE});
 }
 
-void ZSetFamily::ZRevRank(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRankGeneric(args, true, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZRevRank(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRankGeneric(args, true, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZRangeByLex(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx.tx, cmd_cntx.rb, RangeParams{.interval_type = RangeParams::LEX});
+void ZSetFamily::ZRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{.interval_type = RangeParams::LEX});
 }
 
-void ZSetFamily::ZRevRangeByLex(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx.tx, cmd_cntx.rb,
+void ZSetFamily::ZRevRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb,
                 RangeParams{.reverse = true, .interval_type = RangeParams::LEX});
 }
 
-void ZSetFamily::ZRemRangeByRank(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZRemRangeByRank(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view min_s = ArgS(args, 1);
   string_view max_s = ArgS(args, 2);
 
   IndexInterval ii;
   if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->rb->SendError(kInvalidIntErr);
   }
 
   ZRangeSpec range_spec;
   range_spec.interval = ii;
-  ZRemRangeGeneric(key, range_spec, cmd_cntx.tx, cmd_cntx.rb);
+  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZRemRangeByScore(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZRemRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view min_s = ArgS(args, 1);
   string_view max_s = ArgS(args, 2);
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return cmd_cntx.rb->SendError(kFloatRangeErr);
+    return cmd_cntx->rb->SendError(kFloatRangeErr);
   }
 
   ZRangeSpec range_spec;
 
   range_spec.interval = si;
 
-  ZRemRangeGeneric(key, range_spec, cmd_cntx.tx, cmd_cntx.rb);
+  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZRemRangeByLex(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZRemRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view min_s = ArgS(args, 1);
   string_view max_s = ArgS(args, 2);
 
   LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-    return cmd_cntx.rb->SendError(kLexRangeErr);
+    return cmd_cntx->rb->SendError(kLexRangeErr);
   }
 
   ZRangeSpec range_spec;
 
   range_spec.interval = li;
 
-  ZRemRangeGeneric(key, range_spec, cmd_cntx.tx, cmd_cntx.rb);
+  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZRem(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZRem(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, members);
   };
 
-  OpResult<unsigned> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx.rb->SendError(kWrongTypeErr);
+    cmd_cntx->rb->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx.rb->SendLong(*result);
+    cmd_cntx->rb->SendLong(*result);
   }
 }
 
-void ZSetFamily::ZRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void ZSetFamily::ZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (args.size() > 3)
     return rb->SendError(WrongNumArgsError("ZRANDMEMBER"));
@@ -2730,7 +2730,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);
   };
 
-  OpResult<ScoredArray> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  OpResult<ScoredArray> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result) {
     rb->SendScoredArray(result.value(), params.with_scores);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -2744,7 +2744,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ZSetFamily::ZScore(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZScore(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view member = ArgS(args, 1);
 
@@ -2752,8 +2752,8 @@ void ZSetFamily::ZScore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpScore(t->GetOpArgs(shard), key, member);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  OpResult<double> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  OpResult<double> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     rb->SendError(kWrongTypeErr);
   } else if (!result) {
@@ -2763,10 +2763,10 @@ void ZSetFamily::ZScore(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ZSetFamily::ZMScore(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void ZSetFamily::ZMScore(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
-  OpResult<MScoreResponse> result = ZGetMembers(args, cmd_cntx.tx, rb);
+  OpResult<MScoreResponse> result = ZGetMembers(args, cmd_cntx->tx, rb);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
@@ -2782,13 +2782,13 @@ void ZSetFamily::ZMScore(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ZSetFamily::ZScan(CmdArgList args, const CommandContext& cmd_cntx) {
+void ZSetFamily::ZScan(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (!absl::SimpleAtoi(token, &cursor)) {
     return rb->SendError("invalid cursor");
@@ -2805,7 +2805,7 @@ void ZSetFamily::ZScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);
     rb->SendBulkString(absl::StrCat(cursor));
@@ -2818,12 +2818,12 @@ void ZSetFamily::ZScan(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ZSetFamily::ZUnion(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZBooleanOperation(args, "zunion", true, false, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZUnion(CmdArgList args, CommandContext* cmd_cntx) {
+  ZBooleanOperation(args, "zunion", true, false, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ZSetFamily::ZUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
-  ZBooleanOperation(args, "zunionstore", true, true, cmd_cntx.tx, cmd_cntx.rb);
+void ZSetFamily::ZUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
+  ZBooleanOperation(args, "zunionstore", true, true, cmd_cntx->tx, cmd_cntx->rb);
 }
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)

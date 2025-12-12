@@ -1065,9 +1065,9 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
   return flags;
 }
 
-void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool async) {
+void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
   atomic_uint32_t result{0};
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
 
   auto cb = [&](const Transaction* t, EngineShard* shard) {
@@ -1078,10 +1078,10 @@ void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool async) 
     return OpStatus::OK;
   };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  DVLOG(2) << "Del ts " << cmd_cntx.tx->txid();
+  DVLOG(2) << "Del ts " << cmd_cntx->tx->txid();
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (is_mc) {
@@ -1118,17 +1118,17 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
   return res;
 }
 
-void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
   DeleteGeneric(args, cmd_cntx, false);
 }
 
-void GenericFamily::Unlink(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Unlink(CmdArgList args, CommandContext* cmd_cntx) {
   bool async = absl::GetFlag(FLAGS_unlink_experimental_async);
   DeleteGeneric(args, cmd_cntx, async);
 }
 
-void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (args.size() > 1) {
     return rb->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
@@ -1136,7 +1136,7 @@ void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view msg;
 
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
-  if (cmd_cntx.conn_cntx->conn_state.subscribe_info && !rb->IsResp3()) {
+  if (cmd_cntx->conn_cntx->conn_state.subscribe_info && !rb->IsResp3()) {
     if (args.size() == 1) {
       msg = ArgS(args, 0);
     }
@@ -1155,7 +1155,7 @@ void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
   return rb->SendBulkString(msg);
 }
 
-void GenericFamily::Exists(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
   VLOG(1) << "Exists " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
@@ -1168,28 +1168,28 @@ void GenericFamily::Exists(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  return cmd_cntx.rb->SendLong(result.load(memory_order_acquire));
+  return cmd_cntx->rb->SendLong(result.load(memory_order_acquire));
 }
 
-void GenericFamily::Persist(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  cmd_cntx.rb->SendLong(status == OpStatus::OK);
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->rb->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Expire(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->rb->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
@@ -1199,7 +1199,7 @@ void GenericFamily::Expire(CmdArgList args, const CommandContext& cmd_cntx) {
     int_arg = kMaxExpireDeadlineSec;
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx.rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
   if (!expire_options) {
     return;
   }
@@ -1209,21 +1209,21 @@ void GenericFamily::Expire(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  cmd_cntx.rb->SendLong(status == OpStatus::OK);
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->rb->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::ExpireAt(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->rb->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx.rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
   if (!expire_options) {
     return;
   }
@@ -1233,16 +1233,16 @@ void GenericFamily::ExpireAt(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return cmd_cntx.rb->SendError(kExpiryOutOfRange);
+    return cmd_cntx->rb->SendError(kExpiryOutOfRange);
   }
 
-  cmd_cntx.rb->SendLong(status == OpStatus::OK);
+  cmd_cntx->rb->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Keys(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
   string_view pattern(ArgS(args, 0));
   uint64_t cursor = 0;
 
@@ -1257,23 +1257,23 @@ void GenericFamily::Keys(CmdArgList args, const CommandContext& cmd_cntx) {
   auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
 
   do {
-    cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx.conn_cntx);
+    cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx->conn_cntx);
   } while (cursor != 0 && keys.size() < output_limit);
 
-  static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendBulkStrArr(keys);
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb)->SendBulkStrArr(keys);
 }
 
-void GenericFamily::PexpireAt(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view msec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->rb->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx.rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
   if (!expire_options) {
     return;
   }
@@ -1285,22 +1285,22 @@ void GenericFamily::PexpireAt(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return cmd_cntx.rb->SendError(kExpiryOutOfRange);
+    return cmd_cntx->rb->SendError(kExpiryOutOfRange);
   } else {
-    cmd_cntx.rb->SendLong(status == OpStatus::OK);
+    cmd_cntx->rb->SendLong(status == OpStatus::OK);
   }
 }
 
-void GenericFamily::Pexpire(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view msec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->rb->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, -1);
 
@@ -1309,7 +1309,7 @@ void GenericFamily::Pexpire(CmdArgList args, const CommandContext& cmd_cntx) {
     int_arg = kMaxExpireDeadlineMs;
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx.rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
   if (!expire_options) {
     return;
   }
@@ -1319,16 +1319,16 @@ void GenericFamily::Pexpire(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return cmd_cntx.rb->SendError(kExpiryOutOfRange);
+    return cmd_cntx->rb->SendError(kExpiryOutOfRange);
   }
-  cmd_cntx.rb->SendLong(status == OpStatus::OK);
+  cmd_cntx->rb->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Stick(CmdArgList args, const CommandContext& cmd_cntx) {
-  Transaction* transaction = cmd_cntx.tx;
+void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
+  Transaction* transaction = cmd_cntx->tx;
   VLOG(1) << "Stick " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
@@ -1347,7 +1347,7 @@ void GenericFamily::Stick(CmdArgList args, const CommandContext& cmd_cntx) {
   DVLOG(2) << "Stick ts " << transaction->txid();
 
   uint32_t match_cnt = result.load(memory_order_relaxed);
-  cmd_cntx.rb->SendLong(match_cnt);
+  cmd_cntx->rb->SendLong(match_cnt);
 }
 
 // Used to conditionally store double score
@@ -1498,13 +1498,13 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   return len;
 }
 
-void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_only) {
+void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   std::string_view key = ArgS(args, 0);
   bool alpha = false;
   bool reversed = false;
   std::optional<std::string_view> store_key;
   std::optional<std::pair<size_t, size_t>> bounds;
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   for (size_t i = 1; i < args.size(); i++) {
     string arg = absl::AsciiStrToUpper(ArgS(args, i));
     if (arg == "ALPHA") {
@@ -1551,10 +1551,10 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(fetch_cb), !bool(store_key));
+  cmd_cntx->tx->Execute(std::move(fetch_cb), !bool(store_key));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (!fetch_result.ok()) {
-    cmd_cntx.tx->Conclude();
+    cmd_cntx->tx->Conclude();
     if (fetch_result == OpStatus::WRONG_TYPE)
       return builder->SendError(fetch_result.status());
     else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
@@ -1601,7 +1601,7 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
         }
         return OpStatus::OK;
       };
-      cmd_cntx.tx->Execute(std::move(store_callback), true);
+      cmd_cntx->tx->Execute(std::move(store_callback), true);
       if (store_len) {
         rb->SendLong(store_len.value());
       } else {
@@ -1613,20 +1613,20 @@ void SortGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool is_read_o
   std::visit(sort_call, fetch_result.value().first);
 }
 
-void GenericFamily::Sort(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Sort(CmdArgList args, CommandContext* cmd_cntx) {
   SortGeneric(args, cmd_cntx, false);
 }
 
-void GenericFamily::Sort_RO(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Sort_RO(CmdArgList args, CommandContext* cmd_cntx) {
   SortGeneric(args, cmd_cntx, true);
 }
 
-void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view serialized_value = ArgS(args, 2);
 
-  auto rdb_version = GetRdbVersion(serialized_value, cmd_cntx.conn_cntx->journal_emulated);
-  auto* builder = cmd_cntx.rb;
+  auto rdb_version = GetRdbVersion(serialized_value, cmd_cntx->conn_cntx->journal_emulated);
+  auto* builder = cmd_cntx->rb;
   if (!rdb_version) {
     return builder->SendError(kInvalidDumpValueErr);
   }
@@ -1645,7 +1645,7 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
                      rdb_version.value());
   };
 
-  OpStatus result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   switch (result) {
     case OpStatus::OK:
@@ -1659,12 +1659,12 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void GenericFamily::FieldExpire(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view ttl_str = parser.Next();
   uint32_t ttl_sec;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
     return rb->SendError(kInvalidIntErr);
   }
@@ -1674,7 +1674,7 @@ void GenericFamily::FieldExpire(CmdArgList args, const CommandContext& cmd_cntx)
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
 
-  OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<long>> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     rb->SendLongArr(absl::MakeConstSpan(result.value()));
@@ -1685,27 +1685,27 @@ void GenericFamily::FieldExpire(CmdArgList args, const CommandContext& cmd_cntx)
 
 // Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
 // -1 if the field does not have associated TTL on it, and -3 if field is not found.
-void GenericFamily::FieldTtl(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
 
-  OpResult<long> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    cmd_cntx.rb->SendLong(*result);
+    cmd_cntx->rb->SendLong(*result);
     return;
   }
 
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->rb->SendError(result.status());
 }
 
-void GenericFamily::Move(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view target_db_sv = ArgS(args, 1);
   int32_t target_db;
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
     return builder->SendError(kInvalidIntErr);
   }
@@ -1714,7 +1714,7 @@ void GenericFamily::Move(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError(kDbIndOutOfRangeErr);
   }
 
-  if (target_db == cmd_cntx.tx->GetDbIndex()) {
+  if (target_db == cmd_cntx->tx->GetDbIndex()) {
     return builder->SendError("source and destination objects are the same");
   }
 
@@ -1734,98 +1734,98 @@ void GenericFamily::Move(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
   builder->SendLong(res == OpStatus::OK);
 }
 
-void GenericFamily::Rename(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto reply = RenameGeneric(args, false, cmd_cntx.tx);
-
+void GenericFamily::Rename(CmdArgList args, CommandContext* cmd_cntx) {
+  auto reply = RenameGeneric(args, false, cmd_cntx->tx);
+  auto* rb = cmd_cntx->rb;
   if (!reply.status) {
-    return cmd_cntx.rb->SendError(reply);
+    return rb->SendError(reply);
   }
 
   OpStatus st = reply.status.value();
   if (st == OpStatus::OK) {
-    cmd_cntx.rb->SendOk();
+    rb->SendOk();
   } else {
-    cmd_cntx.rb->SendError(reply);
+    rb->SendError(reply);
   }
 }
 
-void GenericFamily::RenameNx(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto reply = RenameGeneric(args, true, cmd_cntx.tx);
-  auto* builder = cmd_cntx.rb;
+void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
+  auto reply = RenameGeneric(args, true, cmd_cntx->tx);
+  auto* rb = cmd_cntx->rb;
   if (!reply.status) {
-    builder->SendError(reply);
+    rb->SendError(reply);
     return;
   }
 
   OpStatus st = reply.status.value();
   if (st == OpStatus::OK) {
-    builder->SendLong(1);
+    rb->SendLong(1);
   } else if (st == OpStatus::KEY_EXISTS) {
-    builder->SendLong(0);
+    rb->SendLong(0);
   } else {
-    builder->SendError(reply);
+    rb->SendError(reply);
   }
 }
 
-void GenericFamily::Copy(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!parser.Finalize()) {
-    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
+    return rb->SendError(parser.TakeError().MakeReply());
   }
 
   if (k1 == k2) {
-    cmd_cntx.rb->SendError("source and destination objects are the same");
+    rb->SendError("source and destination objects are the same");
     return;
   }
 
-  Renamer renamer(cmd_cntx.tx, k1, k2, shard_set->size(), true);
+  Renamer renamer(cmd_cntx->tx, k1, k2, shard_set->size(), true);
   auto reply = renamer.Rename(!replace);
 
   if (!reply.status) {
-    return cmd_cntx.rb->SendError(reply);
+    return rb->SendError(reply);
   }
 
   OpStatus st = reply.status.value();
   if (st == OpStatus::OK) {
-    cmd_cntx.rb->SendLong(1);
+    rb->SendLong(1);
   } else if (st == OpStatus::KEY_EXISTS) {
-    cmd_cntx.rb->SendLong(0);
+    rb->SendLong(0);
   } else if (st == OpStatus::KEY_NOTFOUND) {
-    cmd_cntx.rb->SendLong(0);
+    rb->SendLong(0);
   } else {
-    cmd_cntx.rb->SendError(reply);
+    rb->SendError(reply);
   }
 }
 
-void GenericFamily::ExpireTime(CmdArgList args, const CommandContext& cmd_cntx) {
-  ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx.tx, cmd_cntx.rb);
+void GenericFamily::ExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
+  ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void GenericFamily::PExpireTime(CmdArgList args, const CommandContext& cmd_cntx) {
-  ExpireTimeGeneric(args, TimeUnit::MSEC, cmd_cntx.tx, cmd_cntx.rb);
+void GenericFamily::PExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
+  ExpireTimeGeneric(args, TimeUnit::MSEC, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void GenericFamily::Ttl(CmdArgList args, const CommandContext& cmd_cntx) {
-  TtlGeneric(args, TimeUnit::SEC, cmd_cntx.tx, cmd_cntx.rb);
+void GenericFamily::Ttl(CmdArgList args, CommandContext* cmd_cntx) {
+  TtlGeneric(args, TimeUnit::SEC, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void GenericFamily::Pttl(CmdArgList args, const CommandContext& cmd_cntx) {
-  TtlGeneric(args, TimeUnit::MSEC, cmd_cntx.tx, cmd_cntx.rb);
+void GenericFamily::Pttl(CmdArgList args, CommandContext* cmd_cntx) {
+  TtlGeneric(args, TimeUnit::MSEC, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void GenericFamily::Select(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   int64_t index;
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb;
   if (!absl::SimpleAtoi(key, &index)) {
     return builder->SendError(kInvalidDbIndErr);
   }
@@ -1835,7 +1835,7 @@ void GenericFamily::Select(CmdArgList args, const CommandContext& cmd_cntx) {
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
     return builder->SendError(kDbIndOutOfRangeErr);
   }
-  auto* cntx = cmd_cntx.conn_cntx;
+  auto* cntx = cmd_cntx->conn_cntx;
   if (cntx->conn_state.db_index == index) {
     // accept a noop.
     return builder->SendOk();
@@ -1856,15 +1856,15 @@ void GenericFamily::Select(CmdArgList args, const CommandContext& cmd_cntx) {
   return builder->SendOk();
 }
 
-void GenericFamily::Dump(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    DVLOG(1) << "Dump " << cmd_cntx.tx->DebugId() << ": " << key << ", dump size "
+    DVLOG(1) << "Dump " << cmd_cntx->tx->DebugId() << ": " << key << ", dump size "
              << result.value().size();
     rb->SendBulkString(*result);
   } else {
@@ -1872,7 +1872,7 @@ void GenericFamily::Dump(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void GenericFamily::Type(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
@@ -1884,41 +1884,41 @@ void GenericFamily::Type(CmdArgList args, const CommandContext& cmd_cntx) {
       return OpStatus::KEY_NOTFOUND;
     }
   };
-  OpResult<CompactObjType> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<CompactObjType> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (!result) {
-    cmd_cntx.rb->SendSimpleString("none");
+    cmd_cntx->rb->SendSimpleString("none");
   } else {
-    cmd_cntx.rb->SendSimpleString(ObjTypeToString(result.value()));
+    cmd_cntx->rb->SendSimpleString(ObjTypeToString(result.value()));
   }
 }
 
-void GenericFamily::Time(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Time(CmdArgList args, CommandContext* cmd_cntx) {
   uint64_t now_usec;
-  if (cmd_cntx.tx) {
-    now_usec = cmd_cntx.tx->GetDbContext().time_now_ms * 1000;
+  if (cmd_cntx->tx) {
+    now_usec = cmd_cntx->tx->GetDbContext().time_now_ms * 1000;
   } else {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
   DCHECK_GT(now_usec, 0u);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   rb->StartArray(2);
   rb->SendLong(now_usec / 1000000);
   rb->SendLong(now_usec % 1000000);
 }
 
-void GenericFamily::Echo(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Echo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   return rb->SendBulkString(key);
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
 // [ATTR <mask>] [MLCGE <len>]
-void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!absl::SimpleAtoi(token, &cursor)) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
       string_view help_arr[] = {
@@ -1945,7 +1945,7 @@ void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
   const ScanOpts& scan_op = ops.value();
 
   StringVec keys;
-  cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx.conn_cntx);
+  cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->conn_cntx);
 
   RedisReplyBuilder::ArrayScope scope{builder, 2};
   builder->SendBulkString(absl::StrCat(cursor));
@@ -1964,12 +1964,12 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArg
   return res;
 }
 
-void GenericFamily::RandomKey(CmdArgList args, const CommandContext& cmd_cntx) {
+void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
   const static size_t kMaxAttempts = 3;
 
   absl::BitGen bitgen;
   atomic_size_t candidates_counter{0};
-  auto* cntx = cmd_cntx.conn_cntx;
+  auto* cntx = cmd_cntx->conn_cntx;
   DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
   ScanOpts scan_opts;
   scan_opts.limit = 3;  // number of entries per shard
@@ -2003,7 +2003,7 @@ void GenericFamily::RandomKey(CmdArgList args, const CommandContext& cmd_cntx) {
   auto candidates_count = candidates_counter.load(memory_order_relaxed);
   std::optional<string> random_key = std::nullopt;
   auto random_idx = absl::Uniform<size_t>(bitgen, 0, candidates_count);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   for (const auto& candidate : candidates_collection) {
     if (random_idx >= candidate.size()) {
       random_idx -= candidate.size();
