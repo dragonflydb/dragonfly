@@ -87,9 +87,7 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
   return result;
 }
 
-}  // namespace
-
-void BloomFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   string_view key = parser.Next();
   SbfParams params;
@@ -113,7 +111,7 @@ void BloomFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(res);
 }
 
-void BloomFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -133,7 +131,7 @@ void BloomFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb->SendError(status);
 }
 
-void BloomFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
   const auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -144,7 +142,7 @@ void BloomFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb->SendLong(res ? res->front() : 0);
 }
 
-void BloomFamily::MAdd(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -169,7 +167,7 @@ void BloomFamily::MAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void BloomFamily::MExists(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -186,9 +184,11 @@ void BloomFamily::MExists(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+}  // namespace
+
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&BloomFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void BloomFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();

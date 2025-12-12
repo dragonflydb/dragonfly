@@ -925,9 +925,7 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
   return result;
 }
 
-}  // namespace
-
-void ListFamily::LMPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   CmdArgParser parser{args};
@@ -1009,7 +1007,7 @@ void ListFamily::LMPop(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ListFamily::BLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   CmdArgParser parser{args};
@@ -1050,31 +1048,31 @@ void ListFamily::BLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ListFamily::LPush(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLPush(CmdArgList args, CommandContext* cmd_cntx) {
   return PushGeneric(ListDir::LEFT, false, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::LPushX(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLPushX(CmdArgList args, CommandContext* cmd_cntx) {
   return PushGeneric(ListDir::LEFT, true, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::LPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLPop(CmdArgList args, CommandContext* cmd_cntx) {
   return PopGeneric(ListDir::LEFT, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::RPush(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdRPush(CmdArgList args, CommandContext* cmd_cntx) {
   return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::RPushX(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdRPushX(CmdArgList args, CommandContext* cmd_cntx) {
   return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::RPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
   return PopGeneric(ListDir::RIGHT, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::LLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
@@ -1087,7 +1085,7 @@ void ListFamily::LLen(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ListFamily::LPos(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [key, elem] = parser.Next<string_view, string_view>();
 
@@ -1147,7 +1145,7 @@ void ListFamily::LPos(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ListFamily::LIndex(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   int32_t index;
@@ -1173,7 +1171,7 @@ void ListFamily::LIndex(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void ListFamily::LInsert(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
@@ -1196,7 +1194,7 @@ void ListFamily::LInsert(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendError(result.status());
 }
 
-void ListFamily::LTrim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view s_str = ArgS(args, 1);
   string_view e_str = ArgS(args, 2);
@@ -1216,7 +1214,7 @@ void ListFamily::LTrim(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb->SendError(st);
 }
 
-void ListFamily::LRange(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view s_str = ArgS(args, 1);
   std::string_view e_str = ArgS(args, 2);
@@ -1241,7 +1239,7 @@ void ListFamily::LRange(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void ListFamily::LRem(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
@@ -1262,7 +1260,7 @@ void ListFamily::LRem(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb->SendError(result.status());
 }
 
-void ListFamily::LSet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
@@ -1284,15 +1282,15 @@ void ListFamily::LSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void ListFamily::BLPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdBLPop(CmdArgList args, CommandContext* cmd_cntx) {
   BPopGeneric(ListDir::LEFT, args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void ListFamily::BRPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdBRPop(CmdArgList args, CommandContext* cmd_cntx) {
   BPopGeneric(ListDir::RIGHT, args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void ListFamily::LMove(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
@@ -1304,9 +1302,11 @@ void ListFamily::LMove(CmdArgList args, CommandContext* cmd_cntx) {
   MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx, cmd_cntx->rb);
 }
 
+}  // namespace
+
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&ListFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void ListFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::LIST);

@@ -609,9 +609,7 @@ struct HSetReplies {
   facade::SinkReplyBuilder* rb;
 };
 
-}  // namespace
-
-void HSetFamily::HDel(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](HMapWrap& hw) -> OpResult<uint32_t> {
     unsigned deleted = 0;
     for (string_view s : args.subspan(1))
@@ -621,7 +619,7 @@ void HSetFamily::HDel(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx->rb}.Send(cmd_cntx->tx->ScheduleSingleHopT(WrapW(cb)));
 }
 
-void HSetFamily::HExpire(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   using MinMaxTtl = FInt<0, (1 << 26)>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
@@ -666,7 +664,7 @@ void HSetFamily::HExpire(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void HSetFamily::HGet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<string> {
     if (auto it = hw.Find(field); it)
       return string{it->second};
@@ -685,7 +683,7 @@ void HSetFamily::HGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void HSetFamily::HMGet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto fields = args.subspan(1);
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
@@ -707,7 +705,7 @@ void HSetFamily::HMGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
-void HSetFamily::HStrLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = ArgS(args, 1)](const HMapWrap& hw) -> OpResult<uint32_t> {
     if (auto it = hw.Find(field); it)
       return it->second.length();
@@ -716,19 +714,19 @@ void HSetFamily::HStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   HSetReplies{cmd_cntx->rb}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
-void HSetFamily::HLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
   HSetReplies{cmd_cntx->rb}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
-void HSetFamily::HExists(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
   HSetReplies{cmd_cntx->rb}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
-void HSetFamily::HIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
   string_view incrs = ArgS(args, 2);
@@ -763,7 +761,7 @@ void HSetFamily::HIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void HSetFamily::HIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
   string_view incrs = ArgS(args, 2);
@@ -796,19 +794,19 @@ void HSetFamily::HIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void HSetFamily::HKeys(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
   HGetGeneric(args, FIELDS, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void HSetFamily::HVals(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
   HGetGeneric(args, VALUES, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void HSetFamily::HGetAll(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
   HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void HSetFamily::HScan(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view token = ArgS(args, 1);
   uint64_t cursor = 0;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
@@ -847,7 +845,7 @@ void HSetFamily::HScan(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void HSetFamily::HSet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   string_view cmd{cmd_cntx->cid->name()};
@@ -870,7 +868,7 @@ void HSetFamily::HSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void HSetFamily::HSetNx(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -887,7 +885,7 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
   str_vec.emplace_back(absl::StrCat(lp.lval));
 }
 
-void HSetFamily::HRandField(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (args.size() > 3) {
     DVLOG(1) << "Wrong number of command arguments: " << args.size();
@@ -1020,9 +1018,11 @@ void HSetFamily::HRandField(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+}  // namespace
+
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&HSetFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void HSetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::HASH);

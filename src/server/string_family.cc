@@ -112,7 +112,7 @@ class SetCmd {
   bool explicit_journal_;  // call RecordJournal (auto journaling disabled)
 };
 
-size_t SetRange(std::string* value, size_t start, std::string_view range) {
+size_t SetRangeInternal(std::string* value, size_t start, std::string_view range) {
   value->resize(max(value->size(), start + range.size()));
   memcpy(value->data() + start, range.data(), range.size());
   return value->size();
@@ -157,7 +157,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
     return {op_args.shard->tiered_storage()->Modify<size_t>(
         op_args.db_cntx.db_index, key, res.it->second,
         [start = start, range = string(range)](std::string* s) {
-          return SetRange(s, start, range);
+          return SetRangeInternal(s, start, range);
         })};
   } else {
     string value;
@@ -165,7 +165,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
     if (!res.is_new)
       value = res.it->second.ToString();
 
-    size_t len = SetRange(&value, start, range);
+    size_t len = SetRangeInternal(&value, start, range);
     res.it->second.SetValue(value);
     return {len};
   }
@@ -812,8 +812,6 @@ MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_m
   return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
-}  // namespace
-
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
 
@@ -984,7 +982,7 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void StringFamily::Set(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto [key, value] = parser.Next<string_view, string_view>();
@@ -1092,7 +1090,7 @@ void StringFamily::Set(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void StringFamily::SetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   string_view cmd_name = cmd_cntx->cid->name();
 
   CmdArgParser parser{args};
@@ -1122,7 +1120,7 @@ void StringFamily::SetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
 }
 
-void StringFamily::SetNx(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -1142,7 +1140,7 @@ void StringFamily::SetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 }
 
-void StringFamily::Get(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdGet(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1154,7 +1152,7 @@ void StringFamily::Get(CmdArgList args, CommandContext* cmnd_cntx) {
   GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetDel(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdGetDel(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1169,7 +1167,7 @@ void StringFamily::GetDel(CmdArgList args, CommandContext* cmnd_cntx) {
   GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetSet(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdGetSet(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -1182,15 +1180,15 @@ void StringFamily::GetSet(CmdArgList args, CommandContext* cmnd_cntx) {
   GetReplies{cmnd_cntx->rb}.Send(std::move(prev));
 }
 
-void StringFamily::Append(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdAppend(CmdArgList args, CommandContext* cmnd_cntx) {
   ExtendGeneric(args, false, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::Prepend(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdPrepend(CmdArgList args, CommandContext* cmnd_cntx) {
   ExtendGeneric(args, true, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::GetEx(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
@@ -1258,12 +1256,12 @@ void StringFamily::GetEx(CmdArgList args, CommandContext* cmnd_cntx) {
   GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::Incr(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdIncr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   return IncrByGeneric(key, 1, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::IncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
@@ -1274,7 +1272,7 @@ void StringFamily::IncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   return IncrByGeneric(key, val, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::IncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   double val;
@@ -1298,12 +1296,12 @@ void StringFamily::IncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   rb->SendDouble(result.value());
 }
 
-void StringFamily::Decr(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdDecr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   return IncrByGeneric(key, -1, cmnd_cntx->tx, cmnd_cntx->rb);
 }
 
-void StringFamily::DecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
@@ -1340,7 +1338,7 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-void StringFamily::MGet(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   uint8_t fetch_mask = 0;
@@ -1398,7 +1396,7 @@ void StringFamily::MGet(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 }
 
-void StringFamily::MSet(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
   if (VLOG_IS_ON(2)) {
     string str;
     for (size_t i = 1; i < args.size(); ++i) {
@@ -1425,7 +1423,7 @@ void StringFamily::MSet(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 }
 
-void StringFamily::MSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdMSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1462,14 +1460,14 @@ void StringFamily::MSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   cmnd_cntx->rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void StringFamily::StrLen(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdStrLen(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
   GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetRange(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdGetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
@@ -1484,7 +1482,7 @@ void StringFamily::GetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::SetRange(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdSetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
   auto* builder = cmnd_cntx->rb;
@@ -1520,7 +1518,7 @@ void StringFamily::SetRange(CmdArgList args, CommandContext* cmnd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void StringFamily::ClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
@@ -1628,7 +1626,7 @@ void StringFamily::ClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
 
 // Implements the memcache GAT command. The expected input is
 // GAT <expiry-in-seconds> key [keys...]
-void StringFamily::GAT(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   auto* builder = cmnd_cntx->rb;
@@ -1681,7 +1679,9 @@ void StringFamily::GAT(CmdArgList args, CommandContext* cmnd_cntx) {
   rb->SendGetEnd();
 }
 
-#define HFUNC(x) SetHandler(&StringFamily::x)
+}  // namespace
+
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void StringFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kMSetMask =
