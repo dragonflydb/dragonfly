@@ -78,15 +78,7 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
   auto resp = Run({"expire", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"expire", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"expire", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"expire", "key", "3600", "GT", "LT"});
@@ -109,6 +101,20 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp, IntArg(0));
   resp = Run({"ttl", "key2"});
   EXPECT_THAT(resp.GetInt(), -1);
+
+  // GT does not apply since key has no "inf" expiry
+  resp = Run({"expire", "key2", "404", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // LT applies
+  resp = Run({"expire", "key2", "404", "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), 404);
+
+  Run({"persist", "key"});
 
   // set expiry to 101
   resp = Run({"expire", "key", "101"});
@@ -142,6 +148,17 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp, IntArg(0));
   resp = Run({"ttl", "key"});
   EXPECT_THAT(resp.GetInt(), 101);
+
+  // NX with GT, first sets expiry, updates only to larger values
+  Run({"persist", "key"});
+  Run({"expire", "key", "5", "NX", "GT"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(5));
+
+  Run({"expire", "key", "3", "NX", "GT"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(5));
+
+  Run({"expire", "key", "7", "NX", "GT"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(7));
 }
 
 TEST_F(GenericFamilyTest, ExpireAtOptions) {
@@ -152,15 +169,7 @@ TEST_F(GenericFamilyTest, ExpireAtOptions) {
   Run({"set", "key", "val"});
   // NX and XX are mutually exclusive
   auto resp = Run({"expireat", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"expireat", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"expireat", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"expireat", "key", "3600", "GT", "LT"});
@@ -176,6 +185,11 @@ TEST_F(GenericFamilyTest, ExpireAtOptions) {
   test_time_s = time_s + 9;
   resp = Run({"expireat", "key", absl::StrCat(test_time_s), "NX"});
   EXPECT_THAT(resp, IntArg(0));
+
+  // NX option with expired time is not accepted and so it doesn't delete the value
+  resp = Run({"expireat", "key", absl::StrCat(TEST_current_time_ms / 1000 - 10), "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
 
   // given a key with no expiry
   Run({"set", "key2", "val"});
@@ -220,15 +234,7 @@ TEST_F(GenericFamilyTest, PExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
   auto resp = Run({"pexpire", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"pexpire", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"pexpire", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"pexpire", "key", "3600", "GT", "LT"});
@@ -292,15 +298,7 @@ TEST_F(GenericFamilyTest, PExpireAtOptions) {
   Run({"set", "key", "val"});
   // NX and XX are mutually exclusive
   auto resp = Run({"pexpireat", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"pexpireat", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"pexpireat", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"pexpireat", "key", "3600", "GT", "LT"});

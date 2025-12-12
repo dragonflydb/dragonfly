@@ -1054,8 +1054,8 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
       return nullopt;
     }
   }
-  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ~ExpireFlags::EXPIRE_NX)) {
-    builder->SendError("NX and XX, GT or LT options at the same time are not compatible");
+  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ExpireFlags::EXPIRE_XX)) {
+    builder->SendError("NX and XX options at the same time are not compatible");
     return nullopt;
   }
   if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
