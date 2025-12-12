@@ -3,6 +3,11 @@ import platform
 import pytest
 from testcontainers.core.container import DockerContainer
 
+pytest.skip(
+    "These tests will only be run for the action that generates the package repository",
+    allow_module_level=True,
+)
+
 
 def check(container: DockerContainer, cmd: str):
     result = container.exec(cmd)
