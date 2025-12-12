@@ -66,11 +66,8 @@ template <typename V> struct RaxTreeMap {
     explicit SeekIterator(rax* tree) : SeekIterator(tree, "^", std::string_view{nullptr, 0}) {
     }
 
-    SeekIterator(SeekIterator&& other) noexcept {
-      if (::detail::CopyIteratorState(it_, other.it_))
-        operator++();
-      if (other.IsValid())
-        other.InvalidateIterator();
+    SeekIterator(SeekIterator&& other) noexcept : it_{} {
+      *this = std::move(other);
     }
 
     SeekIterator& operator=(SeekIterator&& other) noexcept {
