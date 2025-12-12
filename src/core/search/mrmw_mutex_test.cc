@@ -51,7 +51,7 @@ class MRMWMutexTest : public ::testing::Test {
       pp_.reset(util::fb2::Pool::IOUring(16, 2));
     }
 #else
-    pp_.reset(fb2::Pool::Epoll(2));
+    pp_.reset(util::fb2::Pool::Epoll(2));
 #endif
     pp_->Run();
   }
