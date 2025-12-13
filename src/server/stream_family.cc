@@ -2673,7 +2673,7 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
 
 }  // namespace
 
-void StreamFamily::XAdd(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
@@ -2787,7 +2787,7 @@ bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* bui
   return true;
 }
 
-void StreamFamily::XClaim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   ClaimOpts opts;
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
@@ -2832,7 +2832,7 @@ void StreamFamily::XClaim(CmdArgList args, CommandContext* cmd_cntx) {
   StreamReplies{cmd_cntx->rb}.SendClaimInfo(result.value());
 }
 
-void StreamFamily::XDel(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -2859,7 +2859,7 @@ void StreamFamily::XDel(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb->SendError(result.status());
 }
 
-void StreamFamily::XGroup(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXGroup(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto sub_cmd_func = parser.MapNext("HELP", &HelpSubCmd, "CREATE", &CreateGroup, "DESTROY",
@@ -2872,7 +2872,7 @@ void StreamFamily::XGroup(CmdArgList args, CommandContext* cmd_cntx) {
   sub_cmd_func(&parser, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void StreamFamily::XInfo(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
@@ -3130,7 +3130,7 @@ void StreamFamily::XInfo(CmdArgList args, CommandContext* cmd_cntx) {
   return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
-void StreamFamily::XLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
@@ -3142,7 +3142,7 @@ void StreamFamily::XLen(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb->SendError(result.status());
 }
 
-void StreamFamily::XPending(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   PendingOpts opts;
   opts.group_name = ArgS(args, 1);
@@ -3200,7 +3200,7 @@ void StreamFamily::XPending(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void StreamFamily::XRange(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = args[0];
   string_view start = args[1];
   string_view end = args[2];
@@ -3208,7 +3208,7 @@ void StreamFamily::XRange(CmdArgList args, CommandContext* cmd_cntx) {
   XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void StreamFamily::XRevRange(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = args[0];
   string_view start = args[1];
   string_view end = args[2];
@@ -3278,15 +3278,15 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
 }
 
-void StreamFamily::XRead(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXRead(CmdArgList args, CommandContext* cmd_cntx) {
   return XReadGeneric2(args, false, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void StreamFamily::XReadGroup(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXReadGroup(CmdArgList args, CommandContext* cmd_cntx) {
   return XReadGeneric2(args, true, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void StreamFamily::XSetId(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view idstr = ArgS(args, 1);
 
@@ -3308,7 +3308,7 @@ void StreamFamily::XSetId(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb->SendError(reply);
 }
 
-void StreamFamily::XTrim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
@@ -3341,7 +3341,7 @@ void StreamFamily::XTrim(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void StreamFamily::XAck(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view group = ArgS(args, 1);
   args.remove_prefix(2);
@@ -3368,7 +3368,7 @@ void StreamFamily::XAck(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb->SendError(result.status());
 }
 
-void StreamFamily::XAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   ClaimOpts opts;
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
@@ -3440,7 +3440,7 @@ void StreamFamily::XAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   StreamReplies{rb}.SendIDs(cresult.deleted_ids);
 }
 
-#define HFUNC(x) SetHandler(&StreamFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 namespace acl {
 constexpr uint32_t kXAdd = WRITE | STREAM | FAST;

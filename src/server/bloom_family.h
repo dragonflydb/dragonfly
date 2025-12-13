@@ -6,10 +6,6 @@
 
 #include "server/common.h"
 
-namespace facade {
-class SinkReplyBuilder;
-}  // namespace facade
-
 namespace dfly {
 
 class CommandRegistry;
@@ -20,13 +16,6 @@ class BloomFamily {
   static void Register(CommandRegistry* registry);
 
  private:
-  using SinkReplyBuilder = facade::SinkReplyBuilder;
-
-  static void Reserve(CmdArgList args, CommandContext* cmd_cntx);
-  static void Add(CmdArgList args, CommandContext* cmd_cntx);
-  static void MAdd(CmdArgList args, CommandContext* cmd_cntx);
-  static void Exists(CmdArgList args, CommandContext* cmd_cntx);
-  static void MExists(CmdArgList args, CommandContext* cmd_cntx);
 };
 
 }  // namespace dfly
