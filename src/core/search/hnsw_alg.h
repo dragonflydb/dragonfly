@@ -259,7 +259,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   inline char* getDataByInternalId(tableint internal_id) const {
-    return (*data_level0_memory_)[internal_id] + offsetData_;
+    auto data_ptr = (char**)(getDataPtrByInternalId(internal_id));
+    return *data_ptr;
   }
 
   int getRandomLevel(double reverse_size) {
@@ -893,12 +894,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     char* data_ptrv = getDataByInternalId(internalId);
     size_t dim = *((size_t*)dist_func_param_);
-    std::vector<data_t> data;
-    data_t* data_ptr = (data_t*)data_ptrv;
-    for (size_t i = 0; i < dim; i++) {
-      data.push_back(*data_ptr);
-      data_ptr += 1;
-    }
+    std::vector<data_t> data(dim);
+    memcpy(data.data(), data_ptrv, dim * sizeof(data_t));
     return data;
   }
 
@@ -1042,7 +1039,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   void updatePoint(const void* dataPoint, tableint internalId, float updateNeighborProbability) {
     // update the feature vector associated with existing point with new vector
-    memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
+    auto data_ptr = (const char**)(getDataPtrByInternalId(internalId));
+    *data_ptr = static_cast<const char*>(dataPoint);
 
     int maxLevelCopy = maxlevel_;
     tableint entryPointCopy = enterpoint_node_;
@@ -1257,7 +1255,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     // Initialisation of the data and label
     memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
-    memcpy(getDataByInternalId(cur_c), data_point, data_size_);
+    auto data_ptr = (const char**)(getDataPtrByInternalId(cur_c));
+    *data_ptr = static_cast<const char*>(data_point);
 
     if (curlevel) {
       *reinterpret_cast<char**>((*linkLists_)[cur_c]) =
