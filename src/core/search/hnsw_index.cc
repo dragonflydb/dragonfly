@@ -136,7 +136,7 @@ struct HnswlibAdapter {
       if (world_.getCurrentElementCount() == world_.getMaxElements() &&
           (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
         auto max_elements = world_.getMaxElements();
-        world_.resizeIndex(max_elements * 2);
+        world_.resizeIndex(max_elements + HierarchicalNSW<float>::k_elements_per_chunk);
         VLOG(1) << "Resizing HNSW Index from " << max_elements << " to " << max_elements * 2;
       }
     } catch (const std::exception& e) {
