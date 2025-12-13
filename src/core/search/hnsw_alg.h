@@ -7,6 +7,8 @@
 
 namespace dfly::search {
 
+static const size_t kHnswElementsPerChunk = 10 * 1024;
+
 template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInterface<dist_t> {
  private:
   class ChunkedArray {
@@ -89,7 +91,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   static const tableint MAX_LABEL_OPERATION_LOCKS = 65536;
   static const unsigned char DELETE_MARK = 0x01;
-  static const size_t k_elements_per_chunk = 10 * 1024;
 
   size_t max_elements_{0};
   mutable std::atomic<size_t> cur_element_count{0};  // current number of elements
@@ -187,7 +188,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     offsetLevel0_ = 0;
 
     data_level0_memory_ =
-        std::make_unique<ChunkedArray>(size_data_per_element_, k_elements_per_chunk, max_elements);
+        std::make_unique<ChunkedArray>(size_data_per_element_, kHnswElementsPerChunk, max_elements);
 
     cur_element_count = 0;
 
@@ -197,7 +198,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     enterpoint_node_ = -1;
     maxlevel_ = -1;
 
-    linkLists_ = std::make_unique<ChunkedArray>(sizeof(void*), k_elements_per_chunk, max_elements);
+    linkLists_ = std::make_unique<ChunkedArray>(sizeof(void*), kHnswElementsPerChunk, max_elements);
     size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
     mult_ = 1 / log(1.0 * M_);
     revSize_ = 1.0 / mult_;
@@ -259,7 +260,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   inline char* getDataByInternalId(tableint internal_id) const {
-    return (*data_level0_memory_)[internal_id] + offsetData_;
+    auto data_ptr = (char**)(getDataPtrByInternalId(internal_id));
+    return *data_ptr;
   }
 
   int getRandomLevel(double reverse_size) {
@@ -893,12 +895,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     char* data_ptrv = getDataByInternalId(internalId);
     size_t dim = *((size_t*)dist_func_param_);
-    std::vector<data_t> data;
-    data_t* data_ptr = (data_t*)data_ptrv;
-    for (size_t i = 0; i < dim; i++) {
-      data.push_back(*data_ptr);
-      data_ptr += 1;
-    }
+    std::vector<data_t> data(dim);
+    memcpy(data.data(), data_ptrv, dim * sizeof(data_t));
     return data;
   }
 
@@ -1042,7 +1040,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   void updatePoint(const void* dataPoint, tableint internalId, float updateNeighborProbability) {
     // update the feature vector associated with existing point with new vector
-    memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
+    auto data_ptr = (const char**)(getDataPtrByInternalId(internalId));
+    *data_ptr = static_cast<const char*>(dataPoint);
 
     int maxLevelCopy = maxlevel_;
     tableint entryPointCopy = enterpoint_node_;
@@ -1257,7 +1256,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     // Initialisation of the data and label
     memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
-    memcpy(getDataByInternalId(cur_c), data_point, data_size_);
+    auto data_ptr = (const char**)(getDataPtrByInternalId(cur_c));
+    *data_ptr = static_cast<const char*>(data_point);
 
     if (curlevel) {
       *reinterpret_cast<char**>((*linkLists_)[cur_c]) =
