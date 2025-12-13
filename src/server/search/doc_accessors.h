@@ -35,6 +35,8 @@ struct BaseAccessor : public search::DocumentAccessor {
 
   // Default implementation uses GetStrings
   virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const override;
+  virtual std::optional<DirectVectorPtr> GetVectorDirectPtr(std::string_view active_field,
+                                                            size_t dim) const override;
   virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
   virtual std::optional<StringList> GetTags(std::string_view active_field) const override;
 };

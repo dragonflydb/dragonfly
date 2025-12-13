@@ -67,7 +67,7 @@ struct HnswlibAdapter {
                100 /* seed*/} {
   }
 
-  void Add(const float* data, GlobalDocId id) {
+  void Add(const void* data, GlobalDocId id) {
     while (true) {
       try {
         MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
@@ -170,20 +170,14 @@ HnswVectorIndex::~HnswVectorIndex() {
 }
 
 bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field);
+  auto vector_ptr = doc.GetVectorDirectPtr(field, dim_);
 
-  if (!vector) {
+  if (!vector_ptr) {
     return false;
   }
 
-  auto& [ptr, size] = vector.value();
-
-  if (ptr && size != dim_) {
-    return false;
-  }
-
-  if (ptr) {
-    adapter_->Add(ptr.get(), id);
+  if (vector_ptr) {
+    adapter_->Add(*vector_ptr, id);
   }
 
   return true;

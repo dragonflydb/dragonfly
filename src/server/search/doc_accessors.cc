@@ -126,6 +126,23 @@ std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
   return std::nullopt;
 }
 
+std::optional<BaseAccessor::DirectVectorPtr> BaseAccessor::GetVectorDirectPtr(
+    std::string_view active_field, size_t dim) const {
+  auto strings_list = GetStrings(active_field);
+  if (strings_list) {
+    if (!strings_list->empty()) {
+      auto value = strings_list->front();
+      if ((value.size() % sizeof(float)) || (value.size() / sizeof(float) != dim)) {
+        return std::nullopt;
+      }
+      return value.data();
+    } else {
+      return nullptr;
+    }
+  }
+  return std::nullopt;
+}
+
 std::optional<BaseAccessor::NumsList> BaseAccessor::GetNumbers(
     std::string_view active_field) const {
   auto strings_list = GetStrings(active_field);
