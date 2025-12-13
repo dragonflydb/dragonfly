@@ -89,6 +89,9 @@ struct CommandContext {
   unsigned exec_body_len = 0;
 
   void RecordLatency(facade::ArgSlice tail_args) const;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
+  void SendError(facade::OpStatus status) const;
+  void SendError(facade::ErrorReply error) const;
 };
 
 // TODO: move it to helio
