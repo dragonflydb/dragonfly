@@ -1037,7 +1037,7 @@ void TtlGeneric(CmdArgList args, TimeUnit unit, Transaction* tx, SinkReplyBuilde
   }
 }
 
-std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkReplyBuilder* builder) {
+io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
   int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
   for (auto& arg : args) {
     string arg_sv = absl::AsciiStrToUpper(ToSV(arg));
@@ -1050,17 +1050,15 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
     } else if (arg_sv == "LT") {
       flags |= ExpireFlags::EXPIRE_LT;
     } else {
-      builder->SendError(absl::StrCat("Unsupported option: ", arg_sv));
-      return nullopt;
+      return nonstd::make_unexpected(absl::StrCat("Unsupported option: ", arg_sv));
     }
   }
   if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ~ExpireFlags::EXPIRE_NX)) {
-    builder->SendError("NX and XX, GT or LT options at the same time are not compatible");
-    return nullopt;
+    return nonstd::make_unexpected(
+        "NX and XX, GT or LT options at the same time are not compatible");
   }
   if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
-    builder->SendError("GT and LT options at the same time are not compatible");
-    return nullopt;
+    return nonstd::make_unexpected("GT and LT options at the same time are not compatible");
   }
   return flags;
 }
@@ -1130,7 +1128,7 @@ void GenericFamily::Unlink(CmdArgList args, CommandContext* cmd_cntx) {
 void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (args.size() > 1) {
-    return rb->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
+    return cmd_cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
   string_view msg;
@@ -1189,7 +1187,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cmd_cntx->rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
@@ -1199,9 +1197,9 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
     int_arg = kMaxExpireDeadlineSec;
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
-    return;
+    return cmd_cntx->SendError(expire_options.error());
   }
   DbSlice::ExpireParams params{.value = int_arg, .expire_options = expire_options.value()};
 
@@ -1219,13 +1217,13 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cmd_cntx->rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
-    return;
+    return cmd_cntx->SendError(expire_options.error());
   }
   DbSlice::ExpireParams params{
       .value = int_arg, .absolute = true, .expire_options = expire_options.value()};
@@ -1236,7 +1234,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return cmd_cntx->rb->SendError(kExpiryOutOfRange);
+    return cmd_cntx->SendError(kExpiryOutOfRange);
   }
 
   cmd_cntx->rb->SendLong(status == OpStatus::OK);
@@ -1269,13 +1267,13 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return cmd_cntx->rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
-    return;
+    return cmd_cntx->SendError(expire_options.error());
   }
   DbSlice::ExpireParams params{.value = int_arg,
                                .unit = TimeUnit::MSEC,
@@ -1288,7 +1286,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return cmd_cntx->rb->SendError(kExpiryOutOfRange);
+    return cmd_cntx->SendError(kExpiryOutOfRange);
   } else {
     cmd_cntx->rb->SendLong(status == OpStatus::OK);
   }
@@ -1300,7 +1298,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return cmd_cntx->rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, -1);
 
@@ -1309,9 +1307,9 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
     int_arg = kMaxExpireDeadlineMs;
   }
 
-  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cmd_cntx->rb);
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
-    return;
+    return cmd_cntx->SendError(expire_options.error());
   }
   DbSlice::ExpireParams params{
       .value = int_arg, .unit = TimeUnit::MSEC, .expire_options = expire_options.value()};
@@ -1322,7 +1320,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return cmd_cntx->rb->SendError(kExpiryOutOfRange);
+    return cmd_cntx->SendError(kExpiryOutOfRange);
   }
   cmd_cntx->rb->SendLong(status == OpStatus::OK);
 }
@@ -1516,23 +1514,23 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     } else if (arg == "LIMIT") {
       int offset, limit;
       if (i + 2 >= args.size()) {
-        return builder->SendError(kSyntaxErr);
+        return cmd_cntx->SendError(kSyntaxErr);
       }
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &offset) ||
           !absl::SimpleAtoi(ArgS(args, i + 2), &limit)) {
-        return builder->SendError(kInvalidIntErr);
+        return cmd_cntx->SendError(kInvalidIntErr);
       }
       bounds = {offset, limit};
       i += 2;
     } else if (!is_read_only && arg == "STORE") {
       if (i + 1 >= args.size()) {
-        return builder->SendError(kSyntaxErr);
+        return cmd_cntx->SendError(kSyntaxErr);
       }
       store_key = ArgS(args, i + 1);
       i += 1;
     } else {
       LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
-      return builder->SendError(kSyntaxErr, kSyntaxErrType);
+      return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
     }
   }
 
@@ -1558,7 +1556,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     if (fetch_result == OpStatus::WRONG_TYPE)
       return builder->SendError(fetch_result.status());
     else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
-      return builder->SendError("One or more scores can't be converted into double");
+      return cmd_cntx->SendError("One or more scores can't be converted into double");
     else
       return rb->SendEmptyArray();
   }
@@ -1605,7 +1603,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       if (store_len) {
         rb->SendLong(store_len.value());
       } else {
-        rb->SendError(store_len.status());
+        cmd_cntx->SendError(store_len.status());
       }
     }
   };
@@ -1628,15 +1626,15 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
   auto rdb_version = GetRdbVersion(serialized_value, cmd_cntx->conn_cntx->journal_emulated);
   auto* builder = cmd_cntx->rb;
   if (!rdb_version) {
-    return builder->SendError(kInvalidDumpValueErr);
+    return cmd_cntx->SendError(kInvalidDumpValueErr);
   }
 
   OpResult<RestoreArgs> restore_args = RestoreArgs::TryFrom(args);
   if (!restore_args) {
     if (restore_args.status() == OpStatus::OUT_OF_RANGE) {
-      return builder->SendError("Invalid IDLETIME value, must be >= 0");
+      return cmd_cntx->SendError("Invalid IDLETIME value, must be >= 0");
     } else {
-      return builder->SendError(restore_args.status());
+      return cmd_cntx->SendError(restore_args.status());
     }
   }
 
@@ -1651,11 +1649,11 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
     case OpStatus::OK:
       return builder->SendOk();
     case OpStatus::KEY_EXISTS:
-      return builder->SendError("-BUSYKEY Target key name already exists.");
+      return cmd_cntx->SendError("-BUSYKEY Target key name already exists.");
     case OpStatus::INVALID_VALUE:
-      return builder->SendError("Bad data format");
+      return cmd_cntx->SendError("Bad data format");
     default:
-      return builder->SendError(result);
+      return cmd_cntx->SendError(result);
   }
 }
 
@@ -1666,7 +1664,7 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   uint32_t ttl_sec;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
   CmdArgList fields = parser.Tail();
 
@@ -1679,7 +1677,7 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (result) {
     rb->SendLongArr(absl::MakeConstSpan(result.value()));
   } else {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
@@ -1698,7 +1696,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  cmd_cntx->rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
 void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1707,15 +1705,15 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
   int32_t target_db;
   auto* builder = cmd_cntx->rb;
   if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
-    return builder->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   if (target_db < 0 || uint32_t(target_db) >= absl::GetFlag(FLAGS_dbnum)) {
-    return builder->SendError(kDbIndOutOfRangeErr);
+    return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
 
   if (target_db == cmd_cntx->tx->GetDbIndex()) {
-    return builder->SendError("source and destination objects are the same");
+    return cmd_cntx->SendError("source and destination objects are the same");
   }
 
   OpStatus res = OpStatus::SKIPPED;
@@ -1783,15 +1781,14 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (k1 == k2) {
-    rb->SendError("source and destination objects are the same");
-    return;
+    return cmd_cntx->SendError("source and destination objects are the same");
   }
 
   Renamer renamer(cmd_cntx->tx, k1, k2, shard_set->size(), true);
   auto reply = renamer.Rename(!replace);
 
   if (!reply.status) {
-    return rb->SendError(reply);
+    return cmd_cntx->SendError(reply);
   }
 
   OpStatus st = reply.status.value();
@@ -1802,7 +1799,7 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (st == OpStatus::KEY_NOTFOUND) {
     rb->SendLong(0);
   } else {
-    rb->SendError(reply);
+    cmd_cntx->SendError(reply);
   }
 }
 
@@ -1827,13 +1824,13 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t index;
   auto* builder = cmd_cntx->rb;
   if (!absl::SimpleAtoi(key, &index)) {
-    return builder->SendError(kInvalidDbIndErr);
+    return cmd_cntx->SendError(kInvalidDbIndErr);
   }
   if (IsClusterEnabled() && index != 0) {
-    return builder->SendError("SELECT is not allowed in cluster mode");
+    return cmd_cntx->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
-    return builder->SendError(kDbIndOutOfRangeErr);
+    return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
   auto* cntx = cmd_cntx->conn_cntx;
   if (cntx->conn_state.db_index == index) {
@@ -1842,7 +1839,7 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (cntx->conn_state.exec_info.IsRunning()) {
-    return builder->SendError("SELECT is not allowed in a transaction");
+    return cmd_cntx->SendError("SELECT is not allowed in a transaction");
   }
 
   cntx->conn_state.db_index = index;
@@ -1933,7 +1930,7 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
       };
       return builder->SendSimpleStrArr(help_arr);
     }
-    return builder->SendError("invalid cursor");
+    return cmd_cntx->SendError("invalid cursor");
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));

@@ -25,7 +25,6 @@
 #endif
 
 using namespace std;
-using absl::StrAppend;
 using namespace double_conversion;
 
 namespace facade {
