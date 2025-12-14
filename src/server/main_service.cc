@@ -1817,7 +1817,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     mc_builder->SetReturnValue(cmd.return_value);
     mc_builder->SetReturnVersion(cmd.return_version);
   }
-
+  CommandContext cmd_ctx{nullptr, nullptr, mc_builder, static_cast<ConnectionContext*>(cntx)};
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
       strcpy(cmd_name, "SET");
@@ -1864,7 +1864,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "QUIT");
       break;
     case MemcacheParser::STATS:
-      server_family_.StatsMC(cmd.key(), mc_builder);
+      server_family_.StatsMC(cmd.key(), &cmd_ctx);
       return;
     case MemcacheParser::VERSION:
       mc_builder->SendSimpleString("VERSION 1.6.0 DF");
