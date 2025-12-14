@@ -10,6 +10,8 @@
 
 #include <queue>
 
+#include "server/tiered_storage.h"
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/intset.h"

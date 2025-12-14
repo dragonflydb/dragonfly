@@ -656,6 +656,8 @@ struct GetReplies {
         return Send(std::move(res.value()));
       case OpStatus::WRONG_TYPE:
         return rb->SendError(kWrongTypeErr);
+      case OpStatus::IO_ERROR:
+        return rb->SendError(kTieredIoError);
       default:
         rb->SendNull();
     }
