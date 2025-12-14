@@ -1656,7 +1656,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 void JsonFamily::Set(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto res = parser.TryMapNext("NX", 1, "XX", 2);
@@ -1688,7 +1688,7 @@ void JsonFamily::Set(CmdArgList args, CommandContext* cmd_cntx) {
 void JsonFamily::MSet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 3u);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() % 3 != 0) {
     return builder->SendError(facade::WrongNumArgsError("json.mset"));
   }
@@ -1717,7 +1717,7 @@ void JsonFamily::Merge(CmdArgList args, CommandContext* cmd_cntx) {
   string_view path = parser.Next();
   string_view value = parser.Next();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1735,7 +1735,7 @@ void JsonFamily::Resp(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1750,7 +1750,7 @@ void JsonFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view command = parser.Next();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (absl::EqualsIgnoreCase(command, "help")) {
     builder->StartArray(3);
@@ -1772,9 +1772,10 @@ void JsonFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
     ShardId sid = Shard(key, shard_set->size());
+    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
     auto cb = [&]() {
       EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->conn_state.db_index};
+      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
       OpArgs op_args{shard, nullptr, db_cntx};
       return OpMemory(op_args, key, json_path);
     };
@@ -1793,9 +1794,10 @@ void JsonFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
     ShardId sid = Shard(key, shard_set->size());
+    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
     auto cb = [&]() {
       EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->conn_state.db_index};
+      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
       OpArgs op_args{shard, nullptr, db_cntx};
       return OpFields(op_args, key, json_path);
     };
@@ -1814,7 +1816,7 @@ void JsonFamily::MGet(CmdArgList args, CommandContext* cmd_cntx) {
 
   string_view path = ArgS(args, args.size() - 1);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   unsigned shard_count = shard_set->size();
@@ -1855,7 +1857,7 @@ void JsonFamily::ArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.Next();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   string_view search_value = parser.Next();
@@ -1891,7 +1893,7 @@ void JsonFamily::ArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
   string_view path = ArgS(args, 1);
   int index = -1;
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(ArgS(args, 2), &index)) {
     VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 2);
     builder->SendError(kInvalidIntErr);
@@ -1918,7 +1920,7 @@ void JsonFamily::ArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   vector<string_view> append_values;
@@ -1940,7 +1942,7 @@ void JsonFamily::ArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
   int start_index;
   int stop_index;
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(ArgS(args, 2), &start_index)) {
     VLOG(1) << "Failed to parse array start index";
     builder->SendError(kInvalidIntErr);
@@ -1970,7 +1972,7 @@ void JsonFamily::ArrPop(CmdArgList args, CommandContext* cmd_cntx) {
   string_view path = parser.NextOrDefault();
   int index = parser.NextOrDefault<int>(-1);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err) {
     return builder->SendError(err.MakeReply());
   }
@@ -1991,7 +1993,7 @@ void JsonFamily::Clear(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2008,7 +2010,7 @@ void JsonFamily::StrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   string_view path = ArgS(args, 1);
   string_view value = ArgS(args, 2);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
@@ -2031,7 +2033,7 @@ void JsonFamily::ObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2048,7 +2050,7 @@ void JsonFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2065,7 +2067,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2082,7 +2084,7 @@ void JsonFamily::NumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2099,7 +2101,7 @@ void JsonFamily::Toggle(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   if (json_path.IsLegacyModePath()) {
@@ -2114,7 +2116,7 @@ void JsonFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2131,7 +2133,7 @@ void JsonFamily::ArrLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2148,7 +2150,7 @@ void JsonFamily::ObjLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2165,7 +2167,7 @@ void JsonFamily::StrLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2182,7 +2184,7 @@ void JsonFamily::Get(CmdArgList args, CommandContext* cmd_cntx) {
 
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   auto params = ParseJsonGetParams(&parser, builder);
   if (!params) {

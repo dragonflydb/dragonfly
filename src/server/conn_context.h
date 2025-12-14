@@ -286,6 +286,7 @@ struct ConnectionState {
   ClientTracking tracking_info_;
 };
 
+class CommandContext;
 class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
@@ -301,7 +302,6 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Namespace* ns = nullptr;
   Transaction* transaction = nullptr;
-  // const CommandId* cid = nullptr;
 
   ConnectionState conn_state;
 
@@ -329,6 +329,7 @@ class ConnectionContext : public facade::ConnectionContext {
 
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware
                          // of it as a state for the connection
+  bool journal_emulated = false;  // whether it is used to dispatch journal commands
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
@@ -344,6 +345,43 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::vector<unsigned> ChangeSubscriptions(CmdArgList channels, bool pattern, bool to_add,
                                             bool to_reply);
+};
+
+class CommandContext {
+ public:
+  CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* rb,
+                 ConnectionContext* cntx)
+      : cid(_cid), tx(_tx), rb_(rb), conn_cntx_(cntx) {
+  }
+
+  const CommandId* cid;
+  Transaction* tx;
+
+  uint64_t start_time_ns = 0;
+
+  // number of commands in the last exec body.
+  unsigned exec_body_len = 0;
+
+  void RecordLatency(facade::ArgSlice tail_args) const;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
+  void SendError(facade::OpStatus status) const;
+  void SendError(facade::ErrorReply error) const;
+
+  ConnectionContext* server_conn_cntx() const {
+    return static_cast<ConnectionContext*>(conn_cntx_);
+  }
+
+  facade::Connection* conn() const {
+    return conn_cntx_->conn();
+  }
+
+  facade::SinkReplyBuilder* rb() const {
+    return rb_;
+  }
+
+ private:
+  facade::SinkReplyBuilder* rb_;
+  ConnectionContext* conn_cntx_;
 };
 
 }  // namespace dfly

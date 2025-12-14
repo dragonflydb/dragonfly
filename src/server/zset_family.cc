@@ -2091,11 +2091,11 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
 namespace {
 
 void CmdBZPopMin(CmdArgList args, CommandContext* cmd_cntx) {
-  BZPopMinMax(args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx, false);
+  BZPopMinMax(args, cmd_cntx->tx, cmd_cntx->rb(), cmd_cntx->server_conn_cntx(), false);
 }
 
 void CmdBZPopMax(CmdArgList args, CommandContext* cmd_cntx) {
-  BZPopMinMax(args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx, true);
+  BZPopMinMax(args, cmd_cntx->tx, cmd_cntx->rb(), cmd_cntx->server_conn_cntx(), true);
 }
 
 void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2123,7 +2123,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if ((args.size() - i) % 2 != 0) {
     builder->SendError(kSyntaxErr);
     return;
@@ -2210,11 +2210,11 @@ void CmdZCard(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx->rb->SendError(kWrongTypeErr);
+    cmd_cntx->SendError(kWrongTypeErr);
     return;
   }
 
-  cmd_cntx->rb->SendLong(result.value());
+  cmd_cntx->rb()->SendLong(result.value());
 }
 
 void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2225,7 +2225,7 @@ void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
 
   ZSetFamily::ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return cmd_cntx->rb->SendError(kFloatRangeErr);
+    return cmd_cntx->SendError(kFloatRangeErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2234,9 +2234,9 @@ void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx->rb->SendError(kWrongTypeErr);
+    cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb->SendLong(*result);
+    cmd_cntx->rb()->SendLong(*result);
   }
 }
 
@@ -2296,7 +2296,7 @@ void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
 
   cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // Check shard results for WRONG_TYPE returned
   for (auto& sm_map : maps) {
@@ -2348,7 +2348,7 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
 
   cmd_cntx->tx->Execute(std::move(cb), false);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // Check shard results for WRONG_TYPE returned
   for (auto& sm_map : maps) {
@@ -2386,7 +2386,7 @@ void CmdZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   ScoredMemberView scored_member;
   scored_member.second = ArgS(args, 2);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!absl::SimpleAtod(score_arg, &scored_member.first)) {
     VLOG(1) << "Bad score:" << score_arg << "|";
@@ -2422,16 +2422,16 @@ void CmdZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdZInter(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zinter", false, false, cmd_cntx->tx, cmd_cntx->rb);
+  ZBooleanOperation(args, "zinter", false, false, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZInterStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zinterstore", false, true, cmd_cntx->tx, cmd_cntx->rb);
+  ZBooleanOperation(args, "zinterstore", false, true, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
   unsigned num_keys;
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
 
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys)) {
     return builder->SendError(OpStatus::SYNTAX_ERR);
@@ -2468,10 +2468,10 @@ void CmdZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
 // Generic function for ZMPop and BZMPop commands
 void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   ValidateZMPopResult zmpop_args;
-  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx->rb, &zmpop_args)) {
+  if (!ValidateZMPopCommand(args, is_blocking, cmd_cntx->rb(), &zmpop_args)) {
     return;
   }
-  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // From the list of input keys, keep the first (in the order of keys in the command) key found
   // in the current shard.
@@ -2520,7 +2520,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
   if (is_blocking && !key_to_pop.has_value()) {
     auto trans = cmd_cntx->tx;
-    auto cntx = cmd_cntx->conn_cntx;
+    auto* cntx = cmd_cntx->server_conn_cntx();
     auto* ns = &trans->GetNamespace();
 
     auto limit_tp = Transaction::time_point::max();
@@ -2576,11 +2576,11 @@ void CmdBZMPop(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdZPopMax(CmdArgList args, CommandContext* cmd_cntx) {
-  ZPopMinMaxFromArgs(args, true, cmd_cntx->tx, cmd_cntx->rb);
+  ZPopMinMaxFromArgs(args, true, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZPopMin(CmdArgList args, CommandContext* cmd_cntx) {
-  ZPopMinMaxFromArgs(args, false, cmd_cntx->tx, cmd_cntx->rb);
+  ZPopMinMaxFromArgs(args, false, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2591,7 +2591,7 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
 
   ZSetFamily::LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-    return cmd_cntx->rb->SendError(kLexRangeErr);
+    return cmd_cntx->SendError(kLexRangeErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2600,50 +2600,51 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx->rb->SendError(kWrongTypeErr);
+    cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb->SendLong(*result);
+    cmd_cntx->rb()->SendLong(*result);
   }
 }
 
 using RangeParams = ZSetFamily::RangeParams;
 
 void CmdZRange(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{});
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb(), RangeParams{});
 }
 
 void CmdZRank(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRankGeneric(args, false, cmd_cntx->tx, cmd_cntx->rb);
+  ZRankGeneric(args, false, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZRevRange(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{.reverse = true});
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb(), RangeParams{.reverse = true});
 }
 
 void CmdZRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{.interval_type = RangeParams::SCORE});
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb(),
+                RangeParams{.interval_type = RangeParams::SCORE});
 }
 
 void CmdZRangeStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args.subspan(1), cmd_cntx->tx, cmd_cntx->rb,
+  ZRangeGeneric(args.subspan(1), cmd_cntx->tx, cmd_cntx->rb(),
                 RangeParams{.with_scores = true, .store_key = ArgS(args, 0)});
 }
 
 void CmdZRevRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb,
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb(),
                 RangeParams{.reverse = true, .interval_type = RangeParams::SCORE});
 }
 
 void CmdZRevRank(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRankGeneric(args, true, cmd_cntx->tx, cmd_cntx->rb);
+  ZRankGeneric(args, true, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb, RangeParams{.interval_type = RangeParams::LEX});
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb(), RangeParams{.interval_type = RangeParams::LEX});
 }
 
 void CmdZRevRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
-  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb,
+  ZRangeGeneric(args, cmd_cntx->tx, cmd_cntx->rb(),
                 RangeParams{.reverse = true, .interval_type = RangeParams::LEX});
 }
 
@@ -2654,12 +2655,12 @@ void CmdZRemRangeByRank(CmdArgList args, CommandContext* cmd_cntx) {
 
   ZSetFamily::IndexInterval ii;
   if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
-    return cmd_cntx->rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   ZSetFamily::ZRangeSpec range_spec;
   range_spec.interval = ii;
-  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb);
+  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZRemRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2669,14 +2670,14 @@ void CmdZRemRangeByScore(CmdArgList args, CommandContext* cmd_cntx) {
 
   ZSetFamily::ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return cmd_cntx->rb->SendError(kFloatRangeErr);
+    return cmd_cntx->SendError(kFloatRangeErr);
   }
 
   ZSetFamily::ZRangeSpec range_spec;
 
   range_spec.interval = si;
 
-  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb);
+  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZRemRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2686,14 +2687,14 @@ void CmdZRemRangeByLex(CmdArgList args, CommandContext* cmd_cntx) {
 
   ZSetFamily::LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-    return cmd_cntx->rb->SendError(kLexRangeErr);
+    return cmd_cntx->SendError(kLexRangeErr);
   }
 
   ZSetFamily::ZRangeSpec range_spec;
 
   range_spec.interval = li;
 
-  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb);
+  ZRemRangeGeneric(key, range_spec, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2705,14 +2706,14 @@ void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cmd_cntx->rb->SendError(kWrongTypeErr);
+    cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb->SendLong(*result);
+    cmd_cntx->rb()->SendLong(*result);
   }
 }
 
 void CmdZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() > 3)
     return rb->SendError(WrongNumArgsError("ZRANDMEMBER"));
@@ -2758,7 +2759,7 @@ void CmdZScore(CmdArgList args, CommandContext* cmd_cntx) {
     return ZSetFamily::OpScore(t->GetOpArgs(shard), key, member);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult<double> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     rb->SendError(kWrongTypeErr);
@@ -2770,7 +2771,7 @@ void CmdZScore(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdZMScore(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
 
@@ -2794,7 +2795,7 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
 
   uint64_t cursor = 0;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!absl::SimpleAtoi(token, &cursor)) {
     return rb->SendError("invalid cursor");
@@ -2825,11 +2826,11 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdZUnion(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zunion", true, false, cmd_cntx->tx, cmd_cntx->rb);
+  ZBooleanOperation(args, "zunion", true, false, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdZUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
-  ZBooleanOperation(args, "zunionstore", true, true, cmd_cntx->tx, cmd_cntx->rb);
+  ZBooleanOperation(args, "zunionstore", true, true, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 }  // namespace

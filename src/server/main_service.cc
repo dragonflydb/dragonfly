@@ -47,7 +47,6 @@ extern "C" {
 #include "server/bloom_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
-#include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/geo_family.h"
@@ -73,7 +72,6 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
-using facade::operator""_KB;
 using facade::ErrorReply;
 
 ABSL_FLAG(int32_t, port, 6379,
@@ -1299,7 +1297,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_c
     return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
-  return VerifyConnectionAclStatus(cmd_cntx.cid, cmd_cntx.conn_cntx,
+  return VerifyConnectionAclStatus(cmd_cntx.cid, cmd_cntx.server_conn_cntx(),
                                    "ACL rules changed between the MULTI and EXEC", tail_args);
 }
 
@@ -1606,8 +1604,8 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
   cmd_cntx->start_time_ns = absl::GetCurrentTimeNanos();
 
-  ConnectionContext* cntx = cmd_cntx->conn_cntx;
-  auto* builder = cmd_cntx->rb;
+  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
+  auto* builder = cmd_cntx->rb();
   DCHECK(builder);
   DCHECK(cntx);
 
@@ -2005,30 +2003,33 @@ absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
 }
 
 void Service::Quit(CmdArgList args, CommandContext* cmd_cntx) {
-  if (cmd_cntx->rb->GetProtocol() == Protocol::REDIS)
-    cmd_cntx->rb->SendOk();
+  if (cmd_cntx->rb()->GetProtocol() == Protocol::REDIS)
+    cmd_cntx->rb()->SendOk();
 
-  cmd_cntx->rb->CloseConnection();
+  cmd_cntx->rb()->CloseConnection();
 
-  DeactivateMonitoring(cmd_cntx->conn_cntx);
-  cmd_cntx->conn_cntx->conn()->ShutdownSelfBlocking();
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  DeactivateMonitoring(cntx);
+  cntx->conn()->ShutdownSelfBlocking();
 }
 
 void Service::Multi(CmdArgList args, CommandContext* cmd_cntx) {
-  if (cmd_cntx->conn_cntx->conn_state.exec_info.IsCollecting()) {
-    return cmd_cntx->rb->SendError("MULTI calls can not be nested");
+  auto& conn_state = cmd_cntx->server_conn_cntx()->conn_state;
+  if (conn_state.exec_info.IsCollecting()) {
+    return cmd_cntx->SendError("MULTI calls can not be nested");
   }
-  cmd_cntx->conn_cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
+  conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
   // TODO: to protect against huge exec transactions.
-  return cmd_cntx->rb->SendOk();
+  return cmd_cntx->rb()->SendOk();
 }
 
 void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
-  auto& exec_info = cmd_cntx->conn_cntx->conn_state.exec_info;
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& exec_info = cntx->conn_state.exec_info;
 
   // Skip if EXEC will already fail due previous WATCH.
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
-    return cmd_cntx->rb->SendOk();
+    return cmd_cntx->rb()->SendOk();
   }
 
   atomic_uint32_t keys_existed = 0;
@@ -2036,7 +2037,7 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
     ShardId shard_id = shard->shard_id();
     ShardArgs largs = t->GetShardArgs(shard_id);
     for (auto k : largs) {
-      t->GetDbSlice(shard_id).RegisterWatchedKey(cmd_cntx->conn_cntx->db_index(), k, &exec_info);
+      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
 
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);
@@ -2048,15 +2049,16 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
   for (string_view key : args) {
-    exec_info.watched_keys.emplace_back(cmd_cntx->conn_cntx->db_index(), key);
+    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
   }
 
-  return cmd_cntx->rb->SendOk();
+  return cmd_cntx->rb()->SendOk();
 }
 
 void Service::Unwatch(CmdArgList args, CommandContext* cmd_cntx) {
-  UnwatchAllKeys(cmd_cntx->conn_cntx->ns, &cmd_cntx->conn_cntx->conn_state.exec_info);
-  return cmd_cntx->rb->SendOk();
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  UnwatchAllKeys(cntx->ns, &cntx->conn_state.exec_info);
+  return cmd_cntx->rb()->SendOk();
 }
 
 optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionContext* cntx,
@@ -2130,19 +2132,20 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   string_view body = ArgS(args, 0);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (body.empty()) {
     return rb->SendNull();
   }
 
-  BorrowedInterpreter interpreter{cmd_cntx->tx, &cmd_cntx->conn_cntx->conn_state};
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  BorrowedInterpreter interpreter{cmd_cntx->tx, &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
-    return cmd_cntx->rb->SendError(res.error().Format(), facade::kScriptErrType);
+    return cmd_cntx->SendError(res.error().Format(), facade::kScriptErrType);
 
   string sha{std::move(res.value())};
 
-  CallSHA(args, sha, interpreter, cmd_cntx->rb, cmd_cntx->conn_cntx, read_only);
+  CallSHA(args, sha, interpreter, cmd_cntx->rb(), cntx, read_only);
 }
 
 void Service::EvalRo(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2151,9 +2154,9 @@ void Service::EvalRo(CmdArgList args, CommandContext* cmd_cntx) {
 
 void Service::EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
-
-  BorrowedInterpreter interpreter{cmd_cntx->tx, &cmd_cntx->conn_cntx->conn_state};
-  CallSHA(args, sha, interpreter, cmd_cntx->rb, cmd_cntx->conn_cntx, read_only);
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  BorrowedInterpreter interpreter{cmd_cntx->tx, &cntx->conn_state};
+  CallSHA(args, sha, interpreter, cmd_cntx->rb(), cntx, read_only);
 }
 
 void Service::EvalShaRo(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2386,13 +2389,13 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 }
 
 void Service::Discard(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
-
-  if (!cmd_cntx->conn_cntx->conn_state.exec_info.IsCollecting()) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  if (!cntx->conn_state.exec_info.IsCollecting()) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  MultiCleanup(cmd_cntx->conn_cntx);
+  MultiCleanup(cntx);
   rb->SendOk();
 }
 
@@ -2467,9 +2470,9 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 }
 
 void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
-  auto& exec_info = cmd_cntx->conn_cntx->conn_state.exec_info;
-  auto* cntx = cmd_cntx->conn_cntx;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& exec_info = cntx->conn_state.exec_info;
 
   // Clean the context no matter the outcome
   absl::Cleanup exec_clear = [cntx] { MultiCleanup(cntx); };
@@ -2594,55 +2597,58 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
   bool sharded = cmd_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
-    return cmd_cntx->rb->SendError("PUBLISH is not supported in cluster mode yet");
+    return cmd_cntx->SendError("PUBLISH is not supported in cluster mode yet");
 
   string_view channel = ArgS(args, 0);
   string_view messages[] = {ArgS(args, 1)};
 
   auto* cs = ServerState::tlocal()->channel_store();
-  cmd_cntx->rb->SendLong(cs->SendMessages(channel, messages, sharded));
+  cmd_cntx->rb()->SendLong(cs->SendMessages(channel, messages, sharded));
 }
 
 void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
   bool sharded = cmd_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
-    return cmd_cntx->rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
+    return cmd_cntx->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
-  cmd_cntx->conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, sharded, args, rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  auto* conn_cntx = cmd_cntx->server_conn_cntx();
+  conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, sharded, args, rb);
 }
 
 void Service::Unsubscribe(CmdArgList args, CommandContext* cmd_cntx) {
   bool sharded = cmd_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  auto* conn_cntx = cmd_cntx->server_conn_cntx();
   if (!sharded && IsClusterEnabled())
     return rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
 
   if (args.size() == 0) {
-    cmd_cntx->conn_cntx->UnsubscribeAll(true, rb);
+    conn_cntx->UnsubscribeAll(true, rb);
   } else {
-    cmd_cntx->conn_cntx->ChangeSubscription(false, true, sharded, args, rb);
+    conn_cntx->ChangeSubscription(false, true, sharded, args, rb);
   }
 }
 
 void Service::PSubscribe(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (IsClusterEnabled()) {
     return rb->SendError("PSUBSCRIBE is not supported in cluster mode yet");
   }
-  cmd_cntx->conn_cntx->ChangePSubscription(true, true, args, rb);
+  cmd_cntx->server_conn_cntx()->ChangePSubscription(true, true, args, rb);
 }
 
 void Service::PUnsubscribe(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (IsClusterEnabled()) {
     return rb->SendError("PUNSUBSCRIBE is not supported in cluster mode yet");
   }
+  auto* conn_cntx = cmd_cntx->server_conn_cntx();
   if (args.size() == 0) {
-    cmd_cntx->conn_cntx->PUnsubscribeAll(true, rb);
+    conn_cntx->PUnsubscribeAll(true, rb);
   } else {
-    cmd_cntx->conn_cntx->ChangePSubscription(false, true, args, rb);
+    conn_cntx->ChangePSubscription(false, true, args, rb);
   }
 }
 
@@ -2652,11 +2658,11 @@ void Service::Function(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "FLUSH") {
-    return cmd_cntx->rb->SendOk();
+    return cmd_cntx->rb()->SendOk();
   }
 
   string err = UnknownSubCmd(sub_cmd, "FUNCTION");
-  return cmd_cntx->rb->SendError(err, kSyntaxErrType);
+  return cmd_cntx->SendError(err, kSyntaxErrType);
 }
 
 void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
@@ -2679,15 +2685,16 @@ void Service::PubsubNumSub(CmdArgList args, SinkReplyBuilder* builder) {
 }
 
 void Service::Monitor(CmdArgList args, CommandContext* cmd_cntx) {
-  VLOG(1) << "starting monitor on this connection: " << cmd_cntx->conn_cntx->conn()->GetClientId();
+  VLOG(1) << "starting monitor on this connection: "
+          << cmd_cntx->server_conn_cntx()->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
   // this connection, to send to it any command
-  cmd_cntx->rb->SendOk();
-  cmd_cntx->conn_cntx->ChangeMonitor(true /* start */);
+  cmd_cntx->rb()->SendOk();
+  cmd_cntx->server_conn_cntx()->ChangeMonitor(true /* start */);
 }
 
 void Service::Pubsub(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() < 1) {
     rb->SendError(WrongNumArgsError(cmd_cntx->cid->name()));
@@ -2749,7 +2756,7 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
     }
   });
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto serialize_command = [rb, this](string_view name, const CommandId& cid) {
     rb->StartArray(7);
     rb->SendSimpleString(cid.name());

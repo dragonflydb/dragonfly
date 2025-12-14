@@ -416,7 +416,7 @@ void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
   // instances is thus 1.
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (!IsClusterEnabledOrEmulated()) {
     return builder->SendError(kClusterDisabled);
   }
@@ -429,7 +429,7 @@ void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
     return builder->SendError(WrongNumArgsError(absl::StrCat("CLUSTER ", sub_cmd)));
   }
 
-  auto* cntx = cmd_cntx->conn_cntx;
+  auto* cntx = cmd_cntx->server_conn_cntx();
   if (sub_cmd == "HELP") {
     return ClusterHelp(builder);
   } else if (sub_cmd == "MYID") {
@@ -448,19 +448,19 @@ void ClusterFamily::Cluster(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void ClusterFamily::ReadOnly(CmdArgList args, CommandContext* cmd_cntx) {
-  cmd_cntx->rb->SendOk();
+  cmd_cntx->rb()->SendOk();
 }
 
 void ClusterFamily::ReadWrite(CmdArgList args, CommandContext* cmd_cntx) {
   if (!IsClusterEmulated()) {
-    return cmd_cntx->rb->SendError(kClusterDisabled);
+    return cmd_cntx->SendError(kClusterDisabled);
   }
-  cmd_cntx->rb->SendOk();
+  cmd_cntx->rb()->SendOk();
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* builder = cmd_cntx->rb;
-  auto* cntx = cmd_cntx->conn_cntx;
+  auto* builder = cmd_cntx->rb();
+  auto* cntx = cmd_cntx->server_conn_cntx();
   if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
     return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
@@ -798,11 +798,11 @@ void ClusterFamily::DflyMigrate(CmdArgList args, CommandContext* cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   args.remove_prefix(1);
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (sub_cmd == "INIT") {
     InitMigration(args, builder);
   } else if (sub_cmd == "FLOW") {
-    DflyMigrateFlow(args, builder, cmd_cntx->conn_cntx);
+    DflyMigrateFlow(args, builder, cmd_cntx->server_conn_cntx());
   } else if (sub_cmd == "ACK") {
     DflyMigrateAck(args, builder);
   } else {

@@ -74,13 +74,13 @@ AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
 }
 
 void AclFamily::Acl(CmdArgList args, CommandContext* cmd_cntx) {
-  cmd_cntx->rb->SendError("Wrong number of arguments for acl command");
+  cmd_cntx->SendError("Wrong number of arguments for acl command");
 }
 
 void AclFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(registry.size());
 
   for (const auto& [username, user] : registry) {
@@ -133,7 +133,7 @@ void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
   auto reg = registry_->GetRegistryWithWriteLock();
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   auto req = ParseAclSetUser(args.subspan(1), false, has_all_keys);
 
   auto error_case = [builder](ErrorReply&& error) { builder->SendError(error); };
@@ -194,18 +194,18 @@ void AclFamily::DelUser(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (users.empty()) {
-    cmd_cntx->rb->SendLong(0);
+    cmd_cntx->rb()->SendLong(0);
     return;
   }
   VLOG(1) << "Evicting open acl connections";
   EvictOpenConnectionsOnAllProactors(users);
   VLOG(1) << "Done evicting open acl connections";
-  cmd_cntx->rb->SendLong(users.size());
+  cmd_cntx->rb()->SendLong(users.size());
 }
 
 void AclFamily::WhoAmI(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
-  rb->SendBulkString(absl::StrCat("User is ", cmd_cntx->conn_cntx->authed_username));
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->SendBulkString(absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
 }
 
 string AclFamily::RegistryToString() const {
@@ -239,7 +239,7 @@ string AclFamily::RegistryToString() const {
 
 void AclFamily::Save(CmdArgList args, CommandContext* cmd_cntx) {
   auto acl_file_path = absl::GetFlag(FLAGS_aclfile);
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (acl_file_path.empty()) {
     builder->SendError("Dragonfly is not configured to use an ACL file.");
     return;
@@ -348,7 +348,7 @@ bool AclFamily::Load() {
 
 void AclFamily::Load(CmdArgList args, CommandContext* cmd_cntx) {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   if (acl_file.empty()) {
     rb->SendError("Dragonfly is not configured to use an ACL file.");
     return;
@@ -362,7 +362,7 @@ void AclFamily::Load(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::Log(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() > 1) {
     return rb->SendError(facade::OpStatus::OUT_OF_RANGE);
   }
@@ -424,7 +424,7 @@ void AclFamily::Log(CmdArgList args, CommandContext* cmd_cntx) {
 void AclFamily::Users(CmdArgList args, CommandContext* cmd_cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   rb->StartArray(registry.size());
   for (const auto& [username, _] : registry) {
@@ -433,7 +433,7 @@ void AclFamily::Users(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::Cat(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() > 1) {
     rb->SendError(facade::OpStatus::SYNTAX_ERR);
@@ -486,7 +486,7 @@ void AclFamily::GetUser(CmdArgList args, CommandContext* cmd_cntx) {
   auto username = facade::ToSV(args[0]);
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!registry.contains(username)) {
     rb->SendNull();
@@ -536,7 +536,7 @@ void AclFamily::GetUser(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::GenPass(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (args.length() > 1) {
     builder->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
     return;
@@ -565,7 +565,7 @@ void AclFamily::GenPass(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::DryRun(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   auto username = facade::ArgS(args, 0);
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
@@ -1203,7 +1203,7 @@ void AclFamily::Help(CmdArgList args, CommandContext* cmd_cntx) {
       "    Return the current connection username.",
       "HELP",
       "    Print this help."};
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendSimpleStrArr(help_arr);
 }
 

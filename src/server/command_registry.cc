@@ -138,14 +138,15 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
 
   cid->RecordLatency(ss->thread_index(), execution_time_usec);
 
-  DCHECK(conn_cntx != nullptr);
+  DCHECK(conn_cntx_ != nullptr);
 
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
-  const auto* conn = conn_cntx->conn();
-  if (conn_cntx->conn_state.squashing_info) {
+  const auto* conn = server_conn_cntx()->conn();
+  auto& conn_state = server_conn_cntx()->conn_state;
+  if (conn_state.squashing_info) {
     // We run from the squashed transaction.
-    conn = conn_cntx->conn_state.squashing_info->owner->conn();
+    conn = conn_state.squashing_info->owner->conn();
   }
 
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
@@ -167,13 +168,13 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
 }
 
 void CommandContext::SendError(std::string_view str, std::string_view type) const {
-  rb->SendError(str, type);
+  rb()->SendError(str, type);
 }
 void CommandContext::SendError(facade::OpStatus status) const {
-  rb->SendError(status);
+  rb()->SendError(status);
 }
 void CommandContext::SendError(facade::ErrorReply error) const {
-  rb->SendError(std::move(error));
+  rb()->SendError(std::move(error));
 }
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
