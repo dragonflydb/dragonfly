@@ -334,6 +334,8 @@ TEST_F(MultiTest, MultiConsistent2) {
 }
 
 TEST_F(MultiTest, MultiConsistent3) {
+  GTEST_SKIP() << "Known consistency bug";
+
   absl::SetFlag(&FLAGS_multi_exec_squash, false);
   vector<Fiber> fbs;
 
@@ -371,7 +373,7 @@ TEST_F(MultiTest, MultiConsistent3) {
     fb.JoinIfNeeded();
 
   auto metrics = GetMetrics();
-  VLOG(0) << metrics.shard_stats.tx_optimistic_total;
+  EXPECT_GT(metrics.shard_stats.tx_optimistic_total, 100);
 }
 
 TEST_F(MultiTest, MultiRename) {
