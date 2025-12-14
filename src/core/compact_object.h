@@ -158,7 +158,6 @@ class CompactObj {
     bool is_key_;
   };
 
-  using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
   // Different representations of external values
@@ -167,14 +166,14 @@ class CompactObj {
     SERIALIZED_MAP  // OBJ_HASH, Serialized map
   };
 
-  CompactObj() {  // By default - empty string.
+  CompactObj() : taglen_{0}, huffman_domain_{0} {  // default - empty string
   }
 
-  explicit CompactObj(std::string_view str, bool is_key) {
+  explicit CompactObj(std::string_view str, bool is_key) : CompactObj() {
     SetString(str, is_key);
   }
 
-  CompactObj(CompactObj&& cs) noexcept {
+  CompactObj(CompactObj&& cs) noexcept : CompactObj() {
     operator=(std::move(cs));
   };
 
@@ -192,7 +191,8 @@ class CompactObj {
   CompactObj AsRef() const {
     CompactObj res;
     memcpy(&res.u_, &u_, sizeof(u_));
-    res.tagbyte_ = tagbyte_;
+    res.taglen_ = taglen_;
+    res.huffman_domain_ = huffman_domain_;
     res.mask_ = mask_;
     res.mask_bits_.ref = 1;
 
@@ -395,10 +395,6 @@ class CompactObj {
 
   uint8_t GetFirstByte() const;
 
-  static constexpr unsigned InlineLen() {
-    return kInlineLen;
-  }
-
   struct Stats {
     size_t small_string_bytes = 0;
     uint64_t huff_encode_total = 0, huff_encode_success = 0;
@@ -449,12 +445,11 @@ class CompactObj {
  private:
   void EncodeString(std::string_view str, bool is_key);
 
-  bool EqualNonInline(std::string_view sv) const;
-
   // Requires: HasAllocated() - true.
   void Free();
 
   bool CmpEncoded(std::string_view sv) const;
+  bool CmpNonInline(std::string_view sv) const;
 
   void SetMeta(uint8_t taglen, uint8_t mask = 0) {
     if (HasAllocated()) {
@@ -514,10 +509,7 @@ class CompactObj {
     bool DefragIfNeeded(PageUsage* page_usage);
   };
 
-  // My main data structure. Union of representations.
-  // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
-  // In case of int values, we waste 8 bytes. I am assuming it's ok and it's not the data type
-  // with biggest memory usage.
+  // Union of different representations
   union U {
     char inline_str[kInlineLen];
 
@@ -534,7 +526,6 @@ class CompactObj {
     }
   } u_;
 
-  //
   static_assert(sizeof(u_) == 16);
 
   union {
@@ -560,15 +551,9 @@ class CompactObj {
     } mask_bits_;
   };
 
-  // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
-  union {
-    uint8_t tagbyte_ = 0;
-    struct {
-      uint8_t taglen_ : 5;
-      uint8_t huffman_domain_ : 1;  // value from HuffmanDomain enum.
-      uint8_t reserved : 2;
-    };
-  };
+  // TODO: use c++20 bitfield initializers
+  uint8_t taglen_ : 5;          // Either length of inline string or tag of type
+  uint8_t huffman_domain_ : 1;  // Value from HuffmanDomain enum. TODO: replace as is_key
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {
@@ -578,7 +563,7 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   if (IsInline()) {
     return std::string_view{u_.inline_str, taglen_} == sv;
   }
-  return EqualNonInline(sv);
+  return CmpNonInline(sv);
 }
 
 std::string_view ObjTypeToString(CompactObjType type);

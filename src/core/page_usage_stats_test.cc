@@ -376,6 +376,7 @@ TEST_F(PageUsageStatsTest, TagIndexDefragResumeWithChanges) {
 
   PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
   p_small_quota.SetForceReallocate(true);
+  util::ThisFiber::SleepFor(10us);
   search::DefragmentResult result = index.Defragment(&p_small_quota);
   EXPECT_TRUE(result.quota_depleted);
   EXPECT_GE(result.objects_moved, 0);

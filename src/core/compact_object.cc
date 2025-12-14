@@ -781,15 +781,13 @@ CompactObj::~CompactObj() {
 CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   DCHECK(&o != this);
 
-  SetMeta(o.taglen_, o.mask_);  // Frees underlying resources if needed.
+  SetMeta(o.taglen_, o.mask_);  // frees own previous resources
   memcpy(&u_, &o.u_, sizeof(u_));
+  huffman_domain_ = o.huffman_domain_;
 
-  tagbyte_ = o.tagbyte_;
-
-  // SetMeta deallocates the object and we only want reset it.
-  o.tagbyte_ = 0;
+  o.taglen_ = 0;  // forget all data
+  o.huffman_domain_ = 0;
   o.mask_ = 0;
-
   return *this;
 }
 
@@ -1268,7 +1266,8 @@ void CompactObj::Reset() {
   if (HasAllocated()) {
     Free();
   }
-  tagbyte_ = 0;
+  taglen_ = 0;
+  huffman_domain_ = 0;
   mask_ = 0;
 }
 
@@ -1380,13 +1379,11 @@ bool CompactObj::operator==(const CompactObj& o) const {
   return memcmp(u_.inline_str, o.u_.inline_str, taglen_) == 0;
 }
 
-bool CompactObj::EqualNonInline(std::string_view sv) const {
+bool CompactObj::CmpNonInline(std::string_view sv) const {
+  DCHECK_GT(taglen_, kInlineLen);
   switch (taglen_) {
-    case INT_TAG: {
-      absl::AlphaNum an(u_.ival);
-      return sv == an.Piece();
-    }
-
+    case INT_TAG:
+      return absl::AlphaNum(u_.ival).Piece() == sv;
     case ROBJ_TAG:
       return u_.r_obj.Equal(sv);
     case SMALL_TAG:
@@ -1398,6 +1395,8 @@ bool CompactObj::EqualNonInline(std::string_view sv) const {
 }
 
 bool CompactObj::CmpEncoded(string_view sv) const {
+  DCHECK(mask_bits_.encoding);
+
   if (mask_bits_.encoding == HUFFMAN_ENC) {
     size_t sz = Size();
     if (sv.size() != sz)

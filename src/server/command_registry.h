@@ -70,14 +70,28 @@ enum class MultiControlKind : uint8_t {
 // Per thread vector of command stats. Each entry is {cmd_calls, cmd_latency_agg in usec}.
 using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
+class CommandId;
+
 struct CommandContext {
-  CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
-      : tx(_tx), rb(_rb), conn_cntx(cntx) {
+  CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* _rb,
+                 ConnectionContext* cntx)
+      : cid(_cid), tx(_tx), rb(_rb), conn_cntx(cntx) {
   }
 
+  const CommandId* cid;
   Transaction* tx;
   facade::SinkReplyBuilder* rb;
   ConnectionContext* conn_cntx;
+
+  uint64_t start_time_ns = 0;
+
+  // number of commands in the last exec body.
+  unsigned exec_body_len = 0;
+
+  void RecordLatency(facade::ArgSlice tail_args) const;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
+  void SendError(facade::OpStatus status) const;
+  void SendError(facade::ErrorReply error) const;
 };
 
 // TODO: move it to helio
@@ -103,7 +117,7 @@ template <typename T> class MoveOnly {
   }
 
  private:
-  T value_;
+  T value_{};
 };
 
 class CommandId : public facade::CommandId {
@@ -125,13 +139,15 @@ class CommandId : public facade::CommandId {
     command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
   }
 
-  using Handler3 = fu2::function_base<true, true, fu2::capacity_default, false, false,
-                                      void(CmdArgList, const CommandContext&) const>;
+  using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
+                                     void(CmdArgList, CommandContext*) const>;
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
   // Returns the invoke time in usec.
-  uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx) const;
+  void Invoke(CmdArgList args, CommandContext* cmd_cntx) const {
+    handler_(args, cmd_cntx);
+  }
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
@@ -152,7 +168,11 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::BLOCKING;
   }
 
-  CommandId&& SetHandler(Handler3 f) && {
+  bool CanBeMonitored() const {
+    return can_be_monitored_;
+  }
+
+  CommandId&& SetHandler(Handler f) && {
     handler_ = std::move(f);
     return std::move(*this);
   }
@@ -181,7 +201,9 @@ class CommandId : public facade::CommandId {
     return is_alias_;
   }
 
-  hdr_histogram* LatencyHist() const;
+  hdr_histogram* GetLatencyHist() const {
+    return latency_histogram_;
+  }
 
   std::optional<CO::PubSubKind> PubSubKind() const {
     return kind_pubsub_;
@@ -192,6 +214,8 @@ class CommandId : public facade::CommandId {
     return kind_multi_ctr_;
   }
 
+  void RecordLatency(unsigned tid, uint64_t latency_usec) const;
+
  private:
   std::optional<CO::PubSubKind> kind_pubsub_;
   std::optional<CO::MultiControlKind> kind_multi_ctr_;
@@ -199,8 +223,10 @@ class CommandId : public facade::CommandId {
   // The following fields must copy manually in the move constructor.
   bool implicit_acl_;
   bool is_alias_{false};
+  bool can_be_monitored_{true};
+
   std::unique_ptr<CmdCallStats[]> command_stats_;
-  Handler3 handler_;
+  Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };

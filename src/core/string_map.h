@@ -156,6 +156,12 @@ class StringMap : public DenseSet {
   static sds GetValue(sds key);
 
  private:
+  // If keepttl is specified, performs a lookup for given field and computes ttl by comparing
+  // existing expiry against time_now(). If keepttl is false, or field is not found, or it expires,
+  // or the field has no ttl, returns ttl_sec. set_time() must have been called before computing
+  // ttl.
+  uint32_t ComputeTtl(std::string_view field, uint32_t ttl_sec, bool keepttl) const;
+
   // Reallocate key and/or value if their pages are underutilized.
   // Returns new pointer (stays same if key utilization is enough) and if reallocation happened.
   std::pair<sds, bool> ReallocIfNeeded(void* obj, PageUsage* page_usage);

@@ -128,4 +128,90 @@ TEST_F(RaxTreeTest, Iterate) {
   }
 }
 
+TEST_F(RaxTreeTest, MoveIterator) {
+  RaxTreeMap<bool> m{pmr::get_default_resource()};
+  RaxTreeMap<bool>::SeekIterator tmp;
+  {
+    // empty map, iterator invalidated on construction
+    tmp = m.begin();
+    const auto it = std::move(tmp);
+    EXPECT_FALSE(tmp.IsValid());
+    EXPECT_FALSE(it.IsValid());
+  }
+
+  {
+    tmp = m.end();
+    const auto it = std::move(tmp);
+    EXPECT_FALSE(tmp.IsValid());
+    EXPECT_FALSE(it.IsValid());
+    EXPECT_EQ(it, m.end());
+  }
+
+  m.try_emplace("first", true);
+  m.try_emplace("second", false);
+
+  {
+    tmp = m.begin();
+    RaxTreeMap<bool>::SeekIterator it{std::move(tmp)};
+    EXPECT_FALSE(tmp.IsValid());
+    EXPECT_TRUE(it.IsValid());
+    EXPECT_EQ((*it).first, "first");
+    EXPECT_TRUE((*it).second);
+
+    ++it;
+
+    EXPECT_EQ((*it).first, "second");
+    EXPECT_FALSE((*it).second);
+
+    ++it;
+    EXPECT_EQ(it, m.end());
+  }
+
+  {
+    // advance before moving, the moved-to iterator should pick where the moved-from left off
+    tmp = m.lower_bound("fig");
+    EXPECT_TRUE(tmp.IsValid());
+
+    ++tmp;
+    EXPECT_EQ((*tmp).first, "second");
+
+    auto it = std::move(tmp);
+    EXPECT_FALSE(tmp.IsValid());
+    EXPECT_TRUE(it.IsValid());
+    EXPECT_EQ((*it).first, "second");
+
+    ++it;
+    EXPECT_FALSE(it.IsValid());
+    EXPECT_EQ(it, m.end());
+  }
+
+  {
+    // move into valid iterator
+    auto it = m.begin();
+    EXPECT_EQ((*it).first, "first");
+
+    tmp = m.lower_bound("sea");
+    EXPECT_EQ((*tmp).first, "second");
+
+    it = std::move(tmp);
+    EXPECT_FALSE(tmp.IsValid());
+    EXPECT_TRUE(it.IsValid());
+
+    EXPECT_EQ((*it).first, "second");
+    ++it;
+    EXPECT_FALSE(it.IsValid());
+    EXPECT_EQ(it, m.end());
+  }
+
+  {
+    auto it = m.lower_bound("sea");
+    EXPECT_EQ((*it).first, "second");
+
+    tmp = m.end();
+    it = std::move(tmp);
+
+    EXPECT_FALSE(it.IsValid());
+  }
+}
+
 }  // namespace dfly::search

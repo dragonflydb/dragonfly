@@ -99,43 +99,6 @@ class ZSetFamily {
 
   static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
                                   std::string_view member);
-
- private:
-  static void BZPopMin(CmdArgList args, const CommandContext& cmd_cntx);
-  static void BZPopMax(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZAdd(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZCard(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZCount(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZDiff(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZIncrBy(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZInterStore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZInter(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZInterCard(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZLexCount(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZMPop(CmdArgList args, const CommandContext& cmd_cntx);
-  static void BZMPop(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZPopMax(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZPopMin(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRange(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRank(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRem(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRandMember(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZScore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZMScore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRangeByLex(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRevRangeByLex(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRangeByScore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRangeStore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRemRangeByRank(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRemRangeByScore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRemRangeByLex(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRevRange(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRevRangeByScore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZRevRank(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZScan(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZUnion(CmdArgList args, const CommandContext& cmd_cntx);
-  static void ZUnionStore(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

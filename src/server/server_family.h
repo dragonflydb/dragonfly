@@ -221,7 +221,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx);
+  void ShutdownCmd(CmdArgList args, CommandContext* cmd_cntx);
 
   Service& service() {
     return service_;
@@ -242,7 +242,7 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
-  void StatsMC(std::string_view section, SinkReplyBuilder* builder);
+  void StatsMC(std::string_view section, CommandContext* cmd_ctx);
 
   GenericError DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* transaction,
                       bool ignore_state = false);
@@ -340,30 +340,29 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  void Auth(CmdArgList args, const CommandContext& cmd_cntx);
-  void Client(CmdArgList args, const CommandContext& cmd_cntx);
-  void Config(CmdArgList args, const CommandContext& cmd_cntx);
-  void DbSize(CmdArgList args, const CommandContext& cmd_cntx);
-  void Debug(CmdArgList args, const CommandContext& cmd_cntx);
-  void Dfly(CmdArgList args, const CommandContext& cmd_cntx);
-  void Memory(CmdArgList args, const CommandContext& cmd_cntx);
-  void Shrink(CmdArgList args, const CommandContext& cmd_cntx);
-  void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
-  void Info(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Hello(CmdArgList args, const CommandContext& cmd_cntx);
-  void LastSave(CmdArgList args, const CommandContext& cmd_cntx);
-  void Latency(CmdArgList args, const CommandContext& cmd_cntx);
-  void ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
-  void AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
-  void ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void ReplConf(CmdArgList args, const CommandContext& cmd_cntx);
-  void Role(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Save(CmdArgList args, const CommandContext& cmd_cntx);
-  void BgSave(CmdArgList args, const CommandContext& cmd_cntx);
-  void Script(CmdArgList args, const CommandContext& cmd_cntx);
-  void SlowLog(CmdArgList args, const CommandContext& cmd_cntx);
-  void Module(CmdArgList args, const CommandContext& cmd_cntx);
+  void Auth(CmdArgList args, CommandContext* cmd_cntx);
+  void Client(CmdArgList args, CommandContext* cmd_cntx);
+  void Config(CmdArgList args, CommandContext* cmd_cntx);
+  void DbSize(CmdArgList args, CommandContext* cmd_cntx);
+  void Debug(CmdArgList args, CommandContext* cmd_cntx);
+  void Dfly(CmdArgList args, CommandContext* cmd_cntx);
+  void Memory(CmdArgList args, CommandContext* cmd_cntx);
+  void Shrink(CmdArgList args, CommandContext* cmd_cntx);
+  void FlushDb(CmdArgList args, CommandContext* cmd_cntx);
+  void Info(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Hello(CmdArgList args, CommandContext* cmd_cntx);
+  void LastSave(CmdArgList args, CommandContext* cmd_cntx);
+  void Latency(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
+  void AddReplicaOf(CmdArgList args, CommandContext* cmd_cntx);
+  void ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplConf(CmdArgList args, CommandContext* cmd_cntx);
+  void Role(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Save(CmdArgList args, CommandContext* cmd_cntx);
+  void BgSave(CmdArgList args, CommandContext* cmd_cntx);
+  void Script(CmdArgList args, CommandContext* cmd_cntx);
+  void SlowLog(CmdArgList args, CommandContext* cmd_cntx);
+  void Module(CmdArgList args, CommandContext* cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
@@ -374,12 +373,13 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+  void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   // REPLICAOF implementation without two phase locking.
-  void ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+  void ReplicaOfInternalV2(CmdArgList args, CommandContext* cmnd_cntx,
                            ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   struct LoadOptions {
@@ -397,7 +397,7 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, SinkReplyBuilder* builder);
+  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, CommandContext* cmd_cntx);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
@@ -415,8 +415,8 @@ class ServerFamily {
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
-  void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
+  void ClientPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ClientUnPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
 
   // Set accepting_connections_ and update listners according to it
   void ChangeConnectionAccept(bool accept);

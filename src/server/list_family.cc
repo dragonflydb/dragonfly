@@ -643,18 +643,18 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   }
 }
 
-void RPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
+void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx.tx, cmd_cntx.rb);
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
+void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (auto err = parser.TakeError(); err)
     return builder->SendError(err.MakeReply());
 
@@ -663,7 +663,7 @@ void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx.tx, cmd_cntx.conn_cntx);
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx, cmd_cntx->conn_cntx);
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -681,13 +681,13 @@ void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void BLMove(CmdArgList args, const CommandContext& cmd_cntx) {
+void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
   float timeout = parser.Next<float>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (auto err = parser.TakeError(); err)
     return builder->SendError(err.MakeReply());
 
@@ -696,7 +696,7 @@ void BLMove(CmdArgList args, const CommandContext& cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx.tx, cmd_cntx.conn_cntx);
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx, cmd_cntx->conn_cntx);
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -925,10 +925,8 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
   return result;
 }
 
-}  // namespace
-
-void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   CmdArgParser parser{args};
   parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
@@ -950,7 +948,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(cb), false /* followed by another hop */);
+  cmd_cntx->tx->Execute(std::move(cb), false /* followed by another hop */);
 
   // Find the first existing key from command arguments
   optional<string_view> key_to_pop;
@@ -963,7 +961,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
       continue;
 
     const auto& [found_key, is_valid_type] = *found_keys_per_shard[sid];
-    ShardArgs shard_args = cmd_cntx.tx->GetShardArgs(sid);
+    ShardArgs shard_args = cmd_cntx->tx->GetShardArgs(sid);
 
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it) {
       if (found_key == *it && it.index() < min_index) {
@@ -977,7 +975,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Handle errors and empty cases first
   if (!key_to_pop || found_wrong_type) {
-    cmd_cntx.tx->Conclude();
+    cmd_cntx->tx->Conclude();
     if (found_wrong_type) {
       response_builder->SendError(kWrongTypeErr);
     } else {
@@ -998,7 +996,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(cb_pop), true);
+  cmd_cntx->tx->Execute(std::move(cb_pop), true);
 
   if (result) {
     response_builder->StartArray(2);
@@ -1009,8 +1007,8 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   CmdArgParser parser{args};
   float timeout = parser.Next<float>();
@@ -1036,9 +1034,9 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return result.status();
   };
 
-  ConnectionContext* conn_cntx = cmd_cntx.conn_cntx;
+  ConnectionContext* conn_cntx = cmd_cntx->conn_cntx;
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx.tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
+      cmd_cntx->tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
       &conn_cntx->paused);
 
   if (popped_key.ok()) {
@@ -1050,44 +1048,44 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ListFamily::LPush(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdLPush(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::LPushX(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdLPushX(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::LPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PopGeneric(ListDir::LEFT, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdLPop(CmdArgList args, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::LEFT, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::RPush(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdRPush(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::RPushX(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdRPushX(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::RPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PopGeneric(ListDir::RIGHT, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::RIGHT, args, cmd_cntx->tx, cmd_cntx->rb);
 }
 
-void ListFamily::LLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cmd_cntx.rb->SendLong(result.value());
+    cmd_cntx->rb->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cmd_cntx.rb->SendLong(0);
+    cmd_cntx->rb->SendLong(0);
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->rb->SendError(result.status());
   }
 }
 
-void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [key, elem] = parser.Next<string_view, string_view>();
 
@@ -1116,7 +1114,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
     parser.Skip(1);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
@@ -1127,7 +1125,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
-  Transaction* trans = cmd_cntx.tx;
+  Transaction* trans = cmd_cntx->tx;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1147,11 +1145,11 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   int32_t index;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
 
   if (!absl::SimpleAtoi(index_str, &index)) {
     rb->SendError(kInvalidIntErr);
@@ -1162,7 +1160,7 @@ void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1173,12 +1171,12 @@ void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (auto err = parser.TakeError(); err)
     return rb->SendError(err.MakeReply());
 
@@ -1188,7 +1186,7 @@ void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 
-  OpResult<int> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     return rb->SendLong(result.value_or(0));
   }
@@ -1196,33 +1194,33 @@ void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendError(result.status());
 }
 
-void ListFamily::LTrim(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view s_str = ArgS(args, 1);
   string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    cmd_cntx.rb->SendError(kInvalidIntErr);
+    cmd_cntx->rb->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  OpStatus st = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus st = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   if (st == OpStatus::KEY_NOTFOUND)
     st = OpStatus::OK;
-  cmd_cntx.rb->SendError(st);
+  cmd_cntx->rb->SendError(st);
 }
 
-void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view s_str = ArgS(args, 1);
   std::string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
     rb->SendError(kInvalidIntErr);
     return;
@@ -1232,7 +1230,7 @@ void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  auto res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  auto res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
     return rb->SendError(res.status());
   }
@@ -1241,72 +1239,74 @@ void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void ListFamily::LRem(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx.rb->SendError(kInvalidIntErr);
+    cmd_cntx->rb->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx.rb->SendLong(result.value_or(0));
+    return cmd_cntx->rb->SendLong(result.value_or(0));
   }
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->rb->SendError(result.status());
 }
 
-void ListFamily::LSet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx.rb->SendError(kInvalidIntErr);
+    cmd_cntx->rb->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   if (result) {
-    cmd_cntx.rb->SendOk();
+    cmd_cntx->rb->SendOk();
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->rb->SendError(result.status());
   }
 }
 
-void ListFamily::BLPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  BPopGeneric(ListDir::LEFT, args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void CmdBLPop(CmdArgList args, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::LEFT, args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void ListFamily::BRPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  BPopGeneric(ListDir::RIGHT, args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void CmdBRPop(CmdArgList args, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::RIGHT, args, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
 }
 
-void ListFamily::LMove(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
 
   if (auto err = parser.TakeError(); err)
-    return cmd_cntx.rb->SendError(err.MakeReply());
+    return cmd_cntx->rb->SendError(err.MakeReply());
 
-  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx.tx, cmd_cntx.rb);
+  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx, cmd_cntx->rb);
 }
+
+}  // namespace
 
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&ListFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void ListFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::LIST);

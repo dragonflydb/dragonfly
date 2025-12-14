@@ -462,8 +462,8 @@ absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) con
 
 DefragmentResult TagIndex::Defragment(PageUsage* page_usage) {
   auto defrag = [&](auto& tree, string* key) {
-    DefragmentMap dm{tree, [&] { return key->empty() ? tree.begin() : tree.lower_bound(*key); }};
-    return dm.Defragment(page_usage, key);
+    DefragmentMap dm{tree, key};
+    return dm.Defragment(page_usage);
   };
 
   DefragmentResult result = defrag(entries_, &next_defrag_entry_);

@@ -596,7 +596,7 @@ DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionCo
     : sf_(*owner), cf_(*cf), cntx_(cntx) {
 }
 
-void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Run(CmdArgList args, CommandContext* cmnd_cntx) {
   string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (subcmd == "HELP") {
     string_view help_arr[] = {
@@ -671,89 +671,89 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
     return rb->SendSimpleStrArr(help_arr);
   }
 
   VLOG(1) << "subcmd " << subcmd;
 
   if (subcmd == "POPULATE") {
-    return Populate(args, builder);
+    return Populate(args, cmnd_cntx);
   }
 
   if (subcmd == "RELOAD") {
-    return Reload(args, builder);
+    return Reload(args, cmnd_cntx);
   }
 
   if (subcmd == "REPLICA" && args.size() == 2) {
-    return Replica(args, builder);
+    return Replica(args, cmnd_cntx);
   }
 
   if (subcmd == "MIGRATION" && args.size() == 2) {
-    return Migration(args, builder);
+    return Migration(args, cmnd_cntx);
   }
 
   if (subcmd == "WATCHED") {
-    return Watched(builder);
+    return Watched(cmnd_cntx);
   }
 
   if (subcmd == "OBJECT" && args.size() >= 2) {
     string_view key = ArgS(args, 1);
     args.remove_prefix(2);
-    return Inspect(key, args, builder);
+    return Inspect(key, args, cmnd_cntx);
   }
 
   if (subcmd == "TX") {
-    return TxAnalysis(builder);
+    return TxAnalysis(cmnd_cntx);
   }
 
   if (subcmd == "OBJHIST") {
-    return ObjHist(builder);
+    return ObjHist(cmnd_cntx);
   }
 
   if (subcmd == "STACKTRACE") {
-    return Stacktrace(builder);
+    return Stacktrace(cmnd_cntx);
   }
 
   if (subcmd == "SHARDS") {
-    return Shards(builder);
+    return Shards(cmnd_cntx);
   }
 
   if (subcmd == "EXEC") {
-    return Exec(builder);
+    return Exec(cmnd_cntx);
   }
 
   if (subcmd == "TRAFFIC") {
-    return LogTraffic(args.subspan(1), builder);
+    return LogTraffic(args.subspan(1), cmnd_cntx);
   }
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
-    return RecvSize(ArgS(args, 1), builder);
+    return RecvSize(ArgS(args, 1), cmnd_cntx);
   }
 
   if (subcmd == "TOPK" && args.size() >= 2) {
-    return Topk(args.subspan(1), builder);
+    return Topk(args.subspan(1), cmnd_cntx);
   }
 
   if (subcmd == "KEYS" && args.size() >= 2) {
-    return Keys(args.subspan(1), builder);
+    return Keys(args.subspan(1), cmnd_cntx);
   }
 
   if (subcmd == "VALUES" && args.size() >= 2) {
-    return Values(args.subspan(1), builder);
+    return Values(args.subspan(1), cmnd_cntx);
   }
   if (subcmd == "COMPRESSION") {
-    return Compression(args.subspan(1), builder);
+    return Compression(args.subspan(1), cmnd_cntx);
   }
 
   if (subcmd == "IOSTATS") {
-    return IOStats(args.subspan(1), builder);
+    return IOStats(args.subspan(1), cmnd_cntx);
   }
   if (subcmd == "SEGMENTS") {
-    return Segments(args.subspan(1), builder);
+    return Segments(args.subspan(1), cmnd_cntx);
   }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
-  return builder->SendError(reply, kSyntaxErrType);
+  return cmnd_cntx->SendError(reply, kSyntaxErrType);
 }
 
 void DebugCmd::Shutdown() {
@@ -761,9 +761,10 @@ void DebugCmd::Shutdown() {
   shard_set->pool()->AwaitFiberOnAll([](auto*) { facade::Connection::StopTrafficLogging(); });
 }
 
-void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Reload(CmdArgList args, CommandContext* cmnd_cntx) {
   bool save = true;
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   for (size_t i = 1; i < args.size(); ++i) {
     string opt = absl::AsciiStrToUpper(ArgS(args, i));
     VLOG(1) << "opt " << opt;
@@ -771,7 +772,7 @@ void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
     if (opt == "NOSAVE") {
       save = false;
     } else {
-      return builder->SendError("DEBUG RELOAD only supports the NOSAVE options.");
+      return cmnd_cntx->SendError("DEBUG RELOAD only supports the NOSAVE options.");
     }
   }
 
@@ -781,7 +782,7 @@ void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
     GenericError ec = sf_.DoSave();
     if (ec) {
-      return builder->SendError(ec.Format());
+      return cmnd_cntx->SendError(ec.Format());
     }
   }
 
@@ -794,19 +795,19 @@ void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
     if (ec) {
       string msg = ec.Format();
       LOG(WARNING) << "Could not load file " << msg;
-      return builder->SendError(msg);
+      return cmnd_cntx->SendError(msg);
     }
   }
 
-  builder->SendOk();
+  rb->SendOk();
 }
 
-void DebugCmd::Replica(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Replica(CmdArgList args, CommandContext* cmnd_cntx) {
   args.remove_prefix(1);
 
   string opt = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
     return rb->SendOk();
@@ -821,22 +822,22 @@ void DebugCmd::Replica(CmdArgList args, facade::SinkReplyBuilder* builder) {
       }
       return;
     } else {
-      return builder->SendError("I am master");
+      return cmnd_cntx->SendError("I am master");
     }
   }
-  return builder->SendError(UnknownSubCmd("replica", "DEBUG"));
+  return cmnd_cntx->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
-void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Migration(CmdArgList args, CommandContext* cmnd_cntx) {
   args.remove_prefix(1);
 
   string opt = absl::AsciiStrToUpper(ArgS(args, 0));
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (opt == "PAUSE" || opt == "RESUME") {
     cf_.PauseAllIncomingMigrations(opt == "PAUSE");
-    return builder->SendOk();
+    return rb->SendOk();
   }
-  return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
+  return cmnd_cntx->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
 enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE, FLAG_UNKNOWN };
@@ -845,14 +846,13 @@ enum PopulateFlag { FLAG_RAND, FLAG_TYPE, FLAG_ELEMENTS, FLAG_SLOT, FLAG_EXPIRE,
 // required: (total count) (key prefix) (val size)
 // optional: [RAND | TYPE typename | ELEMENTS element num | SLOTS (key value)+ | EXPIRE start end]
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
-                                                                facade::SinkReplyBuilder* builder) {
+                                                                CommandContext* cmnd_cntx) {
   CmdArgParser parser(args.subspan(1));
   PopulateOptions options;
 
   options.total_count = parser.Next<uint64_t>();
   options.prefix = parser.NextOrDefault<string_view>("key");
   options.val_size = parser.NextOrDefault<uint32_t>(16);
-
   while (parser.HasNext()) {
     PopulateFlag flag = parser.MapNext("RAND", FLAG_RAND, "TYPE", FLAG_TYPE, "ELEMENTS",
                                        FLAG_ELEMENTS, "SLOTS", FLAG_SLOT, "EXPIRE", FLAG_EXPIRE);
@@ -874,7 +874,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
       case FLAG_EXPIRE: {
         auto [min_ttl, max_ttl] = parser.Next<uint32_t, uint32_t>();
         if (min_ttl >= max_ttl) {
-          builder->SendError(kExpiryOutOfRange);
+          cmnd_cntx->SendError(kExpiryOutOfRange);
           (void)parser.TakeError();
           return nullopt;
         }
@@ -887,14 +887,14 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
     }
   }
   if (parser.HasError()) {
-    builder->SendError(parser.TakeError().MakeReply());
+    cmnd_cntx->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
   return options;
 }
 
-void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
-  optional<PopulateOptions> options = ParsePopulateArgs(args, builder);
+void DebugCmd::Populate(CmdArgList args, CommandContext* cmnd_cntx) {
+  optional<PopulateOptions> options = ParsePopulateArgs(args, cmnd_cntx);
   if (!options.has_value()) {
     return;
   }
@@ -924,7 +924,7 @@ void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
   for (auto& fb : fb_arr)
     fb.Join();
 
-  builder->SendOk();
+  cmnd_cntx->rb->SendOk();
 
   DCHECK(sf_.AreAllReplicasInStableSync());
 }
@@ -995,7 +995,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   });
 }
 
-void DebugCmd::Exec(facade::SinkReplyBuilder* builder) {
+void DebugCmd::Exec(CommandContext* cmnd_cntx) {
   EngineShardSet& ess = *shard_set;
   fb2::Mutex mu;
   std::map<string, unsigned> freq_cnt;
@@ -1013,14 +1013,15 @@ void DebugCmd::Exec(facade::SinkReplyBuilder* builder) {
   }
   StrAppend(&res, "--------------------------\n");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   rb->SendVerbatimString(res);
 }
 
-void DebugCmd::LogTraffic(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmnd_cntx) {
   optional<string> path;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (ProactorBase::me()->GetKind() != ProactorBase::IOURING) {
-    return builder->SendError("Traffic recording supported only on iouring");
+    return cmnd_cntx->SendError("Traffic recording supported only on iouring");
   }
 
   if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
@@ -1036,10 +1037,10 @@ void DebugCmd::LogTraffic(CmdArgList args, facade::SinkReplyBuilder* builder) {
     else
       facade::Connection::StopTrafficLogging();
   });
-  builder->SendOk();
+  rb->SendOk();
 }
 
-void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Inspect(string_view key, CmdArgList args, CommandContext* cmnd_cntx) {
   EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
   VLOG(1) << "DebugCmd::Inspect " << key;
@@ -1049,12 +1050,12 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
     check_compression = absl::AsciiStrToUpper(ArgS(args, 0)) == "COMPRESS";
   }
   string resp;
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (check_compression) {
     auto cb = [&] { return EstimateCompression(cntx_, key); };
     auto res = ess.Await(sid, std::move(cb));
     if (!res) {
-      builder->SendError(res.status());
+      cmnd_cntx->SendError(res.status());
       return;
     }
     StrAppend(&resp, "raw_size: ", res->raw_size, ", compressed_size: ", res->compressed_size);
@@ -1067,7 +1068,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
     ObjInfo res = ess.Await(sid, std::move(cb));
 
     if (!res.found) {
-      builder->SendError(kKeyNotFoundErr);
+      cmnd_cntx->SendError(kKeyNotFoundErr);
       return;
     }
 
@@ -1097,10 +1098,10 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
       StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
     }
   }
-  builder->SendSimpleString(resp);
+  rb->SendSimpleString(resp);
 }
 
-void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
+void DebugCmd::Watched(CommandContext* cmnd_cntx) {
   fb2::Mutex mu;
 
   vector<string> watched_keys;
@@ -1119,7 +1120,7 @@ void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
     }
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
@@ -1128,7 +1129,7 @@ void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
   rb->SendBulkStrArr(watched_keys);
 }
 
-void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {
+void DebugCmd::TxAnalysis(CommandContext* cmnd_cntx) {
   vector<EngineShard::TxQueueInfo> shard_info(shard_set->size());
 
   auto cb = [&](EngineShard* shard) {
@@ -1143,11 +1144,11 @@ void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {
     const auto& info = shard_info[i];
     StrAppend(&result, "shard", i, ":\n", info.Format(), "\n");
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   rb->SendVerbatimString(result);
 }
 
-void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
+void DebugCmd::ObjHist(CommandContext* cmnd_cntx) {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
   auto cb = [&obj_hist_map_arr](PrimeIterator it) {
     unsigned obj_type = it->second.ObjType();
@@ -1182,11 +1183,12 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   rb->SendVerbatimString(result);
 }
 
-void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
+void DebugCmd::Stacktrace(CommandContext* cmnd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   fb2::Mutex m;
   shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
     EngineShard* es = EngineShard::tlocal();
@@ -1200,10 +1202,10 @@ void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
   base::FlushLogs();
-  builder->SendOk();
+  rb->SendOk();
 }
 
-void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
+void DebugCmd::Shards(CommandContext* cmnd_cntx) {
   struct ShardInfo {
     uint64_t used_memory = 0;
     uint64_t key_count = 0;
@@ -1260,12 +1262,12 @@ void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   rb->SendVerbatimString(out);
 }
 
-void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+void DebugCmd::RecvSize(string_view param, CommandContext* cmnd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   uint8_t enable = 2;
   if (absl::EqualsIgnoreCase(param, "ENABLE"))
     enable = 1;
@@ -1280,7 +1282,7 @@ void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
 
   unsigned tid;
   if (!absl::SimpleAtoi(param, &tid) || tid >= shard_set->pool()->size()) {
-    return rb->SendError(kUintErr);
+    return cmnd_cntx->SendError(kUintErr);
   }
 
   string hist;
@@ -1289,8 +1291,8 @@ void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
   rb->SendVerbatimString(hist);
 }
 
-void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+void DebugCmd::Topk(CmdArgList args, CommandContext* cmnd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   DCHECK_GE(args.size(), 1u);
 
   string_view subcmd = ArgS(args, 0);
@@ -1298,7 +1300,7 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
     uint32_t min_freq = 100;
     if (args.size() > 1) {
       if (!absl::SimpleAtoi(ArgS(args, 1), &min_freq))
-        return rb->SendError(kUintErr);
+        return cmnd_cntx->SendError(kUintErr);
     }
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       cntx_->ns->GetDbSlice(es->shard_id()).StartSampleTopK(cntx_->db_index(), min_freq);
@@ -1312,7 +1314,7 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
     if (args.size() > 1) {
       if (!absl::SimpleAtoi(ArgS(args, 1), &max_keys))
-        return rb->SendError(kUintErr);
+        return cmnd_cntx->SendError(kUintErr);
     }
 
     shard_set->RunBriefInParallel([&](EngineShard* es) {
@@ -1343,17 +1345,17 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return;
   }
 
-  return rb->SendError(kSyntaxErr);
+  return cmnd_cntx->SendError(kSyntaxErr);
 }
 
-void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Keys(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view subcmd = ArgS(args, 0);
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       cntx_->ns->GetDbSlice(es->shard_id()).StartSampleKeys(cntx_->db_index());
     });
-    return builder->SendOk();
+    return rb->SendOk();
   }
 
   if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
@@ -1366,21 +1368,20 @@ void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
     });
 
     uint64_t arr[2] = {uniq_keys.load(), total_samples.load()};
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendLongArr(absl::MakeConstSpan(arr));
   }
 
-  return builder->SendError(kSyntaxErr);
+  return cmnd_cntx->SendError(kSyntaxErr);
 }
 
-void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Values(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view subcmd = ArgS(args, 0);
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       cntx_->ns->GetDbSlice(es->shard_id()).StartSampleValues(cntx_->db_index());
     });
-    return builder->SendOk();
+    return rb->SendOk();
   }
 
   vector<unique_ptr<base::Histogram>> histograms(shard_set->size());
@@ -1396,11 +1397,10 @@ void DebugCmd::Values(CmdArgList args, facade::SinkReplyBuilder* builder) {
         merged_histogram.Merge(*hist);
       }
     }
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendVerbatimString(merged_histogram.ToString());
   }
 
-  return builder->SendError(kSyntaxErr);
+  return cmnd_cntx->SendError(kSyntaxErr);
 }
 
 static size_t PostProcessHist(HufHist* dest) {
@@ -1431,12 +1431,13 @@ static size_t PostProcessHist(HufHist* dest) {
   return total_freq;
 }
 
-void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
+void DebugCmd::Compression(CmdArgList args, CommandContext* cmnd_cntx) {
   CompactObjType type = kInvalidCompactObjType;
   CmdArgParser parser(args);
   string bintable;
   bool print_bintable = false;
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   if (parser.Check("SET", &bintable)) {
     // SET <bintable> [type]
     string raw;
@@ -1447,7 +1448,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
         string_view type_str = parser.Next();
         type = ObjTypeFromString(type_str);
         if (type != OBJ_STRING) {  // Currently only string type is supported.
-          return builder->SendError(kSyntaxErr);
+          return cmnd_cntx->SendError(kSyntaxErr);
         }
         domain = CompactObj::HUFF_STRING_VALUES;
       }
@@ -1457,7 +1458,7 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
         }
       });
     }
-    return succeed ? builder->SendOk() : builder->SendError("Failed to set bintable");
+    return succeed ? rb->SendOk() : cmnd_cntx->SendError("Failed to set bintable");
   }
 
   if (parser.Check("EXPORT")) {
@@ -1474,15 +1475,11 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
     string_view type_str = parser.Next();
     type = ObjTypeFromString(type_str);
     if (type == kInvalidCompactObjType) {
-      return builder->SendError(kSyntaxErr);
+      return cmnd_cntx->SendError(kSyntaxErr);
     }
   }
 
-  if (parser.HasError()) {
-    return builder->SendError(parser.TakeError().MakeReply());
-  }
-
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  RETURN_ON_PARSE_ERROR(parser, cmnd_cntx);
 
   fb2::Mutex mu;
   HufHist hist;
@@ -1502,12 +1499,12 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
     if (bintable.empty()) {
       if (!huff_enc.Build(hist.hist.data(), HufHist::kMaxSymbol, &err_msg)) {
-        return rb->SendError(StrCat("Internal error: ", err_msg));
+        return cmnd_cntx->SendError(StrCat("Internal error: ", err_msg));
       }
     } else {
       // Try to read the bintable and create a ctable from it.
       if (!huff_enc.Load(bintable, &err_msg)) {
-        return rb->SendError(StrCat("Internal error: ", err_msg));
+        return cmnd_cntx->SendError(StrCat("Internal error: ", err_msg));
       }
     }
     num_bits = huff_enc.num_bits();
@@ -1541,8 +1538,8 @@ void DebugCmd::Compression(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 }
 
-void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+void DebugCmd::IOStats(CmdArgList args, CommandContext* cmnd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
 
   bool per_second = !args.empty() && absl::EqualsIgnoreCase(args[0], "PS");
   vector<IOStat> stats(shard_set->pool()->size());
@@ -1568,8 +1565,8 @@ void DebugCmd::IOStats(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 }
 
-void DebugCmd::Segments(CmdArgList args, facade::SinkReplyBuilder* builder) {
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+void DebugCmd::Segments(CmdArgList args, CommandContext* cmnd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
   vector<SegmentInfo> info(shard_set->size());
 
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
@@ -1632,8 +1629,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
 
-      sf_.service().InvokeCmd(cid, args_span,
-                              CommandContext{local_cntx.transaction, &crb, &local_cntx});
+      CommandContext cmnd_cntx{cid, stub_tx.get(), &crb, &local_cntx};
+      sf_.service().InvokeCmd(args_span, &cmnd_cntx);
     }
 
     if (options.expire_ttl_range.has_value()) {
@@ -1653,8 +1650,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->MultiSwitchCmd(cid);
       stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
-      sf_.service().InvokeCmd(cid, args_span,
-                              CommandContext{local_cntx.transaction, &crb, &local_cntx});
+      CommandContext cmnd_cntx{cid, stub_tx.get(), &crb, &local_cntx};
+      sf_.service().InvokeCmd(args_span, &cmnd_cntx);
     }
   }
 

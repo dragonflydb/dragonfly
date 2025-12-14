@@ -33,35 +33,35 @@ class DebugCmd {
  public:
   DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx);
 
-  void Run(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Run(CmdArgList args, CommandContext* cmd_cntx);
 
   static void Shutdown();
 
  private:
-  void Populate(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Populate(CmdArgList args, CommandContext* cmd_cntx);
   static std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args,
-                                                          facade::SinkReplyBuilder* builder);
+                                                          CommandContext* cmd_cntx);
   void PopulateRangeFiber(uint64_t from, uint64_t count, const PopulateOptions& opts);
 
-  void Reload(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Replica(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Migration(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Reload(CmdArgList args, CommandContext* cmd_cntx);
+  void Replica(CmdArgList args, CommandContext* cmd_cntx);
+  void Migration(CmdArgList args, CommandContext* cmd_cntx);
 
-  void Exec(facade::SinkReplyBuilder* builder);
-  void Inspect(std::string_view key, CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Watched(facade::SinkReplyBuilder* builder);
-  void TxAnalysis(facade::SinkReplyBuilder* builder);
-  void ObjHist(facade::SinkReplyBuilder* builder);
-  void Stacktrace(facade::SinkReplyBuilder* builder);
-  void Shards(facade::SinkReplyBuilder* builder);
-  void LogTraffic(CmdArgList, facade::SinkReplyBuilder* builder);
-  void RecvSize(std::string_view param, facade::SinkReplyBuilder* builder);
-  void Topk(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Values(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Compression(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void IOStats(CmdArgList args, facade::SinkReplyBuilder* builder);
-  void Segments(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Exec(CommandContext* cmd_cntx);
+  void Inspect(std::string_view key, CmdArgList args, CommandContext* cmd_cntx);
+  void Watched(CommandContext* cmd_cntx);
+  void TxAnalysis(CommandContext* cmd_cntx);
+  void ObjHist(CommandContext* cmd_cntx);
+  void Stacktrace(CommandContext* cmd_cntx);
+  void Shards(CommandContext* cmd_cntx);
+  void LogTraffic(CmdArgList, CommandContext* cmd_cntx);
+  void RecvSize(std::string_view param, CommandContext* cmd_cntx);
+  void Topk(CmdArgList args, CommandContext* cmd_cntx);
+  void Keys(CmdArgList args, CommandContext* cmd_cntx);
+  void Values(CmdArgList args, CommandContext* cmd_cntx);
+  void Compression(CmdArgList args, CommandContext* cmd_cntx);
+  void IOStats(CmdArgList args, CommandContext* cmd_cntx);
+  void Segments(CmdArgList args, CommandContext* cmd_cntx);
   struct PopulateBatch {
     DbIndex dbid;
     uint64_t index[32];

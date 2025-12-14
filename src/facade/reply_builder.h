@@ -308,4 +308,11 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
   void SendEmptyArray();
 };
 
+#define RETURN_ON_PARSE_ERROR(parser, rb)       \
+  do {                                          \
+    if (auto err = (parser).TakeError(); err) { \
+      return (rb)->SendError(err.MakeReply());  \
+    }                                           \
+  } while (0)
+
 }  // namespace facade
