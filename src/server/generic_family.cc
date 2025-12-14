@@ -442,7 +442,7 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   DVLOG(1) << "Rename: key '" << src_key_ << "' successfully found, going to dump it";
 
   io::StringSink sink;
-  SerializerBase::DumpObject(it->second, &sink);
+  SerializerBase::DumpValue(it->second, &sink);
 
   optional rdb_version = GetRdbVersion(sink.str());
   serialized_value_ = {std::move(sink).str(), rdb_version, GetExpireTime(db_slice, exp_it),
@@ -555,9 +555,9 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
         return OpStatus::IO_ERROR;
 
       // TODO: allow saving string directly without proxy object
-      SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
+      SerializerBase::DumpValue(PrimeValue{*res}, &sink);
     } else {
-      SerializerBase::DumpObject(it->second, &sink);
+      SerializerBase::DumpValue(it->second, &sink);
     }
 
     return std::move(sink).str();

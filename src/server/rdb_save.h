@@ -26,7 +26,7 @@ typedef struct quicklistNode quicklistNode;
 
 namespace dfly {
 
-uint8_t RdbObjectType(const PrimeValue& pv);
+uint8_t RdbObjectType(const CompactObj& pv);
 
 class EngineShard;
 class Service;
@@ -159,9 +159,9 @@ class SerializerBase {
   virtual ~SerializerBase() = default;
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
-  static void DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc = false);
-  static void DumpObject(RdbSerializer* serializer, const CompactObj& obj, io::StringSink* out,
-                         bool ignore_crc = false);
+  static void DumpValue(const PrimeValue& obj, io::StringSink* out, bool ignore_crc = false);
+  static void DumpValue(RdbSerializer* serializer, const PrimeValue& obj, io::StringSink* out,
+                        bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;

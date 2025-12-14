@@ -495,7 +495,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  CompactObj& co = add_res.it->second;
+  PrimeValue& co = add_res.it->second;
 
   if (!add_res.is_new) {
     // for non-overwrite case it must be set.
@@ -907,7 +907,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     return find_res.status();
   }
 
-  CompactObj& co = find_res->it->second;
+  PrimeValue& co = find_res->it->second;
 
   const std::uint32_t size = co.Size();
   const std::uint32_t picks_count = std::min(count, size);

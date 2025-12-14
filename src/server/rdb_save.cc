@@ -159,7 +159,7 @@ dfly::CompressionMode GetDefaultCompressionMode() {
   return absl::GetFlag(FLAGS_compression_mode);
 }
 
-uint8_t RdbObjectType(const PrimeValue& pv) {
+uint8_t RdbObjectType(const CompactObj& pv) {
   unsigned type = pv.ObjType();
   unsigned compact_enc = pv.Encoding();
   switch (type) {
@@ -866,8 +866,8 @@ void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
 }
 }  // namespace
 
-void SerializerBase::DumpObject(RdbSerializer* serializer, const CompactObj& obj,
-                                io::StringSink* out, bool ignore_crc) {
+void SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
+                               io::StringSink* out, bool ignore_crc) {
   CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
   if (serializer_used_compression_mode != CompressionMode::NONE) {
     serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
@@ -891,9 +891,9 @@ void SerializerBase::DumpObject(RdbSerializer* serializer, const CompactObj& obj
   serializer->SetCompressionMode(serializer_used_compression_mode);
 }
 
-void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc) {
+void SerializerBase::DumpValue(const PrimeValue& obj, io::StringSink* out, bool ignore_crc) {
   RdbSerializer serializer(GetDefaultCompressionMode());
-  DumpObject(&serializer, obj, out, ignore_crc);
+  DumpValue(&serializer, obj, out, ignore_crc);
 }
 
 size_t SerializerBase::SerializedLen() const {

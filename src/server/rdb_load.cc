@@ -852,7 +852,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       pv_->ReserveString(config_.reserve);
       pv_->AppendString(blob);
     } else {
-      pv_->SetValue(blob);
+      pv_->SetString(blob);
     }
     return;
   }
@@ -2576,7 +2576,7 @@ void RdbLoader::FlushAllShards() {
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
-                                          CompactObj* pv) {
+                                          PrimeValue* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
