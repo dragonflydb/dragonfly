@@ -16,14 +16,8 @@
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
 
-namespace facade {
-class SinkReplyBuilder;
-}  // namespace facade
-
 namespace dfly {
 
-class ConnectionContext;
-class Transaction;
 namespace CO {
 
 enum CommandOpt : uint32_t {
@@ -71,28 +65,7 @@ enum class MultiControlKind : uint8_t {
 using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
 class CommandId;
-
-struct CommandContext {
-  CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* _rb,
-                 ConnectionContext* cntx)
-      : cid(_cid), tx(_tx), rb(_rb), conn_cntx(cntx) {
-  }
-
-  const CommandId* cid;
-  Transaction* tx;
-  facade::SinkReplyBuilder* rb;
-  ConnectionContext* conn_cntx;
-
-  uint64_t start_time_ns = 0;
-
-  // number of commands in the last exec body.
-  unsigned exec_body_len = 0;
-
-  void RecordLatency(facade::ArgSlice tail_args) const;
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
-  void SendError(facade::OpStatus status) const;
-  void SendError(facade::ErrorReply error) const;
-};
+class CommandContext;
 
 // TODO: move it to helio
 // Makes sure that the POD T that is passed to the constructor is reset to default state

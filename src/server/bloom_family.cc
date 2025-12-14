@@ -93,7 +93,7 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   SbfParams params;
 
   tie(params.error, params.init_capacity) = parser.Next<double, uint32_t>();
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (parser.TakeError())
     return rb->SendError(kSyntaxErr);
 
@@ -123,12 +123,12 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = res.status();
   if (res) {
     if (res->front())
-      return cmd_cntx->rb->SendLong(*res->front());
+      return cmd_cntx->rb()->SendLong(*res->front());
     else
       status = res->front().status();
   }
 
-  return cmd_cntx->rb->SendError(status);
+  return cmd_cntx->SendError(status);
 }
 
 void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
@@ -139,7 +139,7 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-  return cmd_cntx->rb->SendLong(res ? res->front() : 0);
+  return cmd_cntx->rb()->SendLong(res ? res->front() : 0);
 }
 
 void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
@@ -150,7 +150,7 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     return rb->SendError(res.status());
@@ -177,7 +177,7 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RedisReplyBuilder::ArrayScope scope{rb, args.size()};
   for (size_t i = 0; i < args.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);

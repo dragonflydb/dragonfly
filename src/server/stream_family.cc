@@ -1865,7 +1865,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   return result;
 }
 
-void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
+void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
   auto key = parser->Next();
 
   CreateOpts opts;
@@ -1874,132 +1874,127 @@ void CreateGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
     opts.flags |= kCreateOptMkstream;
   }
 
-  if (auto err = parser->TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
   };
 
-  OpStatus result = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_ctx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::KEY_NOTFOUND:
-      return builder->SendError(kXGroupKeyNotFound);
+      return cmd_ctx->SendError(kXGroupKeyNotFound);
     default:
-      builder->SendError(result);
+      cmd_ctx->SendError(result);
   }
 }
 
-void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
+void DestroyGroup(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
   auto [key, gname] = parser->Next<string_view, string_view>();
 
-  if (auto err = parser->TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
 
   if (parser->HasNext())
-    return builder->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
+    return cmd_ctx->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
 
   auto cb = [&, &key = key, &gname = gname](Transaction* t, EngineShard* shard) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
-  OpStatus result = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_ctx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::OK:
-      return builder->SendLong(1);
+      return cmd_ctx->rb()->SendLong(1);
     case OpStatus::SKIPPED:
-      return builder->SendLong(0);
+      return cmd_ctx->rb()->SendLong(0);
     case OpStatus::KEY_NOTFOUND:
-      return builder->SendError(kXGroupKeyNotFound);
+      return cmd_ctx->SendError(kXGroupKeyNotFound);
     default:
-      builder->SendError(result);
+      cmd_ctx->SendError(result);
   }
 }
 
-void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
+void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  if (auto err = parser->TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
 
   if (parser->HasNext())
-    return builder->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
+    return cmd_ctx->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
 
   auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
                                                                   EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_ctx->tx->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
-      return builder->SendLong(1);
+      return cmd_ctx->rb()->SendLong(1);
     case OpStatus::KEY_EXISTS:
-      return builder->SendLong(0);
+      return cmd_ctx->rb()->SendLong(0);
     case OpStatus::SKIPPED:
-      return builder->SendError(NoGroupError(key, gname));
+      return cmd_ctx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
-      return builder->SendError(kXGroupKeyNotFound);
+      return cmd_ctx->SendError(kXGroupKeyNotFound);
     default:
-      builder->SendError(result.status());
+      cmd_ctx->SendError(result.status());
   }
 }
 
-void DelConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
+void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  if (auto err = parser->TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
 
   if (parser->HasNext())
-    return builder->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
+    return cmd_ctx->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
 
   auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
                                                                   EngineShard* shard) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_ctx->tx->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
-      return builder->SendLong(*result);
+      return cmd_ctx->rb()->SendLong(*result);
     case OpStatus::SKIPPED:
-      return builder->SendError(NoGroupError(key, gname));
+      return cmd_ctx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
-      return builder->SendError(kXGroupKeyNotFound);
+      return cmd_ctx->SendError(kXGroupKeyNotFound);
     default:
-      builder->SendError(result.status());
+      cmd_ctx->SendError(result.status());
   }
 }
 
-void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
+void SetId(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
   auto [key, gname, id] = parser->Next<string_view, string_view, string_view>();
 
   while (parser->HasNext()) {
     if (parser->Check("ENTRIESREAD")) {
       // TODO: to support ENTRIESREAD.
-      return builder->SendError(kSyntaxErr);
+      return cmd_ctx->SendError(kSyntaxErr);
     } else {
-      return builder->SendError(kSyntaxErr);
+      return cmd_ctx->SendError(kSyntaxErr);
     }
   }
 
-  if (auto err = parser->TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
 
   auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
 
-  OpStatus result = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_ctx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::SKIPPED:
-      return builder->SendError(NoGroupError(key, gname));
+      return cmd_ctx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
-      return builder->SendError(kXGroupKeyNotFound);
+      return cmd_ctx->SendError(kXGroupKeyNotFound);
     default:
-      builder->SendError(result);
+      cmd_ctx->SendError(result);
   }
 }
 
@@ -2021,7 +2016,7 @@ void XGroupHelp(CmdArgList args, CommandContext* cmd_cntx) {
                             "    Set the current group ID and entries_read counter.",
                             "HELP",
                             "    Print this help."};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendSimpleStrArr(help_arr);
 }
 
@@ -2487,16 +2482,15 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   return rb->SendNullArray();
 }
 
-void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx) {
-  optional<ReadOpts> opts = ParseReadArgsOrReply(args, read_group, builder);
+void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
+  optional<ReadOpts> opts = ParseReadArgsOrReply(args, read_group, cmd_cntx->rb());
   if (!opts)
     return;
 
   // Determine if streams have entries or any error occured
   AggregateValue<optional<facade::ErrorReply>> err;
   atomic_bool have_entries = false;
-
+  auto* tx = cmd_cntx->tx;
   // With a single shard we can call OpRead in a single hop, falling back to
   // avoid concluding if no entries are available.
   bool try_fastread = tx->GetUniqueShardCnt() == 1;
@@ -2523,11 +2517,11 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
 
   if (err) {
     tx->Conclude();
-    return builder->SendError(**err);
+    return cmd_cntx->SendError(**err);
   }
 
   if (!have_entries.load(memory_order_relaxed))
-    return XReadBlock(&*opts, tx, builder, cntx);
+    return XReadBlock(&*opts, tx, cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
 
   vector<vector<RecordVec>> xread_resp;
   if (try_fastread && have_entries.load(memory_order_relaxed)) {
@@ -2567,21 +2561,21 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
   }
 
   // Send all results back
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  SinkReplyBuilder::ReplyScope scope(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  SinkReplyBuilder::ReplyScope scope(rb);
   if (opts->read_group) {
     if (rb->IsResp3()) {
       rb->StartCollection(opts->stream_ids.size(), RedisReplyBuilder::CollectionType::MAP);
       for (size_t i = 0; i < opts->stream_ids.size(); i++) {
         string_view key = ArgS(args, i + opts->streams_arg);
-        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+        StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
     } else {
       rb->StartArray(opts->stream_ids.size());
       for (size_t i = 0; i < opts->stream_ids.size(); i++) {
         string_view key = ArgS(args, i + opts->streams_arg);
         rb->StartArray(2);
-        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+        StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
     }
   } else {
@@ -2592,7 +2586,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
           continue;
         }
         string_view key = ArgS(args, i + opts->streams_arg);
-        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+        StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
     } else {
       rb->StartArray(resolved_streams);
@@ -2601,15 +2595,14 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
           continue;
         string_view key = ArgS(args, i + opts->streams_arg);
         rb->StartArray(2);
-        StreamReplies{builder}.SendStreamRecords(key, results[i]);
+        StreamReplies{rb}.SendStreamRecords(key, results[i]);
       }
     }
   }
 }
 
-void HelpSubCmd(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
-  CommandContext cmd_cntx{nullptr, tx, builder, nullptr};
-  XGroupHelp(parser->Tail(), &cmd_cntx);
+void HelpSubCmd(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
+  XGroupHelp(parser->Tail(), cmd_cntx);
 }
 
 bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
@@ -2675,7 +2668,7 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
 
 void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   string_view key = parser.Next();
 
@@ -2793,7 +2786,7 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
-    return cmd_cntx->rb->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(kSyntaxErr);
   }
   // Ignore negative min-idle-time
   opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64>(0));
@@ -2802,11 +2795,11 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   auto ids = GetXclaimIds(args);
   if (ids.empty()) {
     // No ids given.
-    return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   // parse the options
-  if (!ParseXclaimOptions(args, opts, cmd_cntx->rb))
+  if (!ParseXclaimOptions(args, opts, cmd_cntx->rb()))
     return;
 
   uint64_t now = cmd_cntx->tx->GetDbContext().time_now_ms;
@@ -2822,14 +2815,14 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   if (!result) {
     if (result.status() == OpStatus::SKIPPED) {
       // Return empty result when operation is skipped
-      StreamReplies{cmd_cntx->rb}.SendClaimInfo(ClaimInfo{});
+      StreamReplies{cmd_cntx->rb()}.SendClaimInfo(ClaimInfo{});
       return;
     }
-    cmd_cntx->rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
     return;
   }
 
-  StreamReplies{cmd_cntx->rb}.SendClaimInfo(result.value());
+  StreamReplies{cmd_cntx->rb()}.SendClaimInfo(result.value());
 }
 
 void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2842,7 +2835,7 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);
     if (!ParseID(str_id, true, 0, &parsed_id)) {
-      return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
+      return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     }
     ids[i] = parsed_id.val;
   }
@@ -2853,10 +2846,10 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb->SendLong(*result);
+    return cmd_cntx->rb()->SendLong(*result);
   }
 
-  cmd_cntx->rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
 void CmdXGroup(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2867,13 +2860,13 @@ void CmdXGroup(CmdArgList args, CommandContext* cmd_cntx) {
                                      "DELCONSUMER", &DelConsumer, "SETID", &SetId);
 
   if (auto err = parser.TakeError(); err)
-    return cmd_cntx->rb->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
-  sub_cmd_func(&parser, cmd_cntx->tx, cmd_cntx->rb);
+  sub_cmd_func(&parser, cmd_cntx);
 }
 
 void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
@@ -2888,6 +2881,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendSimpleStrArr(help_arr);
   }
 
+  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   if (args.size() >= 2) {
     string_view key = ArgS(args, 1);
     ShardId sid = Shard(key, shard_set->size());
@@ -2896,8 +2890,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->db_index(),
-                             GetCurrentTimeMs()};
+        DbContext db_context{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
         return OpListGroups(db_context, key, shard);
       };
 
@@ -2964,9 +2957,8 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        return OpStreams(
-            DbContext{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->db_index(), GetCurrentTimeMs()},
-            key, shard, full, count);
+        return OpStreams(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()}, key, shard,
+                         full, count);
       };
 
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
@@ -3096,9 +3088,8 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
-        return OpConsumers(
-            DbContext{cmd_cntx->conn_cntx->ns, cmd_cntx->conn_cntx->db_index(), GetCurrentTimeMs()},
-            EngineShard::tlocal(), stream_name, group_name);
+        return OpConsumers(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()},
+                           EngineShard::tlocal(), stream_name, group_name);
       };
 
       OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
@@ -3136,10 +3127,10 @@ void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb->SendLong(*result);
+    return cmd_cntx->rb()->SendLong(*result);
   }
 
-  return cmd_cntx->rb->SendError(result.status());
+  return cmd_cntx->SendError(result.status());
 }
 
 void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
@@ -3148,7 +3139,7 @@ void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
   opts.group_name = ArgS(args, 1);
   args.remove_prefix(2);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!args.empty() && !ParseXpendingOptions(args, opts, rb)) {
     return;
   }
@@ -3205,7 +3196,7 @@ void CmdXRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx->tx, cmd_cntx->rb);
+  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
@@ -3213,7 +3204,7 @@ void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx->tx, cmd_cntx->rb);
+  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
@@ -3279,11 +3270,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
 }
 
 void CmdXRead(CmdArgList args, CommandContext* cmd_cntx) {
-  return XReadGeneric2(args, false, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
+  return XReadGeneric2(args, false, cmd_cntx);
 }
 
 void CmdXReadGroup(CmdArgList args, CommandContext* cmd_cntx) {
-  return XReadGeneric2(args, true, cmd_cntx->tx, cmd_cntx->rb, cmd_cntx->conn_cntx);
+  return XReadGeneric2(args, true, cmd_cntx);
 }
 
 void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
@@ -3292,7 +3283,7 @@ void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
 
   ParsedStreamId parsed_id;
   if (!ParseID(idstr, true, 0, &parsed_id)) {
-    return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   facade::ErrorReply reply(OpStatus::OK);
@@ -3303,14 +3294,14 @@ void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
 
   cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   if (reply.status == OpStatus::STREAM_ID_SMALL) {
-    return cmd_cntx->rb->SendError(LeqTopIdError("XSETID"));
+    return cmd_cntx->SendError(LeqTopIdError("XSETID"));
   }
-  return cmd_cntx->rb->SendError(reply);
+  return cmd_cntx->SendError(reply);
 }
 
 void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   std::string_view key = parser.Next();
 
@@ -3351,7 +3342,7 @@ void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);
     if (!ParseID(str_id, true, 0, &parsed_id)) {
-      return cmd_cntx->rb->SendError(kInvalidStreamId, kSyntaxErrType);
+      return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     }
     ids[i] = parsed_id.val;
   }
@@ -3362,10 +3353,10 @@ void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb->SendLong(*result);
+    return cmd_cntx->rb()->SendLong(*result);
   }
 
-  cmd_cntx->rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
 void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
@@ -3373,7 +3364,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
     return rb->SendError(kSyntaxErr);
@@ -3413,7 +3404,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
     if (arg == "JUSTID") {
       opts.flags |= kClaimJustID;
     } else {
-      return cmd_cntx->rb->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
+      return cmd_cntx->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
     }
   }
 

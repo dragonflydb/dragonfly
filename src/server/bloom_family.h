@@ -9,7 +9,6 @@
 namespace dfly {
 
 class CommandRegistry;
-struct CommandContext;
 
 class BloomFamily {
  public:

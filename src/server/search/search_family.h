@@ -15,7 +15,7 @@ class SinkReplyBuilder;
 
 namespace dfly {
 class CommandRegistry;
-struct CommandContext;
+class CommandContext;
 
 class SearchFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;

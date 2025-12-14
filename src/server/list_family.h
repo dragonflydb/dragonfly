@@ -12,7 +12,6 @@ namespace dfly {
 using facade::OpResult;
 
 class CommandRegistry;
-struct CommandContext;
 
 class ListFamily {
  public:

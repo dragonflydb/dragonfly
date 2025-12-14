@@ -1201,8 +1201,8 @@ vector<SearchResult> SearchGlobalHnswIndex(
 void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   WarmupQueryParser();
 
-  auto* builder = cmd_cntx->rb;
-  if (cmd_cntx->conn_cntx->conn_state.db_index != 0) {
+  auto* builder = cmd_cntx->rb();
+  if (cmd_cntx->server_conn_cntx()->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
   }
 
@@ -1277,7 +1277,7 @@ void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (auto err = parser.TakeError(); err)
     return builder->SendError(err.MakeReply());
 
@@ -1386,8 +1386,8 @@ void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (num_deleted == 0u)
-    return cmd_cntx->rb->SendError(IndexNotFoundMsg(idx_name));
-  return cmd_cntx->rb->SendOk();
+    return cmd_cntx->SendError(IndexNotFoundMsg(idx_name));
+  return cmd_cntx->rb()->SendOk();
 }
 
 void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1406,7 +1406,7 @@ void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (num_notfound > 0u)
     return rb->SendError(IndexNotFoundMsg(idx_name));
@@ -1483,7 +1483,7 @@ void SearchFamily::FtList(CmdArgList args, CommandContext* cmd_cntx) {
       names = es->search_indices()->GetIndexNames();
     return OpStatus::OK;
   });
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->SendBulkStrArr(names);
 }
 
@@ -1560,7 +1560,7 @@ void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   bool is_cross_shard = parser.Check("CSS");
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   auto params = ParseSearchParams(&parser);
   if (SendErrorIfOccurred(params, &parser, builder))
     return;
@@ -1637,7 +1637,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view index_name = parser.Next();
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!parser.Check("SEARCH") && !parser.Check("AGGREGATE")) {
     return rb->SendError("no `SEARCH` or `AGGREGATE` provided");
@@ -1787,7 +1787,7 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   });
 
   absl::flat_hash_set<string> result_set;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // Check first if either shard had errors. Also merge the results into a single set.
   for (auto& res : shard_results) {
@@ -1807,7 +1807,7 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
 
 void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
 
   const auto params = ParseAggregatorParams(&parser);
   if (SendErrorIfOccurred(params, &parser, builder))
@@ -1952,7 +1952,7 @@ void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto sortable_value_sender = SortableValueSender(rb);
 
   const size_t result_size = agg_results.values.size();
@@ -1980,7 +1980,7 @@ void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
 void SearchFamily::FtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   atomic_bool index_not_found{true};
   // Store per-shard synonym data
@@ -2123,7 +2123,7 @@ void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
 
 void SearchFamily::FtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
 
@@ -2148,11 +2148,11 @@ void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (terms.empty()) {
-    return cmd_cntx->rb->SendError("No terms specified");
+    return cmd_cntx->SendError("No terms specified");
   }
 
   if (!parser.Finalize()) {
-    return cmd_cntx->rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   std::atomic_bool index_not_found{true};
@@ -2177,16 +2177,16 @@ void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return cmd_cntx->rb->SendError(string{index_name} + ": no such index");
+    return cmd_cntx->SendError(string{index_name} + ": no such index");
 
-  cmd_cntx->rb->SendOk();
+  cmd_cntx->rb()->SendOk();
 }
 
 void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   // FT._DEBUG command stub for test compatibility
   // This command is used by integration tests to control internal behavior
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.empty() || parser.Check("HELP")) {
     rb->SendSimpleString("FT._DEBUG - Debug command stub (not fully implemented)");

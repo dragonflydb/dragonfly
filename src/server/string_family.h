@@ -6,13 +6,8 @@
 
 #include "facade/facade_types.h"
 
-namespace facade {
-class SinkReplyBuilder;
-}  // namespace facade
-
 namespace dfly {
 
-struct CommandContext;
 class CommandRegistry;
 
 class StringFamily {

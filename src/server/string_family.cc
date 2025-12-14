@@ -988,8 +988,8 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
-  sparams.memcache_flags = cmnd_cntx->conn_cntx->conn_state.memcache_flag;
-  auto* builder = cmnd_cntx->rb;
+  sparams.memcache_flags = cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag;
+  auto* builder = cmnd_cntx->rb();
 
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
@@ -1073,7 +1073,7 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return GetReplies{cmnd_cntx->rb}.Send(std::move(prev));
+    return GetReplies{cmnd_cntx->rb()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -1096,7 +1096,7 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (auto err = parser.TakeError(); err)
     return builder->SendError(err.MakeReply());
 
@@ -1126,15 +1126,15 @@ void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-  sparams.memcache_flags = cmnd_cntx->conn_cntx->conn_state.memcache_flag;
+  sparams.memcache_flags = cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag;
 
   switch (SetGeneric(sparams, key, value, *cmnd_cntx)) {
     case OpStatus::OK:
-      return cmnd_cntx->rb->SendLong(1);  // Successfully set the value
+      return cmnd_cntx->rb()->SendLong(1);  // Successfully set the value
     case OpStatus::OUT_OF_MEMORY:
-      return cmnd_cntx->rb->SendError(kOutOfMemory);
+      return cmnd_cntx->rb()->SendError(kOutOfMemory);
     case OpStatus::SKIPPED:
-      return cmnd_cntx->rb->SendLong(0);  // Existed, zero updates performed
+      return cmnd_cntx->rb()->SendLong(0);  // Existed, zero updates performed
     default:
       LOG(FATAL) << "Invalid result";
   }
@@ -1149,7 +1149,7 @@ void CmdGet(CmdArgList args, CommandContext* cmnd_cntx) {
     return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void CmdGetDel(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1164,7 +1164,7 @@ void CmdGetDel(CmdArgList args, CommandContext* cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void CmdGetSet(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1175,17 +1175,17 @@ void CmdGetSet(CmdArgList args, CommandContext* cmnd_cntx) {
   SetCmd::SetParams sparams{.prev_val = &prev};
 
   if (OpStatus status = SetGeneric(sparams, key, value, *cmnd_cntx); status != OpStatus::OK)
-    return cmnd_cntx->rb->SendError(status);
+    return cmnd_cntx->rb()->SendError(status);
 
-  GetReplies{cmnd_cntx->rb}.Send(std::move(prev));
+  GetReplies{cmnd_cntx->rb()}.Send(std::move(prev));
 }
 
 void CmdAppend(CmdArgList args, CommandContext* cmnd_cntx) {
-  ExtendGeneric(args, false, cmnd_cntx->tx, cmnd_cntx->rb);
+  ExtendGeneric(args, false, cmnd_cntx->tx, cmnd_cntx->rb());
 }
 
 void CmdPrepend(CmdArgList args, CommandContext* cmnd_cntx) {
-  ExtendGeneric(args, true, cmnd_cntx->tx, cmnd_cntx->rb);
+  ExtendGeneric(args, true, cmnd_cntx->tx, cmnd_cntx->rb());
 }
 
 void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1194,7 +1194,7 @@ void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
@@ -1253,12 +1253,12 @@ void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void CmdIncr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, cmnd_cntx->tx, cmnd_cntx->rb);
+  return IncrByGeneric(key, 1, cmnd_cntx->tx, cmnd_cntx->rb());
 }
 
 void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1267,9 +1267,9 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx->rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
   }
-  return IncrByGeneric(key, val, cmnd_cntx->tx, cmnd_cntx->rb);
+  return IncrByGeneric(key, val, cmnd_cntx->tx, cmnd_cntx->rb());
 }
 
 void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1278,7 +1278,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return cmnd_cntx->rb->SendError(kInvalidFloatErr);
+    return cmnd_cntx->rb()->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1286,7 +1286,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   };
 
   OpResult<double> result = cmnd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
@@ -1298,7 +1298,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void CmdDecr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, cmnd_cntx->tx, cmnd_cntx->rb);
+  return IncrByGeneric(key, -1, cmnd_cntx->tx, cmnd_cntx->rb());
 }
 
 void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1307,13 +1307,13 @@ void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx->rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return cmnd_cntx->rb->SendError(kIncrOverflow);
+    return cmnd_cntx->rb()->SendError(kIncrOverflow);
   }
 
-  return IncrByGeneric(key, -val, cmnd_cntx->tx, cmnd_cntx->rb);
+  return IncrByGeneric(key, -val, cmnd_cntx->tx, cmnd_cntx->rb());
 }
 
 // Reorder per-shard results according to argument order of primary command
@@ -1342,12 +1342,12 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   uint8_t fetch_mask = 0;
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
   const bool is_memcache = builder->GetProtocol() == Protocol::MEMCACHE;
 
   if (is_memcache) {
     fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx->conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+    if (cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
   }
 
@@ -1417,9 +1417,9 @@ void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
     result = status;
 
   if (*result == OpStatus::OK) {
-    cmnd_cntx->rb->SendOk();
+    cmnd_cntx->rb()->SendOk();
   } else {
-    cmnd_cntx->rb->SendError(*result);
+    cmnd_cntx->rb()->SendError(*result);
   }
 }
 
@@ -1457,14 +1457,14 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   };
   cmnd_cntx->tx->Execute(std::move(epilog_cb), true);
 
-  cmnd_cntx->rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmnd_cntx->rb()->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
 void CmdStrLen(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void CmdGetRange(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1472,20 +1472,20 @@ void CmdGetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
   if (auto err = parser.TakeError(); err) {
-    return cmnd_cntx->rb->SendError(err.MakeReply());
+    return cmnd_cntx->rb()->SendError(err.MakeReply());
   }
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmnd_cntx->rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void CmdSetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
 
   if (auto err = parser.TakeError(); err) {
     return builder->SendError(err.MakeReply());
@@ -1522,7 +1522,7 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   // Allow max burst in number of tokens
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
@@ -1571,11 +1571,11 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    return cmnd_cntx->rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return cmnd_cntx->rb->SendError(kInvalidIntErr);
+    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
@@ -1586,7 +1586,7 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
     redis_builder->StartArray(result->size());
     auto& array = result.value();
 
@@ -1608,17 +1608,17 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmnd_cntx->rb->SendError(kWrongTypeErr);
+        cmnd_cntx->rb()->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmnd_cntx->rb->SendError(kInvalidIntErr);
+        cmnd_cntx->rb()->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmnd_cntx->rb->SendError(kOutOfMemory);
+        cmnd_cntx->rb()->SendError(kOutOfMemory);
         break;
       default:
-        cmnd_cntx->rb->SendError(result.status());
+        cmnd_cntx->rb()->SendError(result.status());
         break;
     }
   }
@@ -1629,12 +1629,12 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
 void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
   const Protocol protocol = builder->GetProtocol();
   DCHECK(protocol == Protocol::MEMCACHE);
 
   uint8_t fetch_mask = FETCH_MCFLAG;
-  if (cmnd_cntx->conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+  if (cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
     fetch_mask |= FETCH_MCVER;
 
   SinkReplyBuilder::ReplyScope scope(builder);

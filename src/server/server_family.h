@@ -41,7 +41,7 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
-struct CommandContext;
+class CommandContext;
 class CommandRegistry;
 class Service;
 class ScriptMgr;

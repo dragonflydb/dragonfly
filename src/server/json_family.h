@@ -13,7 +13,7 @@ class SinkReplyBuilder;
 namespace dfly {
 
 class CommandRegistry;
-struct CommandContext;
+class CommandContext;
 
 class JsonFamily {
  public:

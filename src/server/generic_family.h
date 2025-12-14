@@ -16,7 +16,7 @@ using facade::CmdArgList;
 using facade::OpResult;
 
 class CommandRegistry;
-struct CommandContext;
+class CommandContext;
 
 class GenericFamily {
  public:

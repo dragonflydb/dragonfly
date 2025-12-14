@@ -671,7 +671,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmnd_cntx) {
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
     return rb->SendSimpleStrArr(help_arr);
   }
 
@@ -764,7 +764,7 @@ void DebugCmd::Shutdown() {
 void DebugCmd::Reload(CmdArgList args, CommandContext* cmnd_cntx) {
   bool save = true;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   for (size_t i = 1; i < args.size(); ++i) {
     string opt = absl::AsciiStrToUpper(ArgS(args, i));
     VLOG(1) << "opt " << opt;
@@ -807,7 +807,7 @@ void DebugCmd::Replica(CmdArgList args, CommandContext* cmnd_cntx) {
 
   string opt = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
     return rb->SendOk();
@@ -832,7 +832,7 @@ void DebugCmd::Migration(CmdArgList args, CommandContext* cmnd_cntx) {
   args.remove_prefix(1);
 
   string opt = absl::AsciiStrToUpper(ArgS(args, 0));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
     cf_.PauseAllIncomingMigrations(opt == "PAUSE");
     return rb->SendOk();
@@ -924,7 +924,7 @@ void DebugCmd::Populate(CmdArgList args, CommandContext* cmnd_cntx) {
   for (auto& fb : fb_arr)
     fb.Join();
 
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 
   DCHECK(sf_.AreAllReplicasInStableSync());
 }
@@ -1013,13 +1013,13 @@ void DebugCmd::Exec(CommandContext* cmnd_cntx) {
   }
   StrAppend(&res, "--------------------------\n");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   rb->SendVerbatimString(res);
 }
 
 void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmnd_cntx) {
   optional<string> path;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (ProactorBase::me()->GetKind() != ProactorBase::IOURING) {
     return cmnd_cntx->SendError("Traffic recording supported only on iouring");
   }
@@ -1050,7 +1050,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, CommandContext* cmnd_cn
     check_compression = absl::AsciiStrToUpper(ArgS(args, 0)) == "COMPRESS";
   }
   string resp;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (check_compression) {
     auto cb = [&] { return EstimateCompression(cntx_, key); };
     auto res = ess.Await(sid, std::move(cb));
@@ -1120,7 +1120,7 @@ void DebugCmd::Watched(CommandContext* cmnd_cntx) {
     }
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
@@ -1144,7 +1144,7 @@ void DebugCmd::TxAnalysis(CommandContext* cmnd_cntx) {
     const auto& info = shard_info[i];
     StrAppend(&result, "shard", i, ":\n", info.Format(), "\n");
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   rb->SendVerbatimString(result);
 }
 
@@ -1183,12 +1183,12 @@ void DebugCmd::ObjHist(CommandContext* cmnd_cntx) {
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   rb->SendVerbatimString(result);
 }
 
 void DebugCmd::Stacktrace(CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   fb2::Mutex m;
   shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
     EngineShard* es = EngineShard::tlocal();
@@ -1262,12 +1262,12 @@ void DebugCmd::Shards(CommandContext* cmnd_cntx) {
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   rb->SendVerbatimString(out);
 }
 
 void DebugCmd::RecvSize(string_view param, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   uint8_t enable = 2;
   if (absl::EqualsIgnoreCase(param, "ENABLE"))
     enable = 1;
@@ -1292,7 +1292,7 @@ void DebugCmd::RecvSize(string_view param, CommandContext* cmnd_cntx) {
 }
 
 void DebugCmd::Topk(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   DCHECK_GE(args.size(), 1u);
 
   string_view subcmd = ArgS(args, 0);
@@ -1350,7 +1350,7 @@ void DebugCmd::Topk(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void DebugCmd::Keys(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view subcmd = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       cntx_->ns->GetDbSlice(es->shard_id()).StartSampleKeys(cntx_->db_index());
@@ -1376,7 +1376,7 @@ void DebugCmd::Keys(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void DebugCmd::Values(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view subcmd = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (absl::EqualsIgnoreCase(subcmd, "ON")) {
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       cntx_->ns->GetDbSlice(es->shard_id()).StartSampleValues(cntx_->db_index());
@@ -1437,7 +1437,7 @@ void DebugCmd::Compression(CmdArgList args, CommandContext* cmnd_cntx) {
   string bintable;
   bool print_bintable = false;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (parser.Check("SET", &bintable)) {
     // SET <bintable> [type]
     string raw;
@@ -1539,7 +1539,7 @@ void DebugCmd::Compression(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void DebugCmd::IOStats(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
 
   bool per_second = !args.empty() && absl::EqualsIgnoreCase(args[0], "PS");
   vector<IOStat> stats(shard_set->pool()->size());
@@ -1566,7 +1566,7 @@ void DebugCmd::IOStats(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void DebugCmd::Segments(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   vector<SegmentInfo> info(shard_set->size());
 
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {

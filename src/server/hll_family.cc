@@ -141,7 +141,7 @@ void PFAdd(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult<int> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, cmd_cntx->rb);
+  HandleOpValueResult(res, cmd_cntx->rb());
 }
 
 OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
@@ -255,9 +255,9 @@ void PFCount(CmdArgList args, CommandContext* cmd_cntx) {
     };
 
     OpResult<int64_t> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-    HandleOpValueResult(res, cmd_cntx->rb);
+    HandleOpValueResult(res, cmd_cntx->rb());
   } else {
-    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx->rb);
+    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx->rb());
   }
 }
 
@@ -314,7 +314,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
 }
 
 void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult<int> result = PFMergeInternal(args, cmd_cntx->tx, rb);
   if (result.ok()) {
     if (result.value() == 0) {

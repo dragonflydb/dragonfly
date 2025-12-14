@@ -227,7 +227,7 @@ void GeoFamily::GeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   args.remove_prefix(i);
   if (args.empty() || args.size() % 3 != 0) {
     builder->SendError(kSyntaxErr);
@@ -268,7 +268,7 @@ void GeoFamily::GeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GeoFamily::GeoHash(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
 
@@ -288,7 +288,7 @@ void GeoFamily::GeoHash(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GeoFamily::GeoPos(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
 
@@ -311,7 +311,7 @@ void GeoFamily::GeoPos(CmdArgList args, CommandContext* cmd_cntx) {
 
 void GeoFamily::GeoDist(CmdArgList args, CommandContext* cmd_cntx) {
   double distance_multiplier = 1;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() == 4) {
     string_view unit = ArgS(args, 3);
@@ -594,7 +594,7 @@ void GeoFamily::GeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
   int from_set = 0;
   // BYRADIUS or BYBOX is set
   int by_set = 0;
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
 
   CmdArgParser parser(args);
   string_view key = parser.Next();
@@ -696,7 +696,7 @@ void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cn
   // member to latlong, set shape.xy
   string_view member = ArgS(args, 1);
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
   if (!ParseDouble(ArgS(args, 2), &shape.t.radius)) {
     return builder->SendError(kInvalidFloatErr);
   }
@@ -788,7 +788,7 @@ void GeoFamily::GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
 
-  auto* builder = cmd_cntx->rb;
+  auto* builder = cmd_cntx->rb();
 
   CmdArgParser parser(args);
 

@@ -547,7 +547,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   OpSetParams op_sp;
 
   const auto option_already_set = [&cmd_cntx] {
-    return cmd_cntx->rb->SendError(WrongNumArgsError(cmd_cntx->cid->name()));
+    return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid->name()));
   };
 
   while (true) {
@@ -567,7 +567,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   op_sp.ttl = parser.Next<uint32_t>();
-  auto* rb = cmd_cntx->rb;
+  auto* rb = cmd_cntx->rb();
   if (parser.HasError()) {
     return rb->SendError(parser.TakeError().MakeReply());
   }
@@ -616,7 +616,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx->rb}.Send(cmd_cntx->tx->ScheduleSingleHopT(WrapW(cb)));
+  HSetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx->ScheduleSingleHopT(WrapW(cb)));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -629,7 +629,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
                                       "GT", ExpireFlags::EXPIRE_GT, "LT", ExpireFlags::EXPIRE_LT)
                           .value_or(ExpireFlags::EXPIRE_ALWAYS);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (parser.HasError()) {
     return rb->SendError(parser.TakeError().MakeReply());
   }
@@ -672,7 +672,7 @@ void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult<string> result = ExecuteRO(cmd_cntx->tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
       return rb->SendBulkString(*result);
@@ -688,7 +688,7 @@ void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
   OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
     case OpStatus::KEY_NOTFOUND: {
@@ -711,19 +711,19 @@ void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx->rb}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx->rb()}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
 void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx->rb}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx->rb()}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
 void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx->rb}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx->rb()}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
 void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
@@ -733,7 +733,7 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
-    return cmd_cntx->rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   IncrByParam param{ival};
@@ -745,17 +745,17 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    cmd_cntx->rb->SendLong(get<int64_t>(param));
+    cmd_cntx->rb()->SendLong(get<int64_t>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        cmd_cntx->rb->SendError("hash value is not an integer");
+        cmd_cntx->SendError("hash value is not an integer");
         break;
       case OpStatus::OUT_OF_RANGE:
-        cmd_cntx->rb->SendError(kIncrOverflow);
+        cmd_cntx->SendError(kIncrOverflow);
         break;
       default:
-        cmd_cntx->rb->SendError(status);
+        cmd_cntx->SendError(status);
         break;
     }
   }
@@ -768,7 +768,7 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
-    return cmd_cntx->rb->SendError(kInvalidFloatErr);
+    return cmd_cntx->SendError(kInvalidFloatErr);
   }
 
   IncrByParam param{dval};
@@ -780,36 +780,36 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
     rb->SendDouble(get<double>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        cmd_cntx->rb->SendError("hash value is not a float");
+        cmd_cntx->SendError("hash value is not a float");
         break;
       default:
-        cmd_cntx->rb->SendError(status);
+        cmd_cntx->SendError(status);
         break;
     }
   }
 }
 
 void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, FIELDS, cmd_cntx->tx, cmd_cntx->rb);
+  HGetGeneric(args, FIELDS, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, VALUES, cmd_cntx->tx, cmd_cntx->rb);
+  HGetGeneric(args, VALUES, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx->tx, cmd_cntx->rb);
+  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx->tx, cmd_cntx->rb());
 }
 
 void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view token = ArgS(args, 1);
   uint64_t cursor = 0;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(token, &cursor)) {
     return rb->SendError("invalid cursor");
   }
@@ -849,7 +849,7 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   string_view cmd{cmd_cntx->cid->name()};
-  auto* rb = cmd_cntx->rb;
+  auto* rb = cmd_cntx->rb();
   if (args.size() % 2 != 1) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
@@ -874,7 +874,7 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-  HSetReplies{cmd_cntx->rb}.Send(cmd_cntx->tx->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
@@ -886,7 +886,7 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
 }
 
 void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() > 3) {
     DVLOG(1) << "Wrong number of command arguments: " << args.size();
     return rb->SendError(kSyntaxErr);

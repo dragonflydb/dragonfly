@@ -369,8 +369,8 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
 
 void ClientSetName(CmdArgList args, CommandContext* cmnd_cntx) {
   if (args.size() == 1) {
-    cmnd_cntx->conn_cntx->conn()->SetName(string{ArgS(args, 0)});
-    return cmnd_cntx->rb->SendOk();
+    cmnd_cntx->conn()->SetName(string{ArgS(args, 0)});
+    return cmnd_cntx->rb()->SendOk();
   }
   return cmnd_cntx->SendError(facade::kSyntaxErr);
 }
@@ -379,8 +379,8 @@ void ClientGetName(CmdArgList args, CommandContext* cmnd_cntx) {
   if (!args.empty()) {
     return cmnd_cntx->SendError(facade::kSyntaxErr);
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
-  if (auto name = cmnd_cntx->conn_cntx->conn()->GetName(); !name.empty()) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
+  if (auto name = cmnd_cntx->conn()->GetName(); !name.empty()) {
     return rb->SendBulkString(name);
   } else {
     return rb->SendNull();
@@ -411,12 +411,12 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
 
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   return rb->SendVerbatimString(result);
 }
 
 void ClientTracking(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (!rb->IsResp3())
     return cmnd_cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
@@ -456,7 +456,7 @@ void ClientTracking(CmdArgList args, CommandContext* cmnd_cntx) {
     }
   }
 
-  auto* conn_cntx = cmnd_cntx->conn_cntx;
+  auto* conn_cntx = cmnd_cntx->server_conn_cntx();
   if (is_on) {
     ++conn_cntx->subscriptions;
   }
@@ -464,11 +464,11 @@ void ClientTracking(CmdArgList args, CommandContext* cmnd_cntx) {
   conn_cntx->conn_state.tracking_info_.SetClientTracking(is_on);
   conn_cntx->conn_state.tracking_info_.SetOption(option);
   conn_cntx->conn_state.tracking_info_.SetNoLoop(noloop);
-  return cmnd_cntx->rb->SendOk();
+  return cmnd_cntx->rb()->SendOk();
 }
 
 void ClientCaching(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (!rb->IsResp3())
     return cmnd_cntx->SendError(
         "Client caching is currently not supported for RESP2. Please use RESP3.");
@@ -477,7 +477,8 @@ void ClientCaching(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  if (!cmnd_cntx->conn_cntx->conn_state.tracking_info_.IsTrackingOn()) {
+  auto* cntx = cmnd_cntx->server_conn_cntx();
+  if (!cntx->conn_state.tracking_info_.IsTrackingOn()) {
     return cmnd_cntx->SendError(
         "CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or "
         "OPTOUT mode enabled");
@@ -485,7 +486,7 @@ void ClientCaching(CmdArgList args, CommandContext* cmnd_cntx) {
 
   using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
-  auto* cntx = cmnd_cntx->conn_cntx;
+
   if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
       return cmnd_cntx->SendError(
@@ -503,7 +504,7 @@ void ClientCaching(CmdArgList args, CommandContext* cmnd_cntx) {
 
   bool is_multi = cmnd_cntx->tx && cmnd_cntx->tx->IsMulti();
   cntx->conn_state.tracking_info_.SetCachingSequenceNumber(is_multi);
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 void ClientSetInfo(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -511,7 +512,7 @@ void ClientSetInfo(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  auto* conn = cmnd_cntx->conn_cntx->conn();
+  auto* conn = cmnd_cntx->conn();
   if (conn == nullptr) {
     return cmnd_cntx->SendError("No connection");
   }
@@ -527,7 +528,7 @@ void ClientSetInfo(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 void ClientId(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -535,7 +536,7 @@ void ClientId(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  return cmnd_cntx->rb->SendLong(cmnd_cntx->conn_cntx->conn()->GetClientId());
+  return cmnd_cntx->rb()->SendLong(cmnd_cntx->conn()->GetClientId());
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
@@ -573,7 +574,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  const bool is_admin_request = cmnd_cntx->conn_cntx->conn()->IsPrivileged();
+  const bool is_admin_request = cmnd_cntx->conn()->IsPrivileged();
 
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
@@ -608,7 +609,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners,
   shard_set->pool()->AwaitFiberOnAll(cb);
 
   if (kill_errors.load() == 0) {
-    return cmnd_cntx->rb->SendLong(killed_connections.load());
+    return cmnd_cntx->rb()->SendLong(killed_connections.load());
   } else {
     return cmnd_cntx->SendError(absl::StrCat("Killed ", killed_connections.load(),
                                              " client(s), but unable to kill ", kill_errors.load(),
@@ -656,7 +657,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
 
   shard_set->pool()->AwaitBrief(cb_brief);
 
-  return cmnd_cntx->rb->SendLong(migrated);
+  return cmnd_cntx->rb()->SendLong(migrated);
 }
 
 std::string_view GetOSString() {
@@ -934,7 +935,7 @@ void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorP
 
   requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
 
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmnd_cntx->rb());
   rb->StartArray(requested_slow_log_length);
   for (size_t i = 0; i < requested_slow_log_length; ++i) {
     const auto& entry = merged_slow_log[i].first;
@@ -2116,7 +2117,7 @@ void ServerFamily::StatsMC(std::string_view section, CommandContext* cmd_ctx) {
 
   absl::StrAppend(&info, "END\r\n");
 
-  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cmd_ctx->rb);
+  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cmd_ctx->rb());
   mc_builder->SendRaw(info);
 
 #undef ADD_LINE
@@ -2283,15 +2284,15 @@ SaveInfoData ServerFamily::GetLastSaveInfo() const {
 void ServerFamily::DbSize(CmdArgList args, CommandContext* cmnd_cntx) {
   atomic_ulong num_keys{0};
 
+  auto* cntx = cmnd_cntx->server_conn_cntx();
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
-        auto db_size = cmnd_cntx->conn_cntx->ns->GetDbSlice(shard->shard_id())
-                           .DbSize(cmnd_cntx->conn_cntx->conn_state.db_index);
+        auto db_size = cntx->ns->GetDbSlice(shard->shard_id()).DbSize(cntx->conn_state.db_index);
         num_keys.fetch_add(db_size, memory_order_relaxed);
       },
       [](ShardId) { return true; });
 
-  return cmnd_cntx->rb->SendLong(num_keys.load(memory_order_relaxed));
+  return cmnd_cntx->rb()->SendLong(num_keys.load(memory_order_relaxed));
 }
 
 void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
@@ -2351,7 +2352,7 @@ void ServerFamily::FlushDb(CmdArgList args, CommandContext* cmnd_cntx) {
   DbIndex index = cmd_name == "FLUSHALL" ? DbSlice::kDbAll : cmnd_cntx->tx->GetDbIndex();
   Drakarys(cmnd_cntx->tx, index, sync);
   SendInvalidationMessages();
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
@@ -2388,7 +2389,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  ConnectionContext* cntx = cmnd_cntx->conn_cntx;
+  ConnectionContext* cntx = cmnd_cntx->server_conn_cntx();
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
     const bool one_arg = args.size() == 1;
@@ -2396,7 +2397,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmnd_cntx) {
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
     if (DoAuth(cntx, username, password)) {
-      return cmnd_cntx->rb->SendOk();
+      return cmnd_cntx->rb()->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
@@ -2413,7 +2414,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view pass = ArgS(args, 0);
   if (pass == GetPassword()) {
     cntx->authenticated = true;
-    cmnd_cntx->rb->SendOk();
+    cmnd_cntx->rb()->SendOk();
   } else {
     return cmnd_cntx->SendError(facade::kAuthRejected);
   }
@@ -2424,7 +2425,7 @@ void ServerFamily::ClientUnPauseCmd(CmdArgList args, CommandContext* cmnd_cntx) 
     return cmnd_cntx->SendError(facade::kSyntaxErr);
   }
   is_c_pause_in_progress_.store(false, std::memory_order_relaxed);
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 void ServerFamily::ChangeConnectionAccept(bool accept) {
@@ -2479,7 +2480,7 @@ void ClientHelp(SinkReplyBuilder* builder) {
 void ServerFamily::Client(CmdArgList args, CommandContext* cmnd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
 
   if (sub_cmd == "SETNAME") {
     return ClientSetName(sub_args, cmnd_cntx);
@@ -2513,7 +2514,7 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmnd_cntx) {
 void ServerFamily::Config(CmdArgList args, CommandContext* cmnd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
         "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -2595,7 +2596,7 @@ void ServerFamily::Config(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 
   if (sub_cmd == "RESETSTAT") {
-    ResetStat(cmnd_cntx->conn_cntx->ns);
+    ResetStat(cmnd_cntx->server_conn_cntx()->ns);
     return builder->SendOk();
   } else {
     return cmnd_cntx->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
@@ -2603,20 +2604,20 @@ void ServerFamily::Config(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void ServerFamily::Debug(CmdArgList args, CommandContext* cmnd_cntx) {
-  DebugCmd dbg_cmd{this, &service_.cluster_family(), cmnd_cntx->conn_cntx};
+  DebugCmd dbg_cmd{this, &service_.cluster_family(), cmnd_cntx->server_conn_cntx()};
 
   return dbg_cmd.Run(args, cmnd_cntx);
 }
 
 void ServerFamily::Memory(CmdArgList args, CommandContext* cmnd_cntx) {
-  MemoryCmd mem_cmd{this, cmnd_cntx->rb, cmnd_cntx->conn_cntx};
+  MemoryCmd mem_cmd{this, cmnd_cntx->rb(), cmnd_cntx->server_conn_cntx()};
 
   return mem_cmd.Run(args);
 }
 
 void ServerFamily::Shrink(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -2738,14 +2739,14 @@ void ServerFamily::BgSave(CmdArgList args, CommandContext* cmnd_cntx) {
   bg_save_fb_.JoinIfNeeded();
   bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
                            boost::intrusive_ptr<Transaction>(cmnd_cntx->tx));
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 // SAVE [DF|RDB] [CLOUD_URI] [BASENAME]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   auto maybe_res = GetSaveCmdOpts(args, cmnd_cntx);
   if (!maybe_res) {
     return;
@@ -3440,13 +3441,13 @@ void ServerFamily::Info(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 
   if (need_metrics || sections.empty()) {
-    metrics = GetMetrics(cmnd_cntx->conn_cntx->ns);
+    metrics = GetMetrics(cmnd_cntx->server_conn_cntx()->ns);
   } else if (!IsMaster()) {
     metrics.replica_side_info = GetReplicaSummary();
   }
 
   std::string info;
-  bool is_priveleged = cmnd_cntx->conn_cntx->conn()->IsPrivileged();
+  bool is_priveleged = cmnd_cntx->conn()->IsPrivileged();
   // For multiple requested sections, invalid section names are ignored (not included in the
   // output). The command does not abort or return an error if some sections are invalid. This
   // matches Valkey behavior.
@@ -3467,7 +3468,7 @@ void ServerFamily::Info(CmdArgList args, CommandContext* cmnd_cntx) {
     }
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   rb->SendVerbatimString(info);
 }
 
@@ -3480,7 +3481,7 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view password;
   string_view clientname;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (!args.empty()) {
     string_view proto_version = ArgS(args, 0);
     is_resp3 = proto_version == "3";
@@ -3509,7 +3510,7 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmnd_cntx) {
     }
   }
 
-  auto* cntx = cmnd_cntx->conn_cntx;
+  ConnectionContext* cntx = cmnd_cntx->server_conn_cntx();
   if (has_auth && !DoAuth(cntx, username, password)) {
     return cmnd_cntx->SendError(facade::kAuthRejected);
   }
@@ -3566,7 +3567,7 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void ServerFamily::AddReplicaOf(CmdArgList args, CommandContext* cmnd_cntx) {
   util::fb2::LockGuard lk(replicaof_mu_);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (IsMaster()) {
     return cmnd_cntx->SendError(
         "Calling ADDREPLICAOFF allowed only after server is already a replica");
@@ -3631,7 +3632,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
       // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 
-      return cmnd_cntx->rb->SendOk();
+      return cmnd_cntx->rb()->SendOk();
     }
 
     // If any replication is in progress, stop it, cancellation should kick in immediately
@@ -3697,7 +3698,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
     new_replica->StartMainReplicationFiber(last_master_data);
   }
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 void ServerFamily::StopAllClusterReplicas() {
@@ -3785,7 +3786,7 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, CommandContext* cmnd_cnt
 
   // replicaof no one
   if (replicaof_args->IsReplicaOfNoOne()) {
-    return ReplicaOfNoOne(cmnd_cntx->rb);
+    return ReplicaOfNoOne(cmnd_cntx->rb());
   }
 
   auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
@@ -3827,7 +3828,7 @@ void ServerFamily::ReplicaOfInternalV2(CmdArgList args, CommandContext* cmnd_cnt
     replica_->StartMainReplicationFiber(last_master_data);
   }
 
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 }
 
 // REPLTAKEOVER <seconds> [SAVE]
@@ -3840,7 +3841,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmnd_cntx) {
   int timeout_sec = parser.Next<int>();
   bool save_flag = static_cast<bool>(parser.Check("SAVE"));
 
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
   if (parser.HasNext())
     return cmnd_cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
@@ -3893,7 +3894,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* builder = cmnd_cntx->rb;
+  auto* builder = cmnd_cntx->rb();
   {
     util::fb2::LockGuard lk(replicaof_mu_);
     if (!IsMaster()) {
@@ -3909,7 +3910,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmnd_cntx) {
   if (args.size() % 2 == 1)
     return err_cb();
 
-  auto* cntx = cmnd_cntx->conn_cntx;
+  ConnectionContext* cntx = cmnd_cntx->server_conn_cntx();
   for (unsigned i = 0; i < args.size(); i += 2) {
     DCHECK_LT(i + 1, args.size());
 
@@ -3986,7 +3987,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void ServerFamily::Role(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
   // ensuring eventual consistency of is_master. When determining if the server is a replica and
@@ -4030,16 +4031,16 @@ void ServerFamily::Role(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, CommandContext* cmnd_cntx) {
-  script_mgr_->Run(args, cmnd_cntx->tx, cmnd_cntx->rb, cmnd_cntx->conn_cntx);
+  script_mgr_->Run(args, cmnd_cntx->tx, cmnd_cntx->rb(), cmnd_cntx->server_conn_cntx());
 }
 
 void ServerFamily::LastSave(CmdArgList args, CommandContext* cmnd_cntx) {
   auto info = thread_safe_save_info_.Get();
-  cmnd_cntx->rb->SendLong(info.save_time);
+  cmnd_cntx->rb()->SendLong(info.save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, CommandContext* cmnd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "LATEST" || sub_cmd == "HISTOGRAM") {
@@ -4096,20 +4097,20 @@ void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmnd_cntx) {
   facade::g_shutdown_fast.store((sb & (SB_NOW | SB_FORCE)) != 0, std::memory_order_seq_cst);
 
   CHECK_NOTNULL(acceptor_)->Stop();
-  cmnd_cntx->rb->SendOk();
+  cmnd_cntx->rb()->SendOk();
 
   // Reset flag for any subsequent restarts (mainly for tests).
   facade::g_shutdown_fast.store(false, std::memory_order_seq_cst);
 }
 
 void ServerFamily::Dfly(CmdArgList args, CommandContext* cmnd_cntx) {
-  dfly_cmd_->Run(args, cmnd_cntx->tx, static_cast<RedisReplyBuilder*>(cmnd_cntx->rb),
-                 cmnd_cntx->conn_cntx);
+  dfly_cmd_->Run(args, cmnd_cntx->tx, static_cast<RedisReplyBuilder*>(cmnd_cntx->rb()),
+                 cmnd_cntx->server_conn_cntx());
 }
 
 void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmnd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
   if (sub_cmd == "HELP") {
     string_view help[] = {
         "SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -4153,7 +4154,7 @@ void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void ServerFamily::Module(CmdArgList args, CommandContext* cmnd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
 
   if (sub_cmd != "LIST")
     return cmnd_cntx->SendError(kSyntaxErr);
@@ -4197,14 +4198,14 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, CommandContext* cmnd_cntx) {
     client_pause_ec_.notify();
   };
 
-  auto* cntx = cmnd_cntx->conn_cntx;
+  ConnectionContext* cntx = cmnd_cntx->server_conn_cntx();
   if (auto pause_fb_opt = Pause(listeners, cntx->ns, cntx->conn(), pause_state,
                                 std::move(is_pause_in_progress), cleanup);
       pause_fb_opt) {
     is_c_pause_in_progress_.store(true);
     active_pauses_.fetch_add(1);
     pause_fb_opt->Detach();
-    return cmnd_cntx->rb->SendOk();
+    return cmnd_cntx->rb()->SendOk();
   }
   cmnd_cntx->SendError("Failed to pause all running clients");
 }

@@ -9,7 +9,7 @@
 namespace dfly {
 
 class CommandRegistry;
-struct CommandContext;
+class CommandContext;
 
 class GeoFamily {
  public:
