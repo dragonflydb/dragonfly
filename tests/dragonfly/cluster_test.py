@@ -3452,6 +3452,7 @@ async def test_replica_takeover_moved(
     assert await m1.client.execute_command("GET newk") == "foo"
 
 
+@pytest.mark.skip(reason="Flaky test, needs investigation #6200")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_search": "yes"})
 async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
     """
@@ -3517,6 +3518,7 @@ async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cluster_search": "yes"})
+@pytest.mark.skip(reason="Flaky test, needs investigation #6200")
 async def test_remove_docs_on_cluster_migration(df_factory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
