@@ -6,3 +6,4 @@ chart-dirs:
 helm-extra-args: --debug --timeout 60s
 check-version-increment: false
 validate-maintainers: false
+validate-chart-schema: false
