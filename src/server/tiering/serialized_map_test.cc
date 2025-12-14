@@ -35,7 +35,7 @@ TEST_F(SerializedMapTest, TestBasic) {
 
   // Serialize kBase to buffer
   std::string buffer;
-  buffer.resize(SerializedMap::EstimateSize(lw.Bytes(), lw.size()));
+  buffer.resize(SerializedMap::EstimateSize(lw.UsedBytes(), lw.size()));
   size_t written = SerializedMap::Serialize(lw, absl::MakeSpan(buffer));
   EXPECT_GT(written, 0u);
   buffer.resize(written);

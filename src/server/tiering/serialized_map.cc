@@ -60,7 +60,7 @@ size_t SerializedMap::EstimateSize(size_t data_bytes, size_t entries) {
 }
 
 size_t SerializedMap::Serialize(const detail::ListpackWrap& lw, absl::Span<char> buffer) {
-  DCHECK_GE(buffer.size(), EstimateSize(lw.Bytes(), lw.size()));
+  DCHECK_GE(buffer.size(), EstimateSize(lw.UsedBytes(), lw.size()));
 
   char* ptr = buffer.data();
   absl::little_endian::Store32(ptr, lw.size());

@@ -118,7 +118,7 @@ ListpackWrap::Iterator ListpackWrap::end() const {
   return Iterator{lp_, nullptr, intbuf_};
 }
 
-size_t ListpackWrap::Bytes() const {
+size_t ListpackWrap::UsedBytes() const {
   return lpBytes(lp_);
 }
 

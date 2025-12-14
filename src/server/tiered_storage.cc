@@ -96,7 +96,7 @@ pair<size_t /*size*/, CompactObj::ExternalRep> DetermineSerializationParams(cons
     case OBJ_HASH: {
       if (pv.Encoding() == kEncodingListPack) {
         detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
-        return std::make_pair(tiering::SerializedMap::EstimateSize(lw.Bytes(), lw.size()),
+        return std::make_pair(tiering::SerializedMap::EstimateSize(lw.UsedBytes(), lw.size()),
                               CompactObj::ExternalRep::SERIALIZED_MAP);
       }
       return {};
