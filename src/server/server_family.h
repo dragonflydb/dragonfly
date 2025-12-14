@@ -242,7 +242,7 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
-  void StatsMC(std::string_view section, SinkReplyBuilder* builder);
+  void StatsMC(std::string_view section, CommandContext* cmd_ctx);
 
   GenericError DoSave(const SaveCmdOptions& save_cmd_opts, Transaction* transaction,
                       bool ignore_state = false);
@@ -373,12 +373,13 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+  void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
   // REPLICAOF implementation without two phase locking.
-  void ReplicaOfInternalV2(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+  void ReplicaOfInternalV2(CmdArgList args, CommandContext* cmnd_cntx,
                            ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   struct LoadOptions {
@@ -396,7 +397,7 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, SinkReplyBuilder* builder);
+  std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, CommandContext* cmd_cntx);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
@@ -414,8 +415,8 @@ class ServerFamily {
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
-  void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
+  void ClientPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
+  void ClientUnPauseCmd(CmdArgList args, CommandContext* cmd_cntx);
 
   // Set accepting_connections_ and update listners according to it
   void ChangeConnectionAccept(bool accept);
