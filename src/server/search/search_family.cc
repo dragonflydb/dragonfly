@@ -1403,16 +1403,18 @@ void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
 void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
-  atomic_uint num_notfound{0};
   vector<DocIndexInfo> infos(shard_set->size());
 
   cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
-    if (index == nullptr)
-      num_notfound.fetch_add(1);
-    else
+    if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
     return OpStatus::OK;
+  });
+
+  // Count how many shards didn't find the index by checking empty entries.
+  size_t num_notfound = std::count_if(infos.begin(), infos.end(), [](const DocIndexInfo& info) {
+    return info.base_index.schema.fields.empty();
   });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
@@ -2243,7 +2245,10 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)
-      << CI{"FT.INFO", kReadOnlyMask, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
+            -2,        0,
+            0,         acl::FT_SEARCH}
+             .HFUNC(FtInfo)
       << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
