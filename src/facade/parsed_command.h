@@ -46,6 +46,9 @@ class ParsedCommand : public cmn::BackedArguments {
     return rb_;
   }
 
+  ConnectionContext* conn_cntx() const {
+    return conn_cntx_;
+  }
   MemcacheParser::Command* mc_command() const {
     return mc_cmd_.get();
   }
