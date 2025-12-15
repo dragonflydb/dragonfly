@@ -2235,8 +2235,10 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)
-      << CI{"FT.INFO", CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtInfo)
+      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
+            -2,        0,
+            0,         acl::FT_SEARCH}
+             .HFUNC(FtInfo)
       << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
