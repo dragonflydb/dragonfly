@@ -10,6 +10,7 @@
 #include "acl/acl_commands_def.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
+#include "facade/parsed_command.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"
 #include "server/tx_base.h"
@@ -334,6 +335,10 @@ class ConnectionContext : public facade::ConnectionContext {
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
 
+  // A temporary variable, to allow passing CommandContext from DispatchMC to
+  // DispatchCommand without changing the function signature.
+  CommandContext* cmnd_ctx = nullptr;
+
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;
 
@@ -347,41 +352,33 @@ class ConnectionContext : public facade::ConnectionContext {
                                             bool to_reply);
 };
 
-class CommandContext {
+class CommandContext : public facade::ParsedCommand {
  public:
+  CommandContext() = default;
+
   CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* rb,
                  ConnectionContext* cntx)
-      : cid(_cid), tx(_tx), rb_(rb), conn_cntx_(cntx) {
+      : cid(_cid), tx(_tx) {
+    Init(rb, cntx);
   }
 
-  const CommandId* cid;
-  Transaction* tx;
+  const CommandId* cid = nullptr;
+  Transaction* tx = nullptr;
 
   uint64_t start_time_ns = 0;
 
   // number of commands in the last exec body.
   unsigned exec_body_len = 0;
 
-  void RecordLatency(facade::ArgSlice tail_args) const;
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
-  void SendError(facade::OpStatus status) const;
-  void SendError(facade::ErrorReply error) const;
-
   ConnectionContext* server_conn_cntx() const {
     return static_cast<ConnectionContext*>(conn_cntx_);
   }
 
+  void RecordLatency(facade::ArgSlice tail_args) const;
+
   facade::Connection* conn() const {
     return conn_cntx_->conn();
   }
-
-  facade::SinkReplyBuilder* rb() const {
-    return rb_;
-  }
-
- private:
-  facade::SinkReplyBuilder* rb_;
-  ConnectionContext* conn_cntx_;
 };
 
 }  // namespace dfly

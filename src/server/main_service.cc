@@ -1535,8 +1535,19 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
     }
   }
 
-  CommandContext command_ctx{cid, dfly_cntx->transaction, builder, dfly_cntx};
-  auto res = InvokeCmd(tail_args, &command_ctx);
+  DispatchResult res = DispatchResult::ERROR;
+  if (dfly_cntx->cmnd_ctx) {
+    // Currently only used by memcache flow.
+
+    dfly_cntx->cmnd_ctx->cid = cid;
+    dfly_cntx->cmnd_ctx->tx = dfly_cntx->transaction;
+    res = InvokeCmd(tail_args, dfly_cntx->cmnd_ctx);
+  } else {
+    // TODO: eventually Resp flow should be migrated to use CommandContext too.
+    CommandContext command_ctx{cid, dfly_cntx->transaction, builder, dfly_cntx};
+    res = InvokeCmd(tail_args, &command_ctx);
+  }
+
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
@@ -1799,9 +1810,13 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
-void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                         MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
+void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
   absl::InlinedVector<string_view, 8> args;
+  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(parsed_cmd->rb());
+  CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
+  const auto& cmd = *parsed_cmd->mc_command();
+  string_view value = cmd.value();
+  auto* cntx = cmd_ctx->server_conn_cntx();
   char cmd_name[16];
   char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
@@ -1815,7 +1830,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     mc_builder->SetReturnValue(cmd.return_value);
     mc_builder->SetReturnVersion(cmd.return_version);
   }
-  CommandContext cmd_ctx{nullptr, nullptr, mc_builder, static_cast<ConnectionContext*>(cntx)};
+
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
       strcpy(cmd_name, "SET");
@@ -1862,7 +1877,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "QUIT");
       break;
     case MemcacheParser::STATS:
-      server_family_.StatsMC(cmd.key(), &cmd_ctx);
+      server_family_.StatsMC(cmd.key(), cmd_ctx);
       return;
     case MemcacheParser::VERSION:
       mc_builder->SendSimpleString("VERSION 1.6.0 DF");
@@ -1922,7 +1937,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(store_opt, strlen(store_opt));
     }
   }
-
+  dfly_cntx->cmnd_ctx = static_cast<CommandContext*>(parsed_cmd);
   DispatchCommand(ParsedArgs{args}, mc_builder, cntx);
 
   // Reset back.
@@ -1972,6 +1987,14 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   });
 
   return res;
+}
+
+facade::ParsedCommand* Service::AllocateParsedCommand() {
+  return new CommandContext{};
+}
+
+void Service::FreeParsedCommand(facade::ParsedCommand* cmd) {
+  delete static_cast<CommandContext*>(cmd);
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {
@@ -2569,7 +2592,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
         // TODO: we will have to create a CommandContext per command if we want to support async
         // execution inside exec.
-
         cmd_cntx->cid = scmd.Cid();
         auto invoke_res = InvokeCmd(args, cmd_cntx);
         if ((invoke_res != DispatchResult::OK) ||

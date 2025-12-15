@@ -514,8 +514,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 
 void Connection::AsyncOperations::operator()(MCPipelineMessagePtr msg) {
   ++self->local_stats_.cmds;
-  self->service_->DispatchMC(*msg->mc_command(), msg->mc_command()->value(),
-                             static_cast<MCReplyBuilder*>(msg->rb()), self->cntx());
+  self->service_->DispatchMC(msg);
   self->last_interaction_ = time(nullptr);
 }
 
@@ -630,6 +629,7 @@ Connection::~Connection() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ssl_ctx_);
 #endif
+
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
@@ -804,21 +804,18 @@ void Connection::HandleRequests() {
           break;
         case Protocol::MEMCACHE:
           reply_builder_.reset(new MCReplyBuilder(socket_.get()));
-          parsed_cmd_ = new ParsedCommand;  // TODO: will be allocated/deallocated by service.
-          parsed_cmd_->CreateMemcacheCommand();
-          parsed_cmd_->Init(reply_builder_.get(), cc_.get());
+          CreateParsedCommand();
           break;
         default:
           break;
       }
-
       ConnectionFlow();
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
       VLOG(1) << "Closed connection for peer "
               << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
       reply_builder_.reset();
-      delete parsed_cmd_;
+      service_->FreeParsedCommand(parsed_cmd_);
       parsed_cmd_ = nullptr;
     }
     cc_.reset();
@@ -1275,16 +1272,11 @@ auto Connection::ParseMemcache() -> ParserStatus {
   uint32_t consumed = 0;
   MemcacheParser::Result result = MemcacheParser::OK;
 
-  auto dispatch_sync = [this] {
-    service_->DispatchMC(*parsed_cmd_->mc_command(), parsed_cmd_->mc_command()->value(),
-                         static_cast<MCReplyBuilder*>(reply_builder_.get()), cc_.get());
-  };
+  auto dispatch_sync = [this] { service_->DispatchMC(parsed_cmd_); };
 
   auto dispatch_async = [this]() -> MessageHandle {
     MCPipelineMessagePtr ptr = parsed_cmd_;
-    parsed_cmd_ = new ParsedCommand;
-    parsed_cmd_->CreateMemcacheCommand();
-    parsed_cmd_->Init(reply_builder_.get(), cc_.get());
+    this->CreateParsedCommand();
     return {ptr};
   };
 
@@ -1950,7 +1942,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
   }
 
   if (auto* ptr = get_if<MCPipelineMessagePtr>(&msg.handle); ptr) {
-    delete *ptr;  // TODO: will be deallocated by service
+    service_->FreeParsedCommand(*ptr);
   }
 }
 
@@ -2072,6 +2064,13 @@ bool Connection::IsReplySizeOverLimit() const {
              << ". Falling back to single command dispatch (instead of squashing)";
   }
   return over_limit;
+}
+
+void Connection::CreateParsedCommand() {
+  parsed_cmd_ = service_->AllocateParsedCommand();
+  parsed_cmd_->Init(reply_builder_.get(), cc_.get());
+  if (protocol_ == Protocol::MEMCACHE)
+    parsed_cmd_->CreateMemcacheCommand();
 }
 
 void Connection::UpdateFromFlags() {

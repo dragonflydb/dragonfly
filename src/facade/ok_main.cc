@@ -42,9 +42,8 @@ class OkService : public ServiceInterface {
     return result;
   }
 
-  void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                  MCReplyBuilder* builder, ConnectionContext* cntx) final {
-    builder->SendError("");
+  void DispatchMC(ParsedCommand* cmd) final {
+    cmd->rb()->SendError("");
   }
 
   ConnectionContext* CreateContext(Connection* owner) final {

@@ -8,6 +8,8 @@
 #include "base/logging.h"
 #include "facade/command_id.h"
 #include "facade/error.h"
+#include "facade/parsed_command.h"
+#include "facade/reply_builder.h"
 #include "facade/resp_expr.h"
 #include "strings/human_readable.h"
 
@@ -215,6 +217,18 @@ bool AbslParseFlag(std::string_view in, MemoryBytesFlag* flag, std::string* err)
 
 std::string AbslUnparseFlag(const MemoryBytesFlag& flag) {
   return strings::HumanReadableNumBytes(flag.value);
+}
+
+void ParsedCommand::SendError(std::string_view str, std::string_view type) const {
+  rb_->SendError(str, type);
+}
+
+void ParsedCommand::SendError(facade::OpStatus status) const {
+  rb_->SendError(status);
+}
+
+void ParsedCommand::SendError(facade::ErrorReply error) const {
+  rb_->SendError(std::move(error));
 }
 
 }  // namespace facade

@@ -167,16 +167,6 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
   }
 }
 
-void CommandContext::SendError(std::string_view str, std::string_view type) const {
-  rb()->SendError(str, type);
-}
-void CommandContext::SendError(facade::OpStatus status) const {
-  rb()->SendError(status);
-}
-void CommandContext::SendError(facade::ErrorReply error) const {
-  rb()->SendError(std::move(error));
-}
-
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
