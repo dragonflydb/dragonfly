@@ -62,6 +62,19 @@ runs:
         fi
         curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
         registry="ghcr.io/romange" && for image in fedora:30 ubuntu:noble; do ./docker pull "$registry/$image"; done
+    - name: Free disk space
+      if: contains(runner.labels, 'self-hosted') == false
+      shell: bash
+      run: |
+        echo "===================Before freeing up space ============================================"
+        df -h
+        rm -rf /hostroot/usr/share/dotnet
+        rm -rf /hostroot/usr/local/share/boost
+        rm -rf /hostroot/usr/local/lib/android
+        rm -rf /hostroot/opt/ghc
+        echo "===================After freeing up space ============================================"
+        df -h
+
     - name: Run PyTests
       id: main
       shell: bash
@@ -141,3 +154,10 @@ runs:
           -H 'Content-Type: application/json' \
           '${{ inputs.gspace-secret }}' \
           -d '{"text": "'"${message}"'"}'
+    - name: Copy binary on a self hosted runner
+      if: failure() && contains(runner.labels, 'self-hosted')
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/build
+        timestamp=$(date +%Y-%m-%d_%H:%M:%S)
+        mv ./dragonfly /var/crash/dragonfly_${timestamp}

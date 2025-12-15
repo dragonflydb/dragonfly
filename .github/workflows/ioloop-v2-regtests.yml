@@ -21,6 +21,8 @@ jobs:
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
 
     steps:
       - uses: actions/checkout@v5
@@ -58,23 +60,13 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: logs
           path: /tmp/failed/*
 
-      - name: Copy binary on a self hosted runner
-        if: failure()
-        run: |
-          # We must use sh syntax.
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            cd ${GITHUB_WORKSPACE}/build
-            timestamp=$(date +%Y-%m-%d_%H:%M:%S)
-            mv ./dragonfly /var/crash/dragonfly_${timestamp}
-          fi
-
   lint-test-chart:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/lint-test-chart
