@@ -70,7 +70,7 @@ inline const uint8_t* to_byte(const void* s) {
 
 io::FileSource RdbTest::GetSource(string name) {
   string rdb_file;
-  if (name[0] == '/') {
+  if (!name.empty() && name[0] == '/') {
     rdb_file = name;  // Absolute path
   } else {
     rdb_file = base::ProgramRunfile("testdata/" + name);
@@ -731,7 +731,7 @@ TEST_F(RdbTest, LoadOldSnapshotTagSortableSeparator) {
   string tar_file = base::ProgramRunfile("testdata/tag_sortable.tar.gz");
   char temp_dir[] = "/tmp/tag_sortable_test_XXXXXX";
   ASSERT_NE(mkdtemp(temp_dir), nullptr);
-  string extract_cmd = absl::StrCat("tar -xf ", tar_file, " -C ", temp_dir);
+  string extract_cmd = absl::StrCat("tar -xf '", tar_file, "' -C '", temp_dir, "'");
   ASSERT_EQ(system(extract_cmd.c_str()), 0);
 
   // Load the snapshot from extracted files
@@ -739,8 +739,8 @@ TEST_F(RdbTest, LoadOldSnapshotTagSortableSeparator) {
   auto ec = LoadRdb(summary_path);
 
   // Cleanup
-  string cleanup_cmd = absl::StrCat("rm -rf ", temp_dir);
-  system(cleanup_cmd.c_str());
+  string cleanup_cmd = absl::StrCat("rm -rf '", temp_dir, "'");
+  (void)system(cleanup_cmd.c_str());
 
   ASSERT_FALSE(ec) << ec.message();
 
