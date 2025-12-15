@@ -505,15 +505,16 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
     return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, value, flags, ttl); });
   }
 
+  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
+  cmn::BackedArguments cmd_backed_args;
   MP::Command cmd;
+  cmd.backed_args = &cmd_backed_args;
   cmd.type = cmd_type;
 
   string_view kv[2] = {key, value};
-  cmd.Assign(kv, kv + 2, 2);
+  cmd_backed_args.Assign(kv, kv + 2, 2);
   cmd.flags = flags;
   cmd.expire_ts = ttl.count();
-
-  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
   auto* context = conn->cmd_cntx();
 
@@ -543,16 +544,17 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
     return pp_->at(0)->Await([&] { return this->GetMC(cmd_type, list); });
   }
 
+  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
   MP::Command cmd;
+  cmn::BackedArguments cmd_backed_args;
+  cmd.backed_args = &cmd_backed_args;
   cmd.type = cmd_type;
   auto src = list.begin();
   if (cmd.type == MP::GAT || cmd.type == MP::GATS) {
     CHECK(absl::SimpleAtoi(*src++, &cmd.expire_ts));
   }
 
-  cmd.Assign(src, list.end(), list.end() - src);
-
-  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
+  cmd_backed_args.Assign(src, list.end(), list.end() - src);
 
   auto* context = conn->cmd_cntx();
   service_->DispatchMC(cmd, string_view{}, static_cast<MCReplyBuilder*>(conn->builder()), context);

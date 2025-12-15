@@ -40,8 +40,7 @@ if (HAS_USE_AFTER_FREE_WARN)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set(CMAKE_CXX_FLAGS "-Wthread-safety ${CMAKE_CXX_FLAGS}")
-    add_compile_options(-Werror=thread-safety)
+    set(CMAKE_CXX_FLAGS "-Wthread-safety -Werror=thread-safety ${CMAKE_CXX_FLAGS}")
 endif()
 
 # We can not use here CHECK_CXX_COMPILER_FLAG because systems that do not support sanitizers

@@ -16,7 +16,7 @@
 #include "common/backed_args.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
-#include "facade/memcache_parser.h"
+#include "facade/parsed_command.h"
 #include "facade/resp_expr.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
@@ -85,7 +85,7 @@ class Connection : public util::Connection {
   using PipelineMessage = cmn::BackedArguments;
 
   // Pipeline message, accumulated Memcached command to be executed.
-  using MCPipelineMessage = MemcacheParser::Command;
+  using MCPipelineMessage = ParsedCommand;
 
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
@@ -116,7 +116,7 @@ class Connection : public util::Connection {
   using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
   using PubMessagePtr = std::unique_ptr<PubMessage>;
 
-  using MCPipelineMessagePtr = std::unique_ptr<MCPipelineMessage>;
+  using MCPipelineMessagePtr = MCPipelineMessage*;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
@@ -417,7 +417,7 @@ class Connection : public util::Connection {
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
-  MemcacheParser::Command mc_cmd_;
+  ParsedCommand* parsed_cmd_ = nullptr;
 
   uint32_t id_;
   Protocol protocol_;
