@@ -13,6 +13,8 @@ extern "C" {
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
 
+#include <filesystem>
+
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -739,8 +741,7 @@ TEST_F(RdbTest, LoadOldSnapshotTagSortableSeparator) {
   auto ec = LoadRdb(summary_path);
 
   // Cleanup
-  string cleanup_cmd = absl::StrCat("rm -rf '", temp_dir, "'");
-  (void)system(cleanup_cmd.c_str());
+  std::filesystem::remove_all(temp_dir);
 
   ASSERT_FALSE(ec) << ec.message();
 
