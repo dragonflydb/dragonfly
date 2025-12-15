@@ -1060,8 +1060,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
   DCHECK(IsValid(prime_it));
-  // If this need to persist, then only set persist value and return
-  if (params.persist) {
+
+  if (params.persist) {  // Persist means remove expiry
     RemoveExpire(cntx.db_index, prime_it);
     return kPersistValue;
   }
@@ -1071,29 +1071,34 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::OUT_OF_RANGE;
   }
 
-  if (rel_msec <= 0) {  // implicit - don't persist
+  int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
+  bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
+
+  if (IsValid(expire_it)) {
+    current_cmp = ExpireTime(expire_it->second);
+    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
+  } else {
+    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
+  }
+
+  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_LT) && (abs_msec < current_cmp);
+  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_GT) && (abs_msec > current_cmp);
+
+  if (!satisfied)
+    return OpStatus::SKIPPED;
+
+  // If we update and the new value is already expired, delete the key
+  if (rel_msec <= 0) {
     Del(cntx, prime_it);
     return -1;
-  } else if (IsValid(expire_it) && !params.persist) {
-    int64_t current = ExpireTime(expire_it->second);
-    if (params.expire_options & ExpireFlags::EXPIRE_NX) {
-      return OpStatus::SKIPPED;
-    }
-    if ((params.expire_options & ExpireFlags::EXPIRE_LT) && current <= abs_msec) {
-      return OpStatus::SKIPPED;
-    } else if ((params.expire_options & ExpireFlags::EXPIRE_GT) && current >= abs_msec) {
-      return OpStatus::SKIPPED;
-    }
-
-    expire_it->second = FromAbsoluteTime(abs_msec);
-    return abs_msec;
-  } else {
-    if (params.expire_options & ExpireFlags::EXPIRE_XX) {
-      return OpStatus::SKIPPED;
-    }
-    AddExpire(cntx.db_index, prime_it, abs_msec);
-    return abs_msec;
   }
+
+  // Update or add expiration
+  if (IsValid(expire_it))
+    expire_it->second = FromAbsoluteTime(abs_msec);
+  else
+    AddExpire(cntx.db_index, prime_it, abs_msec);
+  return abs_msec;
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,

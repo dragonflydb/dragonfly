@@ -1053,9 +1053,9 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
       return nonstd::make_unexpected(absl::StrCat("Unsupported option: ", arg_sv));
     }
   }
-  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ~ExpireFlags::EXPIRE_NX)) {
-    return nonstd::make_unexpected(
-        "NX and XX, GT or LT options at the same time are not compatible");
+
+  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ExpireFlags::EXPIRE_XX)) {
+    return nonstd::make_unexpected("NX and XX options at the same time are not compatible");
   }
   if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
     return nonstd::make_unexpected("GT and LT options at the same time are not compatible");
