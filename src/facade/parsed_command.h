@@ -14,7 +14,7 @@ class SinkReplyBuilder;
 
 // ParsedCommand is a protocol-agnostic holder for parsed request state.
 // It wraps cmn::BackedArguments so the facade can populate RESP arguments and
-// optionally attach a MemcacheParser::Command, complimenting the arguments
+// optionally attach a MemcacheParser::Command, complementing the arguments
 // with memcache-specific data.
 // The purpose of ParsedCommand is to hold the entire state of a parsed request
 // during its lifetime, from parsing to dispatching and reply building including
