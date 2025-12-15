@@ -20,26 +20,25 @@ class SinkReplyBuilder;
 // during its lifetime, from parsing to dispatching and reply building including
 // any async dispatching.
 class ParsedCommand : public cmn::BackedArguments {
+  friend class ServiceInterface;
+
  protected:
   SinkReplyBuilder* rb_ = nullptr;  // either RedisReplyBuilder or MCReplyBuilder
   ConnectionContext* conn_cntx_ = nullptr;
 
   std::unique_ptr<MemcacheParser::Command> mc_cmd_;  // only for memcache protocol
 
- public:
   ParsedCommand() = default;
-  ParsedCommand(SinkReplyBuilder* rb, ConnectionContext* conn_cntx)
-      : rb_{rb}, conn_cntx_{conn_cntx} {
+
+ public:
+  void Init(SinkReplyBuilder* rb, ConnectionContext* conn_cntx) {
+    rb_ = rb;
+    conn_cntx_ = conn_cntx;
   }
 
   void CreateMemcacheCommand() {
     mc_cmd_ = std::make_unique<MemcacheParser::Command>();
     mc_cmd_->backed_args = this;
-  }
-
-  void Init(SinkReplyBuilder* rb, ConnectionContext* conn_cntx) {
-    rb_ = rb;
-    conn_cntx_ = conn_cntx;
   }
 
   SinkReplyBuilder* rb() const {
@@ -52,6 +51,10 @@ class ParsedCommand : public cmn::BackedArguments {
   MemcacheParser::Command* mc_command() const {
     return mc_cmd_.get();
   }
+
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
+  void SendError(facade::OpStatus status) const;
+  void SendError(facade::ErrorReply error) const;
 };
 
 static_assert(sizeof(ParsedCommand) == 152);

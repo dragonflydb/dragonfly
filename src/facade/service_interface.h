@@ -7,7 +7,7 @@
 #include <string>
 
 #include "facade/facade_types.h"
-#include "facade/memcache_parser.h"
+#include "facade/parsed_command.h"
 #include "util/fiber_socket_base.h"
 
 namespace util {
@@ -43,10 +43,17 @@ class ServiceInterface {
                                                   unsigned count, SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 
-  virtual void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                          MCReplyBuilder* builder, ConnectionContext* cntx) = 0;
+  virtual void DispatchMC(ParsedCommand* cmd) = 0;
 
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
+
+  virtual ParsedCommand* AllocateParsedCommand() {
+    return new ParsedCommand();
+  }
+
+  virtual void FreeParsedCommand(ParsedCommand* cmd) {
+    delete cmd;
+  }
 
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }

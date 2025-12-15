@@ -399,6 +399,7 @@ class Connection : public util::Connection {
   void DecrNumConns();
 
   bool IsReplySizeOverLimit() const;
+  void CreateParsedCommand();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
