@@ -14,6 +14,7 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/flags/internal/flag.h"
+#include "absl/functional/bind_front.h"
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -82,23 +83,24 @@ tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
 }
 
 // Determine required byte size and encoding type based on value.
-// TODO(vlad): Maybe split into different accessors?
 // Do NOT enforce rules depending on dynamic runtime values as this is called
 // when scheduling stash and just before succeeeding and is expected to return the same results
 pair<size_t /*size*/, CompactObj::ExternalRep> DetermineSerializationParams(const PrimeValue& pv) {
   switch (pv.ObjType()) {
-    case OBJ_STRING:
+    case OBJ_STRING: {
       if (pv.IsInline())
         return {};
-      return std::make_pair(pv.GetRawString().view().size(), CompactObj::ExternalRep::STRING);
-    case OBJ_HASH:
+      auto strs = pv.GetRawString();
+      return std::make_pair(strs[0].size() + strs[1].size(), CompactObj::ExternalRep::STRING);
+    }
+    case OBJ_HASH: {
       if (pv.Encoding() == kEncodingListPack) {
-        auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
-        size_t bytes = 4 + lpBytes(lp);  // encoded length and data bytes
-        bytes += lpLength(lp) * 2 * 4;   // 4 bytes for encoded key/value lengths
-        return std::make_pair(bytes, CompactObj::ExternalRep::SERIALIZED_MAP);
+        detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+        return std::make_pair(tiering::SerializedMap::EstimateSize(lw.UsedBytes(), lw.size()),
+                              CompactObj::ExternalRep::SERIALIZED_MAP);
       }
       return {};
+    }
     default:
       return {};
   };
@@ -108,18 +110,17 @@ size_t Serialize(CompactObj::ExternalRep rep, const PrimeValue& pv, io::MutableB
   DCHECK_LE(DetermineSerializationParams(pv).first, buffer.size());
   switch (rep) {
     case CompactObj::ExternalRep::STRING: {
-      auto sv = pv.GetRawString();
-      memcpy(buffer.data(), sv.view().data(), sv.view().size());
-      return sv.view().size();
+      auto strs = pv.GetRawString();
+      memcpy(buffer.data(), strs[0].data(), strs[0].size());
+      if (!strs[1].empty())
+        memcpy(buffer.data() + strs[0].size(), strs[1].data(), strs[1].size());
+      return strs[0].size() + strs[1].size();
     }
     case CompactObj::ExternalRep::SERIALIZED_MAP: {
       DCHECK_EQ(pv.Encoding(), kEncodingListPack);
-
-      // TODO(vlad): Optimize copy for serialization
       detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
-      vector<pair<string, string>> entries(lw.begin(), lw.end());
       return tiering::SerializedMap::Serialize(
-          entries, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
+          lw, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
     }
   };
   return 0;
@@ -447,11 +448,9 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
   if (!ShouldStash(*value))
     return {};
 
-  // This invariant should always hold because ShouldStash tests for IoPending flag.
-  CHECK(!bins_->IsPending(dbid, key));
+  CHECK(!bins_->IsPending(dbid, key));  // Because has stash pending is false (ShouldStash checks)
 
-  // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
-  // with a lot of underutilized disk space.
+  // Limit write depth. TODO: Provide backpressure?
   if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
     ++stats_.stash_overflow_cnt;
     return {};
@@ -463,35 +462,22 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
   tiering::OpManager::EntryId id;
   error_code ec;
 
-  value->SetStashPending(true);
+  value->SetStashPending(true);  // Optimistically set ahead, unset in case of error
+
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
-    if (auto prepared = op_manager_->PrepareStash(est_size); prepared) {
-      auto [offset, buf] = *prepared;
-      size_t written = Serialize(rep, *value, buf.bytes);
-      tiering::DiskSegment segment{offset, written};
-      op_manager_->Stash(id, segment, buf);
-    } else {
-      ec = prepared.error();
-    }
+    auto serialize = absl::bind_front(Serialize, rep, cref(*value));
+    ec = op_manager_->PrepareAndStash(id, est_size, serialize);
   } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(*value)); bin) {
-    id = bin->first;
-    // TODO(vlad): Write bin to prepared buffer instead of allocating one
-    if (auto prepared = op_manager_->PrepareStash(bin->second.length()); prepared) {
-      auto [offset, buf] = *prepared;
-      memcpy(buf.bytes.data(), bin->second.data(), bin->second.size());
-      tiering::DiskSegment segment{offset, bin->second.size()};
-      op_manager_->Stash(id, segment, buf);
-    } else {
-      ec = prepared.error();
-      bins_->ReportStashAborted(bin->first);
-    }
+    id = bin->id;
+    auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
+    ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
   } else {
-    return {};  // silently added to bin
+    return {};  // added to bin, no operations pending
   }
 
+  // Set stash pending to false on single value or whole bin
   if (ec) {
-    value->SetStashPending(false);
     LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
     return {};

@@ -107,16 +107,11 @@ bool SmallString::Equal(const SmallString& os) const {
   if (size_ != os.size_)
     return false;
 
-  string_view me[2], other[2];
-  Get(me);
-  os.Get(other);
-
-  return me[0] == other[0] && me[1] == other[1];
+  return Get() == os.Get();
 }
 
 uint64_t SmallString::HashCode() const {
-  string_view slice[2];
-  Get(slice);
+  array<string_view, 2> slice = Get();
 
   XXH3_state_t* state = tl.xxh_state.get();
   XXH3_64bits_reset_withSeed(state, kHashSeed);
@@ -126,17 +121,18 @@ uint64_t SmallString::HashCode() const {
   return XXH3_64bits_digest(state);
 }
 
-void SmallString::Get(string_view dest[2]) const {
+array<string_view, 2> SmallString::Get() const {
   DCHECK(size_);
 
+  array<string_view, 2> dest;
   dest[0] = string_view{prefix_, kPrefLen};
   uint8_t* ptr = tl.seg_alloc->Translate(small_ptr_);
   dest[1] = string_view{reinterpret_cast<char*>(ptr), size_ - kPrefLen};
+  return dest;
 }
 
 void SmallString::Get(char* out) const {
-  string_view strs[2];
-  Get(strs);
+  auto strs = Get();
   memcpy(out, strs[0].data(), strs[0].size());
   memcpy(out + strs[0].size(), strs[1].data(), strs[1].size());
 }
