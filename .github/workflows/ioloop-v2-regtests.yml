@@ -21,6 +21,8 @@ jobs:
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
 
     steps:
       - uses: actions/checkout@v5
