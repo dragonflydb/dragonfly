@@ -424,7 +424,7 @@ bool Connection::MessageHandle::IsReplying() const {
   return IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
          holds_alternative<PipelineMessagePtr>(handle) ||
          (holds_alternative<MCPipelineMessagePtr>(handle) &&
-          !get<MCPipelineMessagePtr>(handle)->no_reply);
+          !get<MCPipelineMessagePtr>(handle)->mc_command()->no_reply);
 }
 
 struct Connection::AsyncOperations {
@@ -434,7 +434,7 @@ struct Connection::AsyncOperations {
 
   void operator()(const PubMessage& msg);
   void operator()(PipelineMessage& msg);
-  void operator()(const MCPipelineMessage& msg);
+  void operator()(MCPipelineMessagePtr msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
@@ -512,10 +512,10 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   self->skip_next_squashing_ = false;
 }
 
-void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
+void Connection::AsyncOperations::operator()(MCPipelineMessagePtr msg) {
   ++self->local_stats_.cmds;
-  self->service_->DispatchMC(
-      msg, msg.value(), static_cast<MCReplyBuilder*>(self->reply_builder_.get()), self->cc_.get());
+  self->service_->DispatchMC(*msg->mc_command(), msg->mc_command()->value(),
+                             static_cast<MCReplyBuilder*>(msg->rb()), self->cntx());
   self->last_interaction_ = time(nullptr);
 }
 
@@ -592,6 +592,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
   static_assert(kReqSz <= 256);
 
+  // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
     case Protocol::REDIS:
       redis_parser_.reset(new RedisParser(RedisParser::Mode::SERVER,
@@ -599,7 +600,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
                                           GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
-      memcache_parser_.reset(new MemcacheParser);
+      memcache_parser_ = make_unique<MemcacheParser>();
       break;
   }
 
@@ -629,7 +630,6 @@ Connection::~Connection() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ssl_ctx_);
 #endif
-
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
@@ -804,16 +804,22 @@ void Connection::HandleRequests() {
           break;
         case Protocol::MEMCACHE:
           reply_builder_.reset(new MCReplyBuilder(socket_.get()));
+          parsed_cmd_ = new ParsedCommand;  // TODO: will be allocated/deallocated by service.
+          parsed_cmd_->CreateMemcacheCommand();
+          parsed_cmd_->Init(reply_builder_.get(), cc_.get());
           break;
         default:
           break;
       }
+
       ConnectionFlow();
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
       VLOG(1) << "Closed connection for peer "
               << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
       reply_builder_.reset();
+      delete parsed_cmd_;
+      parsed_cmd_ = nullptr;
     }
     cc_.reset();
   }
@@ -1270,12 +1276,16 @@ auto Connection::ParseMemcache() -> ParserStatus {
   MemcacheParser::Result result = MemcacheParser::OK;
 
   auto dispatch_sync = [this] {
-    service_->DispatchMC(mc_cmd_, mc_cmd_.value(),
+    service_->DispatchMC(*parsed_cmd_->mc_command(), parsed_cmd_->mc_command()->value(),
                          static_cast<MCReplyBuilder*>(reply_builder_.get()), cc_.get());
   };
 
   auto dispatch_async = [this]() -> MessageHandle {
-    return {make_unique<MCPipelineMessage>(std::move(mc_cmd_))};
+    MCPipelineMessagePtr ptr = parsed_cmd_;
+    parsed_cmd_ = new ParsedCommand;
+    parsed_cmd_->CreateMemcacheCommand();
+    parsed_cmd_->Init(reply_builder_.get(), cc_.get());
+    return {ptr};
   };
 
   DCHECK(io_buf_.InputLen() > 0);
@@ -1289,11 +1299,12 @@ auto Connection::ParseMemcache() -> ParserStatus {
       return OK;
     }
 
-    result = memcache_parser_->Parse(str, &consumed, &mc_cmd_);
+    result = memcache_parser_->Parse(str, &consumed, parsed_cmd_->mc_command());
 
     io_buf_.ConsumeInput(consumed);
 
-    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type " << mc_cmd_.type;
+    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type "
+             << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING) {
       break;
     }
@@ -1936,6 +1947,10 @@ void Connection::RecycleMessage(MessageHandle msg) {
       stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*(*pipe));
       pipeline_req_pool_.push_back(std::move(*pipe));
     }
+  }
+
+  if (auto* ptr = get_if<MCPipelineMessagePtr>(&msg.handle); ptr) {
+    delete *ptr;  // TODO: will be deallocated by service
   }
 }
 

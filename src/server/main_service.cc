@@ -1888,8 +1888,8 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     args.emplace_back(ttl, next - ttl);
   }
 
-  if (!cmd.empty()) {
-    args.emplace_back(cmd.Front());
+  if (!cmd.backed_args->empty()) {
+    args.emplace_back(cmd.key());
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -1908,9 +1908,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     dfly_cntx->conn_state.memcache_flag = cmd.flags;
   } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
     if (cmd.size() > 1) {
-      auto it = cmd.begin();
+      auto it = cmd.backed_args->begin();
       ++it;  // skip first key
-      for (auto end = cmd.end(); it != end; ++it) {
+      for (auto end = cmd.backed_args->end(); it != end; ++it) {
         args.emplace_back(*it);
       }
     }

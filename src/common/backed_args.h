@@ -116,6 +116,11 @@ class BackedArguments {
     return std::string_view{storage_.data() + offset, elem_len(index)};
   }
 
+  char* data(uint32_t index) {
+    uint32_t offset = offsets_[index];
+    return storage_.data() + offset;
+  }
+
   std::string_view operator[](uint32_t index) const {
     return at(index);
   }

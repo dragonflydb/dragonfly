@@ -93,8 +93,8 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   }
 
   string_view key = tokens[0];
-  res->Assign(&key, &key + 1, 1);
-  res->PushArg(bytes_len);
+  res->backed_args->Assign(&key, &key + 1, 1);
+  res->backed_args->PushArg(bytes_len);
 
   return MP::OK;
 }
@@ -144,7 +144,7 @@ MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Comman
     }
   }
 
-  res->Assign(args->begin(), args->end(), args->size());
+  res->backed_args->Assign(args->begin(), args->end(), args->size());
   return MP::OK;
 }
 
@@ -292,9 +292,9 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
         return MP::PARSE_ERROR;
     }
   }
-  res->Assign(&arg0, &arg0 + 1, 1);
+  res->backed_args->Assign(&arg0, &arg0 + 1, 1);
   if (MP::IsStoreCmd(res->type)) {
-    res->PushArg(bytes_len);
+    res->backed_args->PushArg(bytes_len);
   }
   return MP::OK;
 }
@@ -341,7 +341,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
 
   ArgSlice tokens_view{tokens};
   tokens_view.remove_prefix(1);
-  cmd->clear();
+  cmd->backed_args->clear();
 
   if (cmd->type <= CAS) {                                         // Store command
     if (tokens_view.size() < 4 || tokens_view[0].size() > 250) {  // key length limit
@@ -387,7 +387,7 @@ auto MP::ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest) -
 
   if (val_len_to_read_ > 2) {
     uint32_t need_copy = val_len_to_read_ - 2;
-    uint32_t dest_len = dest->elem_len(1);
+    uint32_t dest_len = dest->backed_args->elem_len(1);
     DCHECK_GE(dest_len, need_copy);  // should be ensured during parsing
 
     char* start = dest->value_ptr() + (dest_len - need_copy);
