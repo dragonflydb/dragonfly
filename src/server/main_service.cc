@@ -411,7 +411,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnMapStart(unsigned len) final {
-    rb_->StartCollection(len, RedisReplyBuilder::MAP);
+    rb_->StartCollection(len, CollectionType::MAP);
   }
 
   void OnMapEnd() final {
@@ -500,7 +500,7 @@ void InterpreterReplier::SendBulkString(string_view str) {
 }
 
 void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
-  if (type == MAP)
+  if (type == CollectionType::MAP)
     len *= 2;
   explr_->OnArrayStart(len);
 
@@ -1561,16 +1561,17 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
 
 class ReplyGuard {
  public:
-  ReplyGuard(std::string_view cid_name, SinkReplyBuilder* builder, ConnectionContext* cntx) {
-    const bool is_script = bool(cntx->conn_state.script_info);
-    const bool is_one_of =
-        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY"}).contains(cid_name);
-    bool is_mcache = builder->GetProtocol() == Protocol::MEMCACHE;
+  ReplyGuard(const CommandContext& cmd_cntx) {
+    const bool is_script = bool(cmd_cntx.server_conn_cntx()->conn_state.script_info);
+    cid_name_ = cmd_cntx.cid->name();
+    const bool is_one_of = (cid_name_ == "REPLCONF" || cid_name_ == "DFLY");
+    bool is_mcache = cmd_cntx.mc_command() != nullptr;
     const bool is_no_reply_memcache =
-        is_mcache && (static_cast<MCReplyBuilder*>(builder)->NoReply() || cid_name == "QUIT");
+        is_mcache &&
+        (static_cast<MCReplyBuilder*>(cmd_cntx.rb())->NoReply() || cid_name_ == "QUIT");
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
-      builder_ = builder;
+      builder_ = cmd_cntx.rb();
       replies_recorded_ = builder_->RepliesRecorded();
     }
   }
@@ -1667,7 +1668,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
-  ReplyGuard reply_guard(cmd_cntx->cid->name(), builder, cntx);
+  ReplyGuard reply_guard(*cmd_cntx);
 #endif
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
@@ -1920,7 +1921,6 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       args.emplace_back(ttl_op, 4);
       args.emplace_back(ttl, next - ttl);
     }
-    dfly_cntx->conn_state.memcache_flag = cmd.flags;
   } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
     if (cmd.size() > 1) {
       auto it = cmd.backed_args->begin();
@@ -1929,9 +1929,6 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
         args.emplace_back(*it);
       }
     }
-    if (cmd.type == MemcacheParser::GETS || cmd.type == MemcacheParser::GATS) {
-      dfly_cntx->conn_state.memcache_flag |= ConnectionState::FETCH_CAS_VER;
-    }
   } else {  // write commands.
     if (store_opt[0]) {
       args.emplace_back(store_opt, strlen(store_opt));
@@ -1939,9 +1936,6 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
   }
   dfly_cntx->cmnd_ctx = static_cast<CommandContext*>(parsed_cmd);
   DispatchCommand(ParsedArgs{args}, mc_builder, cntx);
-
-  // Reset back.
-  dfly_cntx->conn_state.memcache_flag = 0;
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {

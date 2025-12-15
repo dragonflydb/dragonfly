@@ -96,7 +96,7 @@ template <typename It> int64_t GetExpireTime(const DbSlice& db_slice, const It& 
 
 class InMemSource : public ::io::Source {
  public:
-  InMemSource(std::string_view buf) : buf_(buf) {
+  explicit InMemSource(std::string_view buf) : buf_(buf) {
   }
 
   ::io::Result<size_t> ReadSome(const iovec* v, uint32_t len) final;
@@ -1066,7 +1066,7 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
 void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
   atomic_uint32_t result{0};
   auto* builder = cmd_cntx->rb();
-  bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
+  bool is_mc = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
@@ -1584,7 +1584,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     if (!bool(store_key)) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
       rb->StartCollection(std::distance(start_it, end_it),
-                          is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
+                          is_set ? CollectionType::SET : CollectionType::ARRAY);
 
       for (auto it = start_it; it != end_it; ++it) {
         rb->SendBulkString(it->key);

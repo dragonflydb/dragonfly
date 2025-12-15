@@ -45,32 +45,29 @@ void CheckConnStateClean(const ConnectionState& state) {
 
 size_t Size(const CapturingReplyBuilder::Payload& payload) {
   size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
-  return visit(
-      Overloaded{
-          [&](monostate) { return payload_size; },
-          [&](long) { return payload_size; },
-          [&](double) { return payload_size; },
-          [&](OpStatus) { return payload_size; },
-          [&](CapturingReplyBuilder::Null) { return payload_size; },
-          // ignore SSO because it's insignificant
-          [&](const CapturingReplyBuilder::SimpleString& data) {
-            return payload_size + data.size();
-          },
-          [&](const CapturingReplyBuilder::BulkString& data) { return payload_size + data.size(); },
-          [&](const CapturingReplyBuilder::Error& data) {
-            return payload_size + data.first.size() + data.second.size();
-          },
-          [&](const unique_ptr<CapturingReplyBuilder::CollectionPayload>& data) {
-            if (!data || (data->len == 0 && data->type == RedisReplyBuilder::ARRAY)) {
-              return payload_size;
-            }
-            for (const auto& pl : data->arr) {
-              payload_size += Size(pl);
-            }
-            return payload_size;
-          },
-      },
-      payload);
+  return visit(Overloaded{
+                   [&](monostate) { return payload_size; },
+                   [&](long) { return payload_size; },
+                   [&](double) { return payload_size; },
+                   [&](OpStatus) { return payload_size; },
+                   [&](payload::Null) { return payload_size; },
+                   // ignore SSO because it's insignificant
+                   [&](const payload::SimpleString& data) { return payload_size + data.size(); },
+                   [&](const payload::BulkString& data) { return payload_size + data.size(); },
+                   [&](const payload::Error& data) {
+                     return payload_size + data.first.size() + data.second.size();
+                   },
+                   [&](const unique_ptr<payload::CollectionPayload>& data) {
+                     if (!data || (data->len == 0 && data->type == CollectionType::ARRAY)) {
+                       return payload_size;
+                     }
+                     for (const auto& pl : data->arr) {
+                       payload_size += Size(pl);
+                     }
+                     return payload_size;
+                   },
+               },
+               payload);
 }
 
 }  // namespace

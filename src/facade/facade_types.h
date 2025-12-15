@@ -35,6 +35,7 @@ constexpr size_t kSanitizerOverhead = 0u;
 #endif
 
 enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
+enum class CollectionType : uint8_t { ARRAY, SET, MAP, PUSH };
 
 using MutableSlice = std::string_view;
 using CmdArgList = absl::Span<const std::string_view>;

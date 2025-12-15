@@ -6,6 +6,7 @@
 
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
+#include "facade/reply_payload.h"
 
 namespace facade {
 
@@ -31,6 +32,9 @@ class ParsedCommand : public cmn::BackedArguments {
   ParsedCommand() = default;
 
  public:
+  payload::Payload reply_payload;  // captured reply payload for async dispatches
+  bool dispatch_async = false;     // whether the command can be dispatched asynchronously
+
   void Init(SinkReplyBuilder* rb, ConnectionContext* conn_cntx) {
     rb_ = rb;
     conn_cntx_ = conn_cntx;
@@ -57,6 +61,6 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(facade::ErrorReply error) const;
 };
 
-static_assert(sizeof(ParsedCommand) == 152);
+static_assert(sizeof(ParsedCommand) == 232);
 
 }  // namespace facade

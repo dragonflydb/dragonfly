@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "facade/reply_builder.h"
+#include "facade/reply_payload.h"
 
 namespace facade {
 
@@ -35,21 +36,13 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendNullArray() override;
   void SendNull() override;
 
- public:
-  using Error = std::pair<std::string, std::string>;  // SendError (msg, type)
-  using Null = std::nullptr_t;                        // SendNull or SendNullArray
-
-  struct CollectionPayload;
-  struct SimpleString : public std::string {};  // SendSimpleString
-  struct BulkString : public std::string {};    // SendBulkString
-
-  CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL, RespVersion resp_v = RespVersion::kResp2)
-      : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
+  explicit CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL,
+                                 RespVersion resp_v = RespVersion::kResp2)
+      : RedisReplyBuilder{nullptr}, reply_mode_{mode} {
     SetRespVersion(resp_v);
   }
 
-  using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                               std::unique_ptr<CollectionPayload>>;
+  using Payload = payload::Payload;
 
   // Non owned Error based on SendError arguments (msg, type)
   using ErrorRef = std::pair<std::string_view, std::string_view>;
@@ -65,14 +58,6 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> TryExtractError(const Payload& pl);
 
-  struct CollectionPayload {
-    CollectionPayload(unsigned len, CollectionType type);
-
-    unsigned len;
-    CollectionType type;
-    std::vector<Payload> arr;
-  };
-
  private:
   // Send payload directly, bypassing external interface. For efficient passing between two
   // captures.
@@ -87,7 +72,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   ReplyMode reply_mode_;
 
   // List of nested active collections that are being built.
-  std::stack<std::pair<std::unique_ptr<CollectionPayload>, int>> stack_;
+  std::stack<std::pair<std::unique_ptr<payload::CollectionPayload>, int>> stack_;
 
   // Root payload.
   Payload current_;
