@@ -1061,7 +1061,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   DCHECK(params.IsDefined());
   DCHECK(IsValid(prime_it));
 
-  if (params.persist) {
+  if (params.persist) {  // Persist means remove expiry
     RemoveExpire(cntx.db_index, prime_it);
     return kPersistValue;
   }

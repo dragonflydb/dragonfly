@@ -317,11 +317,6 @@ def test_expire_should_throw_error(r: redis.Redis):
     assert r.get("foo") == b"bar"
     with pytest.raises(ResponseError):
         r.expire("foo", 1, nx=True, xx=True)
-    # We support NX with LT/GT
-    # with pytest.raises(ResponseError):
-    #    r.expire("foo", 1, nx=True, gt=True)
-    # with pytest.raises(ResponseError):
-    #    r.expire("foo", 1, nx=True, lt=True)
     with pytest.raises(ResponseError):
         r.expire("foo", 1, gt=True, lt=True)
 
