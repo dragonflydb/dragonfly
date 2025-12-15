@@ -354,7 +354,6 @@ class Renamer {
   OpStatus DeserializeDest(Transaction* t, EngineShard* shard);
 
   struct SerializedValue {
-    OpStatus status;
     std::string value;
     std::optional<RdbVersion> version;
     int64_t expire_ts;
@@ -373,7 +372,7 @@ class Renamer {
   bool dest_found_ = false;
   bool do_copy_ = false;
 
-  SerializedValue serialized_value_;
+  OpResult<SerializedValue> serialized_value_;
 };
 
 ErrorReply Renamer::Rename(bool destination_should_not_exist) {
@@ -384,12 +383,12 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
     return OpStatus::KEY_NOTFOUND;
   }
 
-  if (serialized_value_.status != OpStatus::OK) {
+  if (serialized_value_.status() != OpStatus::OK) {
     transaction_->Conclude();
-    return serialized_value_.status;
+    return serialized_value_.status();
   }
 
-  if (!serialized_value_.version) {
+  if (!serialized_value_->version) {
     transaction_->Conclude();
     return ErrorReply{kInvalidDumpValueErr};
   }
@@ -465,10 +464,10 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   OpResult<string> res = DumpToString(src_key_, it->second, t->GetOpArgs(shard));
   if (res.ok()) {
     optional rdb_version = GetRdbVersion(*res);
-    serialized_value_ = {OpStatus::OK, std::move(*res), rdb_version,
-                         GetExpireTime(db_slice, exp_it), it->first.IsSticky()};
+    serialized_value_ = SerializedValue{std::move(*res), rdb_version,
+                                        GetExpireTime(db_slice, exp_it), it->first.IsSticky()};
   } else {
-    serialized_value_ = {res.status()};
+    serialized_value_ = res.status();
   }
 }
 
@@ -490,8 +489,10 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
 }
 
 OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
+  DCHECK(serialized_value_);  // Verified in FetchData
+
   OpArgs op_args = t->GetOpArgs(shard);
-  RestoreArgs restore_args{serialized_value_.expire_ts, true, true};
+  RestoreArgs restore_args{serialized_value_->expire_ts, true, true};
 
   if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
@@ -515,11 +516,11 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     return OpStatus::OK;
   }
 
-  restore_args.SetSticky(serialized_value_.sticky);
+  restore_args.SetSticky(serialized_value_->sticky);
 
-  RdbRestoreValue loader(serialized_value_.version.value());
+  RdbRestoreValue loader(serialized_value_->version.value());
   auto add_res =
-      loader.Add(dest_key_, serialized_value_.value, op_args.db_cntx, restore_args, &db_slice);
+      loader.Add(dest_key_, serialized_value_->value, op_args.db_cntx, restore_args, &db_slice);
 
   if (!add_res)
     return add_res.status();
@@ -532,11 +533,11 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   }
 
   if (shard->journal()) {
-    auto expire_str = absl::StrCat(serialized_value_.expire_ts);
+    auto expire_str = absl::StrCat(serialized_value_->expire_ts);
 
     absl::InlinedVector<std::string_view, 6> args(
-        {dest_key_, expire_str, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv});
-    if (serialized_value_.sticky) {
+        {dest_key_, expire_str, serialized_value_->value, "REPLACE"sv, "ABSTTL"sv});
+    if (serialized_value_->sticky) {
       args.push_back("STICK"sv);
     }
 
