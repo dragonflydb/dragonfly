@@ -2862,9 +2862,10 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
 
-  // Fix for backwards compatibility with old snapshots where TAG fields were
-  // serialized as "TAG SORTABLE SEPARATOR x" but parser expects
-  // "TAG SEPARATOR x SORTABLE". Reorder arguments if needed.
+  // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
+  // serialized as "TAG SORTABLE SEPARATOR x" but parser expects "TAG SEPARATOR x SORTABLE".
+  // Reorder arguments if needed.
+  // TODO: Remove this workaround after Apr 2026.
   for (size_t i = 0; i + 2 < arg_vec.size(); ++i) {
     std::string_view cur{arg_vec[i].data(), arg_vec[i].size()};
     std::string_view next{arg_vec[i + 1].data(), arg_vec[i + 1].size()};

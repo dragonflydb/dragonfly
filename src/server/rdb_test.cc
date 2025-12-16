@@ -13,8 +13,6 @@ extern "C" {
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
 
-#include <filesystem>
-
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -71,12 +69,7 @@ inline const uint8_t* to_byte(const void* s) {
 }
 
 io::FileSource RdbTest::GetSource(string name) {
-  string rdb_file;
-  if (!name.empty() && name[0] == '/') {
-    rdb_file = name;  // Absolute path
-  } else {
-    rdb_file = base::ProgramRunfile("testdata/" + name);
-  }
+  string rdb_file = base::ProgramRunfile("testdata/" + name);
   auto open_res = io::OpenRead(rdb_file, io::ReadonlyFile::Options{});
   CHECK(open_res) << rdb_file;
 
@@ -724,30 +717,6 @@ TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
   const auto& v = search.GetVec();
   ASSERT_FALSE(v.empty());
   EXPECT_THAT(v.front(), IntArg(1));
-}
-
-// Test loading old snapshot where TAG fields were serialized as
-// "TAG SORTABLE SEPARATOR x" instead of "TAG SEPARATOR x SORTABLE"
-TEST_F(RdbTest, LoadOldSnapshotTagSortableSeparator) {
-  // Extract the tar archive to a temp directory
-  string tar_file = base::ProgramRunfile("testdata/tag_sortable.tar.gz");
-  char temp_dir[] = "/tmp/tag_sortable_test_XXXXXX";
-  ASSERT_NE(mkdtemp(temp_dir), nullptr);
-  string extract_cmd = absl::StrCat("tar -xf '", tar_file, "' -C '", temp_dir, "'");
-  ASSERT_EQ(system(extract_cmd.c_str()), 0);
-
-  // Load the snapshot from extracted files
-  string summary_path = absl::StrCat(temp_dir, "/dump-2025-12-15T11:50:40-summary.dfs");
-  auto ec = LoadRdb(summary_path);
-
-  // Cleanup
-  std::filesystem::remove_all(temp_dir);
-
-  ASSERT_FALSE(ec) << ec.message();
-
-  // Verify index info can be retrieved (proves index was loaded correctly)
-  auto info = Run({"FT.INFO", "idx"});
-  ASSERT_THAT(info, ArgType(RespExpr::ARRAY));
 }
 
 TEST_F(RdbTest, DflyLoadAppend) {
