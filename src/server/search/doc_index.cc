@@ -48,6 +48,10 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   PrimeTable::Cursor cursor;
   do {
     cursor = prime_table->Traverse(cursor, cb);
+    // Yield if the fiber has been running for long.
+    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500) {  // 500us
+      util::ThisFiber::Yield();
+    }
   } while (cursor);
 }
 
