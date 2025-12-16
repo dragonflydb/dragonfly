@@ -15,7 +15,6 @@ namespace dfly {
 using namespace util;
 using namespace std;
 namespace h2 = boost::beast::http;
-using facade::CapturingReplyBuilder;
 namespace payload = facade::payload;
 namespace {
 
@@ -123,8 +122,8 @@ struct CaptureVisitor {
     absl::StrAppend(&str, "null");
   }
 
-  void operator()(payload::Error err) {
-    str = absl::StrCat(R"({"error": ")", err.first, "\"");
+  void operator()(const payload::Error& err) {
+    str = absl::StrCat(R"({"error": ")", err->first, "\"");
   }
 
   void operator()(facade::OpStatus status) {

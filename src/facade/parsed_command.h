@@ -61,6 +61,6 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(facade::ErrorReply error) const;
 };
 
-static_assert(sizeof(ParsedCommand) == 232);
+static_assert(sizeof(ParsedCommand) == 200);
 
 }  // namespace facade

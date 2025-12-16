@@ -10,11 +10,11 @@
 
 #include "facade/facade_types.h"
 
-namespace facade {
+namespace facade::payload {
 
-namespace payload {
-using Error = std::pair<std::string, std::string>;  // SendError (msg, type)
-using Null = std::nullptr_t;                        // SendNull or SendNullArray
+// SendError (msg, type)
+using Error = std::unique_ptr<std::pair<std::string, std::string>>;
+using Null = std::nullptr_t;  // SendNull or SendNullArray
 
 struct CollectionPayload;
 struct SimpleString : public std::string {};  // SendSimpleString
@@ -33,6 +33,4 @@ struct CollectionPayload {
   std::vector<Payload> arr;
 };
 
-}  // namespace payload
-
-};  // namespace facade
+};  // namespace facade::payload
