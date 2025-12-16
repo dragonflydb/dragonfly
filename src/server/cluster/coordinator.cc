@@ -176,6 +176,14 @@ util::fb2::Future<GenericError> Coordinator::DispatchAll(std::string command, Re
     LOG(FATAL) << "No cluster config, not implemented logic yet.";
     return {};
   }
+
+  if (!cluster_config->is_master()) {
+    VLOG(2) << "Current node isn't master, the command should be executed locally:" << command;
+    util::fb2::Future<GenericError> res;
+    res.Resolve(GenericError{});
+    return res;
+  }
+
   VLOG(2) << "Dispatching command to all shards: " << command;
   auto shards_config = cluster_config->GetConfig();
 
