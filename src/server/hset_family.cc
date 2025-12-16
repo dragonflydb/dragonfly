@@ -683,7 +683,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx->rb}.Send(ExecuteW(cmd_cntx->tx, std::move(cb)));
+  HSetReplies{cmd_cntx->rb()}.Send(ExecuteW(cmd_cntx->tx, std::move(cb)));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -948,7 +948,7 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-  HSetReplies{cmd_cntx->rb}.Send(Unwrap(cmd_cntx->tx->ScheduleSingleHopT(cb)));
+  HSetReplies{cmd_cntx->rb()}.Send(Unwrap(cmd_cntx->tx->ScheduleSingleHopT(cb)));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
