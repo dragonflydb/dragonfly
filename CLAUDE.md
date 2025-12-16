@@ -1,5 +1,5 @@
-# GitHub Copilot Instructions for Dragonfly
+# Claude Code Instructions for Dragonfly
 
-**READ [AGENTS.md](../AGENTS.md)**
+**READ [AGENTS.md](AGENTS.md)**
 
 All project information, workflows, patterns, and guidelines are in `AGENTS.md`.
