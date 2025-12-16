@@ -40,6 +40,7 @@ inline constexpr char kInvalidJsonPathErr[] = "invalid JSON path";
 inline constexpr char kJsonParseError[] = "failed to parse JSON";
 inline constexpr char kNanOrInfDuringIncr[] = "increment would produce NaN or Infinity";
 inline constexpr char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
+inline constexpr char kTieredIoError[] = "IO error when reading value from tiered storage";
 
 inline constexpr char kSyntaxErrType[] = "syntax_error";
 inline constexpr char kScriptErrType[] = "script_error";

@@ -37,6 +37,7 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
+#include "server/tiered_storage.h"
 #include "server/tiering/common.h"
 #include "util/fibers/simple_channel.h"
 

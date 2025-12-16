@@ -310,6 +310,23 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
   return out_args;
 }
 
+OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
+  io::StringSink sink;
+  if (pv.IsExternal() && !pv.IsCool()) {
+    // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
+    auto res = op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv).Get();
+    if (!res.has_value())
+      return OpStatus::IO_ERROR;
+
+    // TODO: allow saving string directly without proxy object
+    SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
+  } else {
+    SerializerBase::DumpObject(pv, &sink);
+  }
+
+  return std::move(sink).str();
+}
+
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
 
 class Renamer {
@@ -355,7 +372,7 @@ class Renamer {
   bool dest_found_ = false;
   bool do_copy_ = false;
 
-  SerializedValue serialized_value_;
+  OpResult<SerializedValue> serialized_value_;
 };
 
 ErrorReply Renamer::Rename(bool destination_should_not_exist) {
@@ -366,7 +383,12 @@ ErrorReply Renamer::Rename(bool destination_should_not_exist) {
     return OpStatus::KEY_NOTFOUND;
   }
 
-  if (!serialized_value_.version) {
+  if (serialized_value_.status() != OpStatus::OK) {
+    transaction_->Conclude();
+    return serialized_value_.status();
+  }
+
+  if (!serialized_value_->version) {
     transaction_->Conclude();
     return ErrorReply{kInvalidDumpValueErr};
   }
@@ -439,14 +461,14 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
     return;
   }
 
-  DVLOG(1) << "Rename: key '" << src_key_ << "' successfully found, going to dump it";
-
-  io::StringSink sink;
-  SerializerBase::DumpObject(it->second, &sink);
-
-  optional rdb_version = GetRdbVersion(sink.str());
-  serialized_value_ = {std::move(sink).str(), rdb_version, GetExpireTime(db_slice, exp_it),
-                       it->first.IsSticky()};
+  OpResult<string> res = DumpToString(src_key_, it->second, t->GetOpArgs(shard));
+  if (res.ok()) {
+    optional rdb_version = GetRdbVersion(*res);
+    serialized_value_ = SerializedValue{std::move(*res), rdb_version,
+                                        GetExpireTime(db_slice, exp_it), it->first.IsSticky()};
+  } else {
+    serialized_value_ = res.status();
+  }
 }
 
 OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
@@ -467,8 +489,10 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
 }
 
 OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
+  DCHECK(serialized_value_);  // Verified in FetchData
+
   OpArgs op_args = t->GetOpArgs(shard);
-  RestoreArgs restore_args{serialized_value_.expire_ts, true, true};
+  RestoreArgs restore_args{serialized_value_->expire_ts, true, true};
 
   if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
@@ -492,11 +516,11 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     return OpStatus::OK;
   }
 
-  restore_args.SetSticky(serialized_value_.sticky);
+  restore_args.SetSticky(serialized_value_->sticky);
 
-  RdbRestoreValue loader(serialized_value_.version.value());
+  RdbRestoreValue loader(serialized_value_->version.value());
   auto add_res =
-      loader.Add(dest_key_, serialized_value_.value, op_args.db_cntx, restore_args, &db_slice);
+      loader.Add(dest_key_, serialized_value_->value, op_args.db_cntx, restore_args, &db_slice);
 
   if (!add_res)
     return add_res.status();
@@ -509,11 +533,11 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   }
 
   if (shard->journal()) {
-    auto expire_str = absl::StrCat(serialized_value_.expire_ts);
+    auto expire_str = absl::StrCat(serialized_value_->expire_ts);
 
     absl::InlinedVector<std::string_view, 6> args(
-        {dest_key_, expire_str, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv});
-    if (serialized_value_.sticky) {
+        {dest_key_, expire_str, serialized_value_->value, "REPLACE"sv, "ABSTTL"sv});
+    if (serialized_value_->sticky) {
       args.push_back("STICK"sv);
     }
 
@@ -541,31 +565,12 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
 
 OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
-  auto [it, expire_it] = db_slice.FindReadOnly(op_args.db_cntx, key);
+  auto [it, _] = db_slice.FindReadOnly(op_args.db_cntx, key);
 
-  if (IsValid(it)) {
-    DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
-    io::StringSink sink;
-    const PrimeValue& pv = it->second;
-
-    if (pv.IsExternal() && !pv.IsCool()) {
-      // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
-      auto res = op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv).Get();
-      if (!res.has_value())
-        return OpStatus::IO_ERROR;
-
-      // TODO: allow saving string directly without proxy object
-      SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
-    } else {
-      SerializerBase::DumpObject(it->second, &sink);
-    }
-
-    return std::move(sink).str();
-  }
-
-  // fallback
-  DVLOG(1) << "Dump: '" << key << "' Not found";
-  return OpStatus::KEY_NOTFOUND;
+  if (IsValid(it))
+    return DumpToString(key, it->second, op_args);
+  else
+    return OpStatus::KEY_NOTFOUND;
 }
 
 OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
