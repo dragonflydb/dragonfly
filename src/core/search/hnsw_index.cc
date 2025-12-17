@@ -6,13 +6,20 @@
 
 #include <absl/strings/match.h>
 #include <hnswlib/hnswlib.h>
-#include <hnswlib/space_ip.h>
-#include <hnswlib/space_l2.h>
+
+#include <chrono>
+#include <memory>
+#include <mutex>
 
 #include "base/logging.h"
+#include "core/search/base.h"
 #include "core/search/hnsw_alg.h"
 #include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
+#include "server/engine_shard_set.h"
+#include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
+#include "util/proactor_pool.h"
 
 namespace dfly::search {
 
@@ -67,12 +74,23 @@ struct HnswlibAdapter {
                100 /* seed*/} {
   }
 
-  void Add(const void* data, GlobalDocId id) {
+  ~HnswlibAdapter() {
+    LOG(INFO) << "add_execution_time: " << add_execution_time.load();
+  }
+
+  void Add(const void* data, GlobalDocId id, ShardId sid) {
+    /// shard_set->AddL2(sid, [data, id, this]() {
     while (true) {
       try {
         MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-        absl::ReaderMutexLock resize_lock(&resize_mutex_);
+        std::shared_lock resize_lock(resize_mutex_);
+        auto start = std::chrono::high_resolution_clock::now();
         world_.addPoint(data, id);
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::microseconds duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        add_execution_time.fetch_add(duration.count());
+
         return;
       } catch (const std::exception& e) {
         std::string error_msg = e.what();
@@ -83,6 +101,7 @@ struct HnswlibAdapter {
         LOG(ERROR) << "HnswlibAdapter::Add exception: " << e.what();
       }
     }
+    //});
   }
 
   void Remove(GlobalDocId id) {
@@ -124,7 +143,7 @@ struct HnswlibAdapter {
   void ResizeIfFull() {
     {
       // First check with reader lock to avoid contention.
-      absl::ReaderMutexLock lock(&resize_mutex_);
+      std::shared_lock lock(resize_mutex_);
       if (world_.getCurrentElementCount() < world_.getMaxElements() ||
           (world_.allow_replace_deleted_ && world_.getDeletedCount() > 0)) {
         return;
@@ -132,7 +151,7 @@ struct HnswlibAdapter {
     }
     try {
       // Upgrade to writer lock.
-      absl::WriterMutexLock lock(&resize_mutex_);
+      std::unique_lock lock(resize_mutex_);
       if (world_.getCurrentElementCount() == world_.getMaxElements() &&
           (!world_.allow_replace_deleted_ || world_.getDeletedCount() == 0)) {
         auto max_elements = world_.getMaxElements();
@@ -156,8 +175,9 @@ struct HnswlibAdapter {
 
   HnswSpace space_;
   HierarchicalNSW<float> world_;
-  absl::Mutex resize_mutex_;
+  util::fb2::SharedMutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
+  std::atomic<uint64_t> add_execution_time{0};
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
@@ -169,7 +189,8 @@ HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS
 HnswVectorIndex::~HnswVectorIndex() {
 }
 
-bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
+bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field,
+                          ShardId sid) {
   auto vector_ptr = doc.GetVectorDirectPtr(field, dim_);
 
   if (!vector_ptr) {
@@ -177,7 +198,7 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
   }
 
   if (vector_ptr) {
-    adapter_->Add(*vector_ptr, id);
+    adapter_->Add(*vector_ptr, id, sid);
   }
 
   return true;

@@ -379,14 +379,15 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
                                               const PrimeValue& pv) {
   auto accessor = GetAccessor(db_cntx, pv);
 
-  GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
+  auto shard_id = EngineShard::tlocal()->shard_id();
+  GlobalDocId global_id = search::CreateGlobalDocId(shard_id, doc_id);
 
   for (const auto& [field_ident, field_info] : base_->schema.fields) {
     if (field_info.type == search::SchemaField::VECTOR &&
         !(field_info.flags & search::SchemaField::NOINDEX)) {
       if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
           index) {
-        index->Add(global_id, *accessor, field_ident);
+        index->Add(global_id, *accessor, field_ident, shard_id);
       }
     }
   }
@@ -416,14 +417,15 @@ void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, cons
     if (!local_id)
       return;
 
-    GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), *local_id);
+    auto shard_id = EngineShard::tlocal()->shard_id();
+    GlobalDocId global_id = search::CreateGlobalDocId(shard_id, *local_id);
 
     for (const auto& [field_ident, field_info] : base_->schema.fields) {
       if (field_info.type == search::SchemaField::VECTOR &&
           !(field_info.flags & search::SchemaField::NOINDEX)) {
         if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
             index) {
-          index->Add(global_id, doc, field_ident);
+          index->Add(global_id, doc, field_ident, shard_id);
         }
       }
     }

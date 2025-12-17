@@ -5,8 +5,11 @@
 #include <hnswlib/hnswalg.h>
 #include <hnswlib/visited_list_pool.h>
 
+#include "util/fibers/synchronization.h"
+
 namespace dfly::search {
 
+using shared_mutex_t = util::fb2::SharedMutex;
 static const size_t kHnswElementsPerChunk = 10 * 1024;
 
 template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInterface<dist_t> {
@@ -109,10 +112,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   std::unique_ptr<VisitedListPool> visited_list_pool_{nullptr};
 
   // Locks operations with element by label value
-  mutable std::vector<std::mutex> label_op_locks_;
+  mutable std::vector<shared_mutex_t> label_op_locks_;
 
-  std::mutex global;
-  std::vector<std::mutex> link_list_locks_;
+  shared_mutex_t global;
+  std::vector<shared_mutex_t> link_list_locks_;
 
   tableint enterpoint_node_{0};
 
@@ -128,7 +131,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   hnswlib::DISTFUNC<dist_t> fstdistfunc_;
   void* dist_func_param_{nullptr};
 
-  mutable std::mutex label_lookup_lock;  // lock for label_lookup_
+  mutable shared_mutex_t label_lookup_lock;  // lock for label_lookup_
   std::unordered_map<labeltype, tableint> label_lookup_;
 
   std::default_random_engine level_generator_;
@@ -140,8 +143,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   bool allow_replace_deleted_ =
       false;  // flag to replace deleted elements (marked as deleted) during insertions
 
-  std::mutex deleted_elements_lock;               // lock for deleted_elements
+  shared_mutex_t deleted_elements_lock;           // lock for deleted_elements
   std::unordered_set<tableint> deleted_elements;  // contains internal ids of deleted elements
+
+  std::atomic<size_t> writer_count_{0};
 
   HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s) {
   }
@@ -235,7 +240,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     ef_ = ef;
   }
 
-  inline std::mutex& getLabelOpMutex(labeltype label) const {
+  inline shared_mutex_t& getLabelOpMutex(labeltype label) const {
     // calculate hash
     size_t lock_id = label & (MAX_LABEL_OPERATION_LOCKS - 1);
     return label_op_locks_[lock_id];
@@ -317,7 +322,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
       tableint curNodeNum = curr_el_pair.second;
 
-      std::unique_lock<std::mutex> lock(link_list_locks_[curNodeNum]);
+      std::unique_lock<shared_mutex_t> lock(link_list_locks_[curNodeNum]);
 
       int* data;  // = (int *)(linkList0_ + curNodeNum *
                   // size_links_per_element0_);
@@ -586,7 +591,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     {
       // lock only during the update
       // because during the addition the lock for cur_c is already acquired
-      std::unique_lock<std::mutex> lock(link_list_locks_[cur_c], std::defer_lock);
+      std::unique_lock<shared_mutex_t> lock(link_list_locks_[cur_c], std::defer_lock);
       if (isUpdate) {
         lock.lock();
       }
@@ -612,7 +617,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     for (size_t idx = 0; idx < selectedNeighbors.size(); idx++) {
-      std::unique_lock<std::mutex> lock(link_list_locks_[selectedNeighbors[idx]]);
+      std::unique_lock<shared_mutex_t> lock(link_list_locks_[selectedNeighbors[idx]]);
 
       linklistsizeint* ll_other;
       if (level == 0)
@@ -701,7 +706,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     element_levels_.resize(new_max_elements);
 
-    std::vector<std::mutex>(new_max_elements).swap(link_list_locks_);
+    std::vector<shared_mutex_t>(new_max_elements).swap(link_list_locks_);
 
     // Reallocate base layer
     data_level0_memory_->resize(new_max_elements);
@@ -843,8 +848,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
 
         size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
-        std::vector<std::mutex>(max_elements).swap(link_list_locks_);
-        std::vector<std::mutex>(MAX_LABEL_OPERATION_LOCKS).swap(label_op_locks_);
+        std::vector<shared_mutex_t>(max_elements).swap(link_list_locks_);
+        std::vector<shared_mutex_t>(MAX_LABEL_OPERATION_LOCKS).swap(label_op_locks_);
 
         visited_list_pool_.reset(new VisitedListPool(1, max_elements));
 
@@ -883,9 +888,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   template <typename data_t> std::vector<data_t> getDataByLabel(labeltype label) const {
     // lock all operations with element by label
-    std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
+    std::unique_lock<shared_mutex_t> lock_label(getLabelOpMutex(label));
 
-    std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+    std::unique_lock<shared_mutex_t> lock_table(label_lookup_lock);
     auto search = label_lookup_.find(label);
     if (search == label_lookup_.end() || isMarkedDeleted(search->second)) {
       throw std::runtime_error("Label not found");
@@ -905,9 +910,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
    */
   void markDelete(labeltype label) {
     // lock all operations with element by label
-    std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
+    std::unique_lock<shared_mutex_t> lock_label(getLabelOpMutex(label));
 
-    std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+    std::unique_lock<shared_mutex_t> lock_table(label_lookup_lock);
     auto search = label_lookup_.find(label);
     if (search == label_lookup_.end()) {
       throw std::runtime_error("Label not found");
@@ -930,7 +935,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       *ll_cur |= DELETE_MARK;
       num_deleted_ += 1;
       if (allow_replace_deleted_) {
-        std::unique_lock<std::mutex> lock_deleted_elements(deleted_elements_lock);
+        std::unique_lock<shared_mutex_t> lock_deleted_elements(deleted_elements_lock);
         deleted_elements.insert(internalId);
       }
     } else {
@@ -946,9 +951,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
    */
   void unmarkDelete(labeltype label) {
     // lock all operations with element by label
-    std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
+    std::unique_lock<shared_mutex_t> lock_label(getLabelOpMutex(label));
 
-    std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+    std::unique_lock<shared_mutex_t> lock_table(label_lookup_lock);
     auto search = label_lookup_.find(label);
     if (search == label_lookup_.end()) {
       throw std::runtime_error("Label not found");
@@ -969,7 +974,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       *ll_cur &= ~DELETE_MARK;
       num_deleted_ -= 1;
       if (allow_replace_deleted_) {
-        std::unique_lock<std::mutex> lock_deleted_elements(deleted_elements_lock);
+        std::unique_lock<shared_mutex_t> lock_deleted_elements(deleted_elements_lock);
         deleted_elements.erase(internalId);
       }
     } else {
@@ -1004,14 +1009,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     // lock all operations with element by label
-    std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
+    std::unique_lock<shared_mutex_t> lock_label(getLabelOpMutex(label));
     if (!replace_deleted) {
       addPoint(data_point, label, -1);
       return;
     }
     // check if there is vacant place
     tableint internal_id_replaced;
-    std::unique_lock<std::mutex> lock_deleted_elements(deleted_elements_lock);
+    std::unique_lock<shared_mutex_t> lock_deleted_elements(deleted_elements_lock);
     bool is_vacant_place = !deleted_elements.empty();
     if (is_vacant_place) {
       internal_id_replaced = *deleted_elements.begin();
@@ -1028,7 +1033,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       labeltype label_replaced = getExternalLabel(internal_id_replaced);
       setExternalLabel(internal_id_replaced, label);
 
-      std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+      std::unique_lock<shared_mutex_t> lock_table(label_lookup_lock);
       label_lookup_.erase(label_replaced);
       label_lookup_[label] = internal_id_replaced;
       lock_table.unlock();
@@ -1106,7 +1111,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         getNeighborsByHeuristic2(candidates, layer == 0 ? maxM0_ : maxM_);
 
         {
-          std::unique_lock<std::mutex> lock(link_list_locks_[neigh]);
+          std::unique_lock<shared_mutex_t> lock(link_list_locks_[neigh]);
           linklistsizeint* ll_cur;
           ll_cur = get_linklist_at_level(neigh, layer);
           size_t candSize = candidates.size();
@@ -1133,7 +1138,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         while (changed) {
           changed = false;
           unsigned int* data;
-          std::unique_lock<std::mutex> lock(link_list_locks_[currObj]);
+          std::unique_lock<shared_mutex_t> lock(link_list_locks_[currObj]);
           data = get_linklist_at_level(currObj, level);
           int size = getListCount(data);
           tableint* datal = (tableint*)(data + 1);
@@ -1195,7 +1200,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   std::vector<tableint> getConnectionsWithLock(tableint internalId, int level) {
-    std::unique_lock<std::mutex> lock(link_list_locks_[internalId]);
+    std::unique_lock<shared_mutex_t> lock(link_list_locks_[internalId]);
     unsigned int* data = get_linklist_at_level(internalId, level);
     int size = getListCount(data);
     std::vector<tableint> result(size);
@@ -1209,7 +1214,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     {
       // Checking if the element with the same label already exists
       // if so, updating it *instead* of creating a new element.
-      std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+      std::unique_lock<shared_mutex_t> lock_table(label_lookup_lock);
       auto search = label_lookup_.find(label);
       if (search != label_lookup_.end()) {
         tableint existingInternalId = search->second;
@@ -1239,9 +1244,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       label_lookup_[label] = cur_c;
     }
 
-    std::unique_lock<std::mutex> templock(global);
+    std::unique_lock<shared_mutex_t> templock(global);
     int maxlevelcopy = maxlevel_;
-    std::unique_lock<std::mutex> lock_el(link_list_locks_[cur_c]);
+    std::unique_lock<shared_mutex_t> lock_el(link_list_locks_[cur_c]);
     int curlevel = getRandomLevel(mult_);
     if (level > 0)
       curlevel = level;
@@ -1276,7 +1281,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           while (changed) {
             changed = false;
             unsigned int* data;
-            std::unique_lock<std::mutex> lock(link_list_locks_[currObj]);
+            std::unique_lock<shared_mutex_t> lock(link_list_locks_[currObj]);
             data = get_linklist(currObj, level);
             int size = getListCount(data);
 

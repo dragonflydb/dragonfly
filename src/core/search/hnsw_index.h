@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/search/base.h"
 #include "core/search/search.h"
 
 namespace dfly::search {
@@ -16,7 +17,8 @@ class HnswVectorIndex {
 
   ~HnswVectorIndex();
 
-  bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+  bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field,
+           ShardId sid);
   void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
 
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
