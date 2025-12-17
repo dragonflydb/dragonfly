@@ -168,15 +168,15 @@ class Service : public facade::ServiceInterface {
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
-  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
-               SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
+                    bool read_only, CommandContext* cmd_cntx);
+  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter, bool read_only,
+               CommandContext* cmd_cntx);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                                            bool force = false);
 
-  void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
+  void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 
   OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
 

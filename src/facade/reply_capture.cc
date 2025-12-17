@@ -132,10 +132,6 @@ struct CaptureVisitor {
     rb->SendError(err->first, err->second);
   }
 
-  void operator()(OpStatus status) {
-    rb->SendError(status);
-  }
-
   void operator()(const unique_ptr<payload::CollectionPayload>& cp) {
     if (!cp) {
       rb->SendNullArray();
