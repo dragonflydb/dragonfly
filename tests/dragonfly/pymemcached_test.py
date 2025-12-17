@@ -9,7 +9,7 @@ from pymemcache.client.base import Client as MCClient
 from . import dfly_args
 from .instance import DflyInstance
 
-DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
+DEFAULT_ARGS = {"memcached_port": 11212, "proactor_threads": 4}
 
 
 # Generic basic tests
@@ -123,6 +123,34 @@ def test_length_in_set_command(df_server: DflyInstance, memcached_client: MCClie
             assert response.startswith("CLIENT_ERROR bad data chunk\r\n")
 
         client.close()
+
+
+def read_response(client, expected_len):
+    response = b""
+    while len(response) < expected_len:
+        data = client.recv(1024)
+        if not data:
+            break
+        response += data
+    return response
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_error_in_pipeline(df_server: DflyInstance, memcached_client: MCClient):
+    """
+    Verify correct responses to  "get x\r\ngetaa\r\nget y z\r\n"
+    """
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.settimeout(5)
+    client.connect(("127.0.0.1", int(df_server["memcached_port"])))
+
+    client.sendall(b"get x\r\ngetaa\r\nget y z\r\n")
+
+    expected = b"END\r\nERROR\r\nEND\r\n"
+    response = read_response(client, len(expected))
+    client.close()
+
+    assert response == expected
 
 
 # Auxiliary tests

@@ -34,6 +34,10 @@ class ParsedCommand : public cmn::BackedArguments {
  public:
   payload::Payload reply_payload;  // captured reply payload for async dispatches
   bool dispatch_async = false;     // whether the command can be dispatched asynchronously
+  ParsedCommand* next = nullptr;
+
+  // time when the message was parsed as reported by CycleClock::Now()
+  uint64_t parsed_cycle = 0;
 
   void Init(SinkReplyBuilder* rb, ConnectionContext* conn_cntx) {
     rb_ = rb;
@@ -56,11 +60,22 @@ class ParsedCommand : public cmn::BackedArguments {
     return mc_cmd_.get();
   }
 
+  size_t UsedMemory() const {
+    // TODO: sizeof(*this) is inaccurate here, as service can allocate extra space for
+    // its derived class. Seems that we will have to make ParsedCommand polymorphic and use
+    // virtual function here.
+    size_t sz = HeapMemory() + sizeof(*this);
+    if (mc_cmd_) {
+      sz += sizeof(*mc_cmd_);
+    }
+    return sz;
+  }
+
   void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
   void SendError(facade::OpStatus status) const;
   void SendError(const facade::ErrorReply& error) const;
 };
 
-static_assert(sizeof(ParsedCommand) == 200);
+static_assert(sizeof(ParsedCommand) == 216);
 
 }  // namespace facade
