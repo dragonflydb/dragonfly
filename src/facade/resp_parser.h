@@ -8,7 +8,6 @@
 
 #include "io/io.h"
 #include "redis/hiredis.h"
-#include "server/common.h"
 
 namespace dfly {
 
@@ -39,9 +38,7 @@ class RESPObj {
     return reply_ == nullptr;
   }
 
-  Type GetType() const {
-    return static_cast<Type>(reply_->type);
-  }
+  Type GetType() const;
 
   template <class T> std::optional<T> As() const;
 
@@ -76,7 +73,7 @@ class RESPParser {
     redisReaderFree(reader_);
   }
 
-  io::Result<RESPObj, GenericError> Feed(const char* data, size_t len);
+  std::optional<RESPObj> Feed(const char* data, size_t len);
 
  private:
   redisReader* reader_;

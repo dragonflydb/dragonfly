@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/resp_parser.h"
+#include "facade/resp_parser.h"
 
 #include "base/logging.h"
 
@@ -25,19 +25,24 @@ RESPObj::~RESPObj() {
     freeReplyObject(reply_);
 }
 
-io::Result<RESPObj, GenericError> RESPParser::Feed(const char* data, size_t len) {
+RESPObj::Type RESPObj::GetType() const {
+  DCHECK(reply_);
+  return static_cast<Type>(reply_->type);
+}
+
+std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len) {
   auto status = redisReaderFeed(reader_, data, len);
   if (status != REDIS_OK) {
     LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
                << " data: " << std::string_view{data, len};
-    return nonstd::make_unexpected(GenericError(reader_->errstr));
+    return std::nullopt;
   }
   void* reply_obj = nullptr;
   status = redisReaderGetReply(reader_, &reply_obj);
   if (status != REDIS_OK) {
     LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
                << " data: " << data;
-    return nonstd::make_unexpected(GenericError(reader_->errstr));
+    return std::nullopt;
   }
 
   return RESPObj(static_cast<redisReply*>(reply_obj), reply_obj != nullptr);

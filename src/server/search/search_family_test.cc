@@ -13,8 +13,8 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
+#include "facade/resp_parser.h"
 #include "server/command_registry.h"
-#include "server/resp_parser.h"
 #include "server/test_utils.h"
 
 using namespace testing;
