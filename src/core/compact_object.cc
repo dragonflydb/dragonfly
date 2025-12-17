@@ -1610,11 +1610,25 @@ MemoryResource* CompactObj::memory_resource() {
 }
 
 bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
-  if (JsonType* old = json_ptr; ShouldDefragment(page_usage)) {
+  if (ShouldDefragment(page_usage)) {
+    const MiMemoryResource* mr = static_cast<MiMemoryResource*>(memory_resource());
+
+    const int64_t before = static_cast<int64_t>(mr->used());
+    DCHECK_GE(before, 0) << "Memory usage is more than int64_t max value";
+
+    JsonType* old = json_ptr;
     json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old));
     DeleteMR<JsonType>(old);
+
+    const int64_t after = static_cast<int64_t>(mr->used());
+    DCHECK_GE(after, 0) << "Memory usage is more than int64_t max value";
+
+    if (const int64_t delta = after - before; delta != 0) {
+      bytes_used = UpdateSize(bytes_used, delta);
+    }
     return true;
   }
+
   return false;
 }
 
