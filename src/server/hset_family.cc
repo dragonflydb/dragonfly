@@ -499,7 +499,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   return created;
 }
 
-void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkReplyBuilder* builder) {
+void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
   auto cb = [getall_mask](const HMapWrap& hw) -> OpResult<vector<string>> {
     vector<string> res;
     bool keyval = (getall_mask == (FIELDS | VALUES));
@@ -515,8 +515,8 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
     return res;
   };
 
-  OpResult<vector<string>> result = ExecuteRO(tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<vector<string>> result = ExecuteRO(cmd_cntx->tx, cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
     case OpStatus::KEY_NOTFOUND: {
@@ -524,7 +524,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
       return rb->SendBulkStrArr(*result, is_map ? CollectionType::MAP : CollectionType::ARRAY);
     }
     default:
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
   };
 }
 
@@ -568,18 +568,18 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   op_sp.ttl = parser.Next<uint32_t>();
   auto* rb = cmd_cntx->rb();
   if (parser.HasError()) {
-    return rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
-    return rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   CmdArgList fields = parser.Tail();
 
   if (fields.size() % 2 != 0) {
-    return rb->SendError(facade::WrongNumArgsError(cmd_cntx->cid->name()), kSyntaxErrType);
+    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid->name()), kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -590,7 +590,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   if (result) {
     rb->SendLong(*result);
   } else {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
@@ -599,13 +599,13 @@ struct HSetReplies {
     switch (result.status()) {
       case OpStatus::OK:
       case OpStatus::KEY_NOTFOUND:
-        return rb->SendLong(result.value_or(0));
+        return cmd_cntx->rb()->SendLong(result.value_or(0));
       default:
-        return rb->SendError(result.status());
+        return cmd_cntx->SendError(result.status());
     };
   }
 
-  facade::SinkReplyBuilder* rb;
+  CommandContext* cmd_cntx;
 };
 
 void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
@@ -615,7 +615,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx->ScheduleSingleHopT(WrapW(cb)));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx->ScheduleSingleHopT(WrapW(cb)));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -630,11 +630,11 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (parser.HasError()) {
-    return rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   if (!parser.Check("FIELDS"sv)) {
-    return rb->SendError("Mandatory argument FIELDS is missing or not at the right position",
-                         kSyntaxErrType);
+    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                               kSyntaxErrType);
   }
 
   uint32_t numFields = parser.Next<uint32_t>();
@@ -645,8 +645,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
                          kSyntaxErrType);
   }
 
-  if (auto err = parser.TakeError(); err)
-    return rb->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
@@ -659,7 +658,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
     case OpStatus::KEY_NOTFOUND:
       return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
     default:
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
   };
 }
 
@@ -678,7 +677,7 @@ void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     default:
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
   };
 }
 
@@ -700,7 +699,7 @@ void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
       }
     } break;
     default:
-      rb->SendError(result.status());
+      cmd_cntx->SendError(result.status());
   };
 }
 
@@ -710,19 +709,19 @@ void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx->rb()}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
 void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx->rb()}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
 void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx->rb()}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx, cb));
 }
 
 void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
@@ -794,15 +793,15 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, FIELDS, cmd_cntx->tx, cmd_cntx->rb());
+  HGetGeneric(args, FIELDS, cmd_cntx);
 }
 
 void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, VALUES, cmd_cntx->tx, cmd_cntx->rb());
+  HGetGeneric(args, VALUES, cmd_cntx);
 }
 
 void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
-  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx->tx, cmd_cntx->rb());
+  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
 }
 
 void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
@@ -822,7 +821,7 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
-    return rb->SendError(ops.status());
+    return cmd_cntx->SendError(ops.status());
   }
 
   const ScanOpts& scan_op = ops.value();
@@ -840,7 +839,7 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
       break;
     }
     default:
-      return rb->SendError(result.status());
+      cmd_cntx->SendError(result.status());
   }
 }
 
@@ -863,7 +862,7 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   if (result && cmd == "HSET") {
     rb->SendLong(*result);
   } else {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
@@ -873,7 +872,7 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-  HSetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
@@ -1013,7 +1012,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     else
       rb->SendEmptyArray();
   } else {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 

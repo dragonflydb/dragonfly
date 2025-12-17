@@ -734,33 +734,33 @@ OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_vi
   });
 }
 
-void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuilder* builder) {
-  bool skip_on_missing = (builder->GetProtocol() == Protocol::MEMCACHE);
+void IncrByGeneric(string_view key, int64_t val, CommandContext* cmnd_cntx) {
+  bool skip_on_missing = (cmnd_cntx->mc_command() != nullptr);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
     return res;
   };
 
-  OpResult<int64_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> result = cmnd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
 
   switch (result.status()) {
     case OpStatus::OK:
-      builder->SendLong(result.value());
+      cmnd_cntx->rb()->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
-      builder->SendError(kInvalidIntErr);
+      cmnd_cntx->SendError(kInvalidIntErr);
       break;
     case OpStatus::OUT_OF_RANGE:
-      builder->SendError(kIncrOverflow);
+      cmnd_cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      static_cast<MCReplyBuilder*>(builder)->SendNotFound();
+      static_cast<MCReplyBuilder*>(cmnd_cntx->rb())->SendNotFound();
       break;
     default:
-      builder->SendError(result.status());
+      cmnd_cntx->SendError(result.status());
       break;
   }
 }
@@ -1115,18 +1115,16 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view cmd_name = cmd_cntx->cid->name();
+void CmdSetExGeneric(CmdArgList args, CommandContext* cmnd_cntx) {
+  string_view cmd_name = cmnd_cntx->cid->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
-  auto* builder = cmd_cntx->rb();
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmnd_cntx);
 
   if (exp_int < 1)
-    return builder->SendError(InvalidExpireTime(cmd_name));
+    return cmnd_cntx->SendError(InvalidExpireTime(cmd_name));
 
   DbSlice::ExpireParams expiry{
       .value = exp_int,
@@ -1137,12 +1135,12 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t now_ms = GetCurrentTimeMs();
   auto [_, abs_ms] = expiry.Calculate(now_ms, false);
   if (abs_ms < 0)
-    return builder->SendError(InvalidExpireTime("set"));
+    return cmnd_cntx->SendError(InvalidExpireTime("set"));
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
   sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-  builder->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
+  cmnd_cntx->SendError(SetGeneric(sparams, key, value, *cmnd_cntx));
 }
 
 void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1201,7 +1199,7 @@ void CmdGetSet(CmdArgList args, CommandContext* cmnd_cntx) {
   SetCmd::SetParams sparams{.prev_val = &prev};
 
   if (OpStatus status = SetGeneric(sparams, key, value, *cmnd_cntx); status != OpStatus::OK)
-    return cmnd_cntx->rb()->SendError(status);
+    return cmnd_cntx->SendError(status);
 
   GetReplies{cmnd_cntx->rb()}.Send(std::move(prev));
 }
@@ -1226,16 +1224,14 @@ void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-      if (auto err = parser.TakeError(); err) {
-        return builder->SendError(err.MakeReply());
-      }
+      RETURN_ON_PARSE_ERROR(parser, cmnd_cntx);
 
       if (defined) {
-        return builder->SendError(kSyntaxErr, kSyntaxErrType);
+        return cmnd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
       }
 
       if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("getex"));
+        return cmnd_cntx->SendError(InvalidExpireTime("getex"));
       }
 
       exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
@@ -1284,7 +1280,7 @@ void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void CmdIncr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, cmnd_cntx->tx, cmnd_cntx->rb());
+  return IncrByGeneric(key, 1, cmnd_cntx);
 }
 
 void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1295,7 +1291,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   if (!absl::SimpleAtoi(sval, &val)) {
     return cmnd_cntx->rb()->SendError(kInvalidIntErr);
   }
-  return IncrByGeneric(key, val, cmnd_cntx->tx, cmnd_cntx->rb());
+  return IncrByGeneric(key, val, cmnd_cntx);
 }
 
 void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1316,7 +1312,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
-    return rb->SendError(result.status());
+    return cmnd_cntx->SendError(result.status());
   }
 
   rb->SendDouble(result.value());
@@ -1324,7 +1320,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
 
 void CmdDecr(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, cmnd_cntx->tx, cmnd_cntx->rb());
+  return IncrByGeneric(key, -1, cmnd_cntx);
 }
 
 void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1339,7 +1335,7 @@ void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->rb()->SendError(kIncrOverflow);
   }
 
-  return IncrByGeneric(key, -val, cmnd_cntx->tx, cmnd_cntx->rb());
+  return IncrByGeneric(key, -val, cmnd_cntx);
 }
 
 // Reorder per-shard results according to argument order of primary command
@@ -1445,7 +1441,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
   if (*result == OpStatus::OK) {
     cmnd_cntx->rb()->SendOk();
   } else {
-    cmnd_cntx->rb()->SendError(*result);
+    cmnd_cntx->SendError(*result);
   }
 }
 
@@ -1497,9 +1493,7 @@ void CmdGetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
-  if (auto err = parser.TakeError(); err) {
-    return cmnd_cntx->rb()->SendError(err.MakeReply());
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmnd_cntx);
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
@@ -1513,9 +1507,7 @@ void CmdSetRange(CmdArgList args, CommandContext* cmnd_cntx) {
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
   auto* builder = cmnd_cntx->rb();
 
-  if (auto err = parser.TakeError(); err) {
-    return builder->SendError(err.MakeReply());
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmnd_cntx);
 
   if (start < 0) {
     return builder->SendError("offset is out of range");
@@ -1644,7 +1636,7 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
         cmnd_cntx->rb()->SendError(kOutOfMemory);
         break;
       default:
-        cmnd_cntx->rb()->SendError(result.status());
+        cmnd_cntx->SendError(result.status());
         break;
     }
   }
@@ -1669,7 +1661,7 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   CmdArgParser parser{args};
   const int64_t expire_ts = parser.Next<uint64_t>();
   if (parser.HasError()) {
-    return builder->SendError(parser.TakeError().MakeReply());
+    return cmnd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   BlockingCounter tiering_bc{0};
