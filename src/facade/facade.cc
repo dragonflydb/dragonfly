@@ -224,11 +224,15 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) const
 }
 
 void ParsedCommand::SendError(facade::OpStatus status) const {
-  rb_->SendError(status);
+  if (status == OpStatus::OK)
+    return rb_->SendSimpleString("OK");
+  rb_->SendError(StatusToMsg(status));
 }
 
-void ParsedCommand::SendError(facade::ErrorReply error) const {
-  rb_->SendError(std::move(error));
+void ParsedCommand::SendError(const facade::ErrorReply& error) const {
+  if (error.status)
+    return SendError(*error.status);
+  SendError(error.ToSv(), error.kind);
 }
 
 }  // namespace facade

@@ -58,7 +58,7 @@ class ParsedCommand : public cmn::BackedArguments {
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
   void SendError(facade::OpStatus status) const;
-  void SendError(facade::ErrorReply error) const;
+  void SendError(const facade::ErrorReply& error) const;
 };
 
 static_assert(sizeof(ParsedCommand) == 200);
