@@ -43,28 +43,7 @@ class RESPObj {
     return static_cast<Type>(reply_->type);
   }
 
-  template <class T> std::optional<T> As() const {
-    if constexpr (std::is_constructible_v<T, std::string_view>) {
-      if (reply_->type == REDIS_REPLY_STRING) {
-        return T{std::string_view{reply_->str, reply_->len}};
-      }
-    } else if constexpr (std::is_integral_v<T>) {
-      if (reply_->type == REDIS_REPLY_INTEGER) {
-        return static_cast<T>(reply_->integer);
-      }
-    } else if constexpr (std::is_floating_point_v<T>) {
-      if (reply_->type == REDIS_REPLY_DOUBLE) {
-        return static_cast<T>(reply_->dval);
-      }
-    } else if constexpr (std::is_same_v<T, RESPArray>) {
-      if (reply_->type == REDIS_REPLY_ARRAY) {
-        return RESPArray(reply_->element, reply_->elements);
-      }
-    }
-
-    // TODO add other types and errors processing
-    return std::nullopt;
-  }
+  template <class T> std::optional<T> As() const;
 
  private:
   redisReply* reply_ = nullptr;
@@ -102,5 +81,28 @@ class RESPParser {
  private:
   redisReader* reader_;
 };
+
+template <class T> std::optional<T> RESPObj::As() const {
+  if constexpr (std::is_constructible_v<T, std::string_view>) {
+    if (reply_->type == REDIS_REPLY_STRING) {
+      return T{std::string_view{reply_->str, reply_->len}};
+    }
+  } else if constexpr (std::is_integral_v<T>) {
+    if (reply_->type == REDIS_REPLY_INTEGER) {
+      return static_cast<T>(reply_->integer);
+    }
+  } else if constexpr (std::is_floating_point_v<T>) {
+    if (reply_->type == REDIS_REPLY_DOUBLE) {
+      return static_cast<T>(reply_->dval);
+    }
+  } else if constexpr (std::is_same_v<T, RESPArray>) {
+    if (reply_->type == REDIS_REPLY_ARRAY) {
+      return RESPArray(reply_->element, reply_->elements);
+    }
+  }
+
+  // TODO add other types and errors processing
+  return std::nullopt;
+}
 
 }  // namespace dfly

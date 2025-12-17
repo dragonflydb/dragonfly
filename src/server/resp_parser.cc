@@ -29,7 +29,7 @@ io::Result<RESPObj, GenericError> RESPParser::Feed(const char* data, size_t len)
   auto status = redisReaderFeed(reader_, data, len);
   if (status != REDIS_OK) {
     LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
-               << " data: " << data;
+               << " data: " << std::string_view{data, len};
     return nonstd::make_unexpected(GenericError(reader_->errstr));
   }
   void* reply_obj = nullptr;
