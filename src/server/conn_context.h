@@ -167,8 +167,6 @@ struct ConnectionState {
     const ConnectionContext* owner = nullptr;
   };
 
-  enum MCGetMask : uint8_t { FETCH_CAS_VER = 1 };
-
   size_t UsedMemory() const;
 
   // Client tracking is a per-connection state machine that adheres to the requirements
@@ -272,11 +270,6 @@ struct ConnectionState {
 
  public:
   DbIndex db_index = 0;
-
-  // used for memcache set/get commands.
-  // For set op - it's the flag value we are storing along with the value.
-  // For get op - we use it as a mask of MCGetMask values.
-  uint32_t memcache_flag = 0;
 
   ExecInfo exec_info;
   ReplicationInfo replication_info;

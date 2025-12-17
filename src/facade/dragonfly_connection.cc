@@ -478,7 +478,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
     return;
 
   if (pub_msg.force_unsubscribe) {
-    rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+    rb->StartCollection(3, CollectionType::PUSH);
     rb->SendBulkString("sunsubscribe");
     rb->SendBulkString(pub_msg.channel);
     rb->SendLong(0);
@@ -498,8 +498,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
 
-  rb->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
-                     RedisReplyBuilder::CollectionType::PUSH);
+  rb->SendBulkStrArr(absl::Span<string_view>{arr.data(), i}, CollectionType::PUSH);
 }
 
 void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
@@ -531,7 +530,7 @@ void Connection::AsyncOperations::operator()(CheckpointMessage msg) {
 void Connection::AsyncOperations::operator()(const InvalidationMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   DCHECK(rbuilder->IsResp3());
-  rbuilder->StartCollection(2, facade::RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->StartCollection(2, facade::CollectionType::PUSH);
   rbuilder->SendBulkString("invalidate");
   if (msg.invalidate_due_to_flush) {
     rbuilder->SendNull();

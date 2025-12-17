@@ -118,6 +118,10 @@ size_t SetRangeInternal(std::string* value, size_t start, std::string_view range
   return value->size();
 }
 
+bool ShouldFetchMCVer(MemcacheParser::CmdType cmd_type) {
+  return cmd_type == MemcacheParser::GETS || cmd_type == MemcacheParser::GATS;
+}
+
 OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -990,7 +994,8 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
-  sparams.memcache_flags = cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag;
+
+  sparams.memcache_flags = cmnd_cntx->mc_command() ? cmnd_cntx->mc_command()->flags : 0;
   auto* builder = cmnd_cntx->rb();
 
   while (parser.HasNext()) {
@@ -999,19 +1004,18 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
 
-      if (auto err = parser.TakeError(); err) {
-        return builder->SendError(err.MakeReply());
-      }
+      if (parser.HasError())
+        break;
 
       // We can set expiry only once.
       if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return builder->SendError(kSyntaxErr);
+        return cmnd_cntx->SendError(kSyntaxErr);
 
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
       if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("set"));
+        return cmnd_cntx->SendError(InvalidExpireTime("set"));
       }
 
       DbSlice::ExpireParams expiry{
@@ -1023,7 +1027,7 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
       int64_t now_ms = GetCurrentTimeMs();
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
-        return builder->SendError(InvalidExpireTime("set"));
+        return cmnd_cntx->SendError(InvalidExpireTime("set"));
 
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {
@@ -1046,15 +1050,34 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     }
   }
 
-  if (auto err = parser.TakeError(); err) {
-    return builder->SendError(err.MakeReply());
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmnd_cntx);
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
 
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return builder->SendError(kSyntaxErr);
+    return cmnd_cntx->SendError(kSyntaxErr);
+  }
+
+  if (cmnd_cntx->dispatch_async) {
+    // TODO: run asynchronous flow and exit.
+    // 1.
+    //    a. Transaction should support non-blocking execution for single hop/single shard commands.
+    //    b. Transaction ScheduleSingleHop accepts absl::FunctionRef which can not be used for
+    //       async operations. We need to change it to accept std::function or similar.
+    //       As a result, we will need to introduce a new transactional API for async operations.
+    //    c. Scheduling needs to be written for async operations. The good news is that for single
+    //       hop/single shard operations, the scheduling always succeeds.
+    //    4. Multi shard async operations are more complicated, as we may need to retry scheduling
+    //       attempts and then to execute the callback. However, it is possible to do -
+    //       we just need to reimplement the logic, so that the last scheduled shard
+    //       triggers the next asynchronous operation instead of running in coordinator thread.
+    // 2. No need to worry about tiering at this point.
+    // 3. Provide customizable reply mechanism that is called from the shard thread and passes
+    //    the response to ParsedCommand. There is equivalent to what we do today when passing
+    //    the response back via ScheduleSingleHop. But if we store in ParsedCommand, we do not need
+    //    to worry about reordering of responses, as pipelined ParsedCommands will be
+    //    already ordered.
   }
 
   optional<StringResult> prev;
@@ -1128,7 +1151,8 @@ void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-  sparams.memcache_flags = cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag;
+  if (cmnd_cntx->mc_command())
+    sparams.memcache_flags = cmnd_cntx->mc_command()->flags;
 
   switch (SetGeneric(sparams, key, value, *cmnd_cntx)) {
     case OpStatus::OK:
@@ -1345,11 +1369,11 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
 
   uint8_t fetch_mask = 0;
   auto* builder = cmnd_cntx->rb();
-  const bool is_memcache = builder->GetProtocol() == Protocol::MEMCACHE;
+  const bool is_memcache = cmnd_cntx->mc_command() != nullptr;
 
   if (is_memcache) {
     fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+    if (ShouldFetchMCVer(cmnd_cntx->mc_command()->type))
       fetch_mask |= FETCH_MCVER;
   }
 
@@ -1632,11 +1656,10 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   auto* builder = cmnd_cntx->rb();
-  const Protocol protocol = builder->GetProtocol();
-  DCHECK(protocol == Protocol::MEMCACHE);
+  DCHECK(cmnd_cntx->mc_command());
 
   uint8_t fetch_mask = FETCH_MCFLAG;
-  if (cmnd_cntx->server_conn_cntx()->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+  if (ShouldFetchMCVer(cmnd_cntx->mc_command()->type))
     fetch_mask |= FETCH_MCVER;
 
   SinkReplyBuilder::ReplyScope scope(builder);

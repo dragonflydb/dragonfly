@@ -346,17 +346,17 @@ void RedisReplyBuilderBase::SendNullArray() {
 }
 
 constexpr static const char START_SYMBOLS2[4][2] = {"*", "~", "%", ">"};
-static_assert(START_SYMBOLS2[RedisReplyBuilderBase::MAP][0] == '%' &&
-              START_SYMBOLS2[RedisReplyBuilderBase::SET][0] == '~');
+static_assert(START_SYMBOLS2[unsigned(CollectionType::MAP)][0] == '%' &&
+              START_SYMBOLS2[unsigned(CollectionType::SET)][0] == '~');
 
 void RedisReplyBuilderBase::StartCollection(unsigned len, CollectionType ct) {
   if (!IsResp3()) {  // RESP2 supports only arrays
-    if (ct == MAP)
+    if (ct == CollectionType::MAP)
       len *= 2;
-    ct = ARRAY;
+    ct = CollectionType::ARRAY;
   }
   ReplyScope scope(this);
-  WritePieces(START_SYMBOLS2[ct], len, kCRLF);
+  WritePieces(START_SYMBOLS2[unsigned(ct)], len, kCRLF);
 }
 
 void RedisReplyBuilderBase::SendError(std::string_view str, std::string_view type) {

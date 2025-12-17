@@ -726,13 +726,13 @@ TEST_F(RedisReplyBuilderTest, SendStringArrayAsMap) {
   const std::vector<std::string> map_array{"k1", "v1", "k2", "v2"};
 
   builder_->SetRespVersion(RespVersion::kResp2);
-  builder_->SendBulkStrArr(map_array, builder_->MAP);
+  builder_->SendBulkStrArr(map_array, CollectionType::MAP);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*4\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
       << "SendStringArrayAsMap Resp2 Failed.";
 
   builder_->SetRespVersion(RespVersion::kResp3);
-  builder_->SendBulkStrArr(map_array, builder_->MAP);
+  builder_->SendBulkStrArr(map_array, CollectionType::MAP);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "%2\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
       << "SendStringArrayAsMap Resp3 Failed.";
@@ -742,13 +742,13 @@ TEST_F(RedisReplyBuilderTest, SendStringArrayAsSet) {
   const std::vector<std::string> set_array{"e1", "e2", "e3"};
 
   builder_->SetRespVersion(RespVersion::kResp2);
-  builder_->SendBulkStrArr(set_array, builder_->SET);
+  builder_->SendBulkStrArr(set_array, CollectionType::SET);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "SendStringArrayAsSet Resp2 Failed.";
 
   builder_->SetRespVersion(RespVersion::kResp3);
-  builder_->SendBulkStrArr(set_array, builder_->SET);
+  builder_->SendBulkStrArr(set_array, CollectionType::SET);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "~3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "SendStringArrayAsSet Resp3 Failed.";
@@ -847,8 +847,8 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
       [](RRB* r) { r->SendError("e1", "e2"); },
       [kTestSws](RRB* r) { r->SendSimpleStrArr(kTestSws); },
       [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws); },
-      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws, RRB::SET); },
-      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws, RRB::MAP); },
+      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws, CollectionType::SET); },
+      [kTestSws](RRB* r) { r->SendBulkStrArr(kTestSws, CollectionType::MAP); },
       [kTestSws](RRB* r) {
         r->StartArray(3);
         r->SendLong(1L);

@@ -25,7 +25,7 @@ using cmn::HeapSize;
 
 static void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
                                             unsigned count, RedisReplyBuilder* rb) {
-  rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+  rb->StartCollection(3, CollectionType::PUSH);
   rb->SendBulkString(action);
   if (topic.has_value())
     rb->SendBulkString(topic.value());

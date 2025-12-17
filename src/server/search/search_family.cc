@@ -960,7 +960,7 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   auto sortable_value_sender = SortableValueSender(rb);
 
-  rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
+  rb->StartCollection(doc.values.size(), CollectionType::MAP);
   for (const auto& [k, v] : doc.values) {
     rb->SendBulkString(k);
     visit(sortable_value_sender, v);
@@ -1433,14 +1433,14 @@ void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(5, RedisReplyBuilder::MAP);
+  rb->StartCollection(5, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
 
   rb->SendSimpleString("index_definition");
   {
-    rb->StartCollection(3, RedisReplyBuilder::MAP);
+    rb->StartCollection(3, CollectionType::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -1727,7 +1727,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   rb->StartArray(shards_count + 1);
 
   // General stats
-  rb->StartCollection(3, RedisReplyBuilder::MAP);
+  rb->StartCollection(3, CollectionType::MAP);
   rb->SendBulkString("took");
   rb->SendLong(absl::ToInt64Microseconds(took));
   rb->SendBulkString("hits");
@@ -1737,7 +1737,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Per-shard stats
   for (size_t shard_id = 0; shard_id < shards_count; shard_id++) {
-    rb->StartCollection(2, RedisReplyBuilder::MAP);
+    rb->StartCollection(2, CollectionType::MAP);
     rb->SendBulkString("took");
     rb->SendLong(absl::ToInt64Microseconds(profile_results[shard_id]));
     rb->SendBulkString("tree");
@@ -1763,7 +1763,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
         }
       }
 
-      rb->StartCollection(4 + (children > 0), RedisReplyBuilder::MAP);
+      rb->StartCollection(4 + (children > 0), CollectionType::MAP);
       rb->SendSimpleString("total_time");
       rb->SendLong(event.micros);
       rb->SendSimpleString("operation");
@@ -1814,7 +1814,7 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   shard_results.clear();
   vector<string> vec(result_set.begin(), result_set.end());
 
-  rb->SendBulkStrArr(vec, RedisReplyBuilder::SET);
+  rb->SendBulkStrArr(vec, CollectionType::SET);
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2094,7 +2094,7 @@ void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
       res.push_back(flag->CurrentValue());
     }
   }
-  return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+  return rb->SendBulkStrArr(res, CollectionType::MAP);
 }
 
 void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {

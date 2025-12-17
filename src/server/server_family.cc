@@ -2585,7 +2585,7 @@ void ServerFamily::Config(CmdArgList args, CommandContext* cmnd_cntx) {
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+    return rb->SendBulkStrArr(res, CollectionType::MAP);
   }
 
   if (sub_cmd == "REWRITE") {
@@ -3542,7 +3542,7 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmnd_cntx) {
   const int fields_count = az.empty() ? 7 : 8;
 
   SinkReplyBuilder::ReplyAggregator agg(rb);
-  rb->StartCollection(fields_count, RedisReplyBuilder::MAP);
+  rb->StartCollection(fields_count, CollectionType::MAP);
   rb->SendBulkString("server");
   rb->SendBulkString("redis");
   rb->SendBulkString("version");
@@ -4162,14 +4162,14 @@ void ServerFamily::Module(CmdArgList args, CommandContext* cmnd_cntx) {
   rb->StartArray(2);
 
   // Json
-  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->StartCollection(2, CollectionType::MAP);
   rb->SendSimpleString("name");
   rb->SendSimpleString("ReJSON");
   rb->SendSimpleString("ver");
   rb->SendLong(20'808);
 
   // Search
-  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->StartCollection(2, CollectionType::MAP);
   rb->SendSimpleString("name");
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");

@@ -2470,7 +2470,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(rb);
     if (opts->read_group && rb->IsResp3()) {
-      rb->StartCollection(1, RedisReplyBuilder::CollectionType::MAP);
+      rb->StartCollection(1, CollectionType::MAP);
     } else {
       rb->StartArray(1);
       rb->StartArray(2);
@@ -2565,7 +2565,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
   SinkReplyBuilder::ReplyScope scope(rb);
   if (opts->read_group) {
     if (rb->IsResp3()) {
-      rb->StartCollection(opts->stream_ids.size(), RedisReplyBuilder::CollectionType::MAP);
+      rb->StartCollection(opts->stream_ids.size(), CollectionType::MAP);
       for (size_t i = 0; i < opts->stream_ids.size(); i++) {
         string_view key = ArgS(args, i + opts->streams_arg);
         StreamReplies{rb}.SendStreamRecords(key, results[i]);
@@ -2580,7 +2580,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
     }
   } else {
     if (rb->IsResp3()) {
-      rb->StartCollection(resolved_streams, RedisReplyBuilder::CollectionType::MAP);
+      rb->StartCollection(resolved_streams, CollectionType::MAP);
       for (size_t i = 0; i < results.size(); ++i) {
         if (results[i].empty()) {
           continue;
@@ -2900,7 +2900,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
         for (const auto& ginfo : *result) {
           string last_id = StreamIdRepr(ginfo.last_id);
 
-          rb->StartCollection(6, RedisReplyBuilder::MAP);
+          rb->StartCollection(6, CollectionType::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(ginfo.name);
           rb->SendBulkString("consumers");
@@ -2964,9 +2964,9 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
       if (sinfo) {
         if (full) {
-          rb->StartCollection(9, RedisReplyBuilder::MAP);
+          rb->StartCollection(9, CollectionType::MAP);
         } else {
-          rb->StartCollection(10, RedisReplyBuilder::MAP);
+          rb->StartCollection(10, CollectionType::MAP);
         }
 
         rb->SendBulkString("length");
@@ -2997,7 +2997,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
           rb->SendBulkString("groups");
           rb->StartArray(sinfo->cgroups.size());
           for (const auto& ginfo : sinfo->cgroups) {
-            rb->StartCollection(7, RedisReplyBuilder::MAP);
+            rb->StartCollection(7, CollectionType::MAP);
 
             rb->SendBulkString("name");
             rb->SendBulkString(ginfo.name);
@@ -3034,7 +3034,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
             rb->SendBulkString("consumers");
             rb->StartArray(ginfo.consumer_info_vec.size());
             for (const auto& consumer_info : ginfo.consumer_info_vec) {
-              rb->StartCollection(5, RedisReplyBuilder::MAP);
+              rb->StartCollection(5, CollectionType::MAP);
 
               rb->SendBulkString("name");
               rb->SendBulkString(consumer_info.name);
@@ -3100,7 +3100,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
           int64_t active = consumer_info.active_time;
           int64_t inactive = active != -1 ? now_ms - active : -1;
 
-          rb->StartCollection(4, RedisReplyBuilder::MAP);
+          rb->StartCollection(4, CollectionType::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(consumer_info.name);
           rb->SendBulkString("pending");

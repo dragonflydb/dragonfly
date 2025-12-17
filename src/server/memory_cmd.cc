@@ -286,7 +286,7 @@ void MemoryCmd::Stats() {
                        &stats);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder_);
-  rb->StartCollection(stats.size(), RedisReplyBuilder::MAP);
+  rb->StartCollection(stats.size(), CollectionType::MAP);
   for (const auto& [k, v] : stats) {
     rb->SendBulkString(k);
     rb->SendLong(v);
