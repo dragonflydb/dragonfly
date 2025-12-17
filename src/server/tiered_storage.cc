@@ -197,7 +197,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view value, PrimeValue* pv) {
     DCHECK(!value.empty());
-
     switch (pv->GetExternalRep()) {
       case CompactObj::ExternalRep::STRING:
         pv->Materialize(value, true);
