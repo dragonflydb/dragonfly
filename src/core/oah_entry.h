@@ -9,7 +9,6 @@
 #include <string_view>
 
 #include "base/hash.h"
-#include "base/logging.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -19,6 +18,15 @@ namespace dfly {
 
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
 #define FORCE_INLINE __attribute__((always_inline))
+
+static uint64_t Hash(std::string_view str) {
+  constexpr XXH64_hash_t kHashSeed = 24061983;
+  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+}
+
+static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
+  return hash >> (64 - capacity_log);
+}
 
 // TODO add allocator support
 template <class T> class PtrVector {
@@ -109,7 +117,7 @@ template <class T> class PtrVector {
 
   // because of log_size I prefer to hide it
   PtrVector(uint64_t log_size) {
-    DCHECK(log_size <= 32);
+    assert(log_size <= 32);
     uptr_ = reinterpret_cast<uint64_t>(zmalloc(sizeof(T) << log_size));
     const uint64_t size = 1 << log_size;
     for (uint64_t i = 0; i < size; ++i) {
@@ -125,14 +133,6 @@ template <class T> class PtrVector {
   uint64_t uptr_ = 0;
 };
 
-static uint64_t Hash(std::string_view str) {
-  constexpr XXH64_hash_t kHashSeed = 24061983;
-  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
-}
-
-static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
-  return hash >> (64 - capacity_log);
-}
 // doesn't possess memory, it should be created and release manually
 class OAHEntry {
   // we can assume that high 12 bits of user address space
@@ -156,34 +156,7 @@ class OAHEntry {
  public:
   OAHEntry() = default;
 
-  OAHEntry(std::string_view key, uint32_t expiry = UINT32_MAX) {
-    uint32_t key_size = key.size();
-
-    uint32_t expiry_size = (expiry != UINT32_MAX) * sizeof(expiry);
-
-    uint32_t key_len_field_size = key_size <= std::numeric_limits<uint8_t>::max() ? 1 : 4;
-
-    auto size = key_len_field_size + key_size + expiry_size;
-
-    auto* expiry_pos = (char*)zmalloc(size);
-    data_ = reinterpret_cast<uint64_t>(expiry_pos);
-    if (expiry_size) {
-      SetExpiryBit(true);
-      std::memcpy(expiry_pos, &expiry, sizeof(expiry));
-    }
-
-    auto* key_size_pos = expiry_pos + expiry_size;
-    if (key_len_field_size == 1) {
-      SetSsoBit();
-      uint8_t sso_key_size = key_size;
-      std::memcpy(key_size_pos, &sso_key_size, key_len_field_size);
-    } else {
-      std::memcpy(key_size_pos, &key_size, key_len_field_size);
-    }
-
-    auto* key_pos = key_size_pos + key_len_field_size;
-    std::memcpy(key_pos, key.data(), key_size);
-  }
+  OAHEntry(std::string_view key, uint32_t expiry = UINT32_MAX);
 
   // TODO add initializer list constructor
   OAHEntry(PtrVector<OAHEntry>&& vec) {
@@ -229,7 +202,7 @@ class OAHEntry {
   }
 
   std::string_view Key() const {
-    DCHECK(!IsVector());
+    assert(!IsVector());
     return {GetKeyData(), GetKeySize()};
   }
 
@@ -238,14 +211,7 @@ class OAHEntry {
   }
 
   // returns the expiry time of the current entry or UINT32_MAX if no expiry is set.
-  uint32_t GetExpiry() const {
-    std::uint32_t res = UINT32_MAX;
-    if (HasExpiry()) {
-      DCHECK(!IsVector());
-      std::memcpy(&res, Raw(), sizeof(res));
-    }
-    return res;
-  }
+  uint32_t GetExpiry() const;
 
   // TODO consider another option to implement iterator
   OAHEntry* operator->() {
@@ -256,54 +222,16 @@ class OAHEntry {
     return (data_ & kExtHashShiftedMask) >> kExtHashShift;
   }
 
-  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log) {
-    DCHECK(!IsVector());
-    if (Empty())
-      return false;
-    uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
-    uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
-    bucket_id &= bucket_mask;
-    auto stored_hash = GetHash();
-    if (!stored_hash) {
-      stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
-    }
-    uint32_t stored_bucket_id = stored_hash >> (kExtHashSize - bucket_id_hash_part);
-    return bucket_id == stored_bucket_id;
-  }
+  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log);
 
-  static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
-    const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-    const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
-    const uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
-    return ext_hash;
-  }
+  static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log);
 
-  bool CheckNoCollisions(const uint64_t ext_hash) {
-    auto stored_hash = GetHash();
-    return ((stored_hash != ext_hash) & (stored_hash != 0)) | (Empty());
-  }
+  bool CheckNoCollisions(const uint64_t ext_hash);
 
-  bool CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log, uint32_t shift_log) {
-    auto stored_hash = GetHash();
-    if (!stored_hash) {
-      if (IsEntry()) {
-        stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
-      } else {
-        return false;
-      }
-    }
-    return stored_hash == ext_hash;
-  }
+  bool CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log, uint32_t shift_log);
 
   // shift_log identify which bucket the element belongs to
-  uint64_t SetHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
-    DCHECK(data_);
-    DCHECK(!IsVector());
-    const uint64_t result_hash = CalcExtHash(hash, capacity_log, shift_log);
-    const uint64_t ext_hash = result_hash << kExtHashShift;
-    data_ = (data_ & ~kExtHashShiftedMask) | ext_hash;
-    return result_hash;
-  }
+  uint64_t SetHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log);
 
   void ClearHash() {
     data_ &= ~kExtHashShiftedMask;
@@ -311,198 +239,42 @@ class OAHEntry {
 
   // return new bucket_id
   uint32_t Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log, uint32_t new_capacity_log,
-                  uint32_t shift_log) {
-    DCHECK(!IsVector());
-    auto stored_hash = GetHash();
+                  uint32_t shift_log);
 
-    const uint32_t logs_diff = new_capacity_log - prev_capacity_log;
-    const uint32_t prev_significant_bits =
-        prev_capacity_log > shift_log ? shift_log : prev_capacity_log;
-    const uint32_t needed_hash_bits = prev_significant_bits + logs_diff;
+  void SetExpiry(uint32_t at_sec);
 
-    if (!stored_hash || needed_hash_bits > kExtHashSize) {
-      auto hash = Hash(Key());
-      SetHash(hash, new_capacity_log, shift_log);
-      return BucketId(hash, new_capacity_log);
-    }
-
-    const uint32_t real_bucket_end = stored_hash >> (kExtHashSize - prev_significant_bits);
-    const uint32_t prev_shift_mask = (1 << prev_significant_bits) - 1;
-    const uint32_t curr_shift = (current_bucket_id - real_bucket_end) & prev_shift_mask;
-    const uint32_t prev_bucket_mask = (1 << prev_capacity_log) - 1;
-    const uint32_t base_bucket_id = (current_bucket_id - curr_shift) & prev_bucket_mask;
-
-    const uint32_t last_bits_mask = (1 << logs_diff) - 1;
-    const uint32_t stored_hash_shift = kExtHashSize - needed_hash_bits;
-    const uint32_t last_bits = (stored_hash >> stored_hash_shift) & last_bits_mask;
-    const uint32_t new_bucket_id = (base_bucket_id << logs_diff) | last_bits;
-
-    ClearHash();  // the cache is invalid after rehash operation
-
-    DCHECK_EQ(BucketId(Hash(Key()), new_capacity_log), new_bucket_id);
-
-    return new_bucket_id;
-  }
-
-  void SetExpiry(uint32_t at_sec) {
-    DCHECK(!IsVector());
-    if (HasExpiry()) {
-      auto* expiry_pos = Raw();
-      std::memcpy(expiry_pos, &at_sec, sizeof(at_sec));
-    } else {
-      *this = OAHEntry(Key(), at_sec);
-    }
-  }
-
-  // TODO refactor, because it's inefficient
   std::optional<uint32_t> Find(std::string_view str, uint64_t ext_hash, uint32_t capacity_log,
-                               uint32_t shift_log, uint32_t* set_size, uint32_t time_now = 0) {
-    if (IsEntry()) {
-      ExpireIfNeeded(time_now, set_size);
-      return CheckExtendedHash(ext_hash, capacity_log, shift_log) && Key() == str
-                 ? 0
-                 : std::optional<uint32_t>();
-    }
-    if (IsVector()) {
-      auto& vec = AsVector();
-      auto raw_arr = vec.Raw();
-      for (size_t i = 0, size = vec.Size(); i < size; ++i) {
-        raw_arr[i].ExpireIfNeeded(time_now, set_size);
-        if (raw_arr[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) &&
-            raw_arr[i].Key() == str) {
-          return i;
-        }
-      }
-    }
+                               uint32_t shift_log, uint32_t* set_size, uint32_t time_now = 0);
 
-    return std::nullopt;
-  }
-
-  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
-    DCHECK(!IsVector());
-    if (GetExpiry() <= time_now) {
-      Clear();
-      --*set_size;
-    }
-  }
+  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size);
 
   // TODO refactor, because it's inefficient
-  uint32_t Insert(OAHEntry&& e) {
-    if (Empty()) {
-      *this = std::move(e);
-      return 0;
-    } else if (!IsVector()) {
-      OAHEntry tmp(PtrVector<OAHEntry>::FromLogSize(1));
-      auto& arr = tmp.AsVector();
-      arr[0] = std::move(*this);
-      arr[1] = std::move(e);
-      *this = std::move(tmp);
-      return 1;
-    } else {
-      auto& arr = AsVector();
-      size_t i = 0;
-      for (; i < arr.Size(); ++i) {
-        if (!arr[i]) {
-          arr[i] = std::move(e);
-          return i;
-        }
-      }
-      auto new_pos = arr.Size();
-      arr.ResizeLog(arr.LogSize() + 1);
-      arr[new_pos] = (std::move(e));
-      return new_pos;
-    }
-  }
+  uint32_t Insert(OAHEntry&& e);
 
-  uint32_t ElementsNum() {
-    if (Empty()) {
-      return 0;
-    } else if (!IsVector()) {
-      return 1;
-    }
-    return AsVector().Size();
-  }
+  uint32_t ElementsNum();
 
   // TODO remove, it is inefficient
-  inline OAHEntry& operator[](uint32_t pos) {
-    DCHECK(!Empty());
-    if (!IsVector()) {
-      DCHECK(pos == 0);
-      return *this;
-    } else {
-      auto& arr = AsVector();
-      DCHECK(pos < arr.Size());
-      return arr[pos];
-    }
-  }
+  OAHEntry& operator[](uint32_t pos);
 
-  OAHEntry Remove(uint32_t pos) {
-    if (Empty()) {
-      // I'm not sure that this scenario should be check at all
-      DCHECK(pos == 0);
-      return OAHEntry();
-    } else if (!IsVector()) {
-      DCHECK(pos == 0);
-      return std::move(*this);
-    } else {
-      auto& arr = AsVector();
-      DCHECK(pos < arr.Size());
-      return std::move(arr[pos]);
-    }
-  }
+  OAHEntry Remove(uint32_t pos);
 
-  OAHEntry Pop() {
-    if (IsVector()) {
-      auto& arr = AsVector();
-      for (auto& e : arr) {
-        if (e)
-          return std::move(e);
-      }
-      return {};
-    }
-    return std::move(*this);
-  }
+  OAHEntry Pop();
 
   char* Raw() const {
     return (char*)(data_ & ~kTagMask);
   }
 
  protected:
-  void Clear() {
-    // TODO add optimization to avoid destructor calls during vector allocator
-    if (!data_)
-      return;
-
-    if (IsVector()) {
-      AsVector().~PtrVector<OAHEntry>();
-    } else {
-      zfree(Raw());
-    }
-    data_ = 0;
-  }
+  void Clear();
 
   const char* GetKeyData() const {
     uint32_t key_field_size = HasSso() ? 1 : 4;
     return Raw() + GetExpirySize() + key_field_size;
   }
 
-  uint32_t GetKeySize() const {
-    if (HasSso()) {
-      uint8_t size = 0;
-      std::memcpy(&size, Raw() + GetExpirySize(), sizeof(size));
-      return size;
-    }
-    uint32_t size = 0;
-    std::memcpy(&size, Raw() + GetExpirySize(), sizeof(size));
-    return size;
-  }
+  uint32_t GetKeySize() const;
 
-  void SetExpiryBit(bool b) {
-    if (b)
-      data_ |= kExpiryBit;
-    else
-      data_ &= ~kExpiryBit;
-  }
+  void SetExpiryBit(bool b);
 
   void SetVectorBit() {
     data_ |= kVectorBit;
@@ -516,11 +288,7 @@ class OAHEntry {
     return (data_ & kSsoBit) != 0;
   }
 
-  size_t Size() {
-    size_t key_field_size = HasSso() ? 1 : 4;
-    size_t expiry_field_size = HasExpiry() ? 4 : 0;
-    return expiry_field_size + key_field_size + GetKeySize();
-  }
+  size_t Size();
 
   std::uint32_t GetExpirySize() const {
     return HasExpiry() ? sizeof(std::uint32_t) : 0;

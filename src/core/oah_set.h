@@ -46,7 +46,7 @@ class OAHSet {  // Open Addressing Hash Set
       if (owner_ == nullptr || r.owner_ == nullptr) {
         return owner_ == r.owner_;
       }
-      DCHECK(owner_ == r.owner_);
+      assert(owner_ == r.owner_);
       return bucket_ == r.bucket_ && pos_ == r.pos_;
     }
 
@@ -140,7 +140,7 @@ class OAHSet {  // Open Addressing Hash Set
       entries_.resize(Capacity());
       Rehash(prev_capacity_log);
     }
-    DCHECK(Capacity() >= kDisplacementSize);
+    assert(Capacity() >= kDisplacementSize);
   }
 
   void Clear() {
@@ -151,7 +151,7 @@ class OAHSet {  // Open Addressing Hash Set
 
   void AddUnique(OAHEntry&& e, uint32_t bid, uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
-    DCHECK(Capacity() >= kDisplacementSize);
+    assert(Capacity() >= kDisplacementSize);
     const uint32_t capacity_mask = Capacity() - 1;
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
@@ -164,7 +164,7 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     bid = GetExtensionPoint(bid);
-    DCHECK(bid < Capacity());
+    assert(bid < Capacity());
 
     entries_[bid].Insert(std::move(e));
   }
@@ -182,7 +182,7 @@ class OAHSet {  // Open Addressing Hash Set
 
   // TODO: Consider using chunks for this as in StringSet
   void Fill(OAHSet* other) {
-    DCHECK(other->entries_.empty());
+    assert(other->entries_.empty());
     other->Reserve(UpperBoundSize());
     other->set_time(time_now());
     for (auto it = begin(), it_end = end(); it != it_end; ++it) {
@@ -232,7 +232,7 @@ class OAHSet {  // Open Addressing Hash Set
   OAHEntry Pop() {
     for (auto& bucket : entries_) {
       if (auto res = bucket.Pop(); !res.Empty()) {
-        DCHECK(!res.IsVector());
+        assert(!res.IsVector());
         --size_;
         return res;
       }
@@ -297,25 +297,25 @@ class OAHSet {  // Open Addressing Hash Set
 
   size_t ObjMallocUsed() const {
     // TODO implement
-    LOG(FATAL) << "ExpirationUsed() isn't implemented";
+    assert(false);
     return 0;
   }
 
   size_t SetMallocUsed() const {
     // TODO implement
-    LOG(FATAL) << "ExpirationUsed() isn't implemented";
+    assert(false);
     return 0;
   }
 
   bool ExpirationUsed() const {
     // TODO
-    LOG(FATAL) << "ExpirationUsed() isn't implemented";
+    assert(false);
     return true;
   }
 
   size_t SizeSlow() {
     // TODO
-    LOG(FATAL) << "SizeSlow() isn't implemented";
+    assert(false);
     // CollectExpired();
     return size_;
   }
@@ -442,9 +442,9 @@ class OAHSet {  // Open Addressing Hash Set
       // TODO add expiration logic
     }
 
-    DCHECK(Capacity() >= kDisplacementSize);
+    assert(Capacity() >= kDisplacementSize);
     bid = GetExtensionPoint(bid);
-    DCHECK(bid < Capacity());
+    assert(bid < Capacity());
     return bid;
   }
 
