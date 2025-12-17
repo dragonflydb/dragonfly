@@ -412,9 +412,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const InvalidationMessage& msg) {
       return 0;
     }
-    size_t operator()(const MCPipelineMessagePtr& msg) {
-      return sizeof(MCPipelineMessage) + msg->HeapMemory();
-    }
   };
 
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
@@ -422,9 +419,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
 
 bool Connection::MessageHandle::IsReplying() const {
   return IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
-         holds_alternative<PipelineMessagePtr>(handle) ||
-         (holds_alternative<MCPipelineMessagePtr>(handle) &&
-          !get<MCPipelineMessagePtr>(handle)->mc_command()->no_reply);
+         holds_alternative<PipelineMessagePtr>(handle);
 }
 
 struct Connection::AsyncOperations {
@@ -434,7 +429,6 @@ struct Connection::AsyncOperations {
 
   void operator()(const PubMessage& msg);
   void operator()(PipelineMessage& msg);
-  void operator()(MCPipelineMessagePtr msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
@@ -509,12 +503,6 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
-}
-
-void Connection::AsyncOperations::operator()(MCPipelineMessagePtr msg) {
-  ++self->local_stats_.cmds;
-  self->service_->DispatchMC(msg);
-  self->last_interaction_ = time(nullptr);
 }
 
 void Connection::AsyncOperations::operator()(const MigrationRequestMessage& msg) {
@@ -628,7 +616,6 @@ Connection::~Connection() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ssl_ctx_);
 #endif
-
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
@@ -819,6 +806,15 @@ void Connection::HandleRequests() {
     }
     cc_.reset();
   }
+
+  while (parsed_head_ != nullptr) {
+    auto* cmd = parsed_head_;
+    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
+    parsed_head_ = parsed_head_->next;
+    service_->FreeParsedCommand(cmd);
+  }
+  parsed_tail_ = nullptr;
+  parsed_cmd_q_len_ = 0;
 }
 
 unsigned Connection::GetSendWaitTimeSec() const {
@@ -1268,61 +1264,40 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 }
 
 auto Connection::ParseMemcache() -> ParserStatus {
-  uint32_t consumed = 0;
-  MemcacheParser::Result result = MemcacheParser::OK;
-
-  auto dispatch_sync = [this] { service_->DispatchMC(parsed_cmd_); };
-
-  auto dispatch_async = [this]() -> MessageHandle {
-    MCPipelineMessagePtr ptr = parsed_cmd_;
-    this->CreateParsedCommand();
-    return {ptr};
-  };
-
-  DCHECK(io_buf_.InputLen() > 0);
-
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
-
+  MemcacheParser::Result result;
   do {
-    string_view str = ToSV(io_buf_.InputBuffer());
+    result = ParseMCBatch();
 
-    if (str.empty()) {
-      return OK;
+    bool last_parse_error =
+        (result != MemcacheParser::OK && result != MemcacheParser::INPUT_PENDING);
+    ExecuteMCBatch(last_parse_error);
+
+    MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
+    if (builder->GetError()) {
+      return ERROR;
     }
 
-    result = memcache_parser_->Parse(str, &consumed, parsed_cmd_->mc_command());
-
-    io_buf_.ConsumeInput(consumed);
-
-    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type "
-             << unsigned(parsed_cmd_->mc_command()->type);
-    if (result == MemcacheParser::INPUT_PENDING) {
-      break;
-    }
-
-    memcache_parser_->Reset();
-    if (result == MemcacheParser::OK) {
-      DispatchSingle(io_buf_.InputLen() > 0, dispatch_sync, dispatch_async);
-    } else {
+    if (last_parse_error) {
+      builder->SetBatchMode(false);
       if (result == MemcacheParser::UNKNOWN_CMD) {
         builder->SendSimpleString("ERROR");
       } else if (result == MemcacheParser::PARSE_ERROR) {
         builder->SendClientError("bad data chunk");
       } else if (result == MemcacheParser::BAD_DELTA) {
         builder->SendClientError("invalid numeric delta argument");
-      } else if (result != MemcacheParser::OK) {
+      } else {
         builder->SendClientError("bad command line format");
       }
+      parser_error_ = result;
+    } else {
+      reply_builder_->Flush();
     }
-  } while (!builder->GetError());
 
-  parser_error_ = result;
+  } while (result != MemcacheParser::INPUT_PENDING && io_buf_.InputLen() > 0);
 
-  if (result == MemcacheParser::INPUT_PENDING) {
-    return NEED_MORE;
-  }
-
-  return OK;
+  // TODO: fix memcache parser to always consume partial input like redis parser even when
+  // it returns INPUT_PENDING.
+  return result == MemcacheParser::INPUT_PENDING ? NEED_MORE : OK;
 }
 
 void Connection::OnBreakCb(int32_t mask) {
@@ -1939,10 +1914,6 @@ void Connection::RecycleMessage(MessageHandle msg) {
       pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
-
-  if (auto* ptr = get_if<MCPipelineMessagePtr>(&msg.handle); ptr) {
-    service_->FreeParsedCommand(*ptr);
-  }
 }
 
 std::string Connection::LocalBindStr() const {
@@ -2065,11 +2036,95 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
+MemcacheParser::Result Connection::ParseMCBatch() {
+  CHECK(io_buf_.InputLen() > 0);
+
+  do {
+    if (parsed_cmd_ == nullptr) {
+      CreateParsedCommand();
+    }
+    uint32_t consumed = 0;
+
+    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
+                                                            &consumed, parsed_cmd_->mc_command());
+
+    io_buf_.ConsumeInput(consumed);
+
+    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type "
+             << unsigned(parsed_cmd_->mc_command()->type);
+    if (result != MemcacheParser::OK) {
+      if (result != MemcacheParser::INPUT_PENDING) {
+        memcache_parser_->Reset();
+      }
+      return result;
+    }
+    EnqueueParsedCommand();
+  } while (parsed_cmd_q_len_ < 128 && io_buf_.InputLen() > 0);
+  return MemcacheParser::OK;
+}
+
+void Connection::ExecuteMCBatch(bool has_more) {
+  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
+
+  bool is_pipeline = parsed_cmd_q_len_ > 1;
+
+  // Execute sequentially all parsed commands.
+  while (parsed_head_) {
+    bool batch_mode = has_more || (parsed_head_->next != nullptr);
+    reply_builder_->SetBatchMode(batch_mode);
+    uint64_t start_cycle = parsed_head_->parsed_cycle;
+    service_->DispatchMC(parsed_head_);
+    auto* cmd = parsed_head_;
+    parsed_head_ = parsed_head_->next;
+    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
+    --parsed_cmd_q_len_;
+
+    // Cache a single command for immediate reuse, otherwise free it.
+    // TODO: we can cache parsed commands similarly to pipeline_req_pool_.
+    // In fact we should unify both approaches.
+    if (parsed_cmd_ == nullptr) {
+      parsed_cmd_ = cmd;
+    } else {
+      service_->FreeParsedCommand(cmd);
+    }
+    if (builder->GetError()) {
+      return;
+    }
+
+    if (is_pipeline) {
+      stats_->pipelined_cmd_cnt++;
+      stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - start_cycle);
+    }
+  }
+  DCHECK(parsed_head_ == nullptr && parsed_cmd_q_len_ == 0);
+
+  // Reset tail if we consumed all parsed commands.
+  parsed_tail_ = nullptr;
+}
+
 void Connection::CreateParsedCommand() {
   parsed_cmd_ = service_->AllocateParsedCommand();
   parsed_cmd_->Init(reply_builder_.get(), cc_.get());
   if (protocol_ == Protocol::MEMCACHE)
     parsed_cmd_->CreateMemcacheCommand();
+}
+
+void Connection::EnqueueParsedCommand() {
+  parsed_cmd_->next = nullptr;
+  parsed_cmd_->parsed_cycle = base::CycleClock::Now();
+  if (parsed_head_ == nullptr) {
+    parsed_head_ = parsed_cmd_;
+    parsed_tail_ = parsed_cmd_;
+  } else {
+    parsed_tail_->next = parsed_cmd_;
+    parsed_tail_ = parsed_cmd_;
+
+    // We have a pipelined command
+    local_stats_.dispatch_entries_added++;
+    stats_->dispatch_queue_bytes += parsed_cmd_->UsedMemory();
+  }
+  parsed_cmd_ = nullptr;  // ownership transferred
+  parsed_cmd_q_len_++;
 }
 
 void Connection::UpdateFromFlags() {
@@ -2208,7 +2263,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // TODO EnableRecvMultishot
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-    DCHECK(this);
     DoReadOnRecv(n);
     io_event_.notify_one();
   });
@@ -2223,8 +2277,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // TODO maybe use a flag instead of a poll
     DoReadOnRecv(FiberSocketBase::RecvNotification{true});
     fb2::NoOpLock noop;
-    io_event_.wait(
-        noop, [this]() { return io_buf_.InputLen() > 0 || io_ec_ || io_buf_.AppendLen() == 0; });
+    io_event_.wait(noop, [this]() { return io_buf_.InputLen() > 0 || io_ec_; });
 
     if (io_ec_) {
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
@@ -2297,7 +2350,6 @@ void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
   cstats.pipelined_cmd_cnt = 0;
   cstats.conn_received_cnt = 0;
-  cstats.pipelined_cmd_cnt = 0;
   cstats.command_cnt_main = 0;
   cstats.command_cnt_other = 0;
   cstats.io_read_cnt = 0;

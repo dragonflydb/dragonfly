@@ -84,9 +84,6 @@ class Connection : public util::Connection {
   // Pipeline message, accumulated Redis command to be executed.
   using PipelineMessage = cmn::BackedArguments;
 
-  // Pipeline message, accumulated Memcached command to be executed.
-  using MCPipelineMessage = ParsedCommand;
-
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
 
@@ -116,7 +113,6 @@ class Connection : public util::Connection {
   using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
   using PubMessagePtr = std::unique_ptr<PubMessage>;
 
-  using MCPipelineMessagePtr = MCPipelineMessage*;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
@@ -131,8 +127,7 @@ class Connection : public util::Connection {
     }
 
     bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle) ||
-             std::holds_alternative<MCPipelineMessagePtr>(handle);
+      return std::holds_alternative<PipelineMessagePtr>(handle);
     }
 
     bool IsPubMsg() const {
@@ -145,9 +140,8 @@ class Connection : public util::Connection {
 
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
-                 AclUpdateMessagePtr, MigrationRequestMessage, CheckpointMessage,
-                 InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
+                 MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -399,7 +393,11 @@ class Connection : public util::Connection {
   void DecrNumConns();
 
   bool IsReplySizeOverLimit() const;
+
+  MemcacheParser::Result ParseMCBatch();
+  void ExecuteMCBatch(bool has_more);
   void CreateParsedCommand();
+  void EnqueueParsedCommand();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
@@ -419,6 +417,11 @@ class Connection : public util::Connection {
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
+
+  // Parsed commands queue.
+  ParsedCommand* parsed_head_ = nullptr;
+  ParsedCommand* parsed_tail_ = nullptr;
+  unsigned parsed_cmd_q_len_ = 0;
 
   uint32_t id_;
   Protocol protocol_;
