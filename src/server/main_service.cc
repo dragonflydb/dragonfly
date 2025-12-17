@@ -411,7 +411,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnMapStart(unsigned len) final {
-    rb_->StartCollection(len, RedisReplyBuilder::MAP);
+    rb_->StartCollection(len, CollectionType::MAP);
   }
 
   void OnMapEnd() final {
@@ -500,7 +500,7 @@ void InterpreterReplier::SendBulkString(string_view str) {
 }
 
 void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
-  if (type == MAP)
+  if (type == CollectionType::MAP)
     len *= 2;
   explr_->OnArrayStart(len);
 

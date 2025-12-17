@@ -521,8 +521,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
     case OpStatus::OK:
     case OpStatus::KEY_NOTFOUND: {
       bool is_map = (getall_mask == (VALUES | FIELDS));
-      return rb->SendBulkStrArr(*result,
-                                is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
+      return rb->SendBulkStrArr(*result, is_map ? CollectionType::MAP : CollectionType::ARRAY);
     }
     default:
       return rb->SendError(result.status());
@@ -1007,7 +1006,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
         rb->SendBulkString((*result)[i + 1]);
       }
     } else
-      rb->SendBulkStrArr(*result, RedisReplyBuilder::ARRAY);
+      rb->SendBulkStrArr(*result, CollectionType::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       rb->SendNull();
