@@ -1559,7 +1559,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   if (!fetch_result.ok()) {
     cmd_cntx->tx->Conclude();
     if (fetch_result == OpStatus::WRONG_TYPE)
-      return builder->SendError(fetch_result.status());
+      return cmd_cntx->SendError(fetch_result.status());
     else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
       return cmd_cntx->SendError("One or more scores can't be converted into double");
     else
@@ -1746,25 +1746,14 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
 
 void GenericFamily::Rename(CmdArgList args, CommandContext* cmd_cntx) {
   auto reply = RenameGeneric(args, false, cmd_cntx->tx);
-  auto* rb = cmd_cntx->rb();
-  if (!reply.status) {
-    return rb->SendError(reply);
-  }
-
-  OpStatus st = reply.status.value();
-  if (st == OpStatus::OK) {
-    rb->SendOk();
-  } else {
-    rb->SendError(reply);
-  }
+  cmd_cntx->SendError(reply);
 }
 
 void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto reply = RenameGeneric(args, true, cmd_cntx->tx);
   auto* rb = cmd_cntx->rb();
   if (!reply.status) {
-    rb->SendError(reply);
-    return;
+    return cmd_cntx->SendError(reply.ToSv(), reply.kind);
   }
 
   OpStatus st = reply.status.value();
@@ -1773,7 +1762,7 @@ void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (st == OpStatus::KEY_EXISTS) {
     rb->SendLong(0);
   } else {
-    rb->SendError(reply);
+    cmd_cntx->SendError(st);
   }
 }
 
@@ -1783,7 +1772,7 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   bool replace = parser.Check("REPLACE");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!parser.Finalize()) {
-    return rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   if (k1 == k2) {
@@ -1942,7 +1931,7 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
-    return builder->SendError(ops.status());
+    return cmd_cntx->SendError(ops.status());
   }
 
   const ScanOpts& scan_op = ops.value();
