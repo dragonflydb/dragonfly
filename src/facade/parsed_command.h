@@ -32,12 +32,9 @@ class ParsedCommand : public cmn::BackedArguments {
   ParsedCommand() = default;
 
  public:
-  payload::Payload reply_payload;  // captured reply payload for async dispatches
-  bool dispatch_async = false;     // whether the command can be dispatched asynchronously
-  ParsedCommand* next = nullptr;
-
   // time when the message was parsed as reported by CycleClock::Now()
   uint64_t parsed_cycle = 0;
+  ParsedCommand* next = nullptr;
 
   void Init(SinkReplyBuilder* rb, ConnectionContext* conn_cntx) {
     rb_ = rb;
@@ -71,9 +68,45 @@ class ParsedCommand : public cmn::BackedArguments {
     return sz;
   }
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) const;
-  void SendError(facade::OpStatus status) const;
-  void SendError(const facade::ErrorReply& error) const;
+  void set_reply_direct(bool direct) {
+    reply_direct_ = direct;
+  }
+
+  // Returns whether the reply is sent directly to the client
+  bool reply_direct() const {
+    return reply_direct_;
+  }
+
+  void set_dispatch_async(bool async) {
+    dispatch_async_ = async;
+  }
+
+  bool dispatch_async() const {
+    return dispatch_async_;
+  }
+
+  void ResetForReuse();
+  void SendError(std::string_view str, std::string_view type = std::string_view{});
+  void SendError(facade::OpStatus status);
+  void SendError(const facade::ErrorReply& error);
+  void SendStored(bool ok /* true - ok, false - skipped*/);
+
+  payload::Payload TakeReplyPayload() {
+    return std::move(reply_payload_);
+  }
+
+  bool HasPayload() const {
+    return !reply_direct_ && !std::holds_alternative<std::monostate>(reply_payload_);
+  }
+
+ private:
+  // whether the reply should be sent directly, or captured for later sending
+  bool reply_direct_ = true;
+
+  // whether the command can be dispatched asynchronously.
+  bool dispatch_async_ = false;
+
+  payload::Payload reply_payload_;  // captured reply payload for async dispatches
 };
 
 #ifdef __APPLE__
