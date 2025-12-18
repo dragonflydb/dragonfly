@@ -232,6 +232,72 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   EXPECT_EQ(json_obj->at("checked").as_bool(), false);
 }
 
+TEST_F(PageUsageStatsTest, JsonDefragEmpty) {
+  auto parsed = ParseJsonUsingShardHeap(R"({})");
+  EXPECT_TRUE(parsed.has_value());
+
+  PageUsage p{CollectPageStats::NO, 0};
+  p.SetForceReallocate(true);
+
+  Defragment(parsed.value(), &p);
+  EXPECT_TRUE(parsed->empty());
+}
+
+TEST_F(PageUsageStatsTest, JsonDefragNested) {
+  constexpr auto data = R"({"a":{"b":{"c":{"d":"value"}}}})";
+  auto parsed = ParseJsonUsingShardHeap(data);
+  EXPECT_TRUE(parsed.has_value());
+
+  PageUsage p{CollectPageStats::NO, 0};
+  p.SetForceReallocate(true);
+
+  Defragment(parsed.value(), &p);
+  EXPECT_EQ(parsed->get_allocator<>(), old_alloc);
+}
+
+TEST_F(PageUsageStatsTest, JsonDefragRemainsInSameHeap) {
+  // This is a brute force test that defragmentation does not erroneously move data to the default
+  // heap. Comparing allocators before/after defragmentation is not useful as stateless allocators
+  // are all equal. It might be possible to compare the allocator type, but this approach checks
+  // that the pointers in a JSON object belong to the same heap as they did before defragmentation.
+
+  const std::string data = R"({
+    "data": {"sub-data": "attr1"},
+    "values": [true, false, 1.11, 2],
+    "secretkey": ")" + std::string(1024, '.') +
+                           "\"}";
+
+  auto json = ParseJsonUsingShardHeap(data);
+  EXPECT_TRUE(json.has_value());
+
+  auto key_before = json->at("secretkey").as_string_view();
+  auto sub_before = json->at("data").at("sub-data").as_string_view();
+  auto values_before = &*json->at("values").array_range().begin();
+
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), key_before.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), sub_before.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), values_before));
+
+  PageUsage p{CollectPageStats::NO, 0};
+  p.SetForceReallocate(true);
+
+  Defragment(json.value(), &p);
+
+  auto key_after = json->at("secretkey").as_string_view();
+  auto sub_after = json->at("data").at("sub-data").as_string_view();
+  auto values_after = &*json->at("values").array_range().begin();
+
+  // Data still managed by the same heap.
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), key_after.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), sub_after.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), values_after));
+
+  // Defragment actually changed addresses
+  EXPECT_NE(key_after.data(), key_before.data());
+  EXPECT_NE(sub_after.data(), sub_before.data());
+  EXPECT_NE(values_after, values_before);
+}
+
 TEST_F(PageUsageStatsTest, QuotaChecks) {
   {
     PageUsage p{CollectPageStats::NO, 0};
