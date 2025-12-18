@@ -169,7 +169,6 @@ class Transaction {
     // Whether it was suspended (by WatchInShard()). This flag is sticky and stays forever once set.
     WAS_SUSPENDED = 1 << 4,
     AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
-    UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
   };
 
   struct Guard {
@@ -242,7 +241,8 @@ class Transaction {
   void StartMultiNonAtomic();
 
   // Unlock key locks of a multi transaction.
-  void UnlockMulti();
+  // If block is set, wait for unlock to finish.
+  void UnlockMulti(bool block = false);
 
   // Set new command for multi transaction.
   void MultiSwitchCmd(const CommandId* cid);

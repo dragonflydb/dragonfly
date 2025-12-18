@@ -834,33 +834,50 @@ void Transaction::ScheduleInternal() {
   RecordTxScheduleStats(this);
 }
 
-// Runs in the coordinator fiber.
-void Transaction::UnlockMulti() {
-  VLOG(1) << "UnlockMulti " << DebugId();
+void Transaction::UnlockMulti(bool block) {
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
+  DCHECK_EQ(shard_data_.size(), shard_set->size());  // Multi never uses single shard optimization
 
   // Return if we either didn't schedule at all (and thus run) or already did conclude
   if ((coordinator_state_ & COORD_SCHED) == 0 || (coordinator_state_ & COORD_CONCLUDING) > 0)
     return;
+  coordinator_state_ |= COORD_CONCLUDING;
 
+  // Distribute keys by shards
   vector<vector<LockFp>> sharded_keys(shard_set->size());
-  for (const auto& [sid, fp] : multi_->tag_fps) {
+  for (const auto& [sid, fp] : multi_->tag_fps)
     sharded_keys[sid].emplace_back(fp);
+
+  // Whether transaction was active on the shard and needs to unlock
+  auto is_active = [&](ShardId sid) { return IsGlobal() || sharded_keys[sid].empty(); };
+
+  // Count number of active shards ahead and set run/use counts
+  size_t occupied_shards = 0;
+  for (size_t sid = 0; sid < shard_set->size(); sid++) {
+    if (!is_active(sid))
+      continue;
+    occupied_shards++;
   }
+  run_barrier_.Start(occupied_shards);
+  use_count_.fetch_add(occupied_shards, std::memory_order_relaxed);
 
-  use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
-
-  DCHECK_EQ(shard_data_.size(), shard_set->size());
+  // Dispatch callbacks to unlock on shards
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    vector<LockFp> fps = std::move(sharded_keys[i]);
-    shard_set->Add(i, [this, fps = std::move(fps)] {
+    if (is_active(sid))
+      continue;
+
+    shard_set->Add(i, [this, fps = std::move(sharded_keys[i])] {
       this->UnlockMultiShardCb(fps, EngineShard::tlocal());
+      run_barrier_.Dec();
       intrusive_ptr_release(this);
     });
   }
 
-  VLOG(1) << "UnlockMultiEnd " << DebugId();
+  if (block) {
+    run_barrier_.Wait();
+    Refurbish();
+  }
 }
 
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
@@ -1395,7 +1412,6 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
 
   ShardId sid = shard->shard_id();
   auto& sd = shard_data_[SidToId(sid)];
-  sd.local_mask |= UNLOCK_MULTI;
 
   // It does not have to be that all shards in multi transaction execute this tx.
   // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
