@@ -3,11 +3,14 @@
 //
 #pragma once
 
+#include <cassert>
 #include <memory>
 #include <optional>
 
 #include "io/io.h"
+extern "C" {
 #include "redis/hiredis.h"
+}
 
 namespace dfly {
 
@@ -22,7 +25,7 @@ class RESPObj {
     NIL = REDIS_REPLY_NIL,
     DOUBLE = REDIS_REPLY_DOUBLE,
   };
-
+  RESPObj() = default;
   RESPObj(redisReply* reply, bool needs_to_free) : reply_(reply), needs_to_free_(needs_to_free) {
   }
 
@@ -52,11 +55,15 @@ class RESPArray {
   RESPArray(redisReply** elements, size_t size) : elements_(elements), size_(size) {
   }
 
-  size_t size() const {
+  size_t Size() const {
     return size_;
   }
 
-  RESPObj operator[](size_t index) {
+  bool Empty() const {
+    return size_ == 0;
+  }
+
+  RESPObj operator[](size_t index) const {
     return RESPObj(elements_[index], false);
   }
 
@@ -80,6 +87,7 @@ class RESPParser {
 };
 
 template <class T> std::optional<T> RESPObj::As() const {
+  assert(reply_);
   if constexpr (std::is_constructible_v<T, std::string_view>) {
     if (reply_->type == REDIS_REPLY_STRING) {
       return T{std::string_view{reply_->str, reply_->len}};

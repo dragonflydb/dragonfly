@@ -85,10 +85,16 @@ class Coordinator::CrossShardClient : public ProtocolClient {
   }
 
   void EnqueueCommand(CrossShardRequestPtr req) {
-    std::lock_guard lk(mu_);
-    send_queue_.push(req);
-    resp_queue_.push(req);
+    {
+      std::lock_guard lk(send_mu_);
+      send_queue_.push(req);
+    }
+    {
+      std::lock_guard lk(resp_mu_);
+      resp_queue_.push(req);
+    }
     ready_to_send_ = true;
+    ready_to_resp_ = true;
     waker_.notifyAll();
   }
 
@@ -97,7 +103,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
       waker_.await([this] { return exec_st_.IsCancelled() || ready_to_send_; });
       if (exec_st_.IsCancelled())
         return;
-      std::lock_guard lk(mu_);
+      std::lock_guard lk(send_mu_);
       while (!send_queue_.empty()) {
         if (auto ec = ProtocolClient::SendCommand(send_queue_.front()->GetCommand()); ec) {
           exec_st_.ReportError(GenericError(
@@ -114,10 +120,10 @@ class Coordinator::CrossShardClient : public ProtocolClient {
 
   void RespFb() {
     while (!exec_st_.IsCancelled()) {
-      waker_.await([this] { return exec_st_.IsCancelled() || ready_to_send_; });
+      waker_.await([this] { return exec_st_.IsCancelled() || ready_to_resp_; });
       if (exec_st_.IsCancelled())
         return;
-      std::lock_guard lk(mu_);
+      std::lock_guard lk(resp_mu_);
       constexpr auto timeout = 3000;  // TODO add flag and add usage in ReadRespReply.
       while (!resp_queue_.empty()) {
         auto resp = TakeRespReply(timeout);
@@ -134,6 +140,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
         resp_queue_.front()->Exec(*resp);
         resp_queue_.pop();
       }
+      ready_to_resp_ = false;
     }
   }
 
@@ -145,8 +152,10 @@ class Coordinator::CrossShardClient : public ProtocolClient {
   util::fb2::Fiber resp_fb_;
   util::fb2::EventCount waker_;
 
-  mutable util::fb2::Mutex mu_;
+  mutable util::fb2::Mutex send_mu_;
+  mutable util::fb2::Mutex resp_mu_;
   std::atomic_bool ready_to_send_ = false;
+  std::atomic_bool ready_to_resp_ = false;
 };
 
 Coordinator& Coordinator::Current() {
@@ -198,7 +207,7 @@ util::fb2::Future<GenericError> Coordinator::DispatchAll(std::string command, Re
     if (!client) {
       VLOG(1) << "Could not get coordinator client for " << shard.master.ip << ":"
               << shard.master.port;
-      cb({});  // TODO add error propagation.
+      cb(RESPObj());  // TODO add error propagation.
       LOG(FATAL) << "No error processing, not implemented logic yet.";
       return {};
     }

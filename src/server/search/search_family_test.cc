@@ -3599,16 +3599,16 @@ TEST_F(SearchFamilyTest, ParseCSSResponse) {
 
   EXPECT_EQ(reply->GetType(), RESPObj::Type::ARRAY);
   auto array = *reply->As<RESPArray>();
-  EXPECT_GE(array.size(), 1);
+  EXPECT_GE(array.Size(), 1);
   EXPECT_EQ(array[0].GetType(), RESPObj::Type::INTEGER);
 
   Docs search_results;
-  for (size_t i = 1; i < array.size(); i += 2) {
+  for (size_t i = 1; i < array.Size(); i += 2) {
     auto& fields = search_results[*array[i].As<std::string>()];
 
     auto field_array = *array[i + 1].As<RESPArray>();
 
-    for (size_t j = 0; j < field_array.size(); j += 2) {
+    for (size_t j = 0; j < field_array.Size(); j += 2) {
       std::string field_name = *field_array[j].As<std::string>();
       std::string field_value = *field_array[j + 1].As<std::string>();
 
