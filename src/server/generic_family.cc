@@ -319,9 +319,9 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
       return OpStatus::IO_ERROR;
 
     // TODO: allow saving string directly without proxy object
-    SerializerBase::DumpObject(PrimeValue{*res}, &sink);
+    SerializerBase::DumpValue(PrimeValue{*res}, &sink);
   } else {
-    SerializerBase::DumpObject(pv, &sink);
+    SerializerBase::DumpValue(pv, &sink);
   }
 
   return std::move(sink).str();
