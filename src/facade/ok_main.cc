@@ -6,6 +6,7 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/reply_builder.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
 #include "util/fibers/pool.h"

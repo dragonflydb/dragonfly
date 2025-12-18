@@ -9,7 +9,6 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "base/string_view_sso.h"
-#include "server/common.h"
 #include "server/tx_base.h"
 
 namespace dfly {

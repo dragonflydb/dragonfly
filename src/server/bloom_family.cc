@@ -7,6 +7,7 @@
 #include "core/bloom.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"

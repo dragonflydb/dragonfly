@@ -43,7 +43,7 @@ namespace {
 using NewEntries = std::variant<ArgSlice, absl::flat_hash_set<std::string_view>>;
 
 auto EntriesRange(const NewEntries& entries) {
-  return base::it::Wrap(facade::kToSV, entries);
+  return base::it::Wrap(cmn::kToSV, entries);
 }
 
 constexpr uint32_t kMaxIntSetEntries = 256;

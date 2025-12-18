@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "facade/reply_capture.h"
 #include "facade/service_interface.h"
 #include "server/main_service.h"
 
@@ -39,7 +40,9 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
 }  // namespace
 
 JournalExecutor::JournalExecutor(Service* service)
-    : service_{service}, reply_builder_{facade::ReplyMode::NONE}, conn_context_{nullptr, nullptr} {
+    : service_{service},
+      reply_builder_{new facade::CapturingReplyBuilder{facade::ReplyMode::NONE}},
+      conn_context_{nullptr, nullptr} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
   conn_context_.skip_acl_validation = true;
@@ -65,7 +68,7 @@ void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
 }
 
 facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
-  return service_->DispatchCommand(facade::ParsedArgs{cmd.cmd_args}, &reply_builder_,
+  return service_->DispatchCommand(facade::ParsedArgs{cmd.cmd_args}, reply_builder_.get(),
                                    &conn_context_);
 }
 

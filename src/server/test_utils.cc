@@ -21,6 +21,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "util/fibers/pool.h"

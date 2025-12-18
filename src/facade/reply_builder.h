@@ -15,13 +15,6 @@
 
 namespace facade {
 
-// Reply mode allows filtering replies.
-enum class ReplyMode {
-  NONE,      // No replies are recorded
-  ONLY_ERR,  // Only errors are recorded
-  FULL       // All replies are recorded
-};
-
 enum class RespVersion { kResp2, kResp3 };
 
 // Base class for all reply builders. Offer a simple high level interface for controlling output
