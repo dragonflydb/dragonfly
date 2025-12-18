@@ -169,7 +169,7 @@ struct CmdArgParser {
   }
 
   bool HasError() const {
-    return error_.type != ErrorType::NO_ERROR;
+    return bool(error_);
   }
 
   ErrorInfo TakeError();
