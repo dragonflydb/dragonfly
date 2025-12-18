@@ -42,11 +42,12 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
+  virtual ~PageUsage() = default;
   static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
 
   PageUsage(CollectPageStats collect_stats, float threshold, uint64_t quota_usec = kMaxQuota);
 
-  bool IsPageForObjectUnderUtilized(void* object);
+  virtual bool IsPageForObjectUnderUtilized(void* object);
 
   bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
 
