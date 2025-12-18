@@ -612,7 +612,8 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
       obj.SetString(test_str);
 
       // Test StrEncoding helper
-      string raw_str = obj.GetRawString().Take();
+      auto strs = obj.GetRawString();
+      string raw_str = string{strs[0]} + string{strs[1]};
       CompactObj::StrEncoding enc = obj.GetStrEncoding();
       EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
 

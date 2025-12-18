@@ -68,6 +68,11 @@ class OpManager {
   // Stash value to be offloaded. It is opaque to OpManager.
   void Stash(EntryId id, tiering::DiskSegment segment, util::fb2::UringBuf buf);
 
+  // PrepareStash + Stash via function
+  std::error_code PrepareAndStash(
+      EntryId id, size_t length,
+      const std::function<size_t /*written*/ (io::MutableBytes)>& writer);
+
   Stats GetStats() const;
 
  protected:

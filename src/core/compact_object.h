@@ -407,9 +407,9 @@ class CompactObj {
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
-  // returns raw (non-decoded) string. Used to bypass decoding layer.
+  // Return raw (non-decoded) string as two views. First is guaranteed to be non-empty.
   // Precondition: the object is a non-inline string.
-  StringOrView GetRawString() const;
+  std::array<std::string_view, 2> GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
     return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};

@@ -118,6 +118,10 @@ ListpackWrap::Iterator ListpackWrap::end() const {
   return Iterator{lp_, nullptr, intbuf_};
 }
 
+size_t ListpackWrap::UsedBytes() const {
+  return lpBytes(lp_);
+}
+
 std::string_view ListpackWrap::GetView(uint8_t* lp_it, uint8_t int_buf[]) {
   int64_t ele_len = 0;
   uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);

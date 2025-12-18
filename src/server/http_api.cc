@@ -7,7 +7,7 @@
 #include "base/logging.h"
 #include "core/flatbuffers.h"
 #include "facade/conn_context.h"
-#include "facade/reply_builder.h"
+#include "facade/reply_capture.h"
 #include "server/main_service.h"
 #include "util/http/http_common.h"
 
@@ -15,8 +15,7 @@ namespace dfly {
 using namespace util;
 using namespace std;
 namespace h2 = boost::beast::http;
-using facade::CapturingReplyBuilder;
-
+namespace payload = facade::payload;
 namespace {
 
 bool IsVectorOfStrings(flexbuffers::Reference req) {
@@ -111,32 +110,32 @@ struct CaptureVisitor {
     absl::StrAppend(&str, v);
   }
 
-  void operator()(const CapturingReplyBuilder::SimpleString& ss) {
+  void operator()(const payload::SimpleString& ss) {
     absl::StrAppend(&str, "\"", ss, "\"");
   }
 
-  void operator()(const CapturingReplyBuilder::BulkString& bs) {
+  void operator()(const payload::BulkString& bs) {
     absl::StrAppend(&str, JsonEscape(bs));
   }
 
-  void operator()(CapturingReplyBuilder::Null) {
+  void operator()(payload::Null) {
     absl::StrAppend(&str, "null");
   }
 
-  void operator()(CapturingReplyBuilder::Error err) {
-    str = absl::StrCat(R"({"error": ")", err.first, "\"");
+  void operator()(const payload::Error& err) {
+    str = absl::StrCat(R"({"error": ")", err->first, "\"");
   }
 
   void operator()(facade::OpStatus status) {
     absl::StrAppend(&str, "\"", facade::StatusToMsg(status), "\"");
   }
 
-  void operator()(unique_ptr<CapturingReplyBuilder::CollectionPayload> cp) {
+  void operator()(unique_ptr<payload::CollectionPayload> cp) {
     if (!cp) {
       absl::StrAppend(&str, "null");
       return;
     }
-    if (cp->len == 0 && cp->type == facade::RedisReplyBuilder::ARRAY) {
+    if (cp->len == 0 && cp->type == facade::CollectionType::ARRAY) {
       absl::StrAppend(&str, "[]");
       return;
     }

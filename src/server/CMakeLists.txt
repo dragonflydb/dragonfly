@@ -90,6 +90,7 @@ add_library(dragonfly_lib
             ${DF_LINUX_SRCS}
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
             cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc cluster/cluster_utility.cc
+            cluster/coordinator.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc
             sharding.cc)

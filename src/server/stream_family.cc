@@ -1865,7 +1865,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   return result;
 }
 
-void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
+void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto key = parser->Next();
 
   CreateOpts opts;
@@ -1874,127 +1874,127 @@ void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
     opts.flags |= kCreateOptMkstream;
   }
 
-  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
+  RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
   };
 
-  OpStatus result = cmd_ctx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::KEY_NOTFOUND:
-      return cmd_ctx->SendError(kXGroupKeyNotFound);
+      return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
-      cmd_ctx->SendError(result);
+      cmd_cntx->SendError(result);
   }
 }
 
-void DestroyGroup(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
+void DestroyGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [key, gname] = parser->Next<string_view, string_view>();
 
-  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
+  RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
   if (parser->HasNext())
-    return cmd_ctx->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
+    return cmd_cntx->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
 
   auto cb = [&, &key = key, &gname = gname](Transaction* t, EngineShard* shard) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
-  OpStatus result = cmd_ctx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::OK:
-      return cmd_ctx->rb()->SendLong(1);
+      return cmd_cntx->rb()->SendLong(1);
     case OpStatus::SKIPPED:
-      return cmd_ctx->rb()->SendLong(0);
+      return cmd_cntx->rb()->SendLong(0);
     case OpStatus::KEY_NOTFOUND:
-      return cmd_ctx->SendError(kXGroupKeyNotFound);
+      return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
-      cmd_ctx->SendError(result);
+      cmd_cntx->SendError(result);
   }
 }
 
-void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
+void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
+  RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
   if (parser->HasNext())
-    return cmd_ctx->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
+    return cmd_cntx->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
 
   auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
                                                                   EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
-  OpResult<uint32_t> result = cmd_ctx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
-      return cmd_ctx->rb()->SendLong(1);
+      return cmd_cntx->rb()->SendLong(1);
     case OpStatus::KEY_EXISTS:
-      return cmd_ctx->rb()->SendLong(0);
+      return cmd_cntx->rb()->SendLong(0);
     case OpStatus::SKIPPED:
-      return cmd_ctx->SendError(NoGroupError(key, gname));
+      return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
-      return cmd_ctx->SendError(kXGroupKeyNotFound);
+      return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
-      cmd_ctx->SendError(result.status());
+      cmd_cntx->SendError(result.status());
   }
 }
 
-void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
+void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
 
-  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
+  RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
   if (parser->HasNext())
-    return cmd_ctx->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
+    return cmd_cntx->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
 
   auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
                                                                   EngineShard* shard) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
-  OpResult<uint32_t> result = cmd_ctx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
-      return cmd_ctx->rb()->SendLong(*result);
+      return cmd_cntx->rb()->SendLong(*result);
     case OpStatus::SKIPPED:
-      return cmd_ctx->SendError(NoGroupError(key, gname));
+      return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
-      return cmd_ctx->SendError(kXGroupKeyNotFound);
+      return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
-      cmd_ctx->SendError(result.status());
+      cmd_cntx->SendError(result.status());
   }
 }
 
-void SetId(facade::CmdArgParser* parser, CommandContext* cmd_ctx) {
+void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [key, gname, id] = parser->Next<string_view, string_view, string_view>();
 
   while (parser->HasNext()) {
     if (parser->Check("ENTRIESREAD")) {
       // TODO: to support ENTRIESREAD.
-      return cmd_ctx->SendError(kSyntaxErr);
+      return cmd_cntx->SendError(kSyntaxErr);
     } else {
-      return cmd_ctx->SendError(kSyntaxErr);
+      return cmd_cntx->SendError(kSyntaxErr);
     }
   }
 
-  RETURN_ON_PARSE_ERROR(*parser, cmd_ctx);
+  RETURN_ON_PARSE_ERROR(*parser, cmd_cntx);
 
   auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
 
-  OpStatus result = cmd_ctx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::SKIPPED:
-      return cmd_ctx->SendError(NoGroupError(key, gname));
+      return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
-      return cmd_ctx->SendError(kXGroupKeyNotFound);
+      return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
-      cmd_ctx->SendError(result);
+      cmd_cntx->SendError(result);
   }
 }
 
@@ -2315,32 +2315,33 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 }
 
 void XRangeGeneric(std::string_view key, std::string_view start, std::string_view end,
-                   CmdArgList args, bool is_rev, Transaction* tx, SinkReplyBuilder* builder) {
+                   CmdArgList args, bool is_rev, CommandContext* cmd_cntx) {
   RangeOpts range_opts;
   RangeId rs, re;
+
   if (!ParseRangeId(start, RangeBoundary::kStart, &rs) ||
       !ParseRangeId(end, RangeBoundary::kEnd, &re)) {
-    return builder->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   if (rs.exclude && streamIncrID(&rs.parsed_id.val) != C_OK) {
-    return builder->SendError("invalid start ID for the interval", kSyntaxErrType);
+    return cmd_cntx->SendError("invalid start ID for the interval", kSyntaxErrType);
   }
 
   if (re.exclude && streamDecrID(&re.parsed_id.val) != C_OK) {
-    return builder->SendError("invalid end ID for the interval", kSyntaxErrType);
+    return cmd_cntx->SendError("invalid end ID for the interval", kSyntaxErrType);
   }
 
   if (!args.empty()) {
     if (args.size() != 2) {
-      return builder->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
+      return cmd_cntx->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }
 
     string opt = absl::AsciiStrToUpper(ArgS(args, 0));
     string_view val = ArgS(args, 1);
 
     if (opt != "COUNT" || !absl::SimpleAtoi(val, &range_opts.count)) {
-      return builder->SendError(kSyntaxErr);
+      return cmd_cntx->SendError(kSyntaxErr);
     }
   }
 
@@ -2352,18 +2353,18 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
     return OpRange(t->GetOpArgs(shard), key, range_opts);
   };
 
-  OpResult<RecordVec> result = tx->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<RecordVec> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(builder);
-    StreamReplies{builder}.SendRecords(*result);
+    SinkReplyBuilder::ReplyAggregator agg(rb);
+    StreamReplies{rb}.SendRecords(*result);
     return;
   }
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return rb->SendEmptyArray();
   }
-  return builder->SendError(result.status());
+  return cmd_cntx->SendError(result.status());
 }
 
 void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
@@ -2470,7 +2471,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(rb);
     if (opts->read_group && rb->IsResp3()) {
-      rb->StartCollection(1, RedisReplyBuilder::CollectionType::MAP);
+      rb->StartCollection(1, CollectionType::MAP);
     } else {
       rb->StartArray(1);
       rb->StartArray(2);
@@ -2565,7 +2566,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
   SinkReplyBuilder::ReplyScope scope(rb);
   if (opts->read_group) {
     if (rb->IsResp3()) {
-      rb->StartCollection(opts->stream_ids.size(), RedisReplyBuilder::CollectionType::MAP);
+      rb->StartCollection(opts->stream_ids.size(), CollectionType::MAP);
       for (size_t i = 0; i < opts->stream_ids.size(); i++) {
         string_view key = ArgS(args, i + opts->streams_arg);
         StreamReplies{rb}.SendStreamRecords(key, results[i]);
@@ -2580,7 +2581,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
     }
   } else {
     if (rb->IsResp3()) {
-      rb->StartCollection(resolved_streams, RedisReplyBuilder::CollectionType::MAP);
+      rb->StartCollection(resolved_streams, CollectionType::MAP);
       for (size_t i = 0; i < results.size(); ++i) {
         if (results[i].empty()) {
           continue;
@@ -2675,7 +2676,7 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
   auto parsed_add_opts = ParseAddOpts(&parser);
 
   if (auto err = parser.TakeError(); err || !parsed_add_opts) {
-    rb->SendError(!parsed_add_opts ? parsed_add_opts.error() : err.MakeReply());
+    cmd_cntx->SendError(!parsed_add_opts ? parsed_add_opts.error() : err.MakeReply());
     return;
   }
 
@@ -2703,9 +2704,9 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
     if (add_result == OpStatus::KEY_NOTFOUND) {
       rb->SendNull();
     } else if (add_result == OpStatus::STREAM_ID_SMALL) {
-      rb->SendError(LeqTopIdError("XADD"));
+      cmd_cntx->SendError(LeqTopIdError("XADD"));
     } else {
-      rb->SendError(add_result.status());
+      cmd_cntx->SendError(add_result.status());
     }
   }
 }
@@ -2728,7 +2729,7 @@ absl::InlinedVector<streamID, 8> GetXclaimIds(CmdArgList& args) {
   return ids;
 }
 
-bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* builder) {
+bool ParseXclaimOptions(CmdArgList args, ClaimOpts& opts, CommandContext* cmd_cntx) {
   for (size_t i = 0; i < args.size(); ++i) {
     string arg = absl::AsciiStrToUpper(ArgS(args, i));
     bool remaining_args = args.size() - i - 1 > 0;
@@ -2737,21 +2738,21 @@ bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* bui
       if (arg == "IDLE") {
         arg = ArgS(args, ++i);
         if (!absl::SimpleAtoi(arg, &opts.delivery_time)) {
-          builder->SendError(kInvalidIntErr);
+          cmd_cntx->SendError(kInvalidIntErr);
           return false;
         }
         continue;
       } else if (arg == "TIME") {
         arg = ArgS(args, ++i);
         if (!absl::SimpleAtoi(arg, &opts.delivery_time)) {
-          builder->SendError(kInvalidIntErr);
+          cmd_cntx->SendError(kInvalidIntErr);
           return false;
         }
         continue;
       } else if (arg == "RETRYCOUNT") {
         arg = ArgS(args, ++i);
         if (!absl::SimpleAtoi(arg, &opts.retry)) {
-          builder->SendError(kInvalidIntErr);
+          cmd_cntx->SendError(kInvalidIntErr);
           return false;
         }
         continue;
@@ -2762,7 +2763,7 @@ bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* bui
         if (ParseID(arg, true, 0, &parsed_id)) {
           opts.last_id = parsed_id.val;
         } else {
-          builder->SendError(kInvalidStreamId, kSyntaxErrType);
+          cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
           return false;
         }
         continue;
@@ -2773,7 +2774,7 @@ bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* bui
     } else if (arg == "JUSTID") {
       opts.flags |= kClaimJustID;
     } else {
-      builder->SendError("Unknown argument given for XCLAIM command", kSyntaxErr);
+      cmd_cntx->SendError("Unknown argument given for XCLAIM command", kSyntaxErr);
       return false;
     }
   }
@@ -2799,7 +2800,7 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   // parse the options
-  if (!ParseXclaimOptions(args, opts, cmd_cntx->rb()))
+  if (!ParseXclaimOptions(args, opts, cmd_cntx))
     return;
 
   uint64_t now = cmd_cntx->tx->GetDbContext().time_now_ms;
@@ -2900,7 +2901,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
         for (const auto& ginfo : *result) {
           string last_id = StreamIdRepr(ginfo.last_id);
 
-          rb->StartCollection(6, RedisReplyBuilder::MAP);
+          rb->StartCollection(6, CollectionType::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(ginfo.name);
           rb->SendBulkString("consumers");
@@ -2924,7 +2925,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
         }
         return;
       }
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
       int full = 0;
       size_t count = 10;  // default count for xinfo streams
@@ -2964,9 +2965,9 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
       if (sinfo) {
         if (full) {
-          rb->StartCollection(9, RedisReplyBuilder::MAP);
+          rb->StartCollection(9, CollectionType::MAP);
         } else {
-          rb->StartCollection(10, RedisReplyBuilder::MAP);
+          rb->StartCollection(10, CollectionType::MAP);
         }
 
         rb->SendBulkString("length");
@@ -2997,7 +2998,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
           rb->SendBulkString("groups");
           rb->StartArray(sinfo->cgroups.size());
           for (const auto& ginfo : sinfo->cgroups) {
-            rb->StartCollection(7, RedisReplyBuilder::MAP);
+            rb->StartCollection(7, CollectionType::MAP);
 
             rb->SendBulkString("name");
             rb->SendBulkString(ginfo.name);
@@ -3034,7 +3035,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
             rb->SendBulkString("consumers");
             rb->StartArray(ginfo.consumer_info_vec.size());
             for (const auto& consumer_info : ginfo.consumer_info_vec) {
-              rb->StartCollection(5, RedisReplyBuilder::MAP);
+              rb->StartCollection(5, CollectionType::MAP);
 
               rb->SendBulkString("name");
               rb->SendBulkString(consumer_info.name);
@@ -3083,7 +3084,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
         }
         return;
       }
-      return rb->SendError(sinfo.status());
+      return cmd_cntx->SendError(sinfo.status());
     } else if (sub_cmd == "CONSUMERS") {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
@@ -3100,7 +3101,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
           int64_t active = consumer_info.active_time;
           int64_t inactive = active != -1 ? now_ms - active : -1;
 
-          rb->StartCollection(4, RedisReplyBuilder::MAP);
+          rb->StartCollection(4, CollectionType::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(consumer_info.name);
           rb->SendBulkString("pending");
@@ -3115,10 +3116,10 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       if (result.status() == OpStatus::INVALID_VALUE) {
         return rb->SendError(NoGroupError(stream_name, group_name));
       }
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
     }
   }
-  return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
+  return cmd_cntx->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
 void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
@@ -3150,8 +3151,8 @@ void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<PendingResult> op_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
-      return rb->SendError(NoGroupError(key, opts.group_name));
-    return rb->SendError(op_result.status());
+      return cmd_cntx->SendError(NoGroupError(key, opts.group_name));
+    return cmd_cntx->SendError(op_result.status());
   }
   const PendingResult& result = op_result.value();
 
@@ -3196,7 +3197,7 @@ void CmdXRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx->tx, cmd_cntx->rb());
+  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx);
 }
 
 void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
@@ -3204,7 +3205,7 @@ void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx->tx, cmd_cntx->rb());
+  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx);
 }
 
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
@@ -3308,7 +3309,7 @@ void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
   auto parsed_trim_opts = ParseTrimOpts(&parser);
   if (!parser.Finalize() || !parsed_trim_opts) {
     auto err = parser.TakeError();
-    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err.MakeReply());
+    cmd_cntx->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : err.MakeReply());
     return;
   }
 
@@ -3328,7 +3329,7 @@ void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
   if (trim_result) {
     rb->SendLong(*trim_result);
   } else {
-    rb->SendError(trim_result.status());
+    cmd_cntx->SendError(trim_result.status());
   }
 }
 
@@ -3419,7 +3420,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (!result) {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
     return;
   }
 

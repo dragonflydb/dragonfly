@@ -524,7 +524,7 @@ void IOStat::From(const facade::FacadeStats& fs) {
 }
 
 void IOStat::Print(RedisReplyBuilder* rb) const {
-  rb->StartCollection(6, RedisReplyBuilder::CollectionType::MAP);
+  rb->StartCollection(6, CollectionType::MAP);
   rb->SendSimpleString("connections_received");
   rb->SendLong(conn_received);
   rb->SendSimpleString("current_conn_count");
@@ -1519,7 +1519,7 @@ void DebugCmd::Compression(CmdArgList args, CommandContext* cmnd_cntx) {
 
   unsigned map_len = print_bintable ? 6 : 5;
 
-  rb->StartCollection(map_len, RedisReplyBuilder::CollectionType::MAP);
+  rb->StartCollection(map_len, CollectionType::MAP);
   rb->SendSimpleString("max_symbol");
   rb->SendLong(hist.max_symbol);
 

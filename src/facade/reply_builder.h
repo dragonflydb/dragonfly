@@ -15,13 +15,6 @@
 
 namespace facade {
 
-// Reply mode allows filtering replies.
-enum class ReplyMode {
-  NONE,      // No replies are recorded
-  ONLY_ERR,  // Only errors are recorded
-  FULL       // All replies are recorded
-};
-
 enum class RespVersion { kResp2, kResp3 };
 
 // Base class for all reply builders. Offer a simple high level interface for controlling output
@@ -229,7 +222,6 @@ class MCReplyBuilder : public SinkReplyBuilder {
 // Redis reply builder interface for sending RESP data.
 class RedisReplyBuilderBase : public SinkReplyBuilder {
  public:
-  enum CollectionType { ARRAY, SET, MAP, PUSH };
   enum VerbatimFormat { TXT, MARKDOWN };
 
   explicit RedisReplyBuilderBase(io::Sink* sink) : SinkReplyBuilder(sink) {
@@ -280,7 +272,6 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 // Non essential redis reply builder functions implemented on top of the base resp protocol
 class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
-  using RedisReplyBuilderBase::CollectionType;
   using ScoredArray = absl::Span<const std::pair<std::string, double>>;
 
   RedisReplyBuilder(io::Sink* sink) : RedisReplyBuilderBase(sink) {
@@ -296,7 +287,7 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
   };
 
   void SendSimpleStrArr(const facade::ArgRange& strs);
-  void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
+  void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = CollectionType::ARRAY);
   template <typename I> void SendLongArr(absl::Span<const I> longs);
 
   void SendScoredArray(ScoredArray arr, bool with_scores);

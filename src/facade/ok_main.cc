@@ -6,6 +6,7 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/reply_builder.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
 #include "util/fibers/pool.h"
@@ -42,9 +43,8 @@ class OkService : public ServiceInterface {
     return result;
   }
 
-  void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                  MCReplyBuilder* builder, ConnectionContext* cntx) final {
-    builder->SendError("");
+  void DispatchMC(ParsedCommand* cmd) final {
+    cmd->rb()->SendError("");
   }
 
   ConnectionContext* CreateContext(Connection* owner) final {

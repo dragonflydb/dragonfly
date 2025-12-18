@@ -19,7 +19,7 @@ namespace facade {
 // then will follow up with reading the blob data directly from source.
 class MemcacheParser {
  public:
-  enum CmdType {
+  enum CmdType : uint8_t {
     INVALID = 0,
     SET = 1,
     ADD = 2,
@@ -54,7 +54,7 @@ class MemcacheParser {
   };
 
   // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol
-  struct Command : public cmn::BackedArguments {
+  struct Command {
     Command() = default;
     Command(const Command&) = delete;
     Command(Command&&) noexcept = default;
@@ -62,14 +62,22 @@ class MemcacheParser {
     CmdType type = INVALID;
 
     std::string_view key() const {
-      return empty() ? std::string_view{} : Front();
+      return backed_args->empty() ? std::string_view{} : backed_args->Front();
     }
 
     // For STORE commands, value is at index 1.
     // For both key and value we provide convenience accessors that return empty string_view
     // if not present.
     std::string_view value() const {
-      return size() < 2 ? std::string_view{} : at(1);
+      return backed_args->size() < 2 ? std::string_view{} : backed_args->at(1);
+    }
+
+    size_t size() const {
+      return backed_args->size();
+    }
+
+    char* value_ptr() {  // NOLINT
+      return backed_args->data(1);
     }
 
     union {
@@ -79,7 +87,10 @@ class MemcacheParser {
 
     uint32_t expire_ts =
         0;  // relative (expire_ts <= month) or unix time (expire_ts > month) in seconds
+
+    // flags for STORE commands
     uint32_t flags = 0;
+
     bool no_reply = false;  // q
     bool meta = false;
 
@@ -92,10 +103,11 @@ class MemcacheParser {
     bool return_hit = false;          // h
     bool return_version = false;      // c
 
-    char* value_ptr() {
-      return storage_.data() + elem_capacity(0);
-    }
+    // Does not own this object, only references it.
+    cmn::BackedArguments* backed_args = nullptr;
   };
+
+  static_assert(sizeof(Command) == 48);
 
   enum Result : uint8_t {
     OK,

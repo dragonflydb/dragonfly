@@ -18,16 +18,20 @@ namespace facade {
 
 class MCParserTest : public testing::Test {
  protected:
+  MCParserTest() {
+    cmd_.backed_args = &backed_args_;
+  }
   MemcacheParser::Result Parse(string_view input) {
     parser_.Reset();
     return parser_.Parse(input, &consumed_, &cmd_);
   }
 
-  vector<string_view> ToArgs() {
-    return {cmd_.begin(), cmd_.end()};
+  vector<string_view> ToArgs() const {
+    return {cmd_.backed_args->begin(), cmd_.backed_args->end()};
   }
 
   MemcacheParser parser_;
+  cmn::BackedArguments backed_args_;
   MemcacheParser::Command cmd_;
   uint32_t consumed_;
 };

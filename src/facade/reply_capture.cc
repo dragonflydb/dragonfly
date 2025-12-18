@@ -16,11 +16,12 @@
 namespace facade {
 
 using namespace std;
+using namespace payload;
 
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
   last_error_ = str;
   SKIP_LESS(ReplyMode::ONLY_ERR);
-  Capture(Error{str, type});
+  Capture(make_unique<pair<string, string>>(str, type));
 }
 
 void CapturingReplyBuilder::SendNullArray() {
@@ -55,7 +56,8 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   SKIP_LESS(ReplyMode::FULL);
-  stack_.emplace(make_unique<CollectionPayload>(len, type), type == MAP ? len * 2 : len);
+  stack_.emplace(make_unique<CollectionPayload>(len, type),
+                 type == CollectionType::MAP ? len * 2 : len);
 
   // If we added an empty collection, it must be collapsed immediately.
   CollapseFilledCollections();
@@ -102,11 +104,6 @@ void CapturingReplyBuilder::CollapseFilledCollections() {
   }
 }
 
-CapturingReplyBuilder::CollectionPayload::CollectionPayload(unsigned len, CollectionType type)
-    : len{len}, type{type}, arr{} {
-  arr.reserve(type == MAP ? len * 2 : len);
-}
-
 struct CaptureVisitor {
   void operator()(monostate) {
   }
@@ -119,32 +116,28 @@ struct CaptureVisitor {
     rb->SendDouble(v);
   }
 
-  void operator()(const CapturingReplyBuilder::SimpleString& ss) {
+  void operator()(const payload::SimpleString& ss) {
     rb->SendSimpleString(ss);
   }
 
-  void operator()(const CapturingReplyBuilder::BulkString& bs) {
+  void operator()(const payload::BulkString& bs) {
     rb->SendBulkString(bs);
   }
 
-  void operator()(CapturingReplyBuilder::Null) {
+  void operator()(payload::Null) {
     rb->SendNull();
   }
 
-  void operator()(CapturingReplyBuilder::Error err) {
-    rb->SendError(err.first, err.second);
+  void operator()(const payload::Error& err) {
+    rb->SendError(err->first, err->second);
   }
 
-  void operator()(OpStatus status) {
-    rb->SendError(status);
-  }
-
-  void operator()(const unique_ptr<CapturingReplyBuilder::CollectionPayload>& cp) {
+  void operator()(const unique_ptr<payload::CollectionPayload>& cp) {
     if (!cp) {
       rb->SendNullArray();
       return;
     }
-    if (cp->len == 0 && cp->type == RedisReplyBuilder::ARRAY) {
+    if (cp->len == 0 && cp->type == CollectionType::ARRAY) {
       rb->SendEmptyArray();
       return;
     }
@@ -176,7 +169,7 @@ void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {
 optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::TryExtractError(
     const Payload& pl) {
   if (auto* err = get_if<Error>(&pl); err != nullptr) {
-    return ErrorRef{err->first, err->second};
+    return ErrorRef{(*err)->first, (*err)->second};
   }
   return nullopt;
 }

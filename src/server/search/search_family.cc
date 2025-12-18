@@ -960,7 +960,7 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   auto sortable_value_sender = SortableValueSender(rb);
 
-  rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
+  rb->StartCollection(doc.values.size(), CollectionType::MAP);
   for (const auto& [k, v] : doc.values) {
     rb->SendBulkString(k);
     visit(sortable_value_sender, v);
@@ -1403,16 +1403,18 @@ void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
 void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
-  atomic_uint num_notfound{0};
   vector<DocIndexInfo> infos(shard_set->size());
 
   cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
-    if (index == nullptr)
-      num_notfound.fetch_add(1);
-    else
+    if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
     return OpStatus::OK;
+  });
+
+  // Count how many shards didn't find the index by checking empty entries.
+  size_t num_notfound = std::count_if(infos.begin(), infos.end(), [](const DocIndexInfo& info) {
+    return info.base_index.schema.fields.empty();
   });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
@@ -1431,14 +1433,14 @@ void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(5, RedisReplyBuilder::MAP);
+  rb->StartCollection(5, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
 
   rb->SendSimpleString("index_definition");
   {
-    rb->StartCollection(3, RedisReplyBuilder::MAP);
+    rb->StartCollection(3, CollectionType::MAP);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -1725,7 +1727,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   rb->StartArray(shards_count + 1);
 
   // General stats
-  rb->StartCollection(3, RedisReplyBuilder::MAP);
+  rb->StartCollection(3, CollectionType::MAP);
   rb->SendBulkString("took");
   rb->SendLong(absl::ToInt64Microseconds(took));
   rb->SendBulkString("hits");
@@ -1735,7 +1737,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Per-shard stats
   for (size_t shard_id = 0; shard_id < shards_count; shard_id++) {
-    rb->StartCollection(2, RedisReplyBuilder::MAP);
+    rb->StartCollection(2, CollectionType::MAP);
     rb->SendBulkString("took");
     rb->SendLong(absl::ToInt64Microseconds(profile_results[shard_id]));
     rb->SendBulkString("tree");
@@ -1761,7 +1763,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
         }
       }
 
-      rb->StartCollection(4 + (children > 0), RedisReplyBuilder::MAP);
+      rb->StartCollection(4 + (children > 0), CollectionType::MAP);
       rb->SendSimpleString("total_time");
       rb->SendLong(event.micros);
       rb->SendSimpleString("operation");
@@ -1812,7 +1814,7 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   shard_results.clear();
   vector<string> vec(result_set.begin(), result_set.end());
 
-  rb->SendBulkStrArr(vec, RedisReplyBuilder::SET);
+  rb->SendBulkStrArr(vec, CollectionType::SET);
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2092,7 +2094,7 @@ void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
       res.push_back(flag->CurrentValue());
     }
   }
-  return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
+  return rb->SendBulkStrArr(res, CollectionType::MAP);
 }
 
 void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
@@ -2243,7 +2245,10 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)
-      << CI{"FT.INFO", kReadOnlyMask, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
+            -2,        0,
+            0,         acl::FT_SEARCH}
+             .HFUNC(FtInfo)
       << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)

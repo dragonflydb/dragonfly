@@ -41,7 +41,7 @@ void JournalWriter::Write(const journal::Entry::Payload& payload) {
     return;
 
   size_t num_elems = 0, size = 0;
-  for (string_view str : base::it::Wrap(facade::kToSV, payload.args)) {
+  for (string_view str : base::it::Wrap(cmn::kToSV, payload.args)) {
     num_elems++;
     size += str.size();
   };
@@ -52,7 +52,7 @@ void JournalWriter::Write(const journal::Entry::Payload& payload) {
   Write(cmd_size);
   Write(payload.cmd);
 
-  for (string_view str : base::it::Wrap(facade::kToSV, payload.args))
+  for (string_view str : base::it::Wrap(cmn::kToSV, payload.args))
     this->Write(str);
 }
 

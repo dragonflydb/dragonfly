@@ -1,4 +1,4 @@
-add_library(dfly_parser_lib redis_parser.cc resp_expr.cc )
+add_library(dfly_parser_lib redis_parser.cc resp_expr.cc resp_parser.cc)
 cxx_link(dfly_parser_lib base strings_lib)
 
 add_library(dfly_facade conn_context.cc dragonfly_listener.cc dragonfly_connection.cc facade.cc

@@ -43,7 +43,7 @@ namespace {
 using NewEntries = std::variant<ArgSlice, absl::flat_hash_set<std::string_view>>;
 
 auto EntriesRange(const NewEntries& entries) {
-  return base::it::Wrap(facade::kToSV, entries);
+  return base::it::Wrap(cmn::kToSV, entries);
 }
 
 constexpr uint32_t kMaxIntSetEntries = 256;
@@ -1006,27 +1006,25 @@ void SendNumeric(OpResult<uint32_t> result, SinkReplyBuilder* builder) {
 }
 
 struct SetReplies {
-  SetReplies(SinkReplyBuilder* builder, bool _script)
-      : rb(static_cast<RedisReplyBuilder*>(builder)), script(_script) {
-    DCHECK(dynamic_cast<RedisReplyBuilder*>(builder));
+  SetReplies(CommandContext* cntx, bool _script) : cmd_cntx(cntx), script(_script) {
   }
 
   template <typename T> void Send(vector<T>* sv) {
     if (script)  // output is sorted under scripts
       sort(sv->begin(), sv->end());
 
-    rb->SendBulkStrArr(*sv, RedisReplyBuilder::SET);
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkStrArr(*sv, CollectionType::SET);
   }
 
   void Send(const ResultSetView& rsv) {
     if (!rsv)
-      return rb->SendError(rsv.status());
+      return cmd_cntx->SendError(rsv.status());
 
     SvArray arr = ToSvArray(rsv.value());
     Send(&arr);
   }
 
-  RedisReplyBuilder* rb;
+  CommandContext* cmd_cntx;
   bool script;
 };
 
@@ -1044,7 +1042,7 @@ void SAdd(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendLong(result.value());
   }
 
-  rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
 void SIsMember(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1103,7 +1101,7 @@ void SMove(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<unsigned> result = mover.Commit(cmd_cntx->tx);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!result) {
-    return rb->SendError(result.status());
+    return cmd_cntx->SendError(result.status());
   }
 
   rb->SendLong(result.value());
@@ -1163,7 +1161,7 @@ void SPop(CmdArgList args, CommandContext* cmd_cntx) {
         rb->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
+      rb->SendBulkStrArr(*result, CollectionType::SET);
     }
     return;
   }
@@ -1190,7 +1188,7 @@ void SDiff(CmdArgList args, CommandContext* cmd_cntx) {
 
   cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
-  SetReplies{cmd_cntx->rb(), bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(rsv);
+  SetReplies{cmd_cntx, bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(rsv);
 }
 
 void SDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1253,7 +1251,7 @@ void SMembers(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    SetReplies{cmd_cntx->rb(), bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(
+    SetReplies{cmd_cntx, bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(
         &result.value());
   } else {
     cmd_cntx->SendError(result.status());
@@ -1281,7 +1279,7 @@ void SRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (result || result == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
+      rb->SendBulkStrArr(*result, CollectionType::SET);
     } else if (result->size()) {
       rb->SendBulkString(result->front());
     } else {
@@ -1304,8 +1302,7 @@ void SInter(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx->GetUniqueShardCnt());
   if (result) {
-    SetReplies{cmd_cntx->rb(), bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(
-        &*result);
+    SetReplies{cmd_cntx, bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(&*result);
   } else {
     cmd_cntx->SendError(result.status());
   }
@@ -1389,8 +1386,7 @@ void SUnion(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   ResultSetView unionset = UnionResultVec(result_set);
-  SetReplies{cmd_cntx->rb(), bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(
-      unionset);
+  SetReplies{cmd_cntx, bool(cmd_cntx->server_conn_cntx()->conn_state.script_info)}.Send(unionset);
 }
 
 void SUnionStore(CmdArgList args, CommandContext* cmd_cntx) {

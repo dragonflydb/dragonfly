@@ -25,8 +25,8 @@ string Entry::ToString() const {
 
   if (HasPayload()) {
     AppendPrefix(payload.cmd, &rv);
-    for (string_view arg : base::it::Wrap(facade::kToSV, payload.args))
-      absl::StrAppend(&rv, "'", facade::ToSV(arg), "',");
+    for (string_view arg : base::it::Wrap(cmn::kToSV, payload.args))
+      absl::StrAppend(&rv, "'", cmn::ToSV(arg), "',");
     AppendSuffix(&rv);
   } else {
     absl::StrAppend(&rv, ", empty");

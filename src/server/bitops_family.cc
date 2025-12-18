@@ -573,15 +573,14 @@ void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
-  auto* builder = cmd_cntx->rb();
   if (!parser.Finalize()) {
-    return builder->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, builder);
+  HandleOpValueResult(res, cmd_cntx->rb());
 }
 
 // GCC yields a wrong warning about uninitialized optional use
@@ -1182,7 +1181,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
   // Second phase - save to target key if successful
   if (!joined_results) {
     cmd_cntx->tx->Conclude();
-    builder->SendError(joined_results.status());
+    cmd_cntx->SendError(joined_results.status());
     return;
   } else {
     auto op_result = joined_results.value();

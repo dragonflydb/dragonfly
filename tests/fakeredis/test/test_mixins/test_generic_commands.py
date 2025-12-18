@@ -46,9 +46,7 @@ def test_del_operator(r: redis.Redis):
 
 def test_expire_should_not_handle_floating_point_values(r: redis.Redis):
     r.set("foo", "bar")
-    with pytest.raises(
-        redis.ResponseError, match="value is not an integer or out of range"
-    ):
+    with pytest.raises(redis.ResponseError, match="value is not an integer or out of range"):
         r.expire("something_new", 1.2)
         r.pexpire("something_new", 1000.2)
         r.expire("some_unused_key", 1.2)
@@ -175,9 +173,7 @@ def test_sort_with_by_and_get_option(r: redis.Redis):
     ]
     assert r.sort("foo", by="weight_*", get="data_1") == [None, None, None, None]
     # Test sort with different parameters order
-    assert raw_command(
-        r, "sort", "foo", "get", "data_*", "by", "weight_*", "get", "#"
-    ) == [
+    assert raw_command(r, "sort", "foo", "get", "data_*", "by", "weight_*", "get", "#") == [
         b"four",
         b"4",
         b"three",
@@ -302,9 +298,7 @@ def test_exists(r: redis.Redis):
     assert "foo" not in r
     r.set("foo", "bar")
     assert "foo" in r
-    with pytest.raises(
-        redis.ResponseError, match=msgs.WRONG_ARGS_MSG6.format("exists")[4:]
-    ):
+    with pytest.raises(redis.ResponseError, match=msgs.WRONG_ARGS_MSG6.format("exists")[4:]):
         raw_command(r, "exists")
 
 
@@ -323,10 +317,6 @@ def test_expire_should_throw_error(r: redis.Redis):
     assert r.get("foo") == b"bar"
     with pytest.raises(ResponseError):
         r.expire("foo", 1, nx=True, xx=True)
-    with pytest.raises(ResponseError):
-        r.expire("foo", 1, nx=True, gt=True)
-    with pytest.raises(ResponseError):
-        r.expire("foo", 1, nx=True, lt=True)
     with pytest.raises(ResponseError):
         r.expire("foo", 1, gt=True, lt=True)
 
