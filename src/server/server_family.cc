@@ -2610,7 +2610,7 @@ void ServerFamily::Debug(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void ServerFamily::Memory(CmdArgList args, CommandContext* cmnd_cntx) {
-  MemoryCmd mem_cmd{this, cmnd_cntx->rb(), cmnd_cntx->server_conn_cntx()};
+  MemoryCmd mem_cmd{this, cmnd_cntx};
 
   return mem_cmd.Run(args);
 }
