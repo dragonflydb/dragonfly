@@ -21,7 +21,7 @@ using namespace payload;
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
   last_error_ = str;
   SKIP_LESS(ReplyMode::ONLY_ERR);
-  Capture(make_unique<pair<string, string>>(str, type));
+  Capture(make_error(str, type));
 }
 
 void CapturingReplyBuilder::SendNullArray() {
@@ -130,6 +130,14 @@ struct CaptureVisitor {
 
   void operator()(const payload::Error& err) {
     rb->SendError(err->first, err->second);
+  }
+
+  void operator()(payload::StoredReply sr) {
+    if (sr.ok) {
+      rb->SendStored();
+    } else {
+      rb->SendSetSkipped();
+    }
   }
 
   void operator()(const unique_ptr<payload::CollectionPayload>& cp) {

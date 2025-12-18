@@ -659,8 +659,7 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
 
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
+  if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
       DoReadOnRecv(n);
       io_event_.notify_one();
@@ -782,6 +781,8 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
+      // ioloop_v2 not supported for TLS connections yet.
+      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -808,6 +809,8 @@ void Connection::HandleRequests() {
     cc_.reset();
   }
 
+  // TODO: we will have a problem of what to do with pending async commands.
+  // The code below will crash the process as we do not wait for them to finish.
   while (parsed_head_ != nullptr) {
     auto* cmd = parsed_head_;
     stats_->dispatch_queue_bytes -= cmd->UsedMemory();
@@ -1049,13 +1052,12 @@ void Connection::ConnectionFlow() {
   }
 
   error_code ec = reply_builder_->GetError();
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
-    if (io_loop_v2 && !is_tls_) {
+    if (ioloop_v2_) {
       // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
       // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
       // a migration shall only call RegisterOnRev if it reached the main IoLoopV2 below.
@@ -1089,7 +1091,7 @@ void Connection::ConnectionFlow() {
   service_->OnConnectionClose(cc_.get());
   DecreaseStatsOnClose();
 
-  if (io_loop_v2 && !is_tls_) {
+  if (ioloop_v2_) {
     socket_->ResetOnRecvHook();
   }
 
@@ -1744,8 +1746,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
                                     //
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+  if (ioloop_v2_ && socket_ && socket_->IsOpen()) {
     socket_->ResetOnRecvHook();
   }
 
@@ -2071,30 +2072,15 @@ void Connection::ExecuteMCBatch(bool has_more) {
 
   // Execute sequentially all parsed commands.
   while (parsed_head_) {
-    bool batch_mode = has_more || (parsed_head_->next != nullptr);
-    reply_builder_->SetBatchMode(batch_mode);
-    uint64_t start_cycle = parsed_head_->parsed_cycle;
-    service_->DispatchMC(parsed_head_);
     auto* cmd = parsed_head_;
-    parsed_head_ = parsed_head_->next;
-    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
-    --parsed_cmd_q_len_;
+    bool batch_mode = has_more || (cmd->next != nullptr);
+    reply_builder_->SetBatchMode(batch_mode);
+    service_->DispatchMC(cmd);
+    parsed_head_ = cmd->next;
 
-    // Cache a single command for immediate reuse, otherwise free it.
-    // TODO: we can cache parsed commands similarly to pipeline_req_pool_.
-    // In fact we should unify both approaches.
-    if (parsed_cmd_ == nullptr) {
-      parsed_cmd_ = cmd;
-    } else {
-      service_->FreeParsedCommand(cmd);
-    }
+    ReleaseParsedCommand(cmd, is_pipeline);
     if (builder->GetError()) {
       return;
-    }
-
-    if (is_pipeline) {
-      stats_->pipelined_cmd_cnt++;
-      stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - start_cycle);
     }
   }
   DCHECK(parsed_head_ == nullptr && parsed_cmd_q_len_ == 0);
@@ -2115,17 +2101,38 @@ void Connection::EnqueueParsedCommand() {
   parsed_cmd_->parsed_cycle = base::CycleClock::Now();
   if (parsed_head_ == nullptr) {
     parsed_head_ = parsed_cmd_;
-    parsed_tail_ = parsed_cmd_;
   } else {
     parsed_tail_->next = parsed_cmd_;
-    parsed_tail_ = parsed_cmd_;
-
     // We have a pipelined command
     local_stats_.dispatch_entries_added++;
-    stats_->dispatch_queue_bytes += parsed_cmd_->UsedMemory();
   }
+  parsed_tail_ = parsed_cmd_;
+  stats_->dispatch_queue_bytes += parsed_cmd_->UsedMemory();
+
   parsed_cmd_ = nullptr;  // ownership transferred
   parsed_cmd_q_len_++;
+}
+
+void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
+  size_t used_mem = cmd->UsedMemory();
+  DCHECK_GE(stats_->dispatch_queue_bytes, used_mem);
+  DCHECK_GT(parsed_cmd_q_len_, 0u);
+  stats_->dispatch_queue_bytes -= used_mem;
+  --parsed_cmd_q_len_;
+  if (is_pipelined) {
+    stats_->pipelined_cmd_cnt++;
+    stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
+  }
+
+  // Cache a single command for immediate reuse, otherwise free it.
+  // TODO: we can cache parsed commands similarly to pipeline_req_pool_.
+  // In fact we should unify both approaches.
+  if (parsed_cmd_ == nullptr) {
+    parsed_cmd_ = cmd;
+    parsed_cmd_->ResetForReuse();
+  } else {
+    service_->FreeParsedCommand(cmd);
+  }
 }
 
 void Connection::UpdateFromFlags() {

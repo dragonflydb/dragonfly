@@ -1573,22 +1573,22 @@ class ReplyGuard {
         (static_cast<MCReplyBuilder*>(cmd_cntx.rb())->NoReply() || cid_name_ == "QUIT");
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
-      builder_ = cmd_cntx.rb();
-      replies_recorded_ = builder_->RepliesRecorded();
+      cmd_cntx_ = &cmd_cntx;
+      replies_recorded_ = cmd_cntx.rb()->RepliesRecorded();
     }
   }
 
   ~ReplyGuard() {
-    if (builder_) {
-      DCHECK_GT(builder_->RepliesRecorded(), replies_recorded_)
-          << cid_name_ << " " << typeid(*builder_).name();
+    if (cmd_cntx_ && cmd_cntx_->reply_direct()) {
+      auto* rb = cmd_cntx_->rb();
+      DCHECK_GT(rb->RepliesRecorded(), replies_recorded_) << cid_name_ << " " << typeid(*rb).name();
     }
   }
 
  private:
+  const CommandContext* cmd_cntx_ = nullptr;
   size_t replies_recorded_ = 0;
   std::string_view cid_name_;
-  SinkReplyBuilder* builder_ = nullptr;
 };
 
 OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,

@@ -398,6 +398,7 @@ class Connection : public util::Connection {
   void ExecuteMCBatch(bool has_more);
   void CreateParsedCommand();
   void EnqueueParsedCommand();
+  void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
@@ -480,6 +481,8 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
+      bool ioloop_v2_ : 1;  // whether this connection is running on ioloop v2
+
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
     };
