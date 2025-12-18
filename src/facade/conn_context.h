@@ -10,8 +10,6 @@
 #include <string_view>
 
 #include "facade/acl_commands_def.h"
-#include "facade/facade_types.h"
-#include "facade/reply_builder.h"
 
 namespace facade {
 

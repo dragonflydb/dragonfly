@@ -20,6 +20,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/reply_builder.h"
 #include "server/cluster_support.h"
 #include "server/debugcmd.h"
 #include "server/engine_shard_set.h"

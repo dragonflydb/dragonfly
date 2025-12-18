@@ -6,10 +6,11 @@
 
 #include <absl/types/span.h>
 
+#include <cstdint>
 #include <optional>
 
 #include "base/iterator.h"
-#include "src/facade/facade_types.h"
+#include "common/arg_range.h"
 
 namespace dfly {
 
@@ -22,7 +23,7 @@ using DbIndex = uint16_t;
 using ShardId = uint16_t;
 using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
 
-using facade::ArgSlice;
+using cmn::ArgSlice;
 
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
@@ -58,7 +59,7 @@ struct KeyIndex {
     return base::it::Range(*this, KeyIndex{end, end, step, std::nullopt});
   }
 
-  auto Range(facade::ArgRange args) const {
+  auto Range(cmn::ArgRange args) const {
     return base::it::Transform([args](unsigned idx) { return args[idx]; }, Range());
   }
 
@@ -128,12 +129,12 @@ using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)
 // ShardArgs - hold a span to full arguments and a span of sub-ranges
 // referencing those arguments.
 class ShardArgs {
-  using ArgsIndexPair = std::pair<facade::CmdArgList, absl::Span<const IndexSlice>>;
+  using ArgsIndexPair = std::pair<cmn::ArgSlice, absl::Span<const IndexSlice>>;
   ArgsIndexPair slice_;
 
  public:
   class Iterator {
-    facade::CmdArgList arglist_;
+    cmn::ArgSlice arglist_;
     absl::Span<const IndexSlice>::const_iterator index_it_;
     uint32_t delta_ = 0;
 
@@ -145,7 +146,7 @@ class ShardArgs {
     using reference = value_type&;
 
     // First version, corresponds to spans over arguments.
-    Iterator(facade::CmdArgList list, absl::Span<const IndexSlice>::const_iterator it)
+    Iterator(cmn::ArgSlice list, absl::Span<const IndexSlice>::const_iterator it)
         : arglist_(list), index_it_(it) {
     }
 
@@ -158,7 +159,7 @@ class ShardArgs {
     }
 
     std::string_view operator*() const {
-      return facade::ArgS(arglist_, index());
+      return arglist_[index()];
     }
 
     Iterator& operator++() {
@@ -183,7 +184,7 @@ class ShardArgs {
 
   using const_iterator = Iterator;
 
-  ShardArgs(facade::CmdArgList fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
+  ShardArgs(cmn::ArgSlice fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
   }
 
   ShardArgs() : slice_(ArgsIndexPair{}) {

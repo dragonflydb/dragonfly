@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "facade/reply_builder.h"
+#include "facade/reply_mode.h"
 #include "facade/reply_payload.h"
 
 namespace facade {

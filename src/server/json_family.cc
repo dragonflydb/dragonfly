@@ -290,7 +290,7 @@ template <typename I> void Send(I begin, I end, CommandContext* cmnd_cntx) {
     rb->SendEmptyArray();
   } else {
     if constexpr (is_same_v<decltype(*begin), const string>) {
-      rb->SendBulkStrArr(facade::OwnedArgSlice{begin, end});
+      rb->SendBulkStrArr(cmn::OwnedArgSlice{begin, end});
     } else {
       rb->StartArray(end - begin);
       for (auto i = begin; i != end; ++i) {

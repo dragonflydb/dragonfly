@@ -11,7 +11,7 @@
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
-#include "facade/reply_capture.h"
+#include "facade/reply_mode.h"
 #include "server/common.h"
 #include "server/tx_base.h"
 #include "server/version.h"

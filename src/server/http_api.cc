@@ -7,7 +7,7 @@
 #include "base/logging.h"
 #include "core/flatbuffers.h"
 #include "facade/conn_context.h"
-#include "facade/reply_builder.h"
+#include "facade/reply_capture.h"
 #include "server/main_service.h"
 #include "util/http/http_common.h"
 

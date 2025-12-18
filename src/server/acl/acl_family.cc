@@ -29,6 +29,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
+#include "facade/reply_builder.h"
 #include "io/file.h"
 #include "io/file_util.h"
 #include "server/acl/acl_commands_def.h"

@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "base/iterator.h"
+#include "common/arg_range.h"
 #include "common/backed_args.h"
 #include "facade/op_status.h"
 
@@ -38,10 +39,10 @@ enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 enum class CollectionType : uint8_t { ARRAY, SET, MAP, PUSH };
 
 using MutableSlice = std::string_view;
-using CmdArgList = absl::Span<const std::string_view>;
 using CmdArgVec = std::vector<std::string_view>;
-using ArgSlice = absl::Span<const std::string_view>;
-using OwnedArgSlice = absl::Span<const std::string>;
+using cmn::ArgSlice;
+using CmdArgList = cmn::ArgSlice;
+using cmn::ArgRange;
 
 class ParsedArgs {
  public:
@@ -134,44 +135,10 @@ inline std::string_view ToSV(const std::string& slice) {
 
 inline std::string_view ToSV(std::string&& slice) = delete;
 
-constexpr auto kToSV = [](auto&& v) { return ToSV(std::forward<decltype(v)>(v)); };
-
 inline std::string_view ArgS(ArgSlice args, size_t i) {
   return args[i];
 }
 
-struct ArgRange {
-  ArgRange(ArgRange&&) = default;
-  ArgRange(const ArgRange&) = default;
-  ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
-  }
-
-  template <typename T, std::enable_if_t<!std::is_same_v<ArgRange, T>, bool> = true>
-  ArgRange(T&& span) : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
-  }
-
-  size_t Size() const {
-    return std::visit([](const auto& span) { return span.size(); }, span);
-  }
-
-  auto Range() const {
-    return base::it::Wrap(kToSV, span);
-  }
-
-  auto begin() const {
-    return Range().first;
-  }
-
-  auto end() const {
-    return Range().second;
-  }
-
-  std::string_view operator[](size_t idx) const {
-    return std::visit([idx](const auto& span) { return facade::ToSV(span[idx]); }, span);
-  }
-
-  std::variant<ArgSlice, OwnedArgSlice> span;
-};
 struct ConnectionStats {
   size_t read_buf_capacity = 0;                // total capacity of input buffers
   uint64_t dispatch_queue_entries = 0;         // total number of dispatch queue entries
@@ -276,7 +243,7 @@ struct ErrorReply {
   }
 
   std::string_view ToSv() const {
-    return std::visit(kToSV, message);
+    return std::visit(cmn::kToSV, message);
   }
 
   std::variant<std::string, std::string_view> message;
@@ -320,7 +287,7 @@ constexpr size_t kRecvBufSize = 128;
 }  // namespace facade
 
 namespace std {
-ostream& operator<<(ostream& os, facade::CmdArgList args);
+ostream& operator<<(ostream& os, cmn::ArgSlice args);
 ostream& operator<<(ostream& os, facade::Protocol protocol);
 
 }  // namespace std

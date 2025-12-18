@@ -173,8 +173,8 @@ class Service : public facade::ServiceInterface {
                CommandContext* cmd_cntx);
 
   // Return optional payload - first received error that occured when executing commands.
-  std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
-                                                                           bool force = false);
+  std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
+                                                             bool force = false);
 
   void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 
