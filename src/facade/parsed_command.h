@@ -76,6 +76,10 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(const facade::ErrorReply& error) const;
 };
 
+#ifdef __APPLE__
+static_assert(sizeof(ParsedCommand) == 208);
+#else
 static_assert(sizeof(ParsedCommand) == 216);
+#endif
 
 }  // namespace facade
