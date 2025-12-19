@@ -897,34 +897,18 @@ void GeoFamily::GeoRadiusRO(CmdArgList args, CommandContext* cmd_cntx) {
 
 #define HFUNC(x) SetHandler(&GeoFamily::x)
 
-namespace acl {
-constexpr uint32_t kGeoAdd = WRITE | GEO | SLOW;
-constexpr uint32_t kGeoHash = READ | GEO | SLOW;
-constexpr uint32_t kGeoPos = READ | GEO | SLOW;
-constexpr uint32_t kGeoDist = READ | GEO | SLOW;
-constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
-constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
-constexpr uint32_t kGeoRadiusByMemberRO = READ | GEO | SLOW;
-constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
-constexpr uint32_t kGeoRadiusRO = READ | GEO | SLOW;
-}  // namespace acl
-
 void GeoFamily::Register(CommandRegistry* registry) {
-  registry->StartFamily();
-  *registry << CI{"GEOADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -5, 1, 1, acl::kGeoAdd}.HFUNC(
-                   GeoAdd)
-            << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
-            << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
-            << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
-            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-            << CI{"GEORADIUSBYMEMBER",    CO::JOURNALED | CO::STORE_LAST_KEY, -5, 1, 1,
-                  acl::kGeoRadiusByMember}
-                   .HFUNC(GeoRadiusByMember)
-            << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1, acl::kGeoRadiusByMemberRO}.HFUNC(
-                   GeoRadiusByMemberRO)
-            << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY, -6, 1, 1, acl::kGeoRadius}.HFUNC(
-                   GeoRadius)
-            << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1, acl::kGeoRadiusRO}.HFUNC(GeoRadiusRO);
+  registry->StartFamily(acl::GEO);
+  *registry << CI{"GEOADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1}.HFUNC(GeoAdd)
+            << CI{"GEOHASH", CO::READONLY, -2, 1, 1}.HFUNC(GeoHash)
+            << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
+            << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
+            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
+            << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY, -5, 1, 1}.HFUNC(
+                   GeoRadiusByMember)
+            << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
+            << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY, -6, 1, 1}.HFUNC(GeoRadius)
+            << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1}.HFUNC(GeoRadiusRO);
 }
 
 }  // namespace dfly
