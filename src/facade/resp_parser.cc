@@ -31,11 +31,14 @@ RESPObj::Type RESPObj::GetType() const {
 }
 
 std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len) {
-  auto status = redisReaderFeed(reader_, data, len);
-  if (status != REDIS_OK) {
-    LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
-               << " data: " << std::string_view{data, len};
-    return std::nullopt;
+  int status = REDIS_OK;
+  if (len != 0) {  // if no new data we check is previoud data produced a reply
+    status = redisReaderFeed(reader_, data, len);
+    if (status != REDIS_OK) {
+      LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
+                 << " data: " << std::string_view{data, len};
+      return std::nullopt;
+    }
   }
   void* reply_obj = nullptr;
   status = redisReaderGetReply(reader_, &reply_obj);
