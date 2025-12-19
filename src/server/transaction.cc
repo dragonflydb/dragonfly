@@ -837,7 +837,6 @@ void Transaction::ScheduleInternal() {
 void Transaction::UnlockMulti(bool block) {
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
-  DCHECK_EQ(shard_data_.size(), shard_set->size());  // Multi never uses single shard optimization
 
   // Return if we either didn't schedule at all (and thus run) or already did conclude
   if ((coordinator_state_ & COORD_SCHED) == 0 || (coordinator_state_ & COORD_CONCLUDING) > 0)
@@ -845,12 +844,15 @@ void Transaction::UnlockMulti(bool block) {
   coordinator_state_ |= COORD_CONCLUDING;
 
   // Distribute keys by shards
+  DCHECK_EQ(shard_data_.size(), shard_set->size());  // Atomic doesn't use single shard optimization
   vector<vector<LockFp>> sharded_keys(shard_set->size());
   for (const auto& [sid, fp] : multi_->tag_fps)
     sharded_keys[sid].emplace_back(fp);
 
   // Whether transaction was active on the shard and needs to unlock
-  auto is_active = [&](ShardId sid) { return !sharded_keys[sid].empty() || multi_->mode == GLOBAL; };
+  auto is_active = [&](ShardId sid) {
+    return !sharded_keys[sid].empty() || multi_->mode == GLOBAL;
+  };
 
   // Count number of active shards ahead and set run/use counts
   size_t occupied_shards = 0;
