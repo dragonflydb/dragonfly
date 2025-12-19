@@ -6,20 +6,20 @@
 
 #include <absl/strings/match.h>
 #include <hnswlib/hnswlib.h>
+#include <hnswlib/space_ip.h>
+#include <hnswlib/space_l2.h>
 
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_alg.h"
 #include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
-#include "server/engine_shard_set.h"
-#include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
-#include "util/proactor_pool.h"
 
 namespace dfly::search {
 
@@ -29,15 +29,18 @@ namespace {
 
 class HnswSpace : public hnswlib::SpaceInterface<float> {
   unsigned dim_;
+
   VectorSimilarity sim_;
 
   static float L2DistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
     return L2Distance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
+
                       *static_cast<const unsigned*>(param));
   }
 
   static float IPDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
     return IPDistance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
+
                       *static_cast<const unsigned*>(param));
   }
 
@@ -52,6 +55,7 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
   hnswlib::DISTFUNC<float> get_dist_func() {
     if (sim_ == VectorSimilarity::L2) {
       return L2DistanceStatic;
+
     } else {
       return IPDistanceStatic;
     }
@@ -61,6 +65,7 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
     return &dim_;
   }
 };
+
 }  // namespace
 
 // TODO: to replace it and use HierarchicalNSW directly.
@@ -69,8 +74,8 @@ struct HnswlibAdapter {
   constexpr static size_t kDefaultEfRuntime = 10;
 
   explicit HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{params.dim, params.sim},
-        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
+      : space_{MakeSpace(params.dim, params.sim)},
+        world_{GetSpacePtr(), params.capacity, params.hnsw_m, params.hnsw_ef_construction,
                100 /* seed*/} {
   }
 
@@ -138,6 +143,19 @@ struct HnswlibAdapter {
   }
 
  private:
+  using SpaceUnion = std::variant<hnswlib::L2Space, hnswlib::InnerProductSpace>;
+
+  static SpaceUnion MakeSpace(size_t dim, VectorSimilarity sim) {
+    if (sim == VectorSimilarity::L2)
+      return hnswlib::L2Space{dim};
+    else
+      return hnswlib::InnerProductSpace{dim};
+  }
+
+  hnswlib::SpaceInterface<float>* GetSpacePtr() {
+    return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
+  }
+
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
   void ResizeIfFull() {
@@ -173,7 +191,7 @@ struct HnswlibAdapter {
     return out;
   }
 
-  HnswSpace space_;
+  SpaceUnion space_;
   HierarchicalNSW<float> world_;
   util::fb2::SharedMutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
