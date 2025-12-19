@@ -219,59 +219,6 @@ std::string AbslUnparseFlag(const MemoryBytesFlag& flag) {
   return strings::HumanReadableNumBytes(flag.value);
 }
 
-void ParsedCommand::ResetForReuse() {
-  reply_direct_ = true;
-  reply_payload_ = std::monostate{};
-  dispatch_async_ = false;
-
-  offsets_.clear();
-  if (HeapMemory() > 1024) {
-    storage_.clear();  // also deallocates the heap.
-    offsets_.shrink_to_fit();
-  }
-}
-
-void ParsedCommand::SendError(std::string_view str, std::string_view type) {
-  if (reply_direct_) {
-    rb_->SendError(str, type);
-  } else {
-    reply_payload_ = payload::make_error(str, type);
-  }
-}
-
-void ParsedCommand::SendError(facade::OpStatus status) {
-  if (status == OpStatus::OK) {
-    if (reply_direct_) {
-      rb_->SendSimpleString("OK");
-    } else {
-      reply_payload_ = payload::SimpleString{"OK"};
-    }
-  } else {
-    if (reply_direct_) {
-      rb_->SendError(StatusToMsg(status));
-    } else {
-      reply_payload_ = payload::make_error(StatusToMsg(status));
-    }
-  }
-}
-
-void ParsedCommand::SendError(const facade::ErrorReply& error) {
-  if (error.status)
-    return SendError(*error.status);
-  SendError(error.ToSv(), error.kind);
-}
-
-void ParsedCommand::SendStored(bool ok) {
-  if (reply_direct_) {
-    if (ok)
-      rb_->SendStored();
-    else
-      rb_->SendSetSkipped();
-  } else {
-    reply_payload_ = payload::StoredReply{ok};
-  }
-}
-
 }  // namespace facade
 
 namespace std {

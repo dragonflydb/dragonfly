@@ -86,20 +86,46 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   void ResetForReuse();
+
   void SendError(std::string_view str, std::string_view type = std::string_view{});
   void SendError(facade::OpStatus status);
   void SendError(const facade::ErrorReply& error);
   void SendStored(bool ok /* true - ok, false - skipped*/);
+  void SendSimpleString(std::string_view str);
 
-  payload::Payload TakeReplyPayload() {
-    return std::move(reply_payload_);
-  }
+  // If payload exists, sends it to reply builder, resets it and returns true.
+  // Otherwise, returns false.
+  bool SendPayload();
 
-  bool HasPayload() const {
-    return !reply_direct_ && !std::holds_alternative<std::monostate>(reply_payload_);
+  // Polls whether the command can be finalized for execution.
+  // If it was executed synchronously, returns true.
+  // If it was dispatched asynchronously, marks it as head command and returns
+  // true if it finished executing and its reply is ready, false otherwise.
+  bool PollHeadForCompletion() {
+    if (!dispatch_async_ || reply_direct_)
+      return true;  // assert(holds_alternative<monostate>(cmd->TakeReplyPayload()));
+
+    return CheckDoneAndMarkHead();
   }
 
  private:
+  bool IsReplyCached() const {
+    return !reply_direct_ && !std::holds_alternative<std::monostate>(reply_payload_);
+  }
+
+  bool CheckDoneAndMarkHead();
+  void NotifyReplied();
+
+  // Synchronization state bits. The reply callback in a shard thread sets ASYNC_REPLY_DONE
+  // when payload is filled. It also notifies the connection if the command is marked as HEAD_REPLY.
+  // The connection fiber checks for ASYNC_REPLY_DONE and sets HEAD_REPLY via
+  // CheckDoneAndMarkHead().
+  enum StateBits : uint8_t {
+    ASYNC_REPLY_DONE = 1 << 0,
+    HEAD_REPLY = 1 << 1,  // it's the first command in the reply chain.
+  };
+  std::atomic_uint8_t state_{0};
+
   // whether the reply should be sent directly, or captured for later sending
   bool reply_direct_ = true;
 
