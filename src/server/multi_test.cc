@@ -56,6 +56,8 @@ class MultiTest : public BaseFamilyTest {
   }
 };
 
+struct MultiTxTest : public MultiTest {};
+
 // Check constants are valid.
 TEST_F(MultiTest, VerifyConstants) {
   Run({"mget", kKeySid0, kKeySid1, kKeySid2});
@@ -114,6 +116,24 @@ TEST_F(MultiTest, Multi) {
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(MultiTxTest, MultiUnlock) {
+  auto* exec_cid = service_->FindCmd("EXEC");
+  boost::intrusive_ptr<Transaction> tx(new Transaction{exec_cid});
+
+  auto* ns = &namespaces->GetDefaultNamespace();
+  string_view keys[4] = {kKey1, kKey2, kKey3, kKey4};
+
+  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, keys); });
+
+  for (auto key : keys)
+    EXPECT_TRUE(IsLocked(0, key));
+
+  pp_->at(0)->Await([&] { tx->UnlockMulti(); });
+
+  for (auto key : keys)
+    EXPECT_FALSE(IsLocked(0, key));
 }
 
 TEST_F(MultiTest, MultiGlobalCommands) {
@@ -1164,9 +1184,8 @@ TEST_F(MultiEvalTest, MultiAllEval) {
   RespExpr brpop_resp;
 
   // Run the fiber at creation.
-  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    brpop_resp = Run({"brpop", "x", "1"});
-  });
+  auto fb0 =
+      pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { brpop_resp = Run({"brpop", "x", "1"}); });
   Run({"multi"});
   Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
   Run({"eval", "return redis.call('lpop', 'x')", "0"});
@@ -1182,9 +1201,8 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   RespExpr brpop_resp;
 
   // Run the fiber at creation.
-  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    brpop_resp = Run({"brpop", "x", "1"});
-  });
+  auto fb0 =
+      pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { brpop_resp = Run({"brpop", "x", "1"}); });
   Run({"multi"});
   Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
   Run({"lpop", "x"});

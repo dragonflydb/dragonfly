@@ -850,7 +850,7 @@ void Transaction::UnlockMulti(bool block) {
     sharded_keys[sid].emplace_back(fp);
 
   // Whether transaction was active on the shard and needs to unlock
-  auto is_active = [&](ShardId sid) { return IsGlobal() || sharded_keys[sid].empty(); };
+  auto is_active = [&](ShardId sid) { return !sharded_keys[sid].empty() || multi_->mode == GLOBAL; };
 
   // Count number of active shards ahead and set run/use counts
   size_t occupied_shards = 0;
@@ -863,11 +863,11 @@ void Transaction::UnlockMulti(bool block) {
   use_count_.fetch_add(occupied_shards, std::memory_order_relaxed);
 
   // Dispatch callbacks to unlock on shards
-  for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    if (is_active(sid))
+  for (ShardId sid = 0; sid < shard_data_.size(); sid++) {
+    if (!is_active(sid))
       continue;
 
-    shard_set->Add(i, [this, fps = std::move(sharded_keys[i])] {
+    shard_set->Add(sid, [this, fps = std::move(sharded_keys[sid])] {
       this->UnlockMultiShardCb(fps, EngineShard::tlocal());
       run_barrier_.Dec();
       intrusive_ptr_release(this);
