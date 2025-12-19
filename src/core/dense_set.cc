@@ -222,6 +222,7 @@ uint32_t DenseSet::ClearStep(uint32_t start, uint32_t count) {
   if (size_ == 0) {
     entries_.clear();
     num_links_ = 0;
+    obj_malloc_used_ = 0;
     expiration_used_ = false;
   }
   return end;
