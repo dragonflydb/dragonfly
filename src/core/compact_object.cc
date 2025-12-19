@@ -786,10 +786,9 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
 
   SetMeta(o.taglen_, o.mask_);  // frees own previous resources
   memcpy(&u_, &o.u_, sizeof(u_));
-  huffman_domain_ = o.huffman_domain_;
 
   o.taglen_ = 0;  // forget all data
-  o.huffman_domain_ = 0;
+  o.encoding_ = 0;
   o.mask_ = 0;
   return *this;
 }
@@ -820,7 +819,7 @@ size_t CompactObj::Size() const {
         first_byte = *(uint8_t*)u_.r_obj.inner_obj();
         break;
       case JSON_TAG:
-        DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
+        DCHECK_EQ(encoding_, NONE_ENC);
         if (JsonEnconding() == kEncodingJsonFlat) {
           raw_size = u_.json_obj.flat.json_len;
         } else {
@@ -828,7 +827,7 @@ size_t CompactObj::Size() const {
         }
         break;
       case SBF_TAG:
-        DCHECK_EQ(mask_bits_.encoding, NONE_ENC);
+        DCHECK_EQ(encoding_, NONE_ENC);
         raw_size = u_.sbf->current_size();
         break;
       default:
@@ -841,7 +840,7 @@ size_t CompactObj::Size() const {
 uint64_t CompactObj::HashCode() const {
   DCHECK(taglen_ != JSON_TAG) << "JSON type cannot be used for keys!";
 
-  if (mask_bits_.encoding == NONE_ENC) {
+  if (encoding_ == NONE_ENC) {
     if (IsInline()) {
       return XXH3_64bits_withSeed(u_.inline_str, taglen_, kHashSeed);
     }
@@ -858,7 +857,7 @@ uint64_t CompactObj::HashCode() const {
     }
   }
 
-  DCHECK(mask_bits_.encoding);
+  DCHECK(encoding_);
 
   if (IsInline()) {
     // Buffer must accommodate maximum decompressed size from inline storage
@@ -927,7 +926,7 @@ void CompactObj::SetInt(int64_t val) {
 
   if (INT_TAG != taglen_) {
     SetMeta(INT_TAG, mask_);
-    mask_bits_.encoding = NONE_ENC;
+    encoding_ = NONE_ENC;
   }
 
   u_.ival = val;
@@ -1012,9 +1011,9 @@ SBF* CompactObj::GetSBF() const {
   return u_.sbf;
 }
 
-void CompactObj::SetString(std::string_view str, bool is_key) {
+void CompactObj::SetString(std::string_view str) {
   CHECK(!IsExternal());
-  mask_bits_.encoding = NONE_ENC;
+  encoding_ = NONE_ENC;
 
   // Trying auto-detection heuristics first.
   if (str.size() <= 20) {
@@ -1037,11 +1036,11 @@ void CompactObj::SetString(std::string_view str, bool is_key) {
     }
   }
 
-  EncodeString(str, is_key);
+  EncodeString(str);
 }
 
 void CompactObj::ReserveString(size_t size) {
-  mask_bits_.encoding = NONE_ENC;
+  encoding_ = NONE_ENC;
   SetMeta(ROBJ_TAG, mask_);
 
   u_.r_obj.ReserveString(size, tl.local_mr);
@@ -1054,7 +1053,7 @@ void CompactObj::AppendString(std::string_view str) {
 string_view CompactObj::GetSlice(string* scratch) const {
   CHECK(!IsExternal());
 
-  if (mask_bits_.encoding) {
+  if (encoding_) {
     GetString(scratch);
     return *scratch;
   }
@@ -1153,7 +1152,7 @@ void CompactObj::GetString(char* dest) const {
     return;
   }
 
-  if (mask_bits_.encoding) {
+  if (encoding_) {
     StrEncoding str_encoding = GetStrEncoding();
     string_view decode_blob;
 
@@ -1199,7 +1198,7 @@ void CompactObj::GetString(char* dest) const {
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
   uint8_t first_byte = 0;
-  if (mask_bits_.encoding == HUFFMAN_ENC) {
+  if (encoding_ == HUFFMAN_ENC) {
     CHECK(rep == ExternalRep::STRING);
     first_byte = GetFirstByte();
   }
@@ -1266,8 +1265,8 @@ void CompactObj::Materialize(std::string_view blob, bool is_raw) {
       u_.r_obj.SetString(blob, tl.local_mr);
     }
   } else {
-    mask_bits_.encoding = NONE_ENC;  // reset encoding
-    EncodeString(blob, false);
+    encoding_ = NONE_ENC;  // reset encoding
+    EncodeString(blob);
   }
 }
 
@@ -1276,7 +1275,7 @@ void CompactObj::Reset() {
     Free();
   }
   taglen_ = 0;
-  huffman_domain_ = 0;
+  encoding_ = 0;
   mask_ = 0;
 }
 
@@ -1366,9 +1365,9 @@ size_t CompactObj::MallocUsed(bool slow) const {
 bool CompactObj::operator==(const CompactObj& o) const {
   DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
 
-  uint8_t m1 = mask_bits_.encoding;
-  uint8_t m2 = o.mask_bits_.encoding;
-  if (m1 != m2)
+  uint8_t m1 = encoding_;
+  uint8_t m2 = o.encoding_;
+  if (m1 != m2)  // TODO: Dangerous with dynamic encoding rules
     return false;
 
   if (taglen_ != o.taglen_)
@@ -1404,9 +1403,9 @@ bool CompactObj::CmpNonInline(std::string_view sv) const {
 }
 
 bool CompactObj::CmpEncoded(string_view sv) const {
-  DCHECK(mask_bits_.encoding);
+  DCHECK(encoding_);
 
-  if (mask_bits_.encoding == HUFFMAN_ENC) {
+  if (encoding_ == HUFFMAN_ENC) {
     size_t sz = Size();
     if (sv.size() != sz)
       return false;
@@ -1416,7 +1415,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       constexpr size_t kMaxHuffLen = kInlineLen * 8;
       if (sz <= kMaxHuffLen) {
         char buf[kMaxHuffLen];
-        const auto& decoder = tl.GetHuffmanDecoder(huffman_domain_);
+        auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
+        const auto& decoder = tl.GetHuffmanDecoder(domain);
         CHECK(decoder.Decode({u_.inline_str + 1, size_t(taglen_ - 1)}, sz, buf));
         return sv == string_view(buf, sz);
       }
@@ -1497,9 +1497,9 @@ bool CompactObj::CmpEncoded(string_view sv) const {
   return false;
 }
 
-void CompactObj::EncodeString(string_view str, bool is_key) {
+void CompactObj::EncodeString(string_view str) {
   DCHECK_GT(str.size(), kInlineLen);
-  DCHECK_EQ(NONE_ENC, mask_bits_.encoding);
+  DCHECK_EQ(NONE_ENC, encoding_);
 
   string_view encoded = str;
   bool huff_encoded = false;
@@ -1517,7 +1517,7 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
 
   // if !is_ascii, we try huffman encoding next.
   if (!is_ascii && str.size() <= kMaxHuffLen) {
-    auto& huffman = is_key ? tl.huff_keys : tl.huff_string_values;
+    auto& huffman = is_key_ ? tl.huff_keys : tl.huff_string_values;
     if (huffman.encoder.valid()) {
       unsigned dest_len = huffman.encoder.CompressedBound(str.size());
       // 1 byte for storing the size delta.
@@ -1536,8 +1536,7 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
           unsigned delta = str.size() - dest_len;
           DCHECK_LT(delta, 256u);
           tl.tmp_buf[0] = static_cast<uint8_t>(delta);
-          mask_bits_.encoding = HUFFMAN_ENC;
-          huffman_domain_ = is_key ? HUFF_KEYS : HUFF_STRING_VALUES;
+          encoding_ = HUFFMAN_ENC;
           if (encoded.size() <= kInlineLen) {
             SetMeta(encoded.size(), mask_);
             memcpy(u_.inline_str, tl.tmp_buf.data(), encoded.size());
@@ -1561,10 +1560,10 @@ void CompactObj::EncodeString(string_view str, bool is_key) {
     size_t rev_len = ascii_len(encode_len);
 
     if (rev_len == str.size()) {
-      mask_bits_.encoding = ASCII2_ENC;  // str hits its highest bound.
+      encoding_ = ASCII2_ENC;  // str hits its highest bound.
     } else {
       CHECK_EQ(str.size(), rev_len - 1) << "Bad ascii encoding for len " << str.size();
-      mask_bits_.encoding = ASCII1_ENC;  // str is shorter than its highest bound.
+      encoding_ = ASCII1_ENC;  // str is shorter than its highest bound.
     }
 
     tl.tmp_buf.resize(encode_len);

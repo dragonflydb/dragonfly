@@ -166,14 +166,15 @@ class CompactObj {
     SERIALIZED_MAP  // OBJ_HASH, Serialized map
   };
 
-  CompactObj() : taglen_{0}, huffman_domain_{0} {  // default - empty string
+  explicit CompactObj(bool is_key)
+      : is_key_{is_key}, taglen_{0}, encoding_{0} {  // default - empty string
   }
 
-  explicit CompactObj(std::string_view str, bool is_key) : CompactObj() {
-    SetString(str, is_key);
+  CompactObj(std::string_view str, bool is_key) : CompactObj(is_key) {
+    SetString(str);
   }
 
-  CompactObj(CompactObj&& cs) noexcept : CompactObj() {
+  CompactObj(CompactObj&& cs) noexcept : CompactObj(cs.is_key_) {
     operator=(std::move(cs));
   };
 
@@ -289,6 +290,7 @@ class CompactObj {
 
   void GetString(std::string* res) const;
 
+  void SetString(std::string_view str);
   void ReserveString(size_t size);
   void AppendString(std::string_view str);
 
@@ -412,7 +414,7 @@ class CompactObj {
   std::array<std::string_view, 2> GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
-    return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};
+    return StrEncoding{encoding_, bool(is_key_)};
   }
 
   bool HasAllocated() const;
@@ -424,8 +426,7 @@ class CompactObj {
   }
 
  protected:
-  void SetString(std::string_view str, bool is_key);
-  void EncodeString(std::string_view str, bool is_key);
+  void EncodeString(std::string_view str);
 
   // Requires: HasAllocated() - true.
   void Free();
@@ -513,9 +514,6 @@ class CompactObj {
       uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
-      // See the EncodingEnum for the meaning of these bits.
-      uint8_t encoding : 2;
-
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
       // It is cleared when the io request finishes or is cancelled.
       uint8_t io_pending : 1;
@@ -530,12 +528,13 @@ class CompactObj {
   };
 
   // TODO: use c++20 bitfield initializers
-  uint8_t taglen_ : 5;          // Either length of inline string or tag of type
-  uint8_t huffman_domain_ : 1;  // Value from HuffmanDomain enum. TODO: replace as is_key
+  const uint8_t is_key_ : 1;
+  uint8_t taglen_ : 5;    // Either length of inline string or tag of type
+  uint8_t encoding_ : 2;  // Encoding of string values
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {
-  if (mask_bits_.encoding)
+  if (encoding_)
     return CmpEncoded(sv);
 
   if (IsInline()) {
@@ -545,21 +544,16 @@ inline bool CompactObj::operator==(std::string_view sv) const {
 }
 
 struct CompactKey : public CompactObj {
-  CompactKey() : CompactObj() {
+  CompactKey() : CompactObj(true) {
   }
 
   explicit CompactKey(std::string_view str) : CompactObj{str, true} {
-  }
-
-  void SetString(std::string_view str) {
-    CompactObj::SetString(str, true);
   }
 
   CompactKey AsRef() const {
     CompactKey res;
     memcpy(&res.u_, &u_, sizeof(u_));
     res.taglen_ = taglen_;
-    res.huffman_domain_ = huffman_domain_;
     res.mask_ = mask_;
     res.mask_bits_.ref = 1;
 
@@ -568,14 +562,10 @@ struct CompactKey : public CompactObj {
 };
 
 struct CompactValue : public CompactObj {
-  CompactValue() : CompactObj() {
+  CompactValue() : CompactObj(false) {
   }
 
   explicit CompactValue(std::string_view str) : CompactObj{str, false} {
-  }
-
-  void SetString(std::string_view str) {
-    CompactObj::SetString(str, false);
   }
 };
 
