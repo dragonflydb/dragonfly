@@ -160,6 +160,8 @@ void ParsedCommand::NotifyReplied() {
 
   // If it was marked as head already, notify the connection that the head is done.
   if (prev_state & HEAD_REPLY) {
+    // TODO: this might crash as we currently do not wait for async commands on connection close.
+    DCHECK(conn_cntx_);
     conn_cntx_->conn()->Notify();
   }
 }
