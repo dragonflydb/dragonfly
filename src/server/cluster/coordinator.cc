@@ -88,13 +88,14 @@ class Coordinator::CrossShardClient : public ProtocolClient {
     {
       std::lock_guard lk(send_mu_);
       send_queue_.push(req);
+      ready_to_send_ = true;
     }
     {
       std::lock_guard lk(resp_mu_);
       resp_queue_.push(req);
+      ready_to_resp_ = true;
     }
-    ready_to_send_ = true;
-    ready_to_resp_ = true;
+
     waker_.notifyAll();
   }
 
