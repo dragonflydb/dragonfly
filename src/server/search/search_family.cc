@@ -1208,7 +1208,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
 
 }  // namespace
 
-void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   WarmupQueryParser();
 
   auto* builder = cmd_cntx->rb();
@@ -1282,7 +1282,7 @@ void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendOk();
 }
 
-void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
@@ -1340,7 +1340,7 @@ void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendOk();
 }
 
-void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   // Parse optional DD (Delete Documents) parameter
@@ -1400,7 +1400,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
-void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   vector<DocIndexInfo> infos(shard_set->size());
@@ -1485,7 +1485,7 @@ void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLong(total_num_docs);
 }
 
-void SearchFamily::FtList(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
@@ -1565,7 +1565,7 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   return results;
 }
 
-void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
@@ -1645,7 +1645,7 @@ void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
 }
 
-void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view index_name = parser.Next();
@@ -1781,7 +1781,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   string_view field_name = ArgS(args, 1);
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
@@ -1817,7 +1817,7 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }
 
-void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto* builder = cmd_cntx->rb();
 
@@ -1990,7 +1990,7 @@ void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void SearchFamily::FtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -2133,7 +2133,7 @@ void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
   ABSL_UNREACHABLE();
 }
 
-void SearchFamily::FtConfig(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -2146,7 +2146,7 @@ void SearchFamily::FtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   func(&parser, rb);
 }
 
-void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [index_name, group_id] = parser.Next<string_view, string>();
 
@@ -2194,7 +2194,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb()->SendOk();
 }
 
-void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   // FT._DEBUG command stub for test compatibility
   // This command is used by integration tests to control internal behavior
   CmdArgParser parser{args};
@@ -2226,7 +2226,7 @@ void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-#define HFUNC(x) SetHandler(&SearchFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
 // to set as the default for the search family of commands. More sensible defaults,

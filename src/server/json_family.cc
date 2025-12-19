@@ -1657,7 +1657,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 
 }  // namespace
 
-void JsonFamily::Set(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1689,7 +1689,7 @@ void JsonFamily::Set(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // JSON.MSET key path value [key path value ...]
-void JsonFamily::MSet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 3u);
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1715,7 +1715,7 @@ void JsonFamily::MSet(CmdArgList args, CommandContext* cmd_cntx) {
 
 // JSON.MERGE key path value
 // Based on https://datatracker.ietf.org/doc/html/rfc7386 spec
-void JsonFamily::Merge(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.Next();
@@ -1734,7 +1734,7 @@ void JsonFamily::Merge(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendError(status);
 }
 
-void JsonFamily::Resp(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -1750,7 +1750,7 @@ void JsonFamily::Resp(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view command = parser.Next();
 
@@ -1813,7 +1813,7 @@ void JsonFamily::Debug(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
 }
 
-void JsonFamily::MGet(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   string_view path = ArgS(args, args.size() - 1);
@@ -1853,7 +1853,7 @@ void JsonFamily::MGet(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(results.begin(), results.end(), cmd_cntx);
 }
 
-void JsonFamily::ArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.Next();
@@ -1889,7 +1889,7 @@ void JsonFamily::ArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   int index = -1;
@@ -1916,7 +1916,7 @@ void JsonFamily::ArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
@@ -1936,7 +1936,7 @@ void JsonFamily::ArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   int start_index;
@@ -1965,7 +1965,7 @@ void JsonFamily::ArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrPop(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -1984,7 +1984,7 @@ void JsonFamily::ArrPop(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Clear(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2000,7 +2000,7 @@ void JsonFamily::Clear(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::StrAppend(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   string_view value = ArgS(args, 2);
@@ -2023,7 +2023,7 @@ void JsonFamily::StrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2039,7 +2039,7 @@ void JsonFamily::ObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2055,7 +2055,7 @@ void JsonFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::NumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdNumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
@@ -2071,7 +2071,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::SendJsonString(result, cmd_cntx);
 }
 
-void JsonFamily::NumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
@@ -2087,7 +2087,7 @@ void JsonFamily::NumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::SendJsonString(result, cmd_cntx);
 }
 
-void JsonFamily::Toggle(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdToggle(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2102,7 +2102,7 @@ void JsonFamily::Toggle(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void JsonFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2118,7 +2118,7 @@ void JsonFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2134,7 +2134,7 @@ void JsonFamily::ArrLen(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ObjLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2150,7 +2150,7 @@ void JsonFamily::ObjLen(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::StrLen(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
@@ -2166,7 +2166,7 @@ void JsonFamily::StrLen(CmdArgList args, CommandContext* cmd_cntx) {
   reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Get(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   facade::CmdArgParser parser{args};
@@ -2194,7 +2194,7 @@ void JsonFamily::Get(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-#define HFUNC(x) SetHandler(&JsonFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 // Redis modules do not have acl categories, therefore they can not be used by default.
 // However, we do not implement those as modules and therefore we can define our own

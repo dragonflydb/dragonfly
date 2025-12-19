@@ -4,10 +4,7 @@
 
 #pragma once
 
-#include "facade/facade_types.h"
-
 namespace dfly {
-
 class CommandRegistry;
 
 class StringFamily {
