@@ -170,7 +170,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
       value = res.it->second.ToString();
 
     size_t len = SetRangeInternal(&value, start, range);
-    res.it->second.SetValue(value);
+    res.it->second.SetString(value);
     return {len};
   }
 }
@@ -230,7 +230,7 @@ size_t ExtendExisting(const DbSlice::Iterator& it, string_view key, string_view 
   string_view slice = it->second.GetSlice(&tmp);
 
   string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-  it->second.SetString(new_val, false);
+  it->second.SetString(new_val);
   return new_val.size();
 }
 
@@ -255,7 +255,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   if (add_res.is_new) {
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
-    add_res.it->second.SetValue(str);
+    add_res.it->second.SetString(str);
 
     return val;
   }
@@ -279,7 +279,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  add_res.it->second.SetValue(str);
+  add_res.it->second.SetString(str);
 
   return base;
 }
@@ -299,10 +299,10 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     if (skip_on_missing)
       return OpStatus::KEY_NOTFOUND;
 
-    CompactObj cobj;
-    cobj.SetInt(incr);
+    PrimeValue pv;
+    pv.SetInt(incr);
 
-    auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
+    auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), 0);
     RETURN_ON_BAD_STATUS(op_result);
 
     return incr;
@@ -471,10 +471,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 
       res->it->second.SetInt(new_tat_ns);
     } else {
-      CompactObj cobj;
-      cobj.SetInt(new_tat_ns);
+      PrimeValue pv;
+      pv.SetInt(new_tat_ns);
 
-      auto res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
+      auto res = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), new_tat_ms);
       if (!res) {
         return res.status();
       }
@@ -632,7 +632,7 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
   RETURN_ON_BAD_STATUS(it_res);
 
   if (it_res->is_new) {
-    it_res->it->second.SetValue(value);
+    it_res->it->second.SetString(value);
     return {it_res->it->second.Size()};
   }
 
@@ -905,7 +905,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   // overwrite existing entry.
-  prime_value.SetValue(value);
+  prime_value.SetString(value);
 
   DCHECK_EQ(has_expire, prime_value.HasExpire());
 
@@ -916,7 +916,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
                     std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
-  it->second = PrimeValue{value, false};
+  it->second = PrimeValue{value};
 
   if (params.expire_after_ms) {
     db_slice.AddExpire(op_args_.db_cntx.db_index, it,

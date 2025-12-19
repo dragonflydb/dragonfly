@@ -339,7 +339,7 @@ void ElementAccess::Commit(string_view new_value) const {
       }
       context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
     } else {
-      element_iter_->second.SetValue(new_value);
+      element_iter_->second.SetString(new_value);
       post_updater_.Run();
     }
   }

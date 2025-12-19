@@ -625,11 +625,11 @@ void SendAtLeastOneKeyError(string_view cmd, SinkReplyBuilder* builder) {
 enum class AggType : uint8_t { SUM, MIN, MAX, NOOP };
 using ScoredMap = absl::flat_hash_map<std::string, double>;
 
-ScoredMap FromObject(const CompactObj& co, double weight) {
+ScoredMap FromObject(const PrimeValue& co, double weight) {
   ZSetFamily::RangeParams params;
   params.with_scores = true;
   // RANGE is a read-only operation, but requires const_cast
-  IntervalVisitor vis(Action::RANGE, params, &const_cast<CompactObj&>(co));
+  IntervalVisitor vis(Action::RANGE, params, &const_cast<PrimeValue&>(co));
   vis(ZSetFamily::IndexInterval(0, -1));
 
   ScoredArray arr = vis.PopResult();

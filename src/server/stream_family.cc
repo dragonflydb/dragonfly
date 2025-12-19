@@ -1516,8 +1516,8 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
 
   StreamMemTracker mem_tracker;
 
-  CompactObj& cobj = res_it->it->second;
-  stream* stream_inst = (stream*)cobj.RObjPtr();
+  PrimeValue& pv = res_it->it->second;
+  stream* stream_inst = (stream*)pv.RObjPtr();
   long long entries_added = -1;
   streamID max_xdel_id{0, 0};
   streamID id = sid;
@@ -1552,7 +1552,7 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
   if (!streamIDEqZero(&max_xdel_id))
     stream_inst->max_deleted_entry_id = max_xdel_id;
 
-  mem_tracker.UpdateStreamSize(cobj);
+  mem_tracker.UpdateStreamSize(pv);
 
   return OpStatus::OK;
 }
@@ -1563,8 +1563,8 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
   if (!res_it)
     return res_it.status();
 
-  CompactObj& cobj = res_it->it->second;
-  stream* stream_inst = (stream*)cobj.RObjPtr();
+  PrimeValue& pv = res_it->it->second;
+  stream* stream_inst = (stream*)pv.RObjPtr();
 
   uint32_t deleted = 0;
   bool first_entry = false;
@@ -1599,7 +1599,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
     // Only update size tracking if we actually deleted something.
     // This avoids issues with memory tracking noise from other operations
     // in the same thread.
-    tracker.UpdateStreamSize(cobj);
+    tracker.UpdateStreamSize(pv);
   }
   return deleted;
 }
@@ -2033,12 +2033,12 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const Trim
 
   StreamMemTracker mem_tracker;
 
-  CompactObj& cobj = res_it->it->second;
-  stream* s = (stream*)cobj.RObjPtr();
+  PrimeValue& pv = res_it->it->second;
+  stream* s = (stream*)pv.RObjPtr();
 
   int64_t deleted_items_number = TrimStream(opts, s);
 
-  mem_tracker.UpdateStreamSize(cobj);
+  mem_tracker.UpdateStreamSize(pv);
 
   if (op_args.shard->journal() && journal_as_minid) {
     const bool stream_is_empty = s->length == 0;

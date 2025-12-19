@@ -80,7 +80,7 @@ class PageUsageStatsTest : public ::testing::Test {
   std::unique_ptr<StringMap> string_map_;
   SmallString small_string_{};
   std::unique_ptr<QList> qlist_;
-  CompactObj c_obj_{};
+  CompactValue c_obj_{};
 };
 
 TEST_F(PageUsageStatsTest, Defrag) {
@@ -91,7 +91,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
   small_string_.Assign("small-string");
 
   // INT_TAG, defrag will be skipped
-  c_obj_.SetValue("1");
+  c_obj_.SetString("1");
 
   qlist_->Push("xxxx", QList::HEAD);
 
