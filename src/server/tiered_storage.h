@@ -15,7 +15,7 @@
 #include "server/tx_base.h"
 #include "util/fibers/future.h"
 
-#ifdef __linux__
+#ifdef WITH_TIERING
 
 #include <absl/container/flat_hash_map.h>
 
@@ -255,4 +255,4 @@ class TieredStorage {
 
 }  // namespace dfly
 
-#endif  // __linux__
+#endif  // WITH_TIERING
