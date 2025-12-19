@@ -8,57 +8,11 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
+#include "facade/reply_capture.h"
 
 namespace facade {
 
 using namespace std;
-
-namespace {
-
-struct PayloadVisitor {
-  void operator()(monostate) {
-  }
-
-  void operator()(long v) {
-    rb->SendLong(v);
-  }
-
-  void operator()(double v) {
-    LOG(FATAL) << "Double replies are not supported in MC protocol";
-  }
-
-  void operator()(const payload::SimpleString& ss) {
-    rb->SendSimpleString(ss);
-  }
-
-  void operator()(const payload::BulkString& bs) {
-    LOG(FATAL) << "TBD";
-  }
-
-  void operator()(payload::Null) {
-    LOG(FATAL) << "TBD";
-  }
-
-  void operator()(const payload::Error& err) {
-    rb->SendError(err->first, err->second);
-  }
-
-  void operator()(payload::StoredReply sr) {
-    if (sr.ok) {
-      rb->SendStored();
-    } else {
-      rb->SendSetSkipped();
-    }
-  }
-
-  void operator()(const unique_ptr<payload::CollectionPayload>& cp) {
-    LOG(FATAL) << "TBD";
-  }
-
-  SinkReplyBuilder* rb;
-};
-
-}  // namespace
 
 void ParsedCommand::ResetForReuse() {
   reply_direct_ = true;
@@ -125,9 +79,7 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
 
 bool ParsedCommand::SendPayload() {
   if (IsReplyCached()) {
-    PayloadVisitor pv{rb_};
-    std::visit(pv, reply_payload_);
-
+    CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
     reply_payload_ = {};
     return true;
   }
