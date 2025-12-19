@@ -129,7 +129,8 @@ uint32_t OAHEntry::Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log
 
   ClearHash();  // the cache is invalid after rehash operation
 
-  assert(BucketId(Hash(Key()), new_capacity_log) == new_bucket_id);
+  const uint32_t expected_bucket_id = BucketId(Hash(Key()), new_capacity_log);
+  assert(expected_bucket_id == new_bucket_id);
 
   return new_bucket_id;
 }

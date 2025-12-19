@@ -196,6 +196,10 @@ class OAHEntry {
     return (data_ != 0) && !(data_ & kVectorBit);
   }
 
+  size_t AllocSize() const {
+    return zmalloc_usable_size(Raw());
+  }
+
   PtrVector<OAHEntry>& AsVector() {
     static_assert(sizeof(PtrVector<OAHEntry>) == sizeof(uint64_t));
     return *reinterpret_cast<PtrVector<OAHEntry>*>(&data_);

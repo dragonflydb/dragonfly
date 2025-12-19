@@ -9,13 +9,15 @@
 
 #include <vector>
 
-#include "base/pmr/memory_resource.h"
+#include "core/detail/stateless_allocator.h"
 #include "oah_entry.h"
 
 namespace dfly {
 
+// TODO add template parameter instead of OAHEntry
 class OAHSet {  // Open Addressing Hash Set
-  using Buckets = std::vector<OAHEntry, PMR_NS::polymorphic_allocator<OAHEntry>>;
+  using OAHEntryAllocator = StatelessAllocator<OAHEntry>;
+  using Buckets = std::vector<OAHEntry, OAHEntryAllocator>;
 
  public:
   class iterator {
@@ -32,8 +34,11 @@ class OAHSet {  // Open Addressing Hash Set
       SetEntryIt();
     }
 
-    void SetExpiryTime(uint32_t ttl_sec, size_t* obj_malloc_used) {
+    void SetExpiryTime(uint32_t ttl_sec) {
+      auto& entry = owner_->entries_[bucket_][pos_];
+      owner_->obj_alloc_used_ -= entry.AllocSize();
       owner_->entries_[bucket_][pos_].SetExpiry(owner_->EntryTTL(ttl_sec));
+      owner_->obj_alloc_used_ += entry.AllocSize();
     }
 
     iterator& operator++() {
@@ -104,8 +109,7 @@ class OAHSet {  // Open Addressing Hash Set
     return iterator(nullptr, 0, 0);
   }
 
-  explicit OAHSet(PMR_NS::memory_resource* mr = PMR_NS::get_default_resource()) : entries_(mr) {
-  }
+  explicit OAHSet() = default;
 
   bool Add(std::string_view str, uint32_t ttl_sec = UINT32_MAX) {
     uint64_t hash = Hash(str);
@@ -129,6 +133,7 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     AddUnique(std::move(entry), bucket_id, ttl_sec);
+    obj_alloc_used_ += entry.AllocSize();
     return true;
   }
 
@@ -149,6 +154,7 @@ class OAHSet {  // Open Addressing Hash Set
     size_ = 0;
   }
 
+  // TODO should be removed, inefficient
   void AddUnique(OAHEntry&& e, uint32_t bid, uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
     assert(Capacity() >= kDisplacementSize);
@@ -234,6 +240,7 @@ class OAHSet {  // Open Addressing Hash Set
       if (auto res = bucket.Pop(); !res.Empty()) {
         assert(!res.IsVector());
         --size_;
+        obj_alloc_used_ -= res.AllocSize();
         return res;
       }
     }
@@ -248,6 +255,7 @@ class OAHSet {  // Open Addressing Hash Set
     auto bucket_id = BucketId(hash, capacity_log_);
     auto item = FindInternal(bucket_id, str, hash);
     if (item != end()) {
+      obj_alloc_used_ -= item->AllocSize();
       *item = OAHEntry();
       return true;
     }
@@ -295,16 +303,12 @@ class OAHSet {  // Open Addressing Hash Set
     return time_now_;
   }
 
-  size_t ObjMallocUsed() const {
-    // TODO implement
-    assert(false);
-    return 0;
+  size_t ObjAllocUsed() const {
+    return obj_alloc_used_;
   }
 
-  size_t SetMallocUsed() const {
-    // TODO implement
-    assert(false);
-    return 0;
+  size_t SetAllocUsed() const {
+    return entries_.capacity() * sizeof(OAHEntry) + ptr_vectors_size_ * sizeof(OAHEntry);
   }
 
   bool ExpirationUsed() const {
@@ -326,6 +330,13 @@ class OAHSet {  // Open Addressing Hash Set
     size_t prev_size = 1ul << prev_capacity_log;
     // we should prevent moving elements before current possition to avoid double processing
     constexpr size_t mix_size = 2 << kShiftLog;
+
+    auto max_element = std::min(mix_size, prev_size);
+    std::array<OAHEntry, mix_size> old_buckets{};
+    for (size_t i = 0; i < max_element; ++i) {
+      old_buckets[i] = std::move(entries_[i]);
+    }
+
     for (size_t bucket_id = prev_size - 1; bucket_id >= mix_size; --bucket_id) {
       auto bucket = std::move(entries_[bucket_id]);  // can be redundant
       // TODO add optimization for package processing
@@ -342,11 +353,6 @@ class OAHSet {  // Open Addressing Hash Set
           entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
-    }
-    auto max_element = std::min(mix_size, prev_size);
-    std::array<OAHEntry, mix_size> old_buckets{};
-    for (size_t i = 0; i < max_element; ++i) {
-      old_buckets[i] = std::move(entries_[i]);
     }
 
     for (size_t bucket_id = 0; bucket_id < max_element; ++bucket_id) {
@@ -467,6 +473,10 @@ class OAHSet {  // Open Addressing Hash Set
   static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
   static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
+
+  mutable size_t obj_alloc_used_ = 0;
+  mutable std::uint32_t ptr_vectors_size_ = 0;
+
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
   std::uint32_t time_now_ = 0;

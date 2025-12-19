@@ -24,43 +24,19 @@ namespace dfly {
 
 using namespace std;
 
-class ISSAllocator : public PMR_NS::memory_resource {
- public:
-  bool all_freed() const {
-    return alloced_ == 0;
-  }
-
-  void* do_allocate(size_t bytes, size_t alignment) override {
-    alloced_ += bytes;
-    void* p = PMR_NS::new_delete_resource()->allocate(bytes, alignment);
-    return p;
-  }
-
-  void do_deallocate(void* p, size_t bytes, size_t alignment) override {
-    alloced_ -= bytes;
-    return PMR_NS::new_delete_resource()->deallocate(p, bytes, alignment);
-  }
-
-  bool do_is_equal(const PMR_NS::memory_resource& other) const noexcept override {
-    return PMR_NS::new_delete_resource()->is_equal(other);
-  }
-
- private:
-  size_t alloced_ = 0;
-};
-
 class OAHSetTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
     auto* tlh = mi_heap_get_backing();
     init_zmalloc_threadlocal(tlh);
+    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
   }
 
   static void TearDownTestSuite() {
   }
 
   void SetUp() override {
-    ss_ = new OAHSet(&alloc_);
+    ss_ = new OAHSet;
     generator_.seed(0);
   }
 
@@ -68,12 +44,10 @@ class OAHSetTest : public ::testing::Test {
     delete ss_;
 
     // ensure there are no memory leaks after every test
-    EXPECT_TRUE(alloc_.all_freed());
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
   OAHSet* ss_;
-  ISSAllocator alloc_;
   mt19937 generator_;
 };
 
@@ -542,8 +516,7 @@ TEST_F(OAHSetTest, SetFieldExpireHasExpiry) {
   auto k = ss_->Find("k1");
   EXPECT_TRUE(k.HasExpiry());
   EXPECT_EQ(k.ExpiryTime(), 100);
-  size_t obj_malloc_used;
-  k.SetExpiryTime(1, &obj_malloc_used);
+  k.SetExpiryTime(1);
   EXPECT_TRUE(k.HasExpiry());
   EXPECT_EQ(k.ExpiryTime(), 1);
 }
@@ -552,8 +525,7 @@ TEST_F(OAHSetTest, SetFieldExpireNoHasExpiry) {
   EXPECT_TRUE(ss_->Add("k1"));
   auto k = ss_->Find("k1");
   EXPECT_FALSE(k.HasExpiry());
-  size_t obj_malloc_used;
-  k.SetExpiryTime(10, &obj_malloc_used);
+  k.SetExpiryTime(10);
   EXPECT_TRUE(k.HasExpiry());
   EXPECT_EQ(k.ExpiryTime(), 10);
 }
@@ -696,6 +668,9 @@ void BM_Clear(benchmark::State& state) {
     state.PauseTiming();
     for (size_t i = 0; i < elems; ++i) {
       string str = random_string(generator, 16);
+      if (str == "9lbgkq0tgfdc7ugk") {
+        LOG(INFO) << "here";
+      }
       ss.Add(str);
     }
     state.ResumeTiming();
