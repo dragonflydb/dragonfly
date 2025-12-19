@@ -630,7 +630,7 @@ void Connection::OnShutdown() {
 
   BreakOnce(POLLHUP);
   io_ec_ = make_error_code(errc::connection_aborted);
-  io_event_.notify_one();
+  io_event_.notify();
 }
 
 void Connection::OnPreMigrateThread() {
@@ -662,7 +662,7 @@ void Connection::OnPostMigrateThread() {
   if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
       DoReadOnRecv(n);
-      io_event_.notify_one();
+      io_event_.notify();
     });
   }
 
@@ -2272,7 +2272,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DoReadOnRecv(n);
-    io_event_.notify_one();
+    io_event_.notify();
   });
 
   do {
@@ -2284,8 +2284,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // an iteration the fiber does not poll the socket for more data it might deadlock.
     // TODO maybe use a flag instead of a poll
     DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-    fb2::NoOpLock noop;
-    io_event_.wait(noop, [this]() { return io_buf_.InputLen() > 0 || io_ec_; });
+    io_event_.await([this]() {
+      return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
+             io_ec_;
+    });
 
     if (io_ec_) {
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
