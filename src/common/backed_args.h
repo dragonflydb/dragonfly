@@ -139,6 +139,7 @@ class BackedArguments {
   }
 
   std::string_view back() const {
+    assert(size() > 0);
     return at(size() - 1);
   }
 
