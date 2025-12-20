@@ -138,11 +138,30 @@ class BackedArguments {
     storage_.clear();
   }
 
+  std::string_view back() const {
+    assert(size() > 0);
+    return at(size() - 1);
+  }
+
   // Reserves space for additional argument of given length at the end.
   void PushArg(size_t len) {
     size_t old_size = storage_.size();
     offsets_.push_back(old_size);
     storage_.resize(old_size + len + 1);
+  }
+
+  void PushArg(std::string_view arg) {
+    PushArg(arg.size());
+    char* dest = storage_.data() + offsets_.back();
+    if (arg.size() > 0)
+      memcpy(dest, arg.data(), arg.size());
+    dest[arg.size()] = '\0';
+  }
+
+  void PopArg() {
+    uint32_t last_offs = offsets_.back();
+    offsets_.pop_back();
+    storage_.resize(last_offs);
   }
 
  protected:

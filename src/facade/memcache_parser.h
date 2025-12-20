@@ -123,7 +123,7 @@ class MemcacheParser {
   }
 
   size_t UsedMemory() const {
-    return tmp_args_.capacity() * sizeof(std::string_view);
+    return 0;
   }
 
   void Reset() {
@@ -134,9 +134,8 @@ class MemcacheParser {
 
  private:
   Result ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest);
-
+  Result ParseInternal(ArgSlice tokens_view, Command* cmd);
   uint32_t val_len_to_read_ = 0;
-  std::vector<std::string_view> tmp_args_;
 };
 
 }  // namespace facade

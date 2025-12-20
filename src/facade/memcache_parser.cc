@@ -62,6 +62,8 @@ MP::CmdType From(string_view token) {
 }
 
 MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
+  DCHECK_EQ(res->size(), 0u);
+
   const size_t num_tokens = tokens.size();
   unsigned opt_pos = 4;
   if (res->type == MP::CAS) {
@@ -93,13 +95,13 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   }
 
   string_view key = tokens[0];
-  res->backed_args->Assign(&key, &key + 1, 1);
+  res->backed_args->PushArg(key);
   res->backed_args->PushArg(bytes_len);
 
   return MP::OK;
 }
 
-MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Command* res) {
+MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   size_t key_pos = 0;
   if (res->type == MP::GAT || res->type == MP::GATS) {
@@ -111,7 +113,7 @@ MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Comman
 
   // We support only `flushall` or `flushall 0`
   if (key_pos < num_tokens && res->type == MP::FLUSHALL) {
-    DCHECK(args->empty());
+    DCHECK_EQ(res->size(), 0u);
 
     int delay = 0;
     if (key_pos + 1 == num_tokens && absl::SimpleAtoi(tokens[key_pos], &delay) && delay == 0)
@@ -119,7 +121,7 @@ MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Comman
     return MP::PARSE_ERROR;
   }
 
-  args->push_back(tokens[key_pos++]);
+  res->backed_args->PushArg(tokens[key_pos++]);
 
   if (key_pos < num_tokens && res->type == MP::STATS)
     return MP::PARSE_ERROR;  // we don't support additional arguments to stats for now
@@ -134,17 +136,16 @@ MP::Result ParseValueless(ArgSlice tokens, vector<string_view>* args, MP::Comman
   }
 
   while (key_pos < num_tokens) {
-    args->push_back(tokens[key_pos++]);
+    res->backed_args->PushArg(tokens[key_pos++]);
   }
 
   if (res->type >= MP::DELETE) {  // write commands
-    if (args->size() > 1 && args->back() == "noreply") {
+    if (res->size() > 1 && res->backed_args->back() == "noreply") {
       res->no_reply = true;
-      args->pop_back();
+      res->backed_args->PopArg();
     }
   }
 
-  res->backed_args->Assign(args->begin(), args->end(), args->size());
   return MP::OK;
 }
 
@@ -292,7 +293,7 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
         return MP::PARSE_ERROR;
     }
   }
-  res->backed_args->Assign(&arg0, &arg0 + 1, 1);
+  res->backed_args->PushArg(arg0);
   if (MP::IsStoreCmd(res->type)) {
     res->backed_args->PushArg(bytes_len);
   }
@@ -323,23 +324,29 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   }
   *consumed = pos + 2;
 
-  string_view tokens_expression = str.substr(0, pos);
+  string_view main_cmd = str.substr(0, pos);
 
   // cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
   // get <key>*\r\n
   // ms <key> <datalen> <flags>*\r\n
   absl::InlinedVector<string_view, 32> tokens =
-      absl::StrSplit(tokens_expression, ' ', absl::SkipWhitespace());
+      absl::StrSplit(main_cmd, ' ', absl::SkipWhitespace());
 
-  if (tokens.empty())
+  Result res = ParseInternal(absl::MakeSpan(tokens), cmd);
+  if (val_len_to_read_ > 0)
+    return ConsumeValue(str.substr(pos + 2), consumed, cmd);
+  return res;
+};
+
+auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
+  if (tokens_view.empty())
     return PARSE_ERROR;
 
-  cmd->type = From(tokens[0]);
+  cmd->type = From(tokens_view[0]);
   if (cmd->type == INVALID) {
     return UNKNOWN_CMD;
   }
 
-  ArgSlice tokens_view{tokens};
   tokens_view.remove_prefix(1);
   cmd->backed_args->clear();
 
@@ -352,7 +359,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     if (res != MP::OK)
       return res;
     val_len_to_read_ = cmd->value().size() + 2;
-    return ConsumeValue(str.substr(pos + 2), consumed, cmd);
+    return MP::OK;
   }
 
   if (cmd->type >= META_SET) {
@@ -365,7 +372,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
 
     if (IsStoreCmd(cmd->type)) {
       val_len_to_read_ = cmd->value().size() + 2;
-      res = ConsumeValue(str.substr(pos + 2), consumed, cmd);
+      res = MP::OK;
     }
     return res;
   }
@@ -377,9 +384,8 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return MP::PARSE_ERROR;
   }
 
-  tmp_args_.clear();
-  return ParseValueless(tokens_view, &tmp_args_, cmd);
-};
+  return ParseValueless(tokens_view, cmd);
+}
 
 auto MP::ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest) -> Result {
   DCHECK_EQ(dest->size(), 2u);  // key and value
