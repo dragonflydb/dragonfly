@@ -32,6 +32,12 @@ class ParsedCommand : public cmn::BackedArguments {
   ParsedCommand() = default;
 
  public:
+  virtual ~ParsedCommand() = default;
+
+  virtual size_t GetSize() const {
+    return sizeof(ParsedCommand);
+  }
+
   // time when the message was parsed as reported by CycleClock::Now()
   uint64_t parsed_cycle = 0;
   ParsedCommand* next = nullptr;
@@ -58,31 +64,30 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   size_t UsedMemory() const {
-    // TODO: sizeof(*this) is inaccurate here, as service can allocate extra space for
-    // its derived class. Seems that we will have to make ParsedCommand polymorphic and use
-    // virtual function here.
-    size_t sz = HeapMemory() + sizeof(*this);
+    size_t sz = HeapMemory() + GetSize();
     if (mc_cmd_) {
       sz += sizeof(*mc_cmd_);
     }
     return sz;
   }
 
-  void set_reply_direct(bool direct) {
-    reply_direct_ = direct;
+  // Allows the possibility for asynchronous execution of this command.
+  void AllowAsyncExecution() {
+    allow_async_execution_ = true;
   }
 
-  // Returns whether the reply is sent directly to the client
-  bool reply_direct() const {
-    return reply_direct_;
+  bool AsyncExecutionAllowed() const {
+    return allow_async_execution_;
   }
 
-  void set_dispatch_async(bool async) {
-    dispatch_async_ = async;
+  // Marks this command as executed asynchronously with deferred reply.
+  // Precondition: AsyncExecutionAllowed() must be true.
+  void SetDeferredReply() {
+    is_deferred_reply_ = true;
   }
 
-  bool dispatch_async() const {
-    return dispatch_async_;
+  bool IsDeferredReply() const {
+    return is_deferred_reply_;
   }
 
   void ResetForReuse();
@@ -102,15 +107,26 @@ class ParsedCommand : public cmn::BackedArguments {
   // If it was dispatched asynchronously, marks it as head command and returns
   // true if it finished executing and its reply is ready, false otherwise.
   bool PollHeadForCompletion() {
-    if (!dispatch_async_ || reply_direct_)
+    if (!is_deferred_reply_)
       return true;  // assert(holds_alternative<monostate>(cmd->TakeReplyPayload()));
 
     return CheckDoneAndMarkHead();
   }
 
+  // Returns true if the caller can destroy this ParsedCommand.
+  // false, if the command will be destroyed by its asynchronous callback.
+  bool MarkForDestruction() {
+    if (!is_deferred_reply_)
+      return true;
+    uint8_t prev_state = state_.fetch_or(DELETE_INTENT, std::memory_order_acq_rel);
+
+    // If the reply is already done, we can destroy it now.
+    return (prev_state & ASYNC_REPLY_DONE) != 0;
+  }
+
  private:
   bool IsReplyCached() const {
-    return !reply_direct_ && !std::holds_alternative<std::monostate>(reply_payload_);
+    return is_deferred_reply_ && !std::holds_alternative<std::monostate>(reply_payload_);
   }
 
   bool CheckDoneAndMarkHead();
@@ -123,22 +139,24 @@ class ParsedCommand : public cmn::BackedArguments {
   enum StateBits : uint8_t {
     ASYNC_REPLY_DONE = 1 << 0,
     HEAD_REPLY = 1 << 1,  // it's the first command in the reply chain.
+    DELETE_INTENT = 1 << 2,
   };
   std::atomic_uint8_t state_{0};
 
-  // whether the reply should be sent directly, or captured for later sending
-  bool reply_direct_ = true;
-
   // whether the command can be dispatched asynchronously.
-  bool dispatch_async_ = false;
+  bool allow_async_execution_ = false;
+
+  // if false then the reply was sent directly to reply builder,
+  // otherwise, moved asynchronously into reply_payload_
+  bool is_deferred_reply_ = false;
 
   payload::Payload reply_payload_;  // captured reply payload for async dispatches
 };
 
 #ifdef __APPLE__
-static_assert(sizeof(ParsedCommand) == 208);
-#else
 static_assert(sizeof(ParsedCommand) == 216);
+#else
+static_assert(sizeof(ParsedCommand) == 224);
 #endif
 
 }  // namespace facade

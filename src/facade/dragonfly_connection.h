@@ -407,6 +407,7 @@ class Connection : public util::Connection {
   void CreateParsedCommand();
   void EnqueueParsedCommand();
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+  void DestroyParsedQueue();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker

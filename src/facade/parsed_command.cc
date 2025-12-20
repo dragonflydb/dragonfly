@@ -15,9 +15,10 @@ namespace facade {
 using namespace std;
 
 void ParsedCommand::ResetForReuse() {
-  reply_direct_ = true;
+  allow_async_execution_ = false;
+  is_deferred_reply_ = false;
   reply_payload_ = std::monostate{};
-  dispatch_async_ = false;
+
   state_.store(0, std::memory_order_relaxed);
   offsets_.clear();
   if (HeapMemory() > 1024) {
@@ -27,7 +28,7 @@ void ParsedCommand::ResetForReuse() {
 }
 
 void ParsedCommand::SendError(std::string_view str, std::string_view type) {
-  if (reply_direct_) {
+  if (!is_deferred_reply_) {
     rb_->SendError(str, type);
   } else {
     reply_payload_ = payload::make_error(str, type);
@@ -36,7 +37,7 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) {
 }
 
 void ParsedCommand::SendError(facade::OpStatus status) {
-  if (reply_direct_) {
+  if (!is_deferred_reply_) {
     if (status == OpStatus::OK)
       rb_->SendSimpleString("OK");
     else
@@ -57,7 +58,7 @@ void ParsedCommand::SendError(const facade::ErrorReply& error) {
 }
 
 void ParsedCommand::SendStored(bool ok) {
-  if (reply_direct_) {
+  if (!is_deferred_reply_) {
     if (ok)
       rb_->SendStored();
     else
@@ -69,7 +70,7 @@ void ParsedCommand::SendStored(bool ok) {
 }
 
 void ParsedCommand::SendSimpleString(std::string_view str) {
-  if (reply_direct_) {
+  if (!is_deferred_reply_) {
     rb_->SendSimpleString(str);
   } else {
     reply_payload_ = payload::SimpleString{std::string(str)};
@@ -110,6 +111,12 @@ void ParsedCommand::NotifyReplied() {
   // A synchronization point. We set ASYNC_REPLY_DONE to mark it's safe now to read the payload.
   uint8_t prev_state = state_.fetch_or(ASYNC_REPLY_DONE, std::memory_order_acq_rel);
 
+  DVLOG(1) << "ParsedCommand::NotifyReplied with state " << unsigned(prev_state);
+
+  if (prev_state & DELETE_INTENT) {
+    delete this;
+    return;
+  }
   // If it was marked as head already, notify the connection that the head is done.
   if (prev_state & HEAD_REPLY) {
     // TODO: this might crash as we currently do not wait for async commands on connection close.

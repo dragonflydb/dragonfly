@@ -62,7 +62,6 @@ class Service : public facade::ServiceInterface {
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;
-  void FreeParsedCommand(facade::ParsedCommand* cmd) final;
 
   const CommandId* FindCmd(std::string_view) const;
 

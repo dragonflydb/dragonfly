@@ -51,10 +51,6 @@ class ServiceInterface {
     return new ParsedCommand();
   }
 
-  virtual void FreeParsedCommand(ParsedCommand* cmd) {
-    delete cmd;
-  }
-
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }
 

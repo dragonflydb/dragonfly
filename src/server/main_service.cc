@@ -1579,7 +1579,7 @@ class ReplyGuard {
   }
 
   ~ReplyGuard() {
-    if (cmd_cntx_ && cmd_cntx_->reply_direct()) {
+    if (cmd_cntx_ && !cmd_cntx_->IsDeferredReply()) {
       auto* rb = cmd_cntx_->rb();
       DCHECK_GT(rb->RepliesRecorded(), replies_recorded_) << cid_name_ << " " << typeid(*rb).name();
     }
@@ -1984,10 +1984,6 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
 
 facade::ParsedCommand* Service::AllocateParsedCommand() {
   return new CommandContext{};
-}
-
-void Service::FreeParsedCommand(facade::ParsedCommand* cmd) {
-  delete static_cast<CommandContext*>(cmd);
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {

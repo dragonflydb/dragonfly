@@ -355,6 +355,10 @@ class CommandContext : public facade::ParsedCommand {
     Init(rb, cntx);
   }
 
+  virtual size_t GetSize() const override {
+    return sizeof(CommandContext);
+  }
+
   const CommandId* cid = nullptr;
   Transaction* tx = nullptr;
 

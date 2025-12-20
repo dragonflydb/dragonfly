@@ -1059,7 +1059,7 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  if (cmnd_cntx->dispatch_async()) {
+  if (cmnd_cntx->AsyncExecutionAllowed()) {
     // TODO: run asynchronous flow and exit.
     // 1.
     //    a. Transaction should support non-blocking execution for single hop/single shard commands.
