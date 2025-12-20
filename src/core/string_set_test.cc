@@ -523,6 +523,24 @@ TEST_F(StringSetTest, Fill) {
   }
 }
 
+TEST_F(StringSetTest, ClearResetsObjMallocUsed) {
+  // Add some items
+  for (size_t i = 0; i < 100; ++i) {
+    ss_->Add(random_string(generator_, 10));
+  }
+
+  // Verify ObjMallocUsed() > 0 after adding items
+  EXPECT_GT(ss_->ObjMallocUsed(), 0u);
+  EXPECT_GT(ss_->UpperBoundSize(), 0u);
+
+  // Clear the set
+  ss_->Clear();
+
+  // Verify ObjMallocUsed() is reset to 0 after Clear
+  EXPECT_EQ(ss_->ObjMallocUsed(), 0u);
+  EXPECT_EQ(ss_->UpperBoundSize(), 0u);
+}
+
 TEST_F(StringSetTest, IterateEmpty) {
   for (const auto& s : *ss_) {
     // We're iterating to make sure there is no crash. However, if we got here, it's a bug
