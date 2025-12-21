@@ -130,7 +130,7 @@ TEST_F(MultiTxTest, MultiUnlock) {
   for (auto key : keys)
     EXPECT_TRUE(IsLocked(0, key));
 
-  pp_->at(0)->Await([&] { tx->UnlockMulti(); });
+  pp_->at(0)->Await([&] { tx->UnlockMulti(true); });
 
   for (auto key : keys)
     EXPECT_FALSE(IsLocked(0, key));
