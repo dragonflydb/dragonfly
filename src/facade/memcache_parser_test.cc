@@ -112,10 +112,10 @@ TEST_F(MCParserTest, NoreplyBasic) {
 TEST_F(MCParserTest, Meta) {
   MemcacheParser::Result st = Parse("ms key1 ");
   EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
-  EXPECT_EQ(0, consumed_);
-  st = Parse("ms key1 6 T1 F2\r\naaaaaa\r\n");
+  EXPECT_EQ(8, consumed_);
+  st = parser_.Parse("6 T1 F2\r\naaaaaa\r\n", &consumed_, &cmd_);
   EXPECT_EQ(MemcacheParser::OK, st);
-  EXPECT_EQ(25, consumed_);
+  EXPECT_EQ(17, consumed_);
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_EQ("key1", cmd_.key());
   EXPECT_EQ(2, cmd_.flags);
