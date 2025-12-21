@@ -1255,15 +1255,18 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 }
 
 auto Connection::ParseMemcache() -> ParserStatus {
-  bool parsed_added = false;
+  bool commands_parsed = false;
   do {
-    parsed_added = ParseMCBatch();
+    commands_parsed = ParseMCBatch();
 
     if (!ExecuteMCBatch())
       return ERROR;
-  } while (parsed_added && io_buf_.InputLen() > 0);
 
-  return parsed_added ? OK : NEED_MORE;
+    if (!ReplyMCBatch())
+      return ERROR;
+  } while (commands_parsed && io_buf_.InputLen() > 0);
+
+  return commands_parsed ? OK : NEED_MORE;
 }
 
 void Connection::OnBreakCb(int32_t mask) {
@@ -2050,33 +2053,83 @@ bool Connection::ParseMCBatch() {
 
 bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
-  while (parsed_head_) {
-    auto* cmd = parsed_head_;
+  while (parsed_to_execute_) {
+    auto* cmd = parsed_to_execute_;
+    bool is_head = (cmd == parsed_head_);
+
     bool has_replied = false;
 
-    // Protocol parse errors create commands with already cached replies.
-    // Try sending payload now in case it's already set.
-    has_replied = cmd->SendPayload();
-    DVLOG(1) << "Maybe replying head: " << has_replied;
+    if (is_head) {
+      // Protocol parse errors create commands with already cached replies.
+      // Try sending payload now in case it's already set.
+      has_replied = cmd->SendPayload();
+      DVLOG(2) << "Maybe replying head: " << has_replied;
+    } else {
+      // We are not the head command, so we can not reply directly.
+      if (cmd->IsDeferredReply()) {
+        has_replied = true;  // The error reply is filled by the parser.
+      } else {
+        cmd->SetDeferredReply();
+      }
+    }
 
     if (!has_replied) {
       service_->DispatchMC(cmd);
 
       // If the reply was not deferred, then DispatchMC has surely replied.
       has_replied = !cmd->IsDeferredReply();
-      DCHECK(has_replied);  // TODO: We currently did not implement any deferred MC replies.
-      DVLOG(1) << "Executed command, has_replied: " << has_replied;
+      DVLOG(2) << "Executed command, has_replied: " << has_replied;
     }
-    parsed_head_ = cmd->next;
+    parsed_to_execute_ = cmd->next;
 
-    ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+    // Only if commands have deferred replies we need to keep them in the parsed queue
+    // until they complete.
+    if (is_head && has_replied) {
+      // This is head and it replied to the client socket, so we can remove it from the parsed
+      // queue right away.
+      // This optimization makes the ReplyMCBatch call a no-op unless we actually run asynchronous
+      // commands with deferred replies.
+      parsed_head_ = parsed_to_execute_;
+      ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+    }
 
     if (reply_builder_->GetError()) {
       return false;
     }
   }
-  parsed_tail_ = nullptr;
+  if (parsed_head_ == nullptr)
+    parsed_tail_ = nullptr;
   return true;
+}
+
+bool Connection::ReplyMCBatch() {
+  if (protocol_ != Protocol::MEMCACHE) {
+    // We do not support async replies for RESP protocol yet.
+    return true;
+  }
+
+  while (parsed_head_ != parsed_to_execute_) {
+    auto* cmd = parsed_head_;
+    if (!cmd->PollHeadForCompletion())
+      break;
+
+    // This command finished processing and can be replied.
+    auto* next = cmd->next;
+
+    cmd->SendPayload();
+    ReleaseParsedCommand(cmd, next != parsed_to_execute_ /* is_pipelined */);
+    parsed_head_ = next;
+    if (reply_builder_->GetError()) {
+      return false;
+    }
+  }
+
+  if (parsed_head_ == nullptr)
+    parsed_tail_ = nullptr;
+
+  // Flush any remaining data in the reply builder.
+  reply_builder_->Flush();
+  return !reply_builder_->GetError();
 }
 
 void Connection::CreateParsedCommand() {
@@ -2091,8 +2144,13 @@ void Connection::EnqueueParsedCommand() {
   parsed_cmd_->parsed_cycle = base::CycleClock::Now();
   if (parsed_head_ == nullptr) {
     parsed_head_ = parsed_cmd_;
+    parsed_to_execute_ = parsed_cmd_;
   } else {
     parsed_tail_->next = parsed_cmd_;
+    if (parsed_to_execute_ == nullptr) {
+      // we've executed all the parsed commands so far.
+      parsed_to_execute_ = parsed_cmd_;
+    }
     // We have a pipelined command
     local_stats_.dispatch_entries_added++;
   }
@@ -2311,6 +2369,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
+      if (parsed_head_) {
+        ReplyMCBatch();
+      }
     }
 
     if (reply_builder_->GetError()) {
