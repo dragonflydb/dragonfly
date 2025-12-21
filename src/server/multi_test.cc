@@ -1184,8 +1184,9 @@ TEST_F(MultiEvalTest, MultiAllEval) {
   RespExpr brpop_resp;
 
   // Run the fiber at creation.
-  auto fb0 =
-      pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { brpop_resp = Run({"brpop", "x", "1"}); });
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    brpop_resp = Run({"brpop", "x", "1"});
+  });
   Run({"multi"});
   Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
   Run({"eval", "return redis.call('lpop', 'x')", "0"});
@@ -1201,8 +1202,9 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   RespExpr brpop_resp;
 
   // Run the fiber at creation.
-  auto fb0 =
-      pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { brpop_resp = Run({"brpop", "x", "1"}); });
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    brpop_resp = Run({"brpop", "x", "1"});
+  });
   Run({"multi"});
   Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
   Run({"lpop", "x"});

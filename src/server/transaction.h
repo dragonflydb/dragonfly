@@ -168,7 +168,7 @@ class Transaction {
 
     // Whether it was suspended (by WatchInShard()). This flag is sticky and stays forever once set.
     WAS_SUSPENDED = 1 << 4,
-    AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
+    AWAKED_Q = 1 << 5,  // Whether it was awakened (by NotifySuspended())
   };
 
   struct Guard {
