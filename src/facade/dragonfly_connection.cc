@@ -803,22 +803,10 @@ void Connection::HandleRequests() {
       VLOG(1) << "Closed connection for peer "
               << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
       reply_builder_.reset();
-      service_->FreeParsedCommand(parsed_cmd_);
-      parsed_cmd_ = nullptr;
+      DestroyParsedQueue();
     }
     cc_.reset();
   }
-
-  // TODO: we will have a problem of what to do with pending async commands.
-  // The code below will crash the process as we do not wait for them to finish.
-  while (parsed_head_ != nullptr) {
-    auto* cmd = parsed_head_;
-    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
-    parsed_head_ = parsed_head_->next;
-    service_->FreeParsedCommand(cmd);
-  }
-  parsed_tail_ = nullptr;
-  parsed_cmd_q_len_ = 0;
 }
 
 unsigned Connection::GetSendWaitTimeSec() const {
@@ -2131,8 +2119,25 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
     parsed_cmd_ = cmd;
     parsed_cmd_->ResetForReuse();
   } else {
-    service_->FreeParsedCommand(cmd);
+    delete cmd;
   }
+}
+
+void Connection::DestroyParsedQueue() {
+  while (parsed_head_ != nullptr) {
+    auto* cmd = parsed_head_;
+    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
+    parsed_head_ = cmd->next;
+
+    if (cmd->MarkForDestruction()) {  // whether async operation finished or not started
+      DVLOG(2) << "Deleting parsed command " << cmd;
+      delete cmd;
+    }
+  }
+  parsed_tail_ = nullptr;
+  parsed_cmd_q_len_ = 0;
+  delete parsed_cmd_;
+  parsed_cmd_ = nullptr;
 }
 
 void Connection::UpdateFromFlags() {
@@ -2255,8 +2260,6 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
-  ParserStatus parse_status = OK;
-
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
@@ -2265,15 +2268,15 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // Return early because RegisterOnRecv() should not be called if the socket
   // is not open. Both migrations and replication hit this flow upon cancellations.
   if (!peer->IsOpen()) {
-    return parse_status;
+    return ParserStatus::OK;
   }
-
-  // TODO EnableRecvMultishot
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DoReadOnRecv(n);
     io_event_.notify();
   });
+
+  ParserStatus parse_status = OK;
 
   do {
     HandleMigrateRequest();
