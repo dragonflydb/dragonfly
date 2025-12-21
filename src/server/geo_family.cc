@@ -206,9 +206,7 @@ double ExtractUnit(std::string_view arg) {
   }
 }
 
-}  // namespace
-
-void GeoFamily::GeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   ZSetFamily::ZParams zparams;
@@ -267,7 +265,7 @@ void GeoFamily::GeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
   ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx->tx, builder);
 }
 
-void GeoFamily::GeoHash(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoHash(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
@@ -287,7 +285,7 @@ void GeoFamily::GeoHash(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GeoFamily::GeoPos(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoPos(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
@@ -309,7 +307,7 @@ void GeoFamily::GeoPos(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void GeoFamily::GeoDist(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoDist(CmdArgList args, CommandContext* cmd_cntx) {
   double distance_multiplier = 1;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -585,7 +583,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
 
 }  // namespace
 
-void GeoFamily::GeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
   string_view member;
@@ -687,8 +685,7 @@ void GeoFamily::GeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
   GeoSearchStoreGeneric(cmd_cntx->tx, builder, shape, key, member, geo_ops);
 }
 
-void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cntx,
-                                         bool read_only) {
+void GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
   // parse arguments
@@ -776,15 +773,7 @@ void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cn
   GeoSearchStoreGeneric(cmd_cntx->tx, builder, shape, key, member, geo_ops);
 }
 
-void GeoFamily::GeoRadiusByMember(CmdArgList args, CommandContext* cmd_cntx) {
-  GeoRadiusByMemberGeneric(args, cmd_cntx, false);
-}
-
-void GeoFamily::GeoRadiusByMemberRO(CmdArgList args, CommandContext* cmd_cntx) {
-  GeoRadiusByMemberGeneric(args, cmd_cntx, true);
-}
-
-void GeoFamily::GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
+void GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
 
@@ -887,15 +876,25 @@ void GeoFamily::GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool
   GeoSearchStoreGeneric(cmd_cntx->tx, builder, shape, key, "", geo_ops);
 }
 
-void GeoFamily::GeoRadius(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoRadiusByMember(CmdArgList args, CommandContext* cmd_cntx) {
+  GeoRadiusByMemberGeneric(args, cmd_cntx, false);
+}
+
+void CmdGeoRadiusByMemberRO(CmdArgList args, CommandContext* cmd_cntx) {
+  GeoRadiusByMemberGeneric(args, cmd_cntx, true);
+}
+
+void CmdGeoRadius(CmdArgList args, CommandContext* cmd_cntx) {
   GeoRadiusGeneric(args, cmd_cntx, false);
 }
 
-void GeoFamily::GeoRadiusRO(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdGeoRadiusRO(CmdArgList args, CommandContext* cmd_cntx) {
   GeoRadiusGeneric(args, cmd_cntx, true);
 }
 
-#define HFUNC(x) SetHandler(&GeoFamily::x)
+}  // namespace
+
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 namespace acl {
 constexpr uint32_t kGeoAdd = WRITE | GEO | SLOW;
