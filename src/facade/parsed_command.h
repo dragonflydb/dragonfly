@@ -80,8 +80,7 @@ class ParsedCommand : public cmn::BackedArguments {
     return allow_async_execution_;
   }
 
-  // Marks this command as executed asynchronously with deferred reply.
-  // Precondition: AsyncExecutionAllowed() must be true.
+  // Marks this command as having reply stored in its payload instead of being sent directly.
   void SetDeferredReply() {
     is_deferred_reply_ = true;
   }
