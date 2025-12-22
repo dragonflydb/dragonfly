@@ -102,6 +102,9 @@ struct CaptureVisitor {
   void operator()(monostate) {
   }
 
+  void operator()(payload::NoReply) {
+  }
+
   void operator()(long v) {
     absl::StrAppend(&str, v);
   }

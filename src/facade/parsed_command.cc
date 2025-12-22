@@ -14,6 +14,30 @@ namespace facade {
 
 using namespace std;
 
+string MCRender::SendNotFound() const {
+  if (flags_.no_reply)
+    return {};
+  return flags_.meta ? "NF" : "NOT_FOUND";
+}
+
+string MCRender::SendGetEnd() const {
+  if (flags_.no_reply || flags_.meta)
+    return {};
+  return "END";
+}
+
+string MCRender::SendMiss() const {
+  if (flags_.no_reply || !flags_.meta)
+    return {};
+  return "EN";
+}
+
+string MCRender::SendDeleted() const {
+  if (flags_.no_reply)
+    return {};
+  return flags_.meta ? "HD" : "DELETED";
+}
+
 void ParsedCommand::ResetForReuse() {
   allow_async_execution_ = false;
   is_deferred_reply_ = false;
@@ -71,9 +95,10 @@ void ParsedCommand::SendStored(bool ok) {
 
 void ParsedCommand::SendSimpleString(std::string_view str) {
   if (!is_deferred_reply_) {
-    rb_->SendSimpleString(str);
+    if (!str.empty())  // empty string means no-reply
+      rb_->SendSimpleString(str);
   } else {
-    reply_payload_ = payload::SimpleString{std::string(str)};
+    reply_payload_ = payload::make_simple_or_noreply(str);
     NotifyReplied();
   }
 }

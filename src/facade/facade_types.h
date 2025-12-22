@@ -251,6 +251,30 @@ struct ErrorReply {
   std::optional<OpStatus> status{std::nullopt};
 };
 
+struct MemcacheCmdFlags {
+  MemcacheCmdFlags() : raw(0) {
+  }
+
+  union {
+    uint16_t raw = 0;
+    struct {
+      uint16_t no_reply : 1;  // q
+      uint16_t meta : 1;
+
+      // meta flags
+      uint16_t base64 : 1;              // b
+      uint16_t return_flags : 1;        // f
+      uint16_t return_value : 1;        // v
+      uint16_t return_ttl : 1;          // t
+      uint16_t return_access_time : 1;  // l
+      uint16_t return_hit : 1;          // h
+      uint16_t return_version : 1;      // c
+    };
+  };
+};
+
+static_assert(sizeof(MemcacheCmdFlags) == 2);
+
 constexpr unsigned long long operator""_MB(unsigned long long x) {
   return 1024L * 1024L * x;
 }

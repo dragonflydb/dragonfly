@@ -1822,13 +1822,13 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
   char store_opt[32] = {0};
   char ttl_op[] = "EXAT";
 
-  mc_builder->SetNoreply(cmd.no_reply);
-  mc_builder->SetMeta(cmd.meta);
-  if (cmd.meta) {
-    mc_builder->SetBase64(cmd.base64);
-    mc_builder->SetReturnMCFlag(cmd.return_flags);
-    mc_builder->SetReturnValue(cmd.return_value);
-    mc_builder->SetReturnVersion(cmd.return_version);
+  mc_builder->SetNoreply(cmd.cmd_flags.no_reply);
+  mc_builder->SetMeta(cmd.cmd_flags.meta);
+  if (cmd.cmd_flags.meta) {
+    mc_builder->SetBase64(cmd.cmd_flags.base64);
+    mc_builder->SetReturnMCFlag(cmd.cmd_flags.return_flags);
+    mc_builder->SetReturnValue(cmd.cmd_flags.return_value);
+    mc_builder->SetReturnVersion(cmd.cmd_flags.return_version);
   }
 
   switch (cmd.type) {
