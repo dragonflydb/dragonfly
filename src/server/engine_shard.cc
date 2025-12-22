@@ -7,6 +7,7 @@
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_format.h>
 
 #include <memory>
 
@@ -328,8 +329,6 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   // context of the controlling thread will access this shard!
   // --------------------------------------------------------------------------
 
-  constexpr size_t kMaxTraverses = 40;
-
   // TODO: enable tiered storage on non-default db slice
   DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
 
@@ -347,10 +346,10 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
-  unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
-  PageUsage page_usage{collect_page_stats, threshold, UnlimitedQuota()};
+  static constexpr uint64_t kMaxUsecForDefrag = 150;
+  PageUsage page_usage{collect_page_stats, threshold, CycleQuota{kMaxUsecForDefrag}};
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
@@ -367,25 +366,29 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
         }
       }
     });
-    traverses_count++;
-  } while (traverses_count < kMaxTraverses && cur && namespaces);
+  } while (!page_usage.QuotaDepleted() && cur && namespaces);
+  const uint64_t used_cycles = page_usage.UsedQuotaCycles();
+  const uint64_t usec = base::CycleClock::ToUsec(used_cycles);
 
   defrag_state_.UpdateScanState(cur.token());
-
-  if (reallocations > 0) {
-    VLOG(2) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
-            << " times, did it in " << traverses_count << " cursor is at the "
-            << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress");
-  } else {
-    VLOG(2) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
-            << " times out of maximum " << kMaxTraverses << ", with cursor at "
-            << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
-            << " but no location for defrag were found";
-  }
 
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
+
+  const char* cursor_state =
+      defrag_state_.cursor == kCursorDoneState ? "at the end" : "in progress";
+  if (reallocations > 0) {
+    VLOG(2) << absl::StrFormat(
+        "shard %u: successfully defragmented %lu times in %lu cycles (%lu usec), "
+        "cursor is %s",
+        slice.shard_id(), reallocations, used_cycles, usec, cursor_state);
+  } else {
+    VLOG(2) << absl::StrFormat(
+        "shard %u: ran defragmentation for %lu cycles (%lu usec), cursor at %s, "
+        "but no locations for defragmentation were found",
+        slice.shard_id(), used_cycles, usec, cursor_state);
+  }
 
   return page_usage.CollectedStats();
 }
