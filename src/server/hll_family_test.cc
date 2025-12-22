@@ -1,11 +1,9 @@
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/hll_family.h"
-
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
@@ -13,6 +11,7 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+using namespace facade;
 
 namespace dfly {
 
@@ -108,8 +107,8 @@ TEST_F(HllFamilyTest, MultipleValues_random) {
 
 TEST_F(HllFamilyTest, AddInvalid) {
   EXPECT_EQ(Run({"set", "key", "..."}), "OK");
-  EXPECT_THAT(Run({"pfadd", "key", "1"}), ErrArg(HllFamily::kInvalidHllErr));
-  EXPECT_THAT(Run({"pfcount", "key"}), ErrArg(HllFamily::kInvalidHllErr));
+  EXPECT_THAT(Run({"pfadd", "key", "1"}), ErrArg(kInvalidHllError));
+  EXPECT_THAT(Run({"pfcount", "key"}), ErrArg(kInvalidHllError));
 }
 
 TEST_F(HllFamilyTest, OtherType) {
@@ -126,7 +125,7 @@ TEST_F(HllFamilyTest, CountEmpty) {
 
 TEST_F(HllFamilyTest, CountInvalid) {
   EXPECT_EQ(Run({"set", "key", "..."}), "OK");
-  EXPECT_THAT(Run({"pfcount", "key"}), ErrArg(HllFamily::kInvalidHllErr));
+  EXPECT_THAT(Run({"pfcount", "key"}), ErrArg(kInvalidHllError));
 }
 
 TEST_F(HllFamilyTest, CountMultiple) {

@@ -1,9 +1,6 @@
 // Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/bloom_family.h"
-
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 

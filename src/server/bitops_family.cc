@@ -2,17 +2,17 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/bitops_family.h"
+#include <absl/strings/match.h>
 
 #include <bitset>
 #include <nonstd/expected.hpp>
 
-#include "absl/strings/match.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -1390,7 +1390,7 @@ constexpr uint32_t kGetBit = READ | BITMAP | FAST;
 constexpr uint32_t kSetBit = WRITE | BITMAP | SLOW;
 }  // namespace acl
 
-void BitOpsFamily::Register(CommandRegistry* registry) {
+void RegisterBitopsFamily(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1, acl::kBitPos}.SetHandler(&BitPos)

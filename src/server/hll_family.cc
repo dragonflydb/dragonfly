@@ -2,10 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/hll_family.h"
-
-#include "server/acl/acl_commands_def.h"
-
 extern "C" {
 #include "redis/hyperloglog.h"
 }
@@ -45,7 +41,7 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
         builder->SendError(kOutOfMemory);
         break;
       case OpStatus::INVALID_VALUE:
-        builder->SendError(HllFamily::kInvalidHllErr);
+        builder->SendError(kInvalidHllError);
         break;
       case OpStatus::CORRUPTED_HLL:
         builder->SendError(facade::StatusToMsg(OpStatus::CORRUPTED_HLL));
@@ -321,7 +317,7 @@ void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
     if (result.value() == 0) {
       rb->SendOk();
     } else {
-      rb->SendError(HllFamily::kInvalidHllErr);
+      rb->SendError(kInvalidHllError);
     }
   } else {
     HandleOpValueResult(result, rb);
@@ -336,7 +332,7 @@ constexpr uint32_t kPFCount = READ | HYPERLOGLOG | SLOW;
 constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
 }  // namespace acl
 
-void HllFamily::Register(CommandRegistry* registry) {
+void RegisterHllFamily(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   *registry << CI{"PFADD", CO::JOURNALED, -3, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
@@ -344,7 +340,5 @@ void HllFamily::Register(CommandRegistry* registry) {
             << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kPFMerge}
                    .SetHandler(PFMerge);
 }
-
-const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";
 
 }  // namespace dfly

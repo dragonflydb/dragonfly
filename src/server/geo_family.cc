@@ -2,11 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/geo_family.h"
-
-#include "server/acl/acl_commands_def.h"
-#include "server/zset_family.h"
-
 extern "C" {
 #include "redis/geo.h"
 #include "redis/geohash.h"
@@ -20,12 +15,15 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/transaction.h"
+#include "server/zset_family.h"
 
 namespace dfly {
 
@@ -908,7 +906,7 @@ constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
 constexpr uint32_t kGeoRadiusRO = READ | GEO | SLOW;
 }  // namespace acl
 
-void GeoFamily::Register(CommandRegistry* registry) {
+void RegisterGeoFamily(CommandRegistry* registry) {
   registry->StartFamily();
   *registry << CI{"GEOADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -5, 1, 1, acl::kGeoAdd}.HFUNC(
                    GeoAdd)
