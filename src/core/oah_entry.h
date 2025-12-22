@@ -73,6 +73,17 @@ template <class T> class PtrVector {
     return res;
   }
 
+  bool Empty() const {
+    if (uptr_ == 0)
+      return true;
+
+    for (auto& el : *this) {
+      if (el)
+        return false;
+    }
+    return true;
+  }
+
   void ResizeLog(uint64_t new_log_size) {
     auto new_ptr = reinterpret_cast<T*>(zmalloc(sizeof(T) << new_log_size));
     size_t new_size = 1 << new_log_size;
@@ -100,6 +111,10 @@ template <class T> class PtrVector {
     return (T*)(uptr_ & ~kTagMask);
   }
 
+  size_t AllocSize() const {
+    return zmalloc_usable_size(Raw());
+  }
+
  private:
   void Clear() {
     const size_t size = Size();
@@ -114,7 +129,6 @@ template <class T> class PtrVector {
     zfree(Raw());
     uptr_ = 0;
   }
-
   // because of log_size I prefer to hide it
   PtrVector(uint64_t log_size) {
     assert(log_size <= 32);
@@ -253,7 +267,8 @@ class OAHEntry {
   void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size);
 
   // TODO refactor, because it's inefficient
-  uint32_t Insert(OAHEntry&& e);
+  // Returns additional allocation size of ptrVector
+  [[nodiscard]] size_t Insert(OAHEntry&& e);
 
   uint32_t ElementsNum();
 

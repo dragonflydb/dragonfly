@@ -94,13 +94,13 @@ TEST_F(OAHSetTest, OAHEntryTest) {
   OAHEntry first("123456789");
   first.SetHash(Hash(first.Key()), 4, 4);
 
-  test.Insert(std::move(first));
+  EXPECT_EQ(test.Insert(std::move(first)), 16);
 
   uint32_t set_size = 4;
   EXPECT_EQ(test.Find("123456789", OAHEntry::CalcExtHash(Hash("123456789"), 4, 4), 4, 4, &set_size),
             1);
 
-  test.Insert(OAHEntry("23456789"));
+  EXPECT_EQ(test.Insert(OAHEntry("23456789")), 16);
 
   EXPECT_TRUE(test.Remove(0));
   EXPECT_FALSE(test.Remove(0));
@@ -112,28 +112,28 @@ TEST_F(OAHSetTest, OAHEntryTest) {
 TEST_F(OAHSetTest, HashCheckTest) {
   OAHEntry isl;
   {
-    uint32_t pos = isl.Insert(OAHEntry("0123456789"));
-    isl[pos].SetHash(Hash(isl[pos].Key()), 3, 4);
-    EXPECT_TRUE(isl[pos].CheckBucketAffiliation(4, 3, 4));
-    EXPECT_FALSE(isl[pos].CheckBucketAffiliation(6, 3, 4));
-    EXPECT_TRUE(isl[pos].CheckBucketAffiliation(4, 4, 3));
-    EXPECT_FALSE(isl[pos].CheckBucketAffiliation(6, 4, 3));
+    EXPECT_EQ(isl.Insert(OAHEntry("0123456789")), 0);
+    isl[0].SetHash(Hash(isl[0].Key()), 3, 4);
+    EXPECT_TRUE(isl[0].CheckBucketAffiliation(4, 3, 4));
+    EXPECT_FALSE(isl[0].CheckBucketAffiliation(6, 3, 4));
+    EXPECT_TRUE(isl[0].CheckBucketAffiliation(4, 4, 3));
+    EXPECT_FALSE(isl[0].CheckBucketAffiliation(6, 4, 3));
   }
   {
-    uint32_t pos = isl.Insert(OAHEntry("123456789"));
-    isl[pos].SetHash(Hash(isl[pos].Key()), 3, 4);
+    EXPECT_EQ(isl.Insert(OAHEntry("123456789")), 16);
+    isl[1].SetHash(Hash(isl[1].Key()), 3, 4);
   }
   {
-    uint32_t pos = isl.Insert(OAHEntry("23456789"));
-    isl[pos].SetHash(Hash(isl[pos].Key()), 3, 4);
+    EXPECT_EQ(isl.Insert(OAHEntry("23456789")), 16);
+    isl[2].SetHash(Hash(isl[2].Key()), 3, 4);
   }
   {
-    uint32_t pos = isl.Insert(OAHEntry("3456789"));
-    isl[pos].SetHash(Hash(isl[pos].Key()), 3, 4);
+    EXPECT_EQ(isl.Insert(OAHEntry("3456789")), 0);
+    isl[3].SetHash(Hash(isl[3].Key()), 3, 4);
   }
   {
-    uint32_t pos = isl.Insert(OAHEntry("456789"));
-    isl[pos].SetHash(Hash(isl[pos].Key()), 3, 4);
+    EXPECT_EQ(isl.Insert(OAHEntry("456789")), 32);
+    isl[4].SetHash(Hash(isl[4].Key()), 3, 4);
   }
 
   uint32_t num_expired_fields = 0;
@@ -615,9 +615,9 @@ TEST_F(OAHSetTest, IterateEmpty) {
   }
 }
 
-// size_t memUsed(OAHSet& obj) {
-//   return obj.ObjMallocUsed() + obj.SetMallocUsed();
-// }
+static size_t MemUsed(OAHSet& obj) {
+  return obj.ObjAllocUsed() + obj.SetAllocUsed();
+}
 
 void BM_Clone(benchmark::State& state) {
   vector<string> strs;
@@ -690,15 +690,17 @@ void BM_Add(benchmark::State& state) {
     strs.push_back(str);
   }
   ss.Reserve(elems);
+  size_t mem_used = 0;
   while (state.KeepRunning()) {
     for (auto& str : strs)
       ss.Add(str);
     state.PauseTiming();
-    // state.counters["Memory_Used"] = memUsed(ss);
+    mem_used += MemUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_Add)
     ->ArgNames({"elements", "Key Size"})
@@ -716,6 +718,7 @@ void BM_AddMany(benchmark::State& state) {
   }
   ss.Reserve(elems);
   vector<string_view> svs;
+  size_t mem_used = 0;
   for (const auto& str : strs) {
     svs.push_back(str);
   }
@@ -723,11 +726,12 @@ void BM_AddMany(benchmark::State& state) {
     ss.AddMany(absl::MakeSpan(svs));
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
-    // state.counters["Memory_Used"] = memUsed(ss);
+    mem_used += MemUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_AddMany)
     ->ArgNames({"elements", "Key Size"})
@@ -744,18 +748,20 @@ void BM_Erase(benchmark::State& state) {
     strs.push_back(str);
     ss.Add(str);
   }
-  // state.counters["Memory_Before_Erase"] = memUsed(ss);
+  state.counters["Memory_Before_Erase"] = MemUsed(ss);
+  size_t mem_used = 0;
   while (state.KeepRunning()) {
     for (auto& str : strs) {
       ss.Erase(str);
     }
     state.PauseTiming();
-    // state.counters["Memory_After_Erase"] = memUsed(ss);
+    mem_used += MemUsed(ss);
     for (auto& str : strs) {
       ss.Add(str);
     }
     state.ResumeTiming();
   }
+  state.counters["Memory_After_Erase"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_Erase)
     ->ArgNames({"elements", "Key Size"})

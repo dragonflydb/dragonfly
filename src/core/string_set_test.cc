@@ -548,7 +548,7 @@ TEST_F(StringSetTest, IterateEmpty) {
   }
 }
 
-size_t memUsed(StringSet& obj) {
+static size_t MemUsed(StringSet& obj) {
   return obj.ObjMallocUsed() + obj.SetMallocUsed();
 }
 
@@ -620,15 +620,17 @@ void BM_Add(benchmark::State& state) {
     strs.push_back(str);
   }
   ss.Reserve(elems);
+  size_t mem_used = 0;
   while (state.KeepRunning()) {
     for (auto& str : strs)
       ss.Add(str);
     state.PauseTiming();
-    state.counters["Memory_Used"] = memUsed(ss);
+    mem_used += MemUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_Add)
     ->ArgNames({"elements", "Key Size"})
@@ -649,15 +651,17 @@ void BM_AddMany(benchmark::State& state) {
   for (const auto& str : strs) {
     svs.push_back(str);
   }
+  size_t mem_used = 0;
   while (state.KeepRunning()) {
     ss.AddMany(absl::MakeSpan(svs), UINT32_MAX, false);
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
-    state.counters["Memory_Used"] = memUsed(ss);
+    mem_used += MemUsed(ss);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
   }
+  state.counters["Memory_Used"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_AddMany)
     ->ArgNames({"elements", "Key Size"})
@@ -674,18 +678,20 @@ void BM_Erase(benchmark::State& state) {
     strs.push_back(str);
     ss.Add(str);
   }
-  state.counters["Memory_Before_Erase"] = memUsed(ss);
+  state.counters["Memory_Before_Erase"] = MemUsed(ss);
+  size_t mem_used = 0;
   while (state.KeepRunning()) {
     for (auto& str : strs) {
       ss.Erase(str);
     }
     state.PauseTiming();
-    state.counters["Memory_After_Erase"] = memUsed(ss);
+    mem_used += MemUsed(ss);
     for (auto& str : strs) {
       ss.Add(str);
     }
     state.ResumeTiming();
   }
+  state.counters["Memory_After_Erase"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_Erase)
     ->ArgNames({"elements", "Key Size"})

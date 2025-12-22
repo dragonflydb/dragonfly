@@ -129,8 +129,7 @@ uint32_t OAHEntry::Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log
 
   ClearHash();  // the cache is invalid after rehash operation
 
-  const uint32_t expected_bucket_id = BucketId(Hash(Key()), new_capacity_log);
-  assert(expected_bucket_id == new_bucket_id);
+  assert(BucketId(Hash(Key()), new_capacity_log) == new_bucket_id);
 
   return new_bucket_id;
 }
@@ -179,7 +178,7 @@ void OAHEntry::ExpireIfNeeded(uint32_t time_now, uint32_t* set_size) {
 }
 
 // TODO refactor, because it's inefficient
-uint32_t OAHEntry::Insert(OAHEntry&& e) {
+size_t OAHEntry::Insert(OAHEntry&& e) {
   if (Empty()) {
     *this = std::move(e);
     return 0;
@@ -188,21 +187,23 @@ uint32_t OAHEntry::Insert(OAHEntry&& e) {
     auto& arr = tmp.AsVector();
     arr[0] = std::move(*this);
     arr[1] = std::move(e);
+    auto res = arr.AllocSize();
     *this = std::move(tmp);
-    return 1;
+    return res;
   } else {
     auto& arr = AsVector();
     size_t i = 0;
     for (; i < arr.Size(); ++i) {
       if (!arr[i]) {
         arr[i] = std::move(e);
-        return i;
+        return 0;
       }
     }
+    size_t prev_alloc_size = arr.AllocSize();
     auto new_pos = arr.Size();
     arr.ResizeLog(arr.LogSize() + 1);
     arr[new_pos] = (std::move(e));
-    return new_pos;
+    return arr.AllocSize() - prev_alloc_size;
   }
 }
 

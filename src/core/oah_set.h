@@ -132,8 +132,8 @@ class OAHSet {  // Open Addressing Hash Set
       return false;
     }
 
-    AddUnique(std::move(entry), bucket_id, ttl_sec);
     obj_alloc_used_ += entry.AllocSize();
+    AddUnique(std::move(entry), bucket_id, ttl_sec);
     return true;
   }
 
@@ -152,6 +152,8 @@ class OAHSet {  // Open Addressing Hash Set
     capacity_log_ = 0;
     entries_.resize(0);
     size_ = 0;
+    obj_alloc_used_ = 0;
+    ptr_vectors_alloc_used_ = 0;
   }
 
   // TODO should be removed, inefficient
@@ -172,7 +174,7 @@ class OAHSet {  // Open Addressing Hash Set
     bid = GetExtensionPoint(bid);
     assert(bid < Capacity());
 
-    entries_[bid].Insert(std::move(e));
+    ptr_vectors_alloc_used_ += entries_[bid].Insert(std::move(e));
   }
 
   unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec = UINT32_MAX) {
@@ -255,8 +257,15 @@ class OAHSet {  // Open Addressing Hash Set
     auto bucket_id = BucketId(hash, capacity_log_);
     auto item = FindInternal(bucket_id, str, hash);
     if (item != end()) {
+      --size_;
       obj_alloc_used_ -= item->AllocSize();
       *item = OAHEntry();
+      if (entries_[bucket_id].IsVector()) {
+        if (entries_[bucket_id].AsVector().Empty()) {
+          ptr_vectors_alloc_used_ -= entries_[bucket_id].AllocSize();
+          entries_[bucket_id] = OAHEntry();
+        }
+      }
       return true;
     }
     return false;
@@ -308,7 +317,7 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   size_t SetAllocUsed() const {
-    return entries_.capacity() * sizeof(OAHEntry) + ptr_vectors_size_ * sizeof(OAHEntry);
+    return entries_.capacity() * sizeof(OAHEntry) + ptr_vectors_alloc_used_;
   }
 
   bool ExpirationUsed() const {
@@ -350,7 +359,7 @@ class OAHSet {  // Open Addressing Hash Set
           new_bucket_id = FindEmptyAround(new_bucket_id);
 
           // insert method is inefficient
-          entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
+          ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
     }
@@ -368,7 +377,7 @@ class OAHSet {  // Open Addressing Hash Set
           new_bucket_id = FindEmptyAround(new_bucket_id);
 
           // insert method is inefficient
-          entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
+          ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
     }
@@ -379,7 +388,6 @@ class OAHSet {  // Open Addressing Hash Set
     return bid | extension_point_shift;
   }
 
-  // return bucket_id and position otherwise max
   bool FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
     const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
@@ -475,7 +483,7 @@ class OAHSet {  // Open Addressing Hash Set
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
 
   mutable size_t obj_alloc_used_ = 0;
-  mutable std::uint32_t ptr_vectors_size_ = 0;
+  mutable size_t ptr_vectors_alloc_used_ = 0;
 
   std::uint32_t capacity_log_ = 0;
   std::uint32_t size_ = 0;  // number of elements in the set.
