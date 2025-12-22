@@ -360,8 +360,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
       attempts++;
       if (did) {
         reallocations++;
-        if (const ssize_t delta = it->second.MallocUsed() - original_size;
-            delta != 0 && db_table != nullptr) {
+        if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
           db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
         }
       }
