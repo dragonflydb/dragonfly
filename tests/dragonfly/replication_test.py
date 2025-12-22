@@ -1311,9 +1311,7 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
 
 @pytest.mark.exclude_epoll
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
-async def test_take_over_seeder(
-    request, df_factory, df_seeder_factory, master_threads, replica_threads
-):
+async def test_take_over_seeder(df_factory, df_seeder_factory, master_threads, replica_threads):
     master = df_factory.create(
         proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name()}", admin_port=ADMIN_PORT
     )

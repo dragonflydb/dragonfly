@@ -460,7 +460,8 @@ static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds 
 
     int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
     if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
-      VLOG(1) << "This " << error_msg << " step took " << now_ms - last_heartbeat_ms << "ms";
+      VLOG(1) << "This " << error_msg << " step was stalled for " << now_ms - last_heartbeat_ms
+              << "ms";
     }
     f();
     last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
