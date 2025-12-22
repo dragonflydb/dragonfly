@@ -1255,40 +1255,15 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 }
 
 auto Connection::ParseMemcache() -> ParserStatus {
-  MemcacheParser::Result result;
+  bool parsed_added = false;
   do {
-    result = ParseMCBatch();
+    parsed_added = ParseMCBatch();
 
-    bool last_parse_error =
-        (result != MemcacheParser::OK && result != MemcacheParser::INPUT_PENDING);
-    ExecuteMCBatch(last_parse_error);
-
-    MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
-    if (builder->GetError()) {
+    if (!ExecuteMCBatch())
       return ERROR;
-    }
+  } while (parsed_added && io_buf_.InputLen() > 0);
 
-    if (last_parse_error) {
-      builder->SetBatchMode(false);
-      if (result == MemcacheParser::UNKNOWN_CMD) {
-        builder->SendSimpleString("ERROR");
-      } else if (result == MemcacheParser::PARSE_ERROR) {
-        builder->SendClientError("bad data chunk");
-      } else if (result == MemcacheParser::BAD_DELTA) {
-        builder->SendClientError("invalid numeric delta argument");
-      } else {
-        builder->SendClientError("bad command line format");
-      }
-      parser_error_ = result;
-    } else {
-      reply_builder_->Flush();
-    }
-
-  } while (result != MemcacheParser::INPUT_PENDING && io_buf_.InputLen() > 0);
-
-  // TODO: fix memcache parser to always consume partial input like redis parser even when
-  // it returns INPUT_PENDING.
-  return result == MemcacheParser::INPUT_PENDING ? NEED_MORE : OK;
+  return parsed_added ? OK : NEED_MORE;
 }
 
 void Connection::OnBreakCb(int32_t mask) {
@@ -2026,7 +2001,7 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-MemcacheParser::Result Connection::ParseMCBatch() {
+bool Connection::ParseMCBatch() {
   CHECK(io_buf_.InputLen() > 0);
 
   do {
@@ -2042,39 +2017,66 @@ MemcacheParser::Result Connection::ParseMCBatch() {
 
     DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
-    if (result != MemcacheParser::OK) {
-      if (result != MemcacheParser::INPUT_PENDING) {
-        memcache_parser_->Reset();
-      }
-      return result;
-    }
+    if (result == MemcacheParser::INPUT_PENDING)
+      return false;
+
     EnqueueParsedCommand();
+
+    if (result != MemcacheParser::OK) {
+      // We can not just reply directly to parse error, as we may have pipelined commands before.
+      // Fill the reply_payload with the error and continue parsing.
+      memcache_parser_->Reset();
+      auto client_error = [](string_view msg) { return absl::StrCat("CLIENT_ERROR ", msg); };
+
+      parsed_tail_->SetDeferredReply();
+      switch (result) {
+        case MemcacheParser::UNKNOWN_CMD:
+          parsed_tail_->SendSimpleString("ERROR");
+          break;
+        case MemcacheParser::PARSE_ERROR:
+          parsed_tail_->SendSimpleString(client_error("bad data chunk"));
+          break;
+        case MemcacheParser::BAD_DELTA:
+          parsed_tail_->SendSimpleString(client_error("invalid numeric delta argument"));
+          break;
+        default:
+          parsed_tail_->SendSimpleString(client_error("bad command line format"));
+          break;
+      }
+    }
   } while (parsed_cmd_q_len_ < 128 && io_buf_.InputLen() > 0);
-  return MemcacheParser::OK;
+  return true;
 }
 
-void Connection::ExecuteMCBatch(bool has_more) {
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
-
-  bool is_pipeline = parsed_cmd_q_len_ > 1;
-
+bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
   while (parsed_head_) {
     auto* cmd = parsed_head_;
-    bool batch_mode = has_more || (cmd->next != nullptr);
-    reply_builder_->SetBatchMode(batch_mode);
-    service_->DispatchMC(cmd);
+    bool has_replied = false;
+
+    // Protocol parse errors create commands with already cached replies.
+    // Try sending payload now in case it's already set.
+    has_replied = cmd->SendPayload();
+    DVLOG(1) << "Maybe replying head: " << has_replied;
+
+    if (!has_replied) {
+      service_->DispatchMC(cmd);
+
+      // see if the reply was not deferred, then for DispatchMC surely replied.
+      has_replied = !cmd->IsDeferredReply();
+      DCHECK(has_replied);  // TODO: We currently did not implement any deferred MC replies.
+      DVLOG(1) << "Executed command, has_replied: " << has_replied;
+    }
     parsed_head_ = cmd->next;
 
-    ReleaseParsedCommand(cmd, is_pipeline);
-    if (builder->GetError()) {
-      return;
+    ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+
+    if (reply_builder_->GetError()) {
+      return false;
     }
   }
-  DCHECK(parsed_head_ == nullptr && parsed_cmd_q_len_ == 0);
-
-  // Reset tail if we consumed all parsed commands.
   parsed_tail_ = nullptr;
+  return true;
 }
 
 void Connection::CreateParsedCommand() {
@@ -2309,7 +2311,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
-      DCHECK(io_buf_.AppendLen() == 0);
     }
 
     if (reply_builder_->GetError()) {

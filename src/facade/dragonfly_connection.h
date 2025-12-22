@@ -402,8 +402,12 @@ class Connection : public util::Connection {
 
   bool IsReplySizeOverLimit() const;
 
-  MemcacheParser::Result ParseMCBatch();
-  void ExecuteMCBatch(bool has_more);
+  // Returns true if one or more commands were parsed, and false otherwise.
+  bool ParseMCBatch();
+
+  // Returns true on successful execution, false on reply builder error.
+  bool ExecuteMCBatch();
+
   void CreateParsedCommand();
   void EnqueueParsedCommand();
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
