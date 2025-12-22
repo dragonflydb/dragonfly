@@ -96,6 +96,9 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(const facade::ErrorReply& error);
   void SendStored(bool ok /* true - ok, false - skipped*/);
   void SendSimpleString(std::string_view str);
+  void SendOk() {
+    SendSimpleString("OK");
+  }
 
   // If payload exists, sends it to reply builder, resets it and returns true.
   // Otherwise, returns false.

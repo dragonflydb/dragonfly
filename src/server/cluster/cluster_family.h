@@ -73,28 +73,27 @@ class ClusterFamily {
 
   // Custom Dragonfly commands for cluster management
   void DflyCluster(CmdArgList args, CommandContext* cmd_cntx);
-  void DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx);
 
-  void DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* builder)
+  void DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
-  void DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* builder);
-
-  void DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* builder)
+  void DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_cntx);
+  void DflySlotMigrationStatus(CmdArgList args, CommandContext* cmd_cntx)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, CommandContext* cmd_cntx);
 
   // DFLYMIGRATE INIT is internal command to create incoming migration object
-  void InitMigration(CmdArgList args, SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(migration_mu_);
+  void InitMigration(CmdArgList args, CommandContext* cmd_cntx) ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE FLOW initiate second step in slots migration procedure
   // this request should be done for every shard on the target node
   // this method assocciate connection and shard that will be the data
   // source for migration
-  void DflyMigrateFlow(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void DflyMigrateFlow(CmdArgList args, CommandContext* cmd_cntx);
 
-  void DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder);
+  void DflyMigrateAck(CmdArgList args, CommandContext* cmd_cntx);
 
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
       ABSL_LOCKS_EXCLUDED(migration_mu_);

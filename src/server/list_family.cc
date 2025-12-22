@@ -656,10 +656,10 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   if (timeout < 0)
-    return builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
@@ -689,10 +689,10 @@ void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
   float timeout = parser.Next<float>();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   if (timeout < 0)
-    return builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
@@ -797,23 +797,22 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
 }
 
-void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, Transaction* tx,
-                 SinkReplyBuilder* builder) {
+void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return builder->SendLong(result.value());
+    return cmd_cntx->rb()->SendLong(result.value());
   }
 
-  return builder->SendError(result.status());
+  return cmd_cntx->SendError(result.status());
 }
 
-void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
 
@@ -824,20 +823,19 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
     return_arr = true;
   }
 
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
   };
 
-  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     case OpStatus::WRONG_TYPE:
-      return builder->SendError(kWrongTypeErr);
+      return cmd_cntx->SendError(kWrongTypeErr);
     default:;
   }
 
@@ -890,7 +888,7 @@ void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
-      return cmd_cntx->SendError(std::move(error));
+      return cmd_cntx->SendError(error);
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
@@ -938,7 +936,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1014,10 +1012,10 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   float timeout = parser.Next<float>();
   if (auto err = parser.TakeError(); err)
-    return response_builder->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   if (timeout < 0)
-    return response_builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
 
   parser.Skip(parser.Next<size_t>());  // Skip numkeys and keys
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
@@ -1027,7 +1025,7 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
@@ -1050,27 +1048,27 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void CmdLPush(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx->tx, cmd_cntx->rb());
+  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx);
 }
 
 void CmdLPushX(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx->tx, cmd_cntx->rb());
+  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx);
 }
 
 void CmdLPop(CmdArgList args, CommandContext* cmd_cntx) {
-  return PopGeneric(ListDir::LEFT, args, cmd_cntx->tx, cmd_cntx->rb());
+  return PopGeneric(ListDir::LEFT, args, cmd_cntx);
 }
 
 void CmdRPush(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx->tx, cmd_cntx->rb());
+  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx);
 }
 
 void CmdRPushX(CmdArgList args, CommandContext* cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx->tx, cmd_cntx->rb());
+  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx);
 }
 
 void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
-  return PopGeneric(ListDir::RIGHT, args, cmd_cntx->tx, cmd_cntx->rb());
+  return PopGeneric(ListDir::RIGHT, args, cmd_cntx);
 }
 
 void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1119,8 +1117,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  if (auto err = parser.TakeError(); err)
-    return rb->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
@@ -1178,8 +1175,8 @@ void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (auto err = parser.TakeError(); err)
-    return rb->SendError(err.MakeReply());
+
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   DCHECK(pivot.data() && elem.data());
 
