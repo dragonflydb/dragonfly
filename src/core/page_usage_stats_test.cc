@@ -7,6 +7,8 @@
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
@@ -29,6 +31,84 @@ ABSL_DECLARE_FLAG(bool, experimental_flat_json);
 
 using namespace dfly;
 using namespace std::chrono_literals;
+
+namespace {
+
+std::string GenerateTestJSON(size_t num_objects) {
+  std::string data = R"({"contents":[)";
+  for (size_t i = 0; i < num_objects; ++i) {
+    const auto si = std::to_string(i);
+    data += R"({"id":)" + si + R"(,"class":"v___)" + si + R"(","value":)" + si + R"(})";
+    if (i < num_objects - 1) {
+      data += ",";
+    }
+  }
+  data += R"(], "data": "some", "count": 1, "checked": false})";
+  return data;
+}
+
+// Helper to defragment only if a randomly generated value is less than preset probability. For
+// benchmarking realistic situations, where some nodes are fragmented and others are not
+class SelectiveDefragment : public PageUsage {
+ public:
+  explicit SelectiveDefragment(const double fragmentation_probability)
+      : PageUsage(CollectPageStats::NO, 0), frag_prob_{fragmentation_probability} {
+  }
+
+  bool IsPageForObjectUnderUtilized(void*) override {
+    return dist_(rng_) < frag_prob_;
+  }
+
+ private:
+  double frag_prob_;
+  std::mt19937 rng_{99};
+  std::uniform_real_distribution<double> dist_{0.0, 1.0};
+};
+
+struct MemStats {
+  size_t total_reserved{0};
+  size_t total_committed{0};
+  size_t total_used{0};
+  size_t total_wasted{0};
+  size_t num_pages{0};
+};
+
+MemStats LogMemStats(const mi_heap_t* heap) {
+  MemStats stats;
+  mi_heap_visit_blocks(
+      heap, false,
+      [](const mi_heap_t* /*h*/, const mi_heap_area_t* area, void* /*block*/, size_t block_size,
+         void* arg) {
+        const size_t committed = area->committed;
+        const size_t used = area->used * block_size;
+
+        const auto s = static_cast<MemStats*>(arg);
+        s->num_pages++;
+        s->total_committed += committed;
+        s->total_reserved += area->reserved;
+        s->total_used += used;
+        s->total_wasted += committed - used;
+
+        return true;
+      },
+      &stats);
+
+  LOG(INFO) << "Pages: " << stats.num_pages;
+  LOG(INFO) << "Reserved : " << stats.total_reserved << " bytes";
+  LOG(INFO) << "Committed: " << stats.total_committed << " bytes";
+  LOG(INFO) << "Used: " << stats.total_used << " bytes";
+  LOG(INFO) << "Wasted: " << stats.total_wasted << " bytes";
+  if (stats.total_committed) {
+    LOG(INFO) << "Wasted%: "
+              << static_cast<double>(stats.total_wasted) / stats.total_committed * 100.0;
+    LOG(INFO) << "Utilization%: "
+              << static_cast<double>(stats.total_used) / stats.total_committed * 100.0;
+  }
+
+  return stats;
+}
+
+}  // namespace
 
 class PageUsageStatsTest : public ::testing::Test {
  protected:
@@ -194,15 +274,7 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   // still fail. This is because freeing the compact object code path takes the wrong branch based
   // on encoding. The flat encoding was tested manually adjusting this same test with changed
   // encoding.
-  std::string data = R"({"contents":[)";
-  for (size_t i = 0; i < 1000; ++i) {
-    const auto si = std::to_string(i);
-    data += R"({"id":)" + si + R"(,"class":"v___)" + si + R"("})";
-    if (i < 999) {
-      data += ",";
-    }
-  }
-  data += R"(], "data": "some", "count": 1, "checked": false})";
+  std::string data = GenerateTestJSON(1000);
 
   auto* mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());
   size_t before = mr->used();
@@ -230,6 +302,72 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   EXPECT_EQ(json_obj->at("data").as_string_view(), "some");
   EXPECT_EQ(json_obj->at("count").as_integer<uint8_t>(), 1);
   EXPECT_EQ(json_obj->at("checked").as_bool(), false);
+}
+
+TEST_F(PageUsageStatsTest, JsonDefragEmpty) {
+  auto parsed = ParseJsonUsingShardHeap(R"({})");
+  EXPECT_TRUE(parsed.has_value());
+
+  PageUsage p{CollectPageStats::NO, 0};
+  p.SetForceReallocate(true);
+
+  Defragment(parsed.value(), &p);
+  EXPECT_TRUE(parsed->empty());
+}
+
+TEST_F(PageUsageStatsTest, JsonDefragNested) {
+  constexpr auto data = R"({"a":{"b":{"c":{"d":"value"}}}})";
+  auto parsed = ParseJsonUsingShardHeap(data);
+  EXPECT_TRUE(parsed.has_value());
+
+  PageUsage p{CollectPageStats::NO, 0};
+  p.SetForceReallocate(true);
+
+  Defragment(parsed.value(), &p);
+  EXPECT_EQ(parsed->at("a").at("b").at("c").at("d").as_string_view(), "value");
+}
+
+TEST_F(PageUsageStatsTest, JsonDefragRemainsInSameHeap) {
+  // This is a brute force test that defragmentation does not erroneously move data to the default
+  // heap. Comparing allocators before/after defragmentation is not useful as stateless allocators
+  // are all equal. It might be possible to compare the allocator type, but this approach checks
+  // that the pointers in a JSON object belong to the same heap as they did before defragmentation.
+
+  const std::string data = R"({
+    "data": {"sub-data": "attr1"},
+    "values": [true, false, 1.11, 2],
+    "secretkey": ")" + std::string(1024, '.') +
+                           "\"}";
+
+  auto json = ParseJsonUsingShardHeap(data);
+  EXPECT_TRUE(json.has_value());
+
+  auto key_before = json->at("secretkey").as_string_view();
+  auto sub_before = json->at("data").at("sub-data").as_string_view();
+  auto values_before = &*json->at("values").array_range().begin();
+
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), key_before.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), sub_before.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), values_before));
+
+  PageUsage p{CollectPageStats::NO, 0};
+  p.SetForceReallocate(true);
+
+  Defragment(json.value(), &p);
+
+  auto key_after = json->at("secretkey").as_string_view();
+  auto sub_after = json->at("data").at("sub-data").as_string_view();
+  auto values_after = &*json->at("values").array_range().begin();
+
+  // Data still managed by the same heap.
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), key_after.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), sub_after.data()));
+  EXPECT_TRUE(mi_heap_contains_block(m_.heap(), values_after));
+
+  // Defragment actually changed addresses
+  EXPECT_NE(key_after.data(), key_before.data());
+  EXPECT_NE(sub_after.data(), sub_before.data());
+  EXPECT_NE(values_after, values_before);
 }
 
 TEST_F(PageUsageStatsTest, QuotaChecks) {
@@ -426,3 +564,138 @@ TEST_F(PageUsageStatsTest, DefragmentIndexWithNonDefragmentableFields) {
   EXPECT_FALSE(result.quota_depleted);
   EXPECT_EQ(result.objects_moved, 0);
 }
+
+TEST_F(PageUsageStatsTest, DefragReducesWaste) {
+  // This test works with actual defragmentation, by deleting every other json object which creates
+  // holes in pages which cannot be directly freed. The test asserts that wasted memory goes down as
+  // well as committed memory after defragmentation.
+
+  std::vector<std::optional<JsonType>> all_objects;
+
+  constexpr auto total_json = 100;
+  all_objects.reserve(total_json);
+
+  for (auto i = 0; i < total_json; ++i) {
+    auto parsed = ParseJsonUsingShardHeap(GenerateTestJSON(500));
+    EXPECT_TRUE(parsed.has_value());
+    all_objects.emplace_back(std::move(parsed.value()));
+  }
+
+  // Delete every other object to create gaps, so that the pages are partially used.
+  for (size_t i = 0; i < all_objects.size(); i += 2) {
+    all_objects[i].reset();
+  }
+
+  // Allow mimalloc to free any completely empty pages, if any
+  mi_heap_collect(m_.heap(), true);
+
+  // Collects stats using mi_visit.. also logs, to see logs run the test with:
+  // --vmodule=page_usage_stats_test=1 --logtostderr
+  const auto before = LogMemStats(m_.heap());
+
+  PageUsage p{CollectPageStats::NO, 0.8};
+  for (auto& j : all_objects) {
+    if (j.has_value()) {
+      Defragment(j.value(), &p);
+    }
+  }
+
+  mi_heap_collect(m_.heap(), true);
+  const auto after = LogMemStats(m_.heap());
+
+  EXPECT_LT(after.total_wasted, before.total_wasted);
+  EXPECT_LT(after.total_committed, before.total_committed);
+}
+
+namespace {
+
+void InitBenchMemRes() {
+  static bool initialized = false;
+  if (!initialized) {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+    static MiMemoryResource m{tlh};
+    InitTLStatelessAllocMR(&m);
+    CompactObj::InitThreadLocal(&m);
+    initialized = true;
+  }
+}
+
+}  // namespace
+
+void BM_JSONDefragSerialize(benchmark::State& state) {
+  InitBenchMemRes();
+
+  std::string json_data = GenerateTestJSON(state.range(0));
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    auto parsed = ParseJsonUsingShardHeap(json_data);
+    DCHECK(parsed.has_value());
+    state.ResumeTiming();
+
+    JsonType defragmented = DeepCopyJSON(&parsed.value());
+    benchmark::DoNotOptimize(defragmented);
+  }
+}
+
+BENCHMARK(BM_JSONDefragSerialize)
+    ->ArgName("objects_per_json")
+    ->RangeMultiplier(5)
+    ->Range(100, 10000);
+
+void BM_JSONDefragTreeWalk(benchmark::State& state) {
+  InitBenchMemRes();
+
+  std::string json_data = GenerateTestJSON(state.range(0));
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    auto parsed = ParseJsonUsingShardHeap(json_data);
+    PageUsage p{CollectPageStats::NO, 0.1};
+    // Assumes every single node has to be defragmented. not realistic!
+    p.SetForceReallocate(true);
+    state.ResumeTiming();
+
+    Defragment(parsed.value(), &p);
+    benchmark::DoNotOptimize(parsed);
+  }
+}
+
+BENCHMARK(BM_JSONDefragTreeWalk)
+    ->ArgName("objects_per_json")
+    ->RangeMultiplier(5)
+    ->Range(100, 10000);
+
+void BM_JSONDefragSelective(benchmark::State& state) {
+  InitBenchMemRes();
+
+  std::string json_data = GenerateTestJSON(state.range(0));
+
+  for (auto _ : state) {
+    state.PauseTiming();
+    auto parsed = ParseJsonUsingShardHeap(json_data);
+    DCHECK(parsed.has_value());
+    SelectiveDefragment p{state.range(1) / 100.0};
+    state.ResumeTiming();
+
+    Defragment(parsed.value(), &p);
+
+    benchmark::DoNotOptimize(parsed);
+  }
+}
+
+BENCHMARK(BM_JSONDefragSelective)
+    ->ArgNames({"objects_per_json", "fragmentation_probability"})
+    ->Args({250, 0})
+    ->Args({250, 30})
+    ->Args({250, 70})
+    ->Args({250, 100})
+    ->Args({1000, 0})
+    ->Args({1000, 30})
+    ->Args({1000, 70})
+    ->Args({1000, 100})
+    ->Args({4000, 0})
+    ->Args({4000, 30})
+    ->Args({4000, 70})
+    ->Args({4000, 100});
