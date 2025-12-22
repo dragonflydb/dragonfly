@@ -42,6 +42,25 @@ HllBufferPtr InitHllPtr() {
 
 }  // namespace
 
+CycleQuota::CycleQuota(const uint64_t quota_usec)
+    : quota_cycles_{quota_usec == kMaxQuota ? kMaxQuota : base::CycleClock::FromUsec(quota_usec)} {
+  Arm();
+}
+
+void CycleQuota::Arm() {
+  start_cycles_ = base::CycleClock::Now();
+}
+
+bool CycleQuota::Depleted() const {
+  if (quota_cycles_ == kMaxQuota)
+    return false;
+  return base::CycleClock::Now() - start_cycles_ >= quota_cycles_;
+}
+
+uint64_t CycleQuota::UsedCycles() const {
+  return base::CycleClock::Now() - start_cycles_;
+}
+
 void CollectedPageStats::Merge(CollectedPageStats&& other, uint16_t shard_id) {
   this->pages_scanned += other.pages_scanned;
   this->pages_marked_for_realloc += other.pages_marked_for_realloc;
@@ -158,11 +177,16 @@ CollectedPageStats PageUsage::UniquePages::CollectedStats() const {
       .shard_wide_summary = {}};
 }
 
-PageUsage::PageUsage(CollectPageStats collect_stats, float threshold, uint64_t quota_usec)
-    : collect_stats_{collect_stats},
-      threshold_{threshold},
-      quota_cycles_{quota_usec == kMaxQuota ? kMaxQuota : base::CycleClock::FromUsec(quota_usec)},
-      start_cycles_(base::CycleClock::Now()) {
+PageUsage::PageUsage(CollectPageStats collect_stats, float threshold, CycleQuota quota)
+    : collect_stats_{collect_stats}, threshold_{threshold}, quota_{quota} {
+}
+
+void PageUsage::ArmQuotaTimer() {
+  quota_.Arm();
+}
+
+uint64_t PageUsage::UsedQuotaCycles() const {
+  return quota_.UsedCycles();
 }
 
 bool PageUsage::IsPageForObjectUnderUtilized(void* object) {
@@ -185,11 +209,7 @@ bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stat) {
 }
 
 bool PageUsage::QuotaDepleted() const {
-  if (quota_cycles_ == kMaxQuota) {
-    return false;
-  }
-
-  return base::CycleClock::Now() - start_cycles_ >= quota_cycles_;
+  return quota_.Depleted();
 }
 
 }  // namespace dfly

@@ -350,7 +350,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   unsigned traverses_count = 0;
   uint64_t attempts = 0;
 
-  PageUsage page_usage{collect_page_stats, threshold};
+  PageUsage page_usage{collect_page_stats, threshold, UnlimitedQuota()};
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {

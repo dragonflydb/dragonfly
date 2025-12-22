@@ -788,7 +788,7 @@ TEST_F(StringSetTest, ReallocIfNeeded) {
   size_t wasted_before = total_wasted_memory;
 
   size_t underutilized = 0;
-  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  PageUsage page_usage{CollectPageStats::NO, 0.9, UnlimitedQuota()};
   for (auto it = ss_->begin(); it != ss_->end(); ++it) {
     underutilized += page_usage.IsPageForObjectUnderUtilized(*it);
     it.ReallocIfNeeded(&page_usage);

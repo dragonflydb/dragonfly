@@ -52,7 +52,8 @@ std::string GenerateTestJSON(size_t num_objects) {
 class SelectiveDefragment : public PageUsage {
  public:
   explicit SelectiveDefragment(const double fragmentation_probability)
-      : PageUsage(CollectPageStats::NO, 0), frag_prob_{fragmentation_probability} {
+      : PageUsage(CollectPageStats::NO, 0, UnlimitedQuota()),
+        frag_prob_{fragmentation_probability} {
   }
 
   bool IsPageForObjectUnderUtilized(void*) override {
@@ -176,7 +177,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
   qlist_->Push("xxxx", QList::HEAD);
 
   {
-    PageUsage p{CollectPageStats::YES, 0.1};
+    PageUsage p{CollectPageStats::YES, 0.1, UnlimitedQuota()};
     score_map_->begin().ReallocIfNeeded(&p);
     sorted_map_->DefragIfNeeded(&p);
     string_set_->begin().ReallocIfNeeded(&p);
@@ -191,7 +192,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
   }
 
   {
-    PageUsage p{CollectPageStats::NO, 0.1};
+    PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
     score_map_->begin().ReallocIfNeeded(&p);
     sorted_map_->DefragIfNeeded(&p);
     string_set_->begin().ReallocIfNeeded(&p);
@@ -204,7 +205,7 @@ TEST_F(PageUsageStatsTest, Defrag) {
 
 TEST_F(PageUsageStatsTest, StatCollection) {
   constexpr auto threshold = 0.5;
-  PageUsage p{CollectPageStats::YES, threshold};
+  PageUsage p{CollectPageStats::YES, threshold, UnlimitedQuota()};
   for (size_t i = 0; i < 10000; ++i) {
     p.ConsumePageStats({.page_address = uintptr_t{100000 + i},
                         .block_size = 1,
@@ -286,7 +287,7 @@ TEST_F(PageUsageStatsTest, JSONCons) {
   c_obj_.SetJsonSize(mr->used() - before);
   EXPECT_GT(c_obj_.MallocUsed(), 0);
 
-  PageUsage p{CollectPageStats::YES, 0.1};
+  PageUsage p{CollectPageStats::YES, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   c_obj_.DefragIfNeeded(&p);
@@ -308,7 +309,7 @@ TEST_F(PageUsageStatsTest, JsonDefragEmpty) {
   auto parsed = ParseJsonUsingShardHeap(R"({})");
   EXPECT_TRUE(parsed.has_value());
 
-  PageUsage p{CollectPageStats::NO, 0};
+  PageUsage p{CollectPageStats::NO, 0, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   Defragment(parsed.value(), &p);
@@ -320,7 +321,7 @@ TEST_F(PageUsageStatsTest, JsonDefragNested) {
   auto parsed = ParseJsonUsingShardHeap(data);
   EXPECT_TRUE(parsed.has_value());
 
-  PageUsage p{CollectPageStats::NO, 0};
+  PageUsage p{CollectPageStats::NO, 0, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   Defragment(parsed.value(), &p);
@@ -350,7 +351,7 @@ TEST_F(PageUsageStatsTest, JsonDefragRemainsInSameHeap) {
   EXPECT_TRUE(mi_heap_contains_block(m_.heap(), sub_before.data()));
   EXPECT_TRUE(mi_heap_contains_block(m_.heap(), values_before));
 
-  PageUsage p{CollectPageStats::NO, 0};
+  PageUsage p{CollectPageStats::NO, 0, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   Defragment(json.value(), &p);
@@ -372,11 +373,11 @@ TEST_F(PageUsageStatsTest, JsonDefragRemainsInSameHeap) {
 
 TEST_F(PageUsageStatsTest, QuotaChecks) {
   {
-    PageUsage p{CollectPageStats::NO, 0};
+    PageUsage p{CollectPageStats::NO, 0, UnlimitedQuota()};
     EXPECT_FALSE(p.QuotaDepleted());
   }
   {
-    PageUsage p{CollectPageStats::NO, 0, 4};
+    PageUsage p{CollectPageStats::NO, 0, CycleQuota{4}};
     util::ThisFiber::SleepFor(5us);
     EXPECT_TRUE(p.QuotaDepleted());
   }
@@ -384,7 +385,7 @@ TEST_F(PageUsageStatsTest, QuotaChecks) {
 
 TEST_F(PageUsageStatsTest, BlockList) {
   search::BlockList<search::SortedVector<search::DocId>> bl{&m_, 20};
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   // empty list
@@ -399,7 +400,7 @@ TEST_F(PageUsageStatsTest, BlockList) {
   EXPECT_EQ(result.objects_moved, 2);
 
   // quota depleted without defragmentation
-  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  PageUsage p_zero{CollectPageStats::NO, 0.1, CycleQuota{0}};
   p_zero.SetForceReallocate(true);
   result = bl.Defragment(&p_zero);
   EXPECT_TRUE(result.quota_depleted);
@@ -408,14 +409,14 @@ TEST_F(PageUsageStatsTest, BlockList) {
 
 TEST_F(PageUsageStatsTest, BlockListDefragmentResumes) {
   search::BlockList<search::SortedVector<search::DocId>> bl{&m_, 20};
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   for (size_t i = 0; i < 1000; ++i) {
     bl.Insert(i);
   }
 
-  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, CycleQuota{10}};
   p_small_quota.SetForceReallocate(true);
   util::ThisFiber::SleepFor(10us);
   auto result = bl.Defragment(&p_small_quota);
@@ -429,7 +430,7 @@ TEST_F(PageUsageStatsTest, BlockListDefragmentResumes) {
 
 TEST_F(PageUsageStatsTest, BlockListWithPairs) {
   search::BlockList<search::SortedVector<std::pair<search::DocId, double>>> bl{&m_, 20};
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   for (size_t i = 0; i < 100; ++i) {
@@ -443,7 +444,7 @@ TEST_F(PageUsageStatsTest, BlockListWithPairs) {
 
 TEST_F(PageUsageStatsTest, BlockListWithNonDefragmentableContainer) {
   search::BlockList<search::CompressedSortedSet> bl{&m_, 20};
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   // empty list
@@ -489,7 +490,7 @@ TEST_F(PageUsageStatsTest, DefragmentTagIndex) {
       search::SchemaField{search::SchemaField::TAG, 0, "fn", search::SchemaField::TagParams{}};
   search::FieldIndices index{schema, {}, &m_, nullptr};
 
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   // Empty index
@@ -505,7 +506,7 @@ TEST_F(PageUsageStatsTest, DefragmentTagIndex) {
   // single doc with single term returned by `GetTags` should result in two reallocations.
   EXPECT_EQ(result.objects_moved, 2);
 
-  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  PageUsage p_zero{CollectPageStats::NO, 0.1, CycleQuota{0}};
   p_zero.SetForceReallocate(true);
   result = index.Defragment(&p_zero);
   EXPECT_TRUE(result.quota_depleted);
@@ -518,7 +519,7 @@ TEST_F(PageUsageStatsTest, TagIndexDefragResumeWithChanges) {
       search::SchemaField{search::SchemaField::TAG, 0, "fn", search::SchemaField::TagParams{}};
   search::FieldIndices index{schema, {}, &m_, nullptr};
 
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   const MockDocument md;
@@ -526,7 +527,7 @@ TEST_F(PageUsageStatsTest, TagIndexDefragResumeWithChanges) {
     index.Add(i, md);
   }
 
-  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, CycleQuota{10}};
   p_small_quota.SetForceReallocate(true);
   util::ThisFiber::SleepFor(10us);
   search::DefragmentResult result = index.Defragment(&p_small_quota);
@@ -553,7 +554,7 @@ TEST_F(PageUsageStatsTest, DefragmentIndexWithNonDefragmentableFields) {
   search::IndicesOptions options{{}};
   search::FieldIndices index{schema, options, &m_, nullptr};
 
-  PageUsage p{CollectPageStats::NO, 0.1};
+  PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
   p.SetForceReallocate(true);
 
   const MockDocument md;
@@ -593,7 +594,7 @@ TEST_F(PageUsageStatsTest, DefragReducesWaste) {
   // --vmodule=page_usage_stats_test=1 --logtostderr
   const auto before = LogMemStats(m_.heap());
 
-  PageUsage p{CollectPageStats::NO, 0.8};
+  PageUsage p{CollectPageStats::NO, 0.8, UnlimitedQuota()};
   for (auto& j : all_objects) {
     if (j.has_value()) {
       Defragment(j.value(), &p);
@@ -652,7 +653,7 @@ void BM_JSONDefragTreeWalk(benchmark::State& state) {
   for (auto _ : state) {
     state.PauseTiming();
     auto parsed = ParseJsonUsingShardHeap(json_data);
-    PageUsage p{CollectPageStats::NO, 0.1};
+    PageUsage p{CollectPageStats::NO, 0.1, UnlimitedQuota()};
     // Assumes every single node has to be defragmented. not realistic!
     p.SetForceReallocate(true);
     state.ResumeTiming();
