@@ -124,17 +124,18 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
   }
 
-  void SendMiss() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderMiss());
-  }
-
-  void SendGetEnd() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
-  }
-
   void SendDeleted() {  // For MC only.
     SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderDeleted());
   }
+
+  // MGET related methods.
+  // For every value in multi-get, either SendMiss or SendValue must be called with the correct
+  // index, followed by SendGetEnd().
+  // The interface is intermediate, as we do not support asynchronous multi-get yet - we just
+  // add support for deferred replies when MGET is dispatched after asychronous commands.
+  void SendMiss(unsigned index);  // Sends a miss response for the given index in multi-get.
+  void SendValue(unsigned index, std::string_view value, uint64_t mc_ver, uint32_t mc_flag);
+  void SendGetEnd();  // Flushes the end of multi-get response.
 
   // If payload exists, sends it to reply builder, resets it and returns true.
   // Otherwise, returns false.
@@ -165,8 +166,8 @@ class ParsedCommand : public cmn::BackedArguments {
  private:
   bool CheckDoneAndMarkHead();
   void NotifyReplied();
-
   void SendDirect(const payload::StoredReply& sr);
+  void SendDirect(const payload::MGetReply& pl);
 
   // Synchronization state bits. The reply callback in a shard thread sets ASYNC_REPLY_DONE
   // when payload is filled. It also notifies the connection if the command is marked as HEAD_REPLY.

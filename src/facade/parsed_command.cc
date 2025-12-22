@@ -120,10 +120,75 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
   }
 }
 
+void ParsedCommand::SendMiss(unsigned index) {
+  if (is_deferred_reply_) {
+    if (holds_alternative<std::monostate>(reply_payload_)) {
+      // Lazily allocate the array on first use. Already initialized to not found,
+      // so we do not need to do anything else here.
+      auto arr = std::make_unique<facade::payload::SingleGetReply[]>(size());
+      reply_payload_ = std::move(arr);
+      // We do not notify here as there will be more entries to fill.
+    }
+  } else {
+    // Direct reply for either MC or Redis.
+    if (mc_cmd_ != nullptr)
+      rb_->SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderMiss());
+    else
+      static_cast<RedisReplyBuilder*>(rb_)->SendNull();
+  }
+}
+
+void ParsedCommand::SendValue(unsigned index, std::string_view value, uint64_t mc_ver,
+                              uint32_t mc_flag) {
+  if (is_deferred_reply_) {
+    if (holds_alternative<std::monostate>(reply_payload_)) {
+      // Lazily allocate the array on first use.
+      auto arr = std::make_unique<facade::payload::SingleGetReply[]>(size());
+      reply_payload_ = std::move(arr);
+    }
+
+    // Fill in the entry.
+    auto& arr = get<std::unique_ptr<facade::payload::SingleGetReply[]>>(reply_payload_);
+    arr[index].value = std::string(value);
+    arr[index].mc_ver = mc_ver;
+    arr[index].mc_flag = mc_flag;
+    arr[index].is_found = true;
+    // We do not notify here as there will be more entries to fill.
+  } else {
+    if (mc_cmd_) {
+      auto* rb = static_cast<MCReplyBuilder*>(rb_);
+      // Send the value for MC. Note thet we use already parsed key at index from the command
+      // arguments.
+      rb->SendValue(mc_cmd_->cmd_flags, at(index), value, mc_ver, mc_flag,
+                    mc_cmd_->replies_cas_token());
+    } else {
+      auto* rrb = static_cast<RedisReplyBuilder*>(rb_);
+      // TODO: we would like to call the following code lazily to start the array only once.
+      // but it currently does not work with RESP as our ParsedCommand does not really
+      // contain arguments for RESP flow (DispatchCommand does not accept ParsedCommand yet).
+      // if (index == 0)
+      //  rrb->StartArray(size());
+      rrb->SendBulkString(value);
+    }
+  }
+}
+
+void ParsedCommand::SendGetEnd() {
+  if (is_deferred_reply_) {
+    // Finalize the reply payload and notify.
+    NotifyReplied();
+  } else if (mc_cmd_ != nullptr) {  // Only for MC
+    // Direct reply for MC with the END marker.
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
+  }
+}
+
 bool ParsedCommand::SendPayload() {
   if (is_deferred_reply_) {
     if (const auto* stored = get_if<payload::StoredReply>(&reply_payload_); stored) {
       SendDirect(*stored);
+    } else if (const auto* get_reply = get_if<payload::MGetReply>(&reply_payload_); get_reply) {
+      SendDirect(*get_reply);
     } else {
       CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
     }
@@ -174,14 +239,43 @@ void ParsedCommand::NotifyReplied() {
 void ParsedCommand::SendDirect(const payload::StoredReply& sr) {
   if (sr.ok) {
     if (mc_cmd_)
-      SendSimpleDirect(MCRender{mc_cmd_->cmd_flags}.RenderStored(), rb_);
+      rb_->SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderStored());
     else
       rb_->SendOk();
   } else {
     if (mc_cmd_)
-      SendSimpleDirect(MCRender{mc_cmd_->cmd_flags}.RenderNotStored(), rb_);
+      rb_->SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotStored());
     else
       static_cast<RedisReplyBuilder*>(rb_)->SendNull();
+  }
+}
+
+void ParsedCommand::SendDirect(const payload::MGetReply& pl) {
+  RedisReplyBuilder* rrb = mc_cmd_ ? nullptr : static_cast<RedisReplyBuilder*>(rb_);
+  if (rrb) {
+    rrb->StartArray(size());
+  }
+
+  for (size_t i = 0; i < size(); ++i) {
+    const auto& entry = pl[i];
+    if (entry.is_found) {
+      if (mc_cmd_) {
+        auto* rb = static_cast<MCReplyBuilder*>(rb_);
+        rb->SendValue(mc_cmd_->cmd_flags, at(i), entry.value, entry.mc_ver, entry.mc_flag,
+                      mc_cmd_->replies_cas_token());
+      } else {
+        rrb->SendBulkString(entry.value);
+      }
+    } else {  // not found
+      if (mc_cmd_) {
+        rb_->SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
+      } else {
+        rrb->SendNull();
+      }
+    }
+  }
+  if (mc_cmd_) {
+    rb_->SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
   }
 }
 

@@ -151,6 +151,10 @@ struct CaptureVisitor {
     LOG(FATAL) << "StoredReply not supported in non-capturing builder";
   }
 
+  void operator()(const unique_ptr<payload::SingleGetReply[]>& arr) {
+    LOG(FATAL) << "SingleGetReply not supported in non-capturing builder";
+  }
+
   SinkReplyBuilder* rb;
 };
 

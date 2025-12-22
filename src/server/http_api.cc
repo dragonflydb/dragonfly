@@ -130,6 +130,9 @@ struct CaptureVisitor {
     }
   }
 
+  void operator()(const payload::MGetReply& arr) {
+  }
+
   void operator()(const payload::Error& err) {
     str = absl::StrCat(R"({"error": ")", err->first, "\"");
   }

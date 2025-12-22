@@ -1409,33 +1409,20 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
   ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, is_memcache, absl::MakeSpan(res));
 
   SinkReplyBuilder::ReplyScope scope(builder);
-  if (is_memcache) {
-    // TODO: implement deferred support for MGET, which prevents us from running SET,GET in async
-    // pipeline.
-    DCHECK(!cmnd_cntx->IsDeferredReply());
-    auto* rb = static_cast<MCReplyBuilder*>(builder);
-    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);  // memcache is never squashed
-    for (const auto& entry : res) {
-      if (entry) {
-        // TODO: we will need to pass the whole response to ParsedCommand to support
-        // capturing MC replies.
-        rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0,
-                      entry->mc_flag, cmnd_cntx->mc_command()->replies_cas_token());
-      } else {
-        cmnd_cntx->SendMiss();
-      }
-    }
-    cmnd_cntx->SendGetEnd();
-  } else {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->StartArray(res.size());
-    for (const auto& entry : res) {
-      if (entry)
-        rb->SendBulkString(entry->value);
-      else
-        rb->SendNull();
+  // TODO: should go away once we support ParsedCommand for RESP protocol as well.
+  // See SendValue in CommandContext.
+  if (!is_memcache) {
+    static_cast<RedisReplyBuilder*>(builder)->StartArray(args.size());
+  }
+  for (size_t i = 0; i < res.size(); ++i) {
+    const auto& entry = res[i];
+    if (entry) {
+      cmnd_cntx->SendValue(i, entry->value, 0, entry->mc_flag);
+    } else {
+      cmnd_cntx->SendMiss(i);
     }
   }
+  cmnd_cntx->SendGetEnd();
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1675,9 +1662,6 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
     fetch_mask |= FETCH_MCVER;
 
   SinkReplyBuilder::ReplyScope scope(builder);
-  auto* rb = static_cast<MCReplyBuilder*>(builder);
-  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
-
   CmdArgParser parser{args};
   const int64_t expire_ts = parser.Next<uint64_t>();
   if (parser.HasError()) {
@@ -1706,12 +1690,12 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
   ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, true,
                       absl::MakeSpan(ordered_by_shard));
-  for (const auto& entry : ordered_by_shard) {
+  for (size_t i = 0; i < ordered_by_shard.size(); ++i) {
+    const auto& entry = ordered_by_shard[i];
     if (entry) {
-      rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0, entry->mc_flag,
-                    cmnd_cntx->mc_command()->replies_cas_token());
+      cmnd_cntx->SendValue(i, entry->value, 0, entry->mc_flag);
     } else {
-      cmnd_cntx->SendMiss();
+      cmnd_cntx->SendMiss(i);
     }
   }
   cmnd_cntx->SendGetEnd();

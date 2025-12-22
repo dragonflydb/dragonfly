@@ -20,11 +20,22 @@ struct CollectionPayload;
 struct SimpleString : public std::string {};  // SendSimpleString
 struct BulkString : public std::string {};    // SendBulkString
 struct StoredReply {
-  bool ok;  // true for SendStored, false for SendSetSkipped
+  bool ok = false;  // true for SendStored, false for SendSetSkipped
 };
 
+struct SingleGetReply {
+  std::string value;
+  uint64_t mc_ver = 0;
+  uint32_t mc_flag = 0;
+  bool is_found = false;
+};
+
+using MGetReply = std::unique_ptr<SingleGetReply[]>;
+
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             std::unique_ptr<CollectionPayload>, StoredReply>;
+                             std::unique_ptr<CollectionPayload>, StoredReply, MGetReply>;
+
+static_assert(sizeof(Payload) == 40);
 
 struct CollectionPayload {
   CollectionPayload(unsigned _len, CollectionType _type) : len{_len}, type{_type} {
