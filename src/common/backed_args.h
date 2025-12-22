@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <cstdint>
 #include <string_view>
 
 namespace cmn {
