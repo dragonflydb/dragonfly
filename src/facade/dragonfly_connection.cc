@@ -2062,7 +2062,7 @@ bool Connection::ExecuteMCBatch() {
     if (!has_replied) {
       service_->DispatchMC(cmd);
 
-      // see if the reply was not deferred, then for DispatchMC surely replied.
+      // If the reply was not deferred, then DispatchMC has surely replied.
       has_replied = !cmd->IsDeferredReply();
       DCHECK(has_replied);  // TODO: We currently did not implement any deferred MC replies.
       DVLOG(1) << "Executed command, has_replied: " << has_replied;
