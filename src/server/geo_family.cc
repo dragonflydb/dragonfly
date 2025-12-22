@@ -262,7 +262,7 @@ void CmdGeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK(cmd_cntx->tx);
 
   absl::Span memb_sp{members.data(), members.size()};
-  ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx->tx, builder);
+  ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx);
 }
 
 void CmdGeoHash(CmdArgList args, CommandContext* cmd_cntx) {

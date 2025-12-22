@@ -18,6 +18,7 @@ namespace dfly {
 
 class CommandRegistry;
 class Transaction;
+class CommandContext;
 struct OpArgs;
 
 class ZSetFamily {
@@ -76,7 +77,7 @@ class ZSetFamily {
 
   // Used by GeoFamily also
   static void ZAddGeneric(std::string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
-                          Transaction* tx, SinkReplyBuilder* builder);
+                          CommandContext* cmd_cntx);
 
   static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, Transaction* tx,
                                               SinkReplyBuilder* builder);
