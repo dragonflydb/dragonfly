@@ -23,10 +23,8 @@ struct StoredReply {
   bool ok;  // true for SendStored, false for SendSetSkipped
 };
 
-struct NoReply {};  // for no reply mode.
-
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             std::unique_ptr<CollectionPayload>, StoredReply, NoReply>;
+                             std::unique_ptr<CollectionPayload>, StoredReply>;
 
 struct CollectionPayload {
   CollectionPayload(unsigned _len, CollectionType _type) : len{_len}, type{_type} {
@@ -44,7 +42,7 @@ inline Error make_error(std::string_view msg, std::string_view type = "") {
 
 inline Payload make_simple_or_noreply(std::string_view resp) {
   if (resp.empty())
-    return NoReply{};
+    return std::monostate{};
   else
     return SimpleString{std::string(resp)};
 }

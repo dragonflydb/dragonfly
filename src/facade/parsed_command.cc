@@ -14,25 +14,25 @@ namespace facade {
 
 using namespace std;
 
-string MCRender::SendNotFound() const {
+string MCRender::RenderNotFound() const {
   if (flags_.no_reply)
     return {};
   return flags_.meta ? "NF" : "NOT_FOUND";
 }
 
-string MCRender::SendGetEnd() const {
+string MCRender::RenderGetEnd() const {
   if (flags_.no_reply || flags_.meta)
     return {};
   return "END";
 }
 
-string MCRender::SendMiss() const {
+string MCRender::RenderMiss() const {
   if (flags_.no_reply || !flags_.meta)
     return {};
   return "EN";
 }
 
-string MCRender::SendDeleted() const {
+string MCRender::RenderDeleted() const {
   if (flags_.no_reply)
     return {};
   return flags_.meta ? "HD" : "DELETED";
@@ -104,7 +104,7 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
 }
 
 bool ParsedCommand::SendPayload() {
-  if (IsReplyCached()) {
+  if (is_deferred_reply_) {
     CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
     reply_payload_ = {};
     return true;

@@ -105,10 +105,7 @@ void CapturingReplyBuilder::CollapseFilledCollections() {
 }
 
 struct CaptureVisitor {
-  void operator()(monostate) {  // NOLINT
-  }
-
-  void operator()(NoReply) {  // NOLINT
+  void operator()(monostate) {
   }
 
   void operator()(long v) {

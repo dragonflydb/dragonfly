@@ -20,10 +20,10 @@ class MCRender {
   explicit MCRender(MemcacheCmdFlags flags) : flags_(flags) {
   }
 
-  std::string SendNotFound() const;
-  std::string SendMiss() const;
-  std::string SendDeleted() const;
-  std::string SendGetEnd() const;
+  std::string RenderNotFound() const;
+  std::string RenderMiss() const;
+  std::string RenderDeleted() const;
+  std::string RenderGetEnd() const;
 
  private:
   MemcacheCmdFlags flags_;
@@ -117,19 +117,19 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendStored(bool ok /* true - ok, false - skipped*/);
 
   void SendNotFound() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.SendNotFound());
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
   }
 
   void SendMiss() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.SendMiss());
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderMiss());
   }
 
   void SendGetEnd() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.SendGetEnd());
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
   }
 
   void SendDeleted() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.SendDeleted());
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderDeleted());
   }
 
   // If payload exists, sends it to reply builder, resets it and returns true.
@@ -159,10 +159,6 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
  private:
-  bool IsReplyCached() const {
-    return is_deferred_reply_ && !std::holds_alternative<std::monostate>(reply_payload_);
-  }
-
   bool CheckDoneAndMarkHead();
   void NotifyReplied();
 
