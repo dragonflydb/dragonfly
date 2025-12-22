@@ -24,7 +24,7 @@ struct ConnectionRef {
   // only until the next suspension point.
   Connection* Get() const;
 
-  // Returns thue if the reference expired. Thread-safe.
+  // Returns true if the reference expired. Thread-safe.
   bool IsExpired() const;
 
   // Returns client id.Thread-safe.
