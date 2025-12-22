@@ -549,10 +549,12 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   // Wait for all offloads again
   ExpectConditionWithinTimeout(wait_offloaded);
 
+  auto c_key = string{1, 'c'};
+
   // HDEL
   for (size_t i = 0; i < kNUM; i++) {
     string key = absl::StrCat("k", i);
-    EXPECT_THAT(Run({"HDEL", key, string{1, 'c'}}), IntArg(1));
+    EXPECT_THAT(Run({"HDEL", key, c_key}), IntArg(1));
     EXPECT_THAT(Run({"HLEN", key}), IntArg(25));
   }
 
@@ -562,9 +564,19 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   // HSET new field
   for (size_t i = 0; i < kNUM; i++) {
     string key = absl::StrCat("k", i);
-    EXPECT_THAT(Run({"HSET", key, string{1, 'c'}, "Some new value"}), IntArg(1));
+    EXPECT_THAT(Run({"HSET", key, c_key, "Some new value"}), IntArg(1));
     EXPECT_THAT(Run({"HLEN", key}), IntArg(26));
-    EXPECT_EQ(Run({"HGET", key, string{1, 'c'}}), "Some new value");
+    EXPECT_EQ(Run({"HGET", key, c_key}), "Some new value");
+  }
+
+  // Wait for all offloads again
+  ExpectConditionWithinTimeout(wait_offloaded);
+
+  // HSET replace field
+  for (size_t i = 0; i < kNUM; i++) {
+    string key = absl::StrCat("k", i);
+    EXPECT_THAT(Run({"HSET", key, c_key, "Even more recent value"}), IntArg(0));
+    EXPECT_EQ(Run({"HGET", key, c_key}), "Even more recent value");
   }
 }
 
