@@ -15,6 +15,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/top_keys.h"
+#include "facade/dragonfly_connection.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"

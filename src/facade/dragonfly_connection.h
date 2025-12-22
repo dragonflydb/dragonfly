@@ -15,6 +15,7 @@
 
 #include "common/backed_args.h"
 #include "facade/acl_commands_def.h"
+#include "facade/connection_ref.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "facade/resp_expr.h"
@@ -154,37 +155,7 @@ class Connection : public util::Connection {
 
   enum Phase : uint8_t { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
-  // Weak reference to a connection, invalidated upon connection close.
-  // Used to dispatch async operations for the connection without worrying about pointer lifetime.
-  struct WeakRef {
-   public:
-    // Get residing thread of connection. Thread-safe.
-    unsigned LastKnownThreadId() const {
-      return last_known_thread_id_;
-    }
-    // Get pointer to connection if still valid, nullptr if expired.
-    // Can only be called from connection's thread. Validity is guaranteed
-    // only until the next suspension point.
-    Connection* Get() const;
-
-    // Returns thue if the reference expired. Thread-safe.
-    bool IsExpired() const;
-
-    // Returns client id.Thread-safe.
-    uint32_t GetClientId() const;
-
-    bool operator<(const WeakRef& other) const;
-    bool operator==(const WeakRef& other) const;
-
-   private:
-    friend class Connection;
-
-    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
-
-    std::weak_ptr<Connection> ptr_;
-    unsigned last_known_thread_id_;
-    uint32_t client_id_;
-  };
+  using WeakRef = ConnectionRef;
 
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.

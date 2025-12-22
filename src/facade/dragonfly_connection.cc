@@ -2178,12 +2178,12 @@ void Connection::EnsureMemoryBudget(unsigned tid) {
   thread_queue_backpressure[tid].EnsureBelowLimit();
 }
 
-Connection::WeakRef::WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
+ConnectionRef::ConnectionRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
                              uint32_t client_id)
     : ptr_{ptr}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
-Connection* Connection::WeakRef::Get() const {
+Connection* ConnectionRef::Get() const {
   auto sptr = ptr_.lock();
 
   //  The connection can only be deleted on this thread, so
@@ -2201,11 +2201,11 @@ uint32_t Connection::WeakRef::GetClientId() const {
   return client_id_;
 }
 
-bool Connection::WeakRef::operator<(const WeakRef& other) const {
+bool ConnectionRef::operator<(const ConnectionRef& other) const {
   return client_id_ < other.client_id_;
 }
 
-bool Connection::WeakRef::operator==(const WeakRef& other) const {
+bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
