@@ -1088,13 +1088,10 @@ void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (is_mc) {
-    using facade::MCReplyBuilder;
-    MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(builder);
-
     if (del_cnt == 0) {
-      mc_builder->SendNotFound();
+      cmd_cntx->SendNotFound();
     } else {
-      mc_builder->SendDeleted();
+      cmd_cntx->SendDeleted();
     }
   } else {
     builder->SendLong(del_cnt);

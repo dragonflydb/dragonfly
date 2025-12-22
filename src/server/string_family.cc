@@ -757,7 +757,7 @@ void IncrByGeneric(string_view key, int64_t val, CommandContext* cmnd_cntx) {
       cmnd_cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      static_cast<MCReplyBuilder*>(cmnd_cntx->rb())->SendNotFound();
+      cmnd_cntx->SendNotFound();
       break;
     default:
       cmnd_cntx->SendError(result.status());
@@ -1400,12 +1400,14 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);  // memcache is never squashed
     for (const auto& entry : res) {
       if (entry) {
+        // TODO: we will need to pass the whole response to ParsedCommand to support
+        // capturing MC replies.
         rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
       } else {
-        rb->SendMiss();
+        cmnd_cntx->SendMiss();
       }
     }
-    rb->SendGetEnd();
+    cmnd_cntx->SendGetEnd();
   } else {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->StartArray(res.size());
@@ -1690,10 +1692,10 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
     if (entry) {
       rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
     } else {
-      rb->SendMiss();
+      cmnd_cntx->SendMiss();
     }
   }
-  rb->SendGetEnd();
+  cmnd_cntx->SendGetEnd();
 }
 
 }  // namespace

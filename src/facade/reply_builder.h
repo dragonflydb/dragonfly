@@ -165,11 +165,6 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendSetSkipped() final;
 
   void SendClientError(std::string_view str);
-  void SendNotFound();
-  void SendMiss();
-  void SendDeleted();
-  void SendGetEnd();
-
   void SendValue(std::string_view key, std::string_view value, uint64_t mc_ver, uint32_t mc_flag,
                  bool send_cas_token);
   void SendSimpleString(std::string_view str) final;

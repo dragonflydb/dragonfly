@@ -91,23 +91,13 @@ class MemcacheParser {
     // flags for STORE commands
     uint32_t flags = 0;
 
-    bool no_reply = false;  // q
-    bool meta = false;
-
-    // meta flags
-    bool base64 = false;              // b
-    bool return_flags = false;        // f
-    bool return_value = false;        // v
-    bool return_ttl = false;          // t
-    bool return_access_time = false;  // l
-    bool return_hit = false;          // h
-    bool return_version = false;      // c
+    MemcacheCmdFlags cmd_flags;
 
     // Does not own this object, only references it.
     cmn::BackedArguments* backed_args = nullptr;
   };
 
-  static_assert(sizeof(Command) == 48);
+  static_assert(sizeof(Command) == 40);
 
   enum Result : uint8_t {
     OK,

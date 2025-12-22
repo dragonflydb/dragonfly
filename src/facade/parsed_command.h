@@ -13,6 +13,22 @@ namespace facade {
 class ConnectionContext;
 class SinkReplyBuilder;
 
+// Renders simple string responses based on flags.
+// Returns empty string if no response is to be sent.
+class MCRender {
+ public:
+  explicit MCRender(MemcacheCmdFlags flags) : flags_(flags) {
+  }
+
+  std::string RenderNotFound() const;
+  std::string RenderMiss() const;
+  std::string RenderDeleted() const;
+  std::string RenderGetEnd() const;
+
+ private:
+  MemcacheCmdFlags flags_;
+};
+
 // ParsedCommand is a protocol-agnostic holder for parsed request state.
 // It wraps cmn::BackedArguments so the facade can populate RESP arguments and
 // optionally attach a MemcacheParser::Command, complementing the arguments
@@ -94,8 +110,26 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(std::string_view str, std::string_view type = std::string_view{});
   void SendError(facade::OpStatus status);
   void SendError(const facade::ErrorReply& error);
-  void SendStored(bool ok /* true - ok, false - skipped*/);
+
   void SendSimpleString(std::string_view str);
+
+  void SendStored(bool ok /* true - ok, false - skipped*/);
+
+  void SendNotFound() {  // For MC only.
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
+  }
+
+  void SendMiss() {  // For MC only.
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderMiss());
+  }
+
+  void SendGetEnd() {  // For MC only.
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
+  }
+
+  void SendDeleted() {  // For MC only.
+    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderDeleted());
+  }
 
   // If payload exists, sends it to reply builder, resets it and returns true.
   // Otherwise, returns false.
@@ -124,10 +158,6 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
  private:
-  bool IsReplyCached() const {
-    return is_deferred_reply_ && !std::holds_alternative<std::monostate>(reply_payload_);
-  }
-
   bool CheckDoneAndMarkHead();
   void NotifyReplied();
 

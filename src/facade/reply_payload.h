@@ -40,4 +40,11 @@ inline Error make_error(std::string_view msg, std::string_view type = "") {
   return std::make_unique<std::pair<std::string, std::string>>(msg, type);
 }
 
+inline Payload make_simple_or_noreply(std::string_view resp) {
+  if (resp.empty())
+    return std::monostate{};
+  else
+    return SimpleString{std::string(resp)};
+}
+
 };  // namespace facade::payload

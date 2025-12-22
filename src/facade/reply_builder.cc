@@ -274,24 +274,6 @@ void MCReplyBuilder::SendSetSkipped() {
   SendSimpleString(flag_.meta ? "NS" : "NOT_STORED");
 }
 
-void MCReplyBuilder::SendNotFound() {
-  SendSimpleString(flag_.meta ? "NF" : "NOT_FOUND");
-}
-
-void MCReplyBuilder::SendGetEnd() {
-  if (!flag_.meta)
-    SendSimpleString("END");
-}
-
-void MCReplyBuilder::SendMiss() {
-  if (flag_.meta)
-    SendSimpleString("EN");
-}
-
-void MCReplyBuilder::SendDeleted() {
-  SendSimpleString(flag_.meta ? "HD" : "DELETED");
-}
-
 void MCReplyBuilder::SendRaw(std::string_view str) {
   ReplyScope scope(this);
   WriteRef(str);

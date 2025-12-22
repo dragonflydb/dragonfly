@@ -86,7 +86,7 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   res->flags = flags;
   if (num_tokens == opt_pos + 1) {
     if (tokens[opt_pos] == "noreply") {
-      res->no_reply = true;
+      res->cmd_flags.no_reply = true;
     } else {
       return MP::PARSE_ERROR;
     }
@@ -141,7 +141,7 @@ MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
 
   if (res->type >= MP::DELETE) {  // write commands
     if (res->size() > 1 && res->backed_args->back() == "noreply") {
-      res->no_reply = true;
+      res->cmd_flags.no_reply = true;
       res->backed_args->PopArg();
     }
   }
@@ -201,7 +201,7 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
   if (tokens[0].size() > 250)
     return MP::PARSE_ERROR;
 
-  res->meta = true;
+  res->cmd_flags.meta = true;
   res->flags = 0;
   res->expire_ts = 0;
 
@@ -253,7 +253,7 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
         if (!absl::Base64Unescape(arg0, &blob))
           return MP::PARSE_ERROR;
         arg0 = blob;
-        res->base64 = true;
+        res->cmd_flags.base64 = true;
         break;
       case 'F':
         if (!absl::SimpleAtoi(token.substr(1), &res->flags))
@@ -268,25 +268,25 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
           return MP::BAD_INT;
         break;
       case 'q':
-        res->no_reply = true;
+        res->cmd_flags.no_reply = true;
         break;
       case 'f':
-        res->return_flags = true;
+        res->cmd_flags.return_flags = true;
         break;
       case 'v':
-        res->return_value = true;
+        res->cmd_flags.return_value = true;
         break;
       case 't':
-        res->return_ttl = true;
+        res->cmd_flags.return_ttl = true;
         break;
       case 'l':
-        res->return_access_time = true;
+        res->cmd_flags.return_access_time = true;
         break;
       case 'h':
-        res->return_hit = true;
+        res->cmd_flags.return_hit = true;
         break;
       case 'c':
-        res->return_version = true;
+        res->cmd_flags.return_version = true;
         break;
       default:
         LOG(WARNING) << "unknown meta flag: " << token;  // not yet implemented
@@ -311,7 +311,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return ConsumeValue(str, consumed, cmd);
   }
 
-  cmd->no_reply = false;  // re-initialize
+  cmd->cmd_flags.raw = 0;  // re-initialize
   auto pos = str.find("\r\n");
   if (pos == string_view::npos) {
     // We need more data to parse the command. For get/gets commands this line can be very long.
