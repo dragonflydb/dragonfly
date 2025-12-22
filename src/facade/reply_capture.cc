@@ -132,14 +132,6 @@ struct CaptureVisitor {
     rb->SendError(err->first, err->second);
   }
 
-  void operator()(payload::StoredReply sr) {
-    if (sr.ok) {
-      rb->SendStored();
-    } else {
-      rb->SendSetSkipped();
-    }
-  }
-
   void operator()(const unique_ptr<payload::CollectionPayload>& cp) {
     auto* builder = static_cast<RedisReplyBuilder*>(rb);
     if (!cp) {
@@ -153,6 +145,10 @@ struct CaptureVisitor {
     builder->StartCollection(cp->len, cp->type);
     for (auto& pl : cp->arr)
       visit(*this, std::move(pl));
+  }
+
+  void operator()(payload::StoredReply sr) {
+    LOG(FATAL) << "StoredReply not supported in non-capturing builder";
   }
 
   SinkReplyBuilder* rb;

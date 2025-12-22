@@ -1569,8 +1569,7 @@ class ReplyGuard {
     const bool is_one_of = (cid_name_ == "REPLCONF" || cid_name_ == "DFLY");
     bool is_mcache = cmd_cntx.mc_command() != nullptr;
     const bool is_no_reply_memcache =
-        is_mcache &&
-        (static_cast<MCReplyBuilder*>(cmd_cntx.rb())->NoReply() || cid_name_ == "QUIT");
+        (is_mcache && cmd_cntx.mc_command()->cmd_flags.no_reply) || cid_name_ == "QUIT";
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
       cmd_cntx_ = &cmd_cntx;
@@ -1821,15 +1820,6 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
   char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
   char ttl_op[] = "EXAT";
-
-  mc_builder->SetNoreply(cmd.cmd_flags.no_reply);
-  mc_builder->SetMeta(cmd.cmd_flags.meta);
-  if (cmd.cmd_flags.meta) {
-    mc_builder->SetBase64(cmd.cmd_flags.base64);
-    mc_builder->SetReturnMCFlag(cmd.cmd_flags.return_flags);
-    mc_builder->SetReturnValue(cmd.cmd_flags.return_value);
-    mc_builder->SetReturnVersion(cmd.cmd_flags.return_version);
-  }
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:

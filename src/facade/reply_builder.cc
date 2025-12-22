@@ -209,19 +209,20 @@ void SinkReplyBuilder::FinishScope() {
   guaranteed_pieces_ = vecs_.size();  // all vecs are pieces
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), all_(0) {
+MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
-void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,
-                               uint32_t mc_flag, bool send_cas_token) {
+void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
+                               std::string_view value, uint64_t mc_token, uint32_t mc_flag,
+                               bool send_cas_token) {
   ReplyScope scope(this);
-  if (flag_.meta) {
+  if (cmd_flags.meta) {
     string flags;
-    if (flag_.return_mcflag)
+    if (cmd_flags.return_flags)
       absl::StrAppend(&flags, " f", mc_flag);
-    if (flag_.return_version)
-      absl::StrAppend(&flags, " c", mc_ver);
-    if (flag_.return_value) {
+    if (cmd_flags.return_version)
+      absl::StrAppend(&flags, " c", mc_token);
+    if (cmd_flags.return_value) {
       WritePieces("VA ", value.size(), flags, kCRLF, value, kCRLF);
     } else {
       WritePieces("HD ", flags, kCRLF);
@@ -229,7 +230,7 @@ void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uin
   } else {
     WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
     if (send_cas_token)
-      WritePieces(" ", mc_ver);
+      WritePieces(" ", mc_token);
 
     if (value.size() <= kMaxInlineSize) {
       WritePieces(kCRLF, value, kCRLF);
@@ -242,15 +243,8 @@ void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uin
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
-  if (flag_.noreply)
-    return;
-
   ReplyScope scope(this);
   WritePieces(str, kCRLF);
-}
-
-void MCReplyBuilder::SendStored() {
-  SendSimpleString(flag_.meta ? "HD" : "STORED");
 }
 
 void MCReplyBuilder::SendLong(long val) {
@@ -268,10 +262,6 @@ void MCReplyBuilder::SendProtocolError(std::string_view str) {
 
 void MCReplyBuilder::SendClientError(string_view str) {
   SendSimpleString(absl::StrCat("CLIENT_ERROR ", str));
-}
-
-void MCReplyBuilder::SendSetSkipped() {
-  SendSimpleString(flag_.meta ? "NS" : "NOT_STORED");
 }
 
 void MCReplyBuilder::SendRaw(std::string_view str) {
@@ -446,14 +436,6 @@ template void RedisReplyBuilder::SendLongArr<long>(absl::Span<const long>);
 template void RedisReplyBuilder::SendLongArr<int32_t>(absl::Span<const int32_t>);
 template void RedisReplyBuilder::SendLongArr<uint32_t>(absl::Span<const uint32_t>);
 template void RedisReplyBuilder::SendLongArr<uint64_t>(absl::Span<const uint64_t>);
-
-void RedisReplyBuilder::SendStored() {
-  SendSimpleString("OK");
-}
-
-void RedisReplyBuilder::SendSetSkipped() {
-  SendNull();
-}
 
 void RedisReplyBuilder::StartArray(unsigned len) {
   StartCollection(len, CollectionType::ARRAY);
