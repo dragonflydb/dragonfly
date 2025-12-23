@@ -45,7 +45,7 @@ jobs:
             mv dragonfly_*.deb ${{ env.RELEASE_DIR }}/
 
     - name: Upload
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: dragonfly-aarch64
         path: |
@@ -120,7 +120,7 @@ jobs:
           fi
 
     - name: Upload
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v6
       with:
         name: dragonfly-amd64-${{ matrix.name }}
         path: results-artifacts/*
@@ -128,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-native, build-arm]
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
         name: Download files
         with:
           path: artifacts
