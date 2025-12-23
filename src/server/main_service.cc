@@ -1828,6 +1828,8 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       break;
     case MemcacheParser::SET:
       strcpy(cmd_name, "SET");
+      if (cntx->conn()->IsIoLoopV2())
+        parsed_cmd->AllowAsyncExecution();  // Enable for SET command.
       break;
     case MemcacheParser::ADD:
       strcpy(cmd_name, "SET");

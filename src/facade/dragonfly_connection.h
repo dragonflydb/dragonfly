@@ -381,6 +381,9 @@ class Connection : public util::Connection {
   // Returns true on successful execution, false on reply builder error.
   bool ExecuteMCBatch();
 
+  // Returns true on successful execution, false on reply builder error.
+  bool ReplyMCBatch();
+
   void CreateParsedCommand();
   void EnqueueParsedCommand();
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
@@ -406,8 +409,26 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_cmd_ = nullptr;
 
   // Parsed commands queue.
+  //
+  // Commands move through the following stages in a single linked list:
+  //   1) parsed but not yet dispatched        : [parsed_to_execute_, ..., parsed_tail_]
+  //   2) dispatched but not yet completed     : between parsed_head_ and parsed_to_execute_
+  //   3) completed (replies ready to send)    : a prefix of [parsed_head_, ..., parsed_to_execute_)
+  //   4) replied and removed                  : before parsed_head_ (no longer in the list)
+  //
+  // Logical order diagram:
+  //   head -> ... -> (dispatched, waiting for completion) -> ... -> parsed_to_execute_ -> ... ->
+  //   tail
+  //
+  // parsed_to_execute_ is advanced as commands are dispatched for execution.
+  // Executed (completed) commands are kept in the queue until their replies are sent,
+  // in order to preserve reply ordering.
+  // ReplyMCBatch walks from parsed_head_ up to (but not including) parsed_to_execute_,
+  // replies commands that have completed, and removes only those replied commands from
+  // the queue, advancing parsed_head_ accordingly.
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
+  ParsedCommand* parsed_to_execute_ = nullptr;
   unsigned parsed_cmd_q_len_ = 0;
 
   uint32_t id_;

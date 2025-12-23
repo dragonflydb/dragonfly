@@ -1067,6 +1067,38 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     //    the response back via ScheduleSingleHop. But if we store in ParsedCommand, we do not need
     //    to worry about reordering of responses, as pipelined ParsedCommands will be
     //    already ordered.
+
+    boost::intrusive_ptr<Transaction> tr_ptr(cmnd_cntx->tx);
+    auto cb = [cmnd_cntx, sparams, tr_ptr]() {
+      EngineShard* shard = EngineShard::tlocal();
+      bool explicit_journal = cmnd_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+      SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
+
+      // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
+      // So we can use mc_command data.
+      // For Memcache, we use the values from the command.
+      // TODO: we will need to get arguments in a different way for Redis protocol.
+      DCHECK(cmnd_cntx->mc_command());
+      std::string_view key = cmnd_cntx->mc_command()->key();
+      std::string_view value = cmnd_cntx->mc_command()->value();
+
+      OpStatus status = set_cmd.Set(sparams, key, value);
+
+      if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
+        // Relevant to MC.
+        return cmnd_cntx->SendStored(status == OpStatus::OK);
+      }
+      if (status == OpStatus::OUT_OF_MEMORY) {
+        return cmnd_cntx->SendError(kOutOfMemory);
+      }
+      LOG(FATAL) << "TBD " << status;
+    };
+
+    cmnd_cntx->SetDeferredReply();  // we defer the reply for sure.
+    ShardId shard_id = cmnd_cntx->tx->GetUniqueShard();
+    shard_set->Add(shard_id, cb);
+
+    return;
   }
 
   optional<StringResult> prev;
@@ -1379,6 +1411,9 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
 
   SinkReplyBuilder::ReplyScope scope(builder);
   if (is_memcache) {
+    // TODO: implement deferred support for MGET, which prevents us from running SET,GET in async
+    // pipeline.
+    DCHECK(!cmnd_cntx->IsDeferredReply());
     auto* rb = static_cast<MCReplyBuilder*>(builder);
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);  // memcache is never squashed
     for (const auto& entry : res) {
