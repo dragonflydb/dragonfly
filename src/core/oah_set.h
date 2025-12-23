@@ -243,6 +243,12 @@ class OAHSet {  // Open Addressing Hash Set
         assert(!res.IsVector());
         --size_;
         obj_alloc_used_ -= res.AllocSize();
+        if (bucket.IsVector()) {
+          if (bucket.AsVector().Empty()) {
+            ptr_vectors_alloc_used_ -= bucket.AllocSize();
+            bucket = OAHEntry();
+          }
+        }
         return res;
       }
     }
@@ -362,6 +368,8 @@ class OAHSet {  // Open Addressing Hash Set
           ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
+      if (bucket.Empty())
+        ptr_vectors_alloc_used_ -= bucket.AllocSize();
     }
 
     for (size_t bucket_id = 0; bucket_id < max_element; ++bucket_id) {
@@ -380,6 +388,8 @@ class OAHSet {  // Open Addressing Hash Set
           ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
+      if (bucket.Empty())
+        ptr_vectors_alloc_used_ -= bucket.AllocSize();
     }
   }
 

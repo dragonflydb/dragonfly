@@ -668,9 +668,6 @@ void BM_Clear(benchmark::State& state) {
     state.PauseTiming();
     for (size_t i = 0; i < elems; ++i) {
       string str = random_string(generator, 16);
-      if (str == "9lbgkq0tgfdc7ugk") {
-        LOG(INFO) << "here";
-      }
       ss.Add(str);
     }
     state.ResumeTiming();
