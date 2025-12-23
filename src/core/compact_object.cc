@@ -33,6 +33,7 @@ extern "C" {
 #include "core/string_set.h"
 
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
+ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json object defragmentation");
 
 namespace dfly {
 using namespace std;
@@ -1087,6 +1088,9 @@ string_view CompactObj::GetSlice(string* scratch) const {
 }
 
 bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
+  static const bool disable_json_defragmentation =
+      absl::GetFlag(FLAGS_disable_json_defragmentation);
+
   switch (taglen_) {
     case ROBJ_TAG:
       // currently only these object types are supported for this operation
@@ -1097,6 +1101,9 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
     case JSON_TAG:
+      if (disable_json_defragmentation) {
+        return false;
+      }
       return u_.json_obj.DefragIfNeeded(page_usage);
     case INT_TAG:
       page_usage->RecordNotRequired();
