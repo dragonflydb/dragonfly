@@ -40,8 +40,8 @@ std::optional<TmpJson> JsonFromString(std::string_view input);
 std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 
 // Defragments the given json object by traversing its tree structure non-recursively, examining
-// nodes and defragmenting as needed.
-void Defragment(JsonType& j, PageUsage* page_usage);
+// nodes and defragmenting as needed. Returns true if any object within the node was reallocated
+bool Defragment(JsonType& j, PageUsage* page_usage);
 
 template <typename Json = JsonType>
 auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)

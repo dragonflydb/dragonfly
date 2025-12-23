@@ -50,38 +50,40 @@ using namespace dfly;
 // The following two functions allocate a string-based object by copying data to a fresh memory
 // page. Then the move-assignment operator swaps it with the input node (swap_l_r in jsoncons), and
 // the temporary is destroyed at the end of the scope.
-void DefragmentByteString(JsonType& j, PageUsage* page_usage) {
+bool DefragmentByteString(JsonType& j, PageUsage* page_usage) {
   const auto& byte_storage = j.cast<JsonType::byte_string_storage>();
   if (byte_storage.length() == 0 ||
       !page_usage->IsPageForObjectUnderUtilized(const_cast<uint8_t*>(byte_storage.data())))
-    return;
+    return false;
 
   const byte_string_view bsv{byte_storage.data(), byte_storage.length()};
   if (j.tag() == semantic_tag::ext) {
     j = JsonType(byte_string_arg, bsv, j.ext_tag(), byte_storage.get_allocator());
-    return;
+    return true;
   }
 
   j = JsonType(byte_string_arg, bsv, j.tag(), byte_storage.get_allocator());
+  return true;
 }
 
-void DefragmentLongString(JsonType& j, PageUsage* page_usage) {
+bool DefragmentLongString(JsonType& j, PageUsage* page_usage) {
   const auto& str_storage = j.cast<JsonType::long_string_storage>();
   if (str_storage.length() == 0 ||
       !page_usage->IsPageForObjectUnderUtilized(const_cast<char*>(str_storage.data())))
-    return;
+    return false;
 
   JsonType::string_view_type svt{str_storage.data(), str_storage.length()};
   j = JsonType(svt, j.tag(), str_storage.get_allocator());
+  return true;
 }
 
 // Allocates a new json object of type json_object_arg, with fresh memory allocation for its
 // contained vector of key value pairs. Then moves members from j to this new object. Finally j is
 // swapped with the new object.
-void DefragmentJsonObject(JsonType& j, PageUsage* page_usage) {
+bool DefragmentJsonObject(JsonType& j, PageUsage* page_usage) {
   auto& object = j.cast<JsonType::object_storage>().value();
   if (object.empty() || !page_usage->IsPageForObjectUnderUtilized(&*object.begin()))
-    return;
+    return false;
 
   // Creates a fresh object and reserves space for the underlying vector.
   JsonType new_node{json_object_arg, j.tag(), object.get_allocator()};
@@ -99,14 +101,15 @@ void DefragmentJsonObject(JsonType& j, PageUsage* page_usage) {
   // Invokes move assignment. A swap is performed, and new_node now holds null_storage
   // references instead of `j`. It will be destroyed on leaving scope, cleaning up its memory.
   j = std::move(new_node);
+  return true;
 }
 
 // Same as DefragmentJsonObject except uses an array object. The contained members are moved
 // similarly, and on exit the old node is destroyed.
-void DefragmentJsonArray(JsonType& j, PageUsage* page_usage) {
+bool DefragmentJsonArray(JsonType& j, PageUsage* page_usage) {
   auto& array = j.cast<JsonType::array_storage>().value();
   if (array.empty() || !page_usage->IsPageForObjectUnderUtilized(&*array.begin()))
-    return;
+    return false;
 
   JsonType new_node{json_array_arg, j.tag(), array.get_allocator()};
   new_node.reserve(array.size());
@@ -116,6 +119,7 @@ void DefragmentJsonArray(JsonType& j, PageUsage* page_usage) {
   }
 
   j = std::move(new_node);
+  return true;
 }
 
 }  // namespace
@@ -130,7 +134,8 @@ optional<JsonType> ParseJsonUsingShardHeap(string_view input) {
   return ParseWithDecoder(input, json_decoder<JsonType>{StatelessAllocator<char>{}});
 }
 
-void Defragment(JsonType& j, PageUsage* page_usage) {
+bool Defragment(JsonType& j, PageUsage* page_usage) {
+  bool did_defragment = false;
   // stack-based traversal inspired from jsoncons::basic_json::compute_memory_size
   std::stack<JsonType*> stack;
   stack.push(&j);
@@ -142,13 +147,13 @@ void Defragment(JsonType& j, PageUsage* page_usage) {
     const json_storage_kind storage_kind = current->storage_kind();
     switch (storage_kind) {
       case json_storage_kind::byte_str:
-        DefragmentByteString(*current, page_usage);
+        did_defragment |= DefragmentByteString(*current, page_usage);
         break;
       case json_storage_kind::long_str:
-        DefragmentLongString(*current, page_usage);
+        did_defragment |= DefragmentLongString(*current, page_usage);
         break;
       case json_storage_kind::object: {
-        DefragmentJsonObject(*current, page_usage);
+        did_defragment |= DefragmentJsonObject(*current, page_usage);
         auto& object = current->cast<JsonType::object_storage>().value();
         for (auto& member : object) {
           stack.push(&member.value());
@@ -156,7 +161,7 @@ void Defragment(JsonType& j, PageUsage* page_usage) {
         break;
       }
       case json_storage_kind::array: {
-        DefragmentJsonArray(*current, page_usage);
+        did_defragment |= DefragmentJsonArray(*current, page_usage);
         auto& array = current->cast<JsonType::array_storage>().value();
         for (auto& member : array) {
           stack.push(&member);
@@ -169,6 +174,7 @@ void Defragment(JsonType& j, PageUsage* page_usage) {
         break;
     }
   }
+  return did_defragment;
 }
 
 }  // namespace dfly
