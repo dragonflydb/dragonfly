@@ -14,6 +14,7 @@ extern "C" {
 #include <absl/strings/str_split.h>
 
 #include <boost/icl/interval_set.hpp>
+#include <csignal>
 #include <queue>
 #include <shared_mutex>
 #include <tuple>
