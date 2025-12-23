@@ -52,6 +52,33 @@ set(CMAKE_REQUIRED_FLAGS "-fsanitize=undefined")
 check_cxx_source_compiles("int main() { return 0; }" SUPPORT_USAN)
 set(CMAKE_REQUIRED_FLAGS "")
 
+# Check for Direct I/O support on the build host
+include(CheckCXXSourceRuns)
+set(DIRECT_IO_TEST_CODE "
+#include <fcntl.h>
+#include <unistd.h>
+int main() {
+    // Open file in current dir (which is the build dir during cmake checks)
+    int fd = open(\"direct_io_probe.tmp\", O_CREAT | O_WRONLY | O_DIRECT, 0666);
+    if (fd < 0) return 1;
+    close(fd);
+    unlink(\"direct_io_probe.tmp\");
+    return 0;
+}
+")
+# Check if it runs. Use CMAKE_BINARY_DIR to ensure we test the actual build partition.
+set(OLD_CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS})
+list(APPEND CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE") # We might need _GNU_SOURCE for O_DIRECT on some older Linux headers
+check_cxx_source_runs("${DIRECT_IO_TEST_CODE}" DIRECT_IO_SUPPORTED)
+set(CMAKE_REQUIRED_DEFINITIONS ${OLD_CMAKE_REQUIRED_DEFINITIONS})
+
+if (DIRECT_IO_SUPPORTED)
+  message(STATUS "Build host supports O_DIRECT")
+  add_compile_definitions(DIRECT_IO_SUPPORTED) # To be able to filter out test cases and not the whole test suite
+else()
+  message(STATUS "Build host does not support O_DIRECT (note: this check only validates the build host, target capabilities may differ when cross-compiling) - Tests will run using standard Buffered I/O.")
+endif()
+
 # We must define all the required variables from the root cmakefile, otherwise
 # they just disappear.
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/helio/cmake" ${CMAKE_MODULE_PATH})

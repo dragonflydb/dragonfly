@@ -16,7 +16,16 @@
 
 using namespace ::dfly::tiering::literals;
 
-ABSL_FLAG(bool, backing_file_direct, true, "If true uses O_DIRECT to open backing files");
+#ifdef DIRECT_IO_SUPPORTED
+constexpr int kDirectIoFlag = O_DIRECT;
+constexpr bool kDirectIoDefault = true;
+#else
+constexpr int kDirectIoFlag = 0;
+constexpr bool kDirectIoDefault = false;
+#endif
+
+ABSL_FLAG(bool, backing_file_direct, kDirectIoDefault,
+          "If true uses O_DIRECT to open backing files");
 
 ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
           "Size of registered buffer for IoUring fixed read/writes");
@@ -72,7 +81,7 @@ error_code DiskStorage::Open(string_view path) {
 
   int kFlags = O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC;
   if (absl::GetFlag(FLAGS_backing_file_direct))
-    kFlags |= O_DIRECT;
+    kFlags |= kDirectIoFlag;  // If supported, adds O_DIRECT. If not, adds 0 (no-op).
 
   backing_file_path_ = path;
   auto res = OpenLinux(path, kFlags, 0666);

@@ -58,7 +58,12 @@ pair<string, string> GetBucketPath(string_view path) {
 }
 
 #ifdef __linux__
-const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
+#if defined(DIRECT_IO_SUPPORTED)
+constexpr int kOptionalDirectIO = O_DIRECT;
+#else
+constexpr int kOptionalDirectIO = 0;
+#endif
+const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | kOptionalDirectIO;
 #endif
 
 }  // namespace
