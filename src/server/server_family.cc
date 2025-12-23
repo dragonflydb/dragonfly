@@ -4104,8 +4104,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void ServerFamily::Dfly(CmdArgList args, CommandContext* cmnd_cntx) {
-  dfly_cmd_->Run(args, cmnd_cntx->tx, static_cast<RedisReplyBuilder*>(cmnd_cntx->rb()),
-                 cmnd_cntx->server_conn_cntx());
+  dfly_cmd_->Run(args, cmnd_cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, CommandContext* cmnd_cntx) {

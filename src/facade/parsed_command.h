@@ -114,6 +114,9 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(const facade::ErrorReply& error);
 
   void SendSimpleString(std::string_view str);
+  void SendOk() {
+    SendSimpleString("OK");
+  }
 
   void SendStored(bool ok /* true - ok, false - skipped*/);
 

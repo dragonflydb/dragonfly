@@ -77,9 +77,9 @@ string IndexNotFoundMsg(string_view index_name) {
 // Returns false if no errors occured
 template <typename T>
 bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
-                         SinkReplyBuilder* builder) {
+                         CommandContext* cmd_cntx) {
   if (auto err = parser->TakeError(); err || !result) {
-    builder->SendError(!result ? result.error() : err.MakeReply());
+    cmd_cntx->SendError(!result ? result.error() : err.MakeReply());
     return true;
   }
 
@@ -1222,7 +1222,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   bool is_cross_shard = parser.Check("CSS");
 
   auto parsed_index = CreateDocIndex(&parser);
-  if (SendErrorIfOccurred(parsed_index, &parser, builder)) {
+  if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
 
@@ -1287,8 +1287,7 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx->rb();
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -1304,14 +1303,14 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (!index_info) {
     cmd_cntx->tx->Conclude();
-    return builder->SendError("Index not found");
+    return cmd_cntx->SendError("Index not found");
   }
 
   // Parse additional schema
   DocIndex new_index{};
   new_index.type = index_info->type;
   auto parse_result = ParseSchema(&parser, &new_index);
-  if (SendErrorIfOccurred(parse_result, &parser, builder)) {
+  if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
     cmd_cntx->tx->Conclude();
     return;
   }
@@ -1580,7 +1579,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto* builder = cmd_cntx->rb();
   auto params = ParseSearchParams(&parser);
-  if (SendErrorIfOccurred(params, &parser, builder))
+  if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
   // Check query string length limit
@@ -1627,11 +1626,11 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
     });
 
     if (index_not_found.load(memory_order_relaxed))
-      return builder->SendError(string{index_name} + ": no such index");
+      return cmd_cntx->SendError(string{index_name} + ": no such index");
 
     for (const auto& res : docs) {
       if (res.error)
-        return builder->SendError(*res.error);
+        return cmd_cntx->SendError(*res.error);
     }
   }
 
@@ -1667,12 +1666,12 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   string_view query_str = parser.Next();
 
   auto params = ParseSearchParams(&parser);
-  if (SendErrorIfOccurred(params, &parser, rb))
+  if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str, &params->query_params))
-    return rb->SendError("query syntax error");
+    return cmd_cntx->SendError("query syntax error");
 
   search_algo.EnableProfiling();
 
@@ -1813,7 +1812,7 @@ void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
       result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
     } else {
       res.error().kind = facade::kSearchErrType;
-      return rb->SendError(res.error());
+      return cmd_cntx->SendError(res.error());
     }
   }
 
@@ -1828,7 +1827,7 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
   const auto params = ParseAggregatorParams(&parser);
-  if (SendErrorIfOccurred(params, &parser, builder))
+  if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
   // Check query string length limit
@@ -1887,19 +1886,19 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     for (size_t i = 0; i < params->joins.size(); ++i) {
       // Check join query string length limit
       if (params->joins[i].query.size() > max_query_bytes) {
-        return builder->SendError(absl::StrCat("Join query string is too long, max length is ",
-                                               max_query_bytes, " bytes"));
+        return cmd_cntx->SendError(absl::StrCat("Join query string is too long, max length is ",
+                                                max_query_bytes, " bytes"));
       }
 
       search::QueryParams empty_params;
       if (!search_algos[i + 1].Init(params->joins[i].query, &empty_params)) {
-        return builder->SendError("Query syntax error in JOIN");
+        return cmd_cntx->SendError("Query syntax error in JOIN");
       }
     }
 
     auto data_for_join = PreprocessDataForJoin(params->index, *params);
     if (!data_for_join) {
-      return builder->SendError(data_for_join.error());
+      return cmd_cntx->SendError(data_for_join.error());
     }
 
     // preaggregated_shard_data is preaggregation results per index per shard
@@ -2058,7 +2057,7 @@ void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
+void FtConfigHelp(CmdArgParser* parser, CommandContext* cmd_cntx) {
   string_view param = parser->Next();
 
   vector<string> names = config_registry.List(param);
@@ -2072,6 +2071,7 @@ void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
     }
   }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(res.size());
   for (const auto& flag : res) {
     rb->StartArray(5);
@@ -2083,7 +2083,7 @@ void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
   }
 }
 
-void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+void FtConfigGet(CmdArgParser* parser, CommandContext* cmd_cntx) {
   string_view param = parser->Next();
   vector<string> names = config_registry.List(param);
 
@@ -2100,21 +2100,22 @@ void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
       res.push_back(flag->CurrentValue());
     }
   }
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendBulkStrArr(res, CollectionType::MAP);
 }
 
-void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+void FtConfigSet(CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [param, value] = parser->Next<string_view, string_view>();
 
   if (!parser->Finalize()) {
-    rb->SendError(parser->TakeError().MakeReply());
+    cmd_cntx->SendError(parser->TakeError().MakeReply());
     return;
   }
 
   vector<string> names = config_registry.List(param);
   if (names.size() != 1 ||
       config_registry.GetFlag(names[0])->Filename().find(kCurrentFile) == std::string::npos) {
-    return rb->SendError("Invalid option name");
+    return cmd_cntx->SendError("Invalid option name");
   }
 
   ConfigRegistry::SetResult result = config_registry.Set(param, value);
@@ -2122,34 +2123,32 @@ void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
   const char kErrPrefix[] = "FT.CONFIG SET failed (possibly related to argument '";
   switch (result) {
     case ConfigRegistry::SetResult::OK:
-      return rb->SendOk();
+      return cmd_cntx->SendOk();
     case ConfigRegistry::SetResult::UNKNOWN:
-      return rb->SendError(
+      return cmd_cntx->SendError(
           absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
           kConfigErrType);
 
     case ConfigRegistry::SetResult::READONLY:
-      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
-                           kConfigErrType);
+      return cmd_cntx->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
+                                 kConfigErrType);
 
     case ConfigRegistry::SetResult::INVALID:
-      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
-                           kConfigErrType);
+      return cmd_cntx->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                                 kConfigErrType);
   }
   ABSL_UNREACHABLE();
 }
 
 void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-
   auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
 
   if (auto err = parser.TakeError(); err) {
-    rb->SendError("Unknown subcommand");
+    cmd_cntx->SendError("Unknown subcommand");
     return;
   }
-  func(&parser, rb);
+  func(&parser, cmd_cntx);
 }
 
 void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2218,9 +2217,7 @@ void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
       parser.Next();  // variable name
       parser.Next();  // variable value
 
-      if (auto err = parser.TakeError(); err) {
-        return rb->SendError(err.MakeReply());
-      }
+      RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
       // Just acknowledge the command
       rb->SendOk();

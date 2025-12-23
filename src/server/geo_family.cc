@@ -206,6 +206,31 @@ double ExtractUnit(std::string_view arg) {
   }
 }
 
+bool HandleGeoParserFinalize(const GeoShape& shape, CmdArgParser* parser,
+                             CommandContext* cmd_cntx) {
+  if (parser->Finalize()) {
+    return false;
+  }
+
+  auto error = parser->TakeError();
+  switch (error.type) {
+    case Errors::INVALID_LONG_LAT: {
+      string err =
+          absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
+      cmd_cntx->SendError(err, kSyntaxErrType);
+      break;
+    }
+    case Errors::INVALID_UNIT:
+      cmd_cntx->SendError("Unsupported unit provided. please use M, KM, FT, MI", kSyntaxErrType);
+      break;
+    default:
+      cmd_cntx->SendError(error.MakeReply());
+      break;
+  }
+
+  return true;
+}
+
 void CmdGeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
@@ -652,20 +677,8 @@ void CmdGeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  if (!parser.Finalize()) {
-    auto error = parser.TakeError();
-    switch (error.type) {
-      case Errors::INVALID_LONG_LAT: {
-        string err =
-            absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
-        return builder->SendError(err, kSyntaxErrType);
-      }
-      case Errors::INVALID_UNIT:
-        return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
-                                  kSyntaxErrType);
-      default:
-        return builder->SendError(error.MakeReply());
-    }
+  if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
+    return;
   }
 
   // check mandatory options
@@ -842,21 +855,8 @@ void GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only)
     }
   }
 
-  if (!parser.Finalize()) {
-    auto error = parser.TakeError();
-
-    switch (error.type) {
-      case Errors::INVALID_LONG_LAT: {
-        string err =
-            absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
-        return builder->SendError(err, kSyntaxErrType);
-      }
-      case Errors::INVALID_UNIT:
-        return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
-                                  kSyntaxErrType);
-      default:
-        return builder->SendError(error.MakeReply());
-    }
+  if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
+    return;
   }
 
   if (geo_ops.sorting == Sorting::kError) {
