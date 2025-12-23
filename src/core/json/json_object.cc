@@ -130,14 +130,6 @@ optional<JsonType> ParseJsonUsingShardHeap(string_view input) {
   return ParseWithDecoder(input, json_decoder<JsonType>{StatelessAllocator<char>{}});
 }
 
-JsonType DeepCopyJSON(const JsonType* j) {
-  std::string serialized;
-  j->dump(serialized);
-  auto deserialized = ParseJsonUsingShardHeap(serialized);
-  DCHECK(deserialized.has_value());
-  return std::move(deserialized.value());
-}
-
 void Defragment(JsonType& j, PageUsage* page_usage) {
   // stack-based traversal inspired from jsoncons::basic_json::compute_memory_size
   std::stack<JsonType*> stack;

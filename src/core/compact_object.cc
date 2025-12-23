@@ -1623,9 +1623,7 @@ bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
     const int64_t before = static_cast<int64_t>(mr->used());
     DCHECK_GE(before, 0) << "Memory usage is more than int64_t max value";
 
-    JsonType* old = json_ptr;
-    json_ptr = AllocateMR<JsonType>(DeepCopyJSON(old));
-    DeleteMR<JsonType>(old);
+    Defragment(*json_ptr, page_usage);
 
     const int64_t after = static_cast<int64_t>(mr->used());
     DCHECK_GE(after, 0) << "Memory usage is more than int64_t max value";

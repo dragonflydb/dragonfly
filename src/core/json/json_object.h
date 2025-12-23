@@ -39,11 +39,6 @@ std::optional<TmpJson> JsonFromString(std::string_view input);
 // shards where mimalloc heap is initialized.
 std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 
-// Deep copy a JSON object, by first serializing it to a string and then deserializing the string.
-// The operation is intended to help during defragmentation, by copying into a page reserved for
-// malloc.
-JsonType DeepCopyJSON(const JsonType* j);
-
 // Defragments the given json object by traversing its tree structure non-recursively, examining
 // nodes and defragmenting as needed.
 void Defragment(JsonType& j, PageUsage* page_usage);

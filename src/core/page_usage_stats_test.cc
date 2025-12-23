@@ -623,50 +623,6 @@ void InitBenchMemRes() {
 
 }  // namespace
 
-void BM_JSONDefragSerialize(benchmark::State& state) {
-  InitBenchMemRes();
-
-  std::string json_data = GenerateTestJSON(state.range(0));
-
-  for (auto _ : state) {
-    state.PauseTiming();
-    auto parsed = ParseJsonUsingShardHeap(json_data);
-    DCHECK(parsed.has_value());
-    state.ResumeTiming();
-
-    JsonType defragmented = DeepCopyJSON(&parsed.value());
-    benchmark::DoNotOptimize(defragmented);
-  }
-}
-
-BENCHMARK(BM_JSONDefragSerialize)
-    ->ArgName("objects_per_json")
-    ->RangeMultiplier(5)
-    ->Range(100, 10000);
-
-void BM_JSONDefragTreeWalk(benchmark::State& state) {
-  InitBenchMemRes();
-
-  std::string json_data = GenerateTestJSON(state.range(0));
-
-  for (auto _ : state) {
-    state.PauseTiming();
-    auto parsed = ParseJsonUsingShardHeap(json_data);
-    PageUsage p{CollectPageStats::NO, 0.1};
-    // Assumes every single node has to be defragmented. not realistic!
-    p.SetForceReallocate(true);
-    state.ResumeTiming();
-
-    Defragment(parsed.value(), &p);
-    benchmark::DoNotOptimize(parsed);
-  }
-}
-
-BENCHMARK(BM_JSONDefragTreeWalk)
-    ->ArgName("objects_per_json")
-    ->RangeMultiplier(5)
-    ->Range(100, 10000);
-
 void BM_JSONDefragSelective(benchmark::State& state) {
   InitBenchMemRes();
 
