@@ -102,8 +102,6 @@ class SinkReplyBuilder {
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;
 
-  virtual void SendStored() = 0;
-  virtual void SendSetSkipped() = 0;
   void SendOk() {
     SendSimpleString("OK");
   }
@@ -160,64 +158,21 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
-  void SendStored() final;
   void SendLong(long val) final;
-  void SendSetSkipped() final;
 
   void SendClientError(std::string_view str);
-  void SendValue(std::string_view key, std::string_view value, uint64_t mc_ver, uint32_t mc_flag,
-                 bool send_cas_token);
+  void SendValue(MemcacheCmdFlags cmd_flags, std::string_view key, std::string_view value,
+                 uint64_t mc_token, uint32_t mc_flag, bool send_cas_token);
   void SendSimpleString(std::string_view str) final;
   void SendProtocolError(std::string_view str) final;
 
   void SendRaw(std::string_view str);
-
-  void SetNoreply(bool noreply) {
-    flag_.noreply = noreply;
-  }
-
-  bool NoReply() const {
-    return flag_.noreply;
-  }
-
-  void SetMeta(bool meta) {
-    flag_.meta = meta;
-  }
-
-  void SetBase64(bool base64) {
-    flag_.base64 = base64;
-  }
-
-  void SetReturnMCFlag(bool val) {
-    flag_.return_mcflag = val;
-  }
-
-  void SetReturnValue(bool val) {
-    flag_.return_value = val;
-  }
-
-  void SetReturnVersion(bool val) {
-    flag_.return_version = val;
-  }
-
- private:
-  union {
-    struct {
-      uint8_t noreply : 1;
-      uint8_t meta : 1;
-      uint8_t base64 : 1;
-      uint8_t return_value : 1;
-      uint8_t return_mcflag : 1;
-      uint8_t return_version : 1;
-    } flag_;
-    uint8_t all_;
-  };
 };
 
 // Redis reply builder interface for sending RESP data.
 class RedisReplyBuilderBase : public SinkReplyBuilder {
  public:
-  enum VerbatimFormat { TXT, MARKDOWN };
+  enum VerbatimFormat : uint8_t { TXT, MARKDOWN };
 
   explicit RedisReplyBuilderBase(io::Sink* sink) : SinkReplyBuilder(sink) {
   }
@@ -287,9 +242,6 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
 
   void SendScoredArray(ScoredArray arr, bool with_scores);
   void SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr);
-  void SendStored() final;
-  void SendSetSkipped() final;
-
   void StartArray(unsigned len);
   void SendEmptyArray();
 };

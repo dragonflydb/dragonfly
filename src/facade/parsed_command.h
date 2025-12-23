@@ -24,6 +24,8 @@ class MCRender {
   std::string RenderMiss() const;
   std::string RenderDeleted() const;
   std::string RenderGetEnd() const;
+  std::string RenderStored() const;
+  std::string RenderNotStored() const;
 
  private:
   MemcacheCmdFlags flags_;
@@ -160,6 +162,8 @@ class ParsedCommand : public cmn::BackedArguments {
  private:
   bool CheckDoneAndMarkHead();
   void NotifyReplied();
+
+  void SendDirect(const payload::StoredReply& sr);
 
   // Synchronization state bits. The reply callback in a shard thread sets ASYNC_REPLY_DONE
   // when payload is filled. It also notifies the connection if the command is marked as HEAD_REPLY.

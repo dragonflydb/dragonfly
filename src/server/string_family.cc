@@ -118,10 +118,6 @@ size_t SetRangeInternal(std::string* value, size_t start, std::string_view range
   return value->size();
 }
 
-bool ShouldFetchMCVer(MemcacheParser::CmdType cmd_type) {
-  return cmd_type == MemcacheParser::GETS || cmd_type == MemcacheParser::GATS;
-}
-
 OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -487,7 +483,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 struct GetResp {
   string key;  // TODO: to use backing storage to optimize this as well.
   string_view value;
-  uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+  uint64_t mc_ver = 0;
   uint32_t mc_flag = 0;
 };
 
@@ -695,33 +691,26 @@ struct GetReplies {
   RedisReplyBuilder* rb;
 };
 
-void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuilder* builder) {
+void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
-  if (builder->GetProtocol() == Protocol::REDIS) {
+  if (cmnd_cntx->mc_command() == nullptr) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
-    GetReplies{rb}.Send(tx->ScheduleSingleHopT(cb));
+    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
+    GetReplies{rb}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
   } else {
     // Memcached skips if key is missing
-    DCHECK(builder->GetProtocol() == Protocol::MEMCACHE);
-
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    OpResult<bool> result = tx->ScheduleSingleHopT(std::move(cb));
-
-    if (result.value_or(false)) {
-      return builder->SendStored();
-    }
-
-    builder->SendSetSkipped();
+    OpResult<bool> result = cmnd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+    cmnd_cntx->SendStored(result.value_or(false));
   }
 }
 
@@ -1036,7 +1025,7 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
           GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
           return OpStatus::OK;
         });
-        return builder->SendStored();
+        return cmnd_cntx->SendStored(true);
       }
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
@@ -1101,17 +1090,11 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     return GetReplies{cmnd_cntx->rb()}.Send(std::move(prev));
   }
 
-  if (result == OpStatus::OK) {
-    return builder->SendStored();
-  }
-
   if (result == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cmnd_cntx->SendError(kOutOfMemory);
   }
 
-  DCHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
-
-  builder->SendSetSkipped();
+  cmnd_cntx->SendStored(result == OpStatus::OK);
 }
 
 /// (P)SETEX key seconds (milliseconds) value
@@ -1205,11 +1188,11 @@ void CmdGetSet(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 void CmdAppend(CmdArgList args, CommandContext* cmnd_cntx) {
-  ExtendGeneric(args, false, cmnd_cntx->tx, cmnd_cntx->rb());
+  ExtendGeneric(args, false, cmnd_cntx);
 }
 
 void CmdPrepend(CmdArgList args, CommandContext* cmnd_cntx) {
-  ExtendGeneric(args, true, cmnd_cntx->tx, cmnd_cntx->rb());
+  ExtendGeneric(args, true, cmnd_cntx);
 }
 
 void CmdGetEx(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1369,7 +1352,7 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
 
   if (is_memcache) {
     fetch_mask |= FETCH_MCFLAG;
-    if (ShouldFetchMCVer(cmnd_cntx->mc_command()->type))
+    if (cmnd_cntx->mc_command()->replies_cas_token())
       fetch_mask |= FETCH_MCVER;
   }
 
@@ -1402,7 +1385,8 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
       if (entry) {
         // TODO: we will need to pass the whole response to ParsedCommand to support
         // capturing MC replies.
-        rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
+        rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0,
+                      entry->mc_flag, cmnd_cntx->mc_command()->replies_cas_token());
       } else {
         cmnd_cntx->SendMiss();
       }
@@ -1653,7 +1637,7 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK(cmnd_cntx->mc_command());
 
   uint8_t fetch_mask = FETCH_MCFLAG;
-  if (ShouldFetchMCVer(cmnd_cntx->mc_command()->type))
+  if (cmnd_cntx->mc_command()->replies_cas_token())
     fetch_mask |= FETCH_MCVER;
 
   SinkReplyBuilder::ReplyScope scope(builder);
@@ -1690,7 +1674,8 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
                       absl::MakeSpan(ordered_by_shard));
   for (const auto& entry : ordered_by_shard) {
     if (entry) {
-      rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
+      rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0, entry->mc_flag,
+                    cmnd_cntx->mc_command()->replies_cas_token());
     } else {
       cmnd_cntx->SendMiss();
     }
