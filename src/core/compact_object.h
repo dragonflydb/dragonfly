@@ -469,10 +469,6 @@ class CompactObj {
     size_t bytes_used;
 
     bool DefragIfNeeded(PageUsage* page_usage);
-
-    // Computes if the contained object should be defragmented, by examining pointers within it and
-    // returning true if any of them reside in an underutilized page.
-    bool ShouldDefragment(PageUsage* page_usage) const;
   };
 
   struct FlatJsonT {

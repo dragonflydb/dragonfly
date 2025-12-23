@@ -1617,33 +1617,21 @@ MemoryResource* CompactObj::memory_resource() {
 }
 
 bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
-  if (ShouldDefragment(page_usage)) {
-    const MiMemoryResource* mr = static_cast<MiMemoryResource*>(memory_resource());
+  const MiMemoryResource* mr = static_cast<MiMemoryResource*>(memory_resource());
 
-    const int64_t before = static_cast<int64_t>(mr->used());
-    DCHECK_GE(before, 0) << "Memory usage is more than int64_t max value";
+  const int64_t before = static_cast<int64_t>(mr->used());
+  DCHECK_GE(before, 0) << "Memory usage is more than int64_t max value";
 
-    Defragment(*json_ptr, page_usage);
+  bool did_defragment = Defragment(*json_ptr, page_usage);
 
-    const int64_t after = static_cast<int64_t>(mr->used());
-    DCHECK_GE(after, 0) << "Memory usage is more than int64_t max value";
+  const int64_t after = static_cast<int64_t>(mr->used());
+  DCHECK_GE(after, 0) << "Memory usage is more than int64_t max value";
 
-    if (const int64_t delta = after - before; delta != 0) {
-      bytes_used = UpdateSize(bytes_used, delta);
-    }
-    return true;
+  if (const int64_t delta = after - before; delta != 0) {
+    bytes_used = UpdateSize(bytes_used, delta);
   }
 
-  return false;
-}
-
-bool CompactObj::JsonConsT::ShouldDefragment(PageUsage* page_usage) const {
-  bool should_defragment = false;
-  json_ptr->compute_memory_size([&page_usage, &should_defragment](const void* p) {
-    should_defragment |= page_usage->IsPageForObjectUnderUtilized(const_cast<void*>(p));
-    return 0;
-  });
-  return should_defragment;
+  return did_defragment;
 }
 
 bool CompactObj::FlatJsonT::DefragIfNeeded(PageUsage* page_usage) {
