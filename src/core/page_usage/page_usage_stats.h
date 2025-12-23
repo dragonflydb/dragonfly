@@ -20,6 +20,8 @@ namespace dfly {
 class CycleQuota {
  public:
   static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
+  static constexpr uint64_t kDefaultDefragQuota = 150;
+
   explicit CycleQuota(uint64_t quota_usec);
 
   // Sets the starting point for the quota to be counted from. Can be called multiple times to reset

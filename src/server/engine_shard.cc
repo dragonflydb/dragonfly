@@ -320,8 +320,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect_page_stats,
-                                                        const float threshold) {
+std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage& page_usage) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -348,8 +347,6 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(CollectPageStats collect
   uint64_t reallocations = 0;
   uint64_t attempts = 0;
 
-  static constexpr uint64_t kMaxUsecForDefrag = 150;
-  PageUsage page_usage{collect_page_stats, threshold, CycleQuota{kMaxUsecForDefrag}};
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
@@ -409,7 +406,10 @@ uint32_t EngineShard::DefragTask() {
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
-    if (DoDefrag(CollectPageStats::NO, threshold)) {
+    // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
+    PageUsage page_usage{CollectPageStats::NO, threshold,
+                         CycleQuota{CycleQuota::kDefaultDefragQuota}};
+    if (DoDefrag(page_usage)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
