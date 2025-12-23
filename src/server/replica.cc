@@ -998,14 +998,14 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   TransactionReader tx_reader{journal_rec_executed_.load(std::memory_order_relaxed) - 1};
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
-  std::optional<TransactionData> tx_data;
-  while ((tx_data = tx_reader.NextTxData(&reader, cntx))) {
-    DVLOG(3) << "Lsn: " << tx_data->lsn;
+  TransactionData tx_data;
+  while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
+    DVLOG(3) << "Lsn: " << tx_data.lsn;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-    if (tx_data->opcode == journal::Op::LSN) {
+    if (tx_data.opcode == journal::Op::LSN) {
       //  Do nothing
-    } else if (tx_data->opcode == journal::Op::PING) {
+    } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       auto* journal = ServerState::tlocal()->journal();
@@ -1015,7 +1015,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         journal->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
       }
     } else {
-      const bool is_successful = ExecuteTx(std::move(*tx_data), cntx);
+      const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
       if (is_successful) {
         // We only increment upon successful execution of the transaction.
         // The reason for this is that during partial sync we sent this

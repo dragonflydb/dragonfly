@@ -24,19 +24,11 @@ namespace {
 template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... parts) {
   vector<string> raw_parts{absl::StrCat(std::forward<Ts>(parts))...};
 
-  auto cmd_str = accumulate(raw_parts.begin(), raw_parts.end(), std::string{});
-  auto buf = make_unique<uint8_t[]>(cmd_str.size());
-  memcpy(buf.get(), cmd_str.data(), cmd_str.size());
-
-  CmdArgVec slice_parts;
-  size_t start = 0;
-  for (const auto& part : raw_parts) {
-    slice_parts.emplace_back(reinterpret_cast<char*>(buf.get()) + start, part.size());
-    start += part.size();
-  }
-
-  return {std::move(buf), std::move(slice_parts), cmd_str.size()};
+  journal::ParsedEntry::CmdData res;
+  res.Assign(raw_parts.begin(), raw_parts.end(), raw_parts.size());
+  return res;
 }
+
 }  // namespace
 
 JournalExecutor::JournalExecutor(Service* service)
@@ -68,8 +60,7 @@ void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
 }
 
 facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
-  return service_->DispatchCommand(facade::ParsedArgs{cmd.cmd_args}, reply_builder_.get(),
-                                   &conn_context_);
+  return service_->DispatchCommand(facade::ParsedArgs{cmd}, reply_builder_.get(), &conn_context_);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {

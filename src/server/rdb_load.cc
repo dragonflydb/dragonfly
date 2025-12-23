@@ -2417,19 +2417,22 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   size_t done = 0;
   JournalExecutor ex{service};
   while (done < num_entries) {
-    journal::ParsedEntry entry{};
-    SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
+    journal::ParsedEntry entry;
+    auto ec = journal_reader_.ReadEntry(&entry);
+    if (ec)
+      return ec;
+
     done++;
 
-    if (entry.cmd.cmd_args.empty()) {
+    if (entry.cmd.empty()) {
       if (entry.opcode == journal::Op::PING) {
         continue;
       }
       return RdbError(errc::rdb_file_corrupted);
     }
 
-    if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
-        absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
+    if (absl::EqualsIgnoreCase(entry.cmd[0], "FLUSHALL") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FLUSHDB")) {
       // Applying a flush* operation in the middle of a load can cause out-of-sync deletions of
       // data that should not be deleted, see https://github.com/dragonflydb/dragonfly/issues/1231
       // By returning an error we are effectively restarting the replication.

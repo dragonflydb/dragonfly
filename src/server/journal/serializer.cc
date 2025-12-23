@@ -141,13 +141,8 @@ template io::Result<uint16_t> JournalReader::ReadUInt<uint16_t>();
 template io::Result<uint32_t> JournalReader::ReadUInt<uint32_t>();
 template io::Result<uint64_t> JournalReader::ReadUInt<uint64_t>();
 
-io::Result<size_t> JournalReader::ReadString(io::MutableBytes buffer) {
-  size_t size = 0;
-  SET_OR_UNEXPECT(ReadUInt<uint64_t>(), size);
-
-  if (size > buffer.size())
-    return make_unexpected(make_error_code(errc::bad_message));
-
+std::error_code JournalReader::ReadString(io::MutableBytes buffer) {
+  size_t size = buffer.size();
   uint64_t available = std::min(size, buf_.InputLen());
   uint64_t remainder = 0;
 
@@ -166,79 +161,77 @@ io::Result<size_t> JournalReader::ReadString(io::MutableBytes buffer) {
   if (remainder) {
     if (is_short_remainder) {
       if (auto ec = EnsureRead(remainder); ec)
-        return make_unexpected(ec);
+        return ec;
       buf_.ReadAndConsume(remainder, remainder_buf_pos);
     } else {
       uint64_t read;
-      SET_OR_UNEXPECT(source_->Read({remainder_buf_pos, remainder}), read)
+      SET_OR_RETURN(source_->Read({remainder_buf_pos, remainder}), read);
       if (read < remainder) {
-        return make_unexpected(make_error_code(errc::io_error));
+        return make_error_code(errc::io_error);
       }
     }
   }
 
-  return size;
+  return {};
 }
 
 std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) {
   size_t num_strings = 0;
   SET_OR_RETURN(ReadUInt<uint64_t>(), num_strings);
-  data->cmd_args.resize(num_strings);
 
   size_t cmd_size = 0;
   SET_OR_RETURN(ReadUInt<uint64_t>(), cmd_size);
-  data->cmd_len = cmd_size;
+
+  data->Reserve(num_strings, cmd_size + num_strings /* +\0 char*/);
 
   // Read all strings consecutively.
-  data->command_buf = make_unique<uint8_t[]>(cmd_size);
-  uint8_t* ptr = data->command_buf.get();
-  for (auto& span : data->cmd_args) {
-    size_t size;
-    SET_OR_RETURN(ReadString({ptr, cmd_size}), size);
-    DCHECK(size <= cmd_size);
-    span = string_view{reinterpret_cast<char*>(ptr), size};
-    ptr += size;
+  for (size_t i = 0; i < num_strings; ++i) {
+    size_t size = 0;
+    SET_OR_RETURN(ReadUInt<uint64_t>(), size);
+    if (size > cmd_size) {  // corrupted entry
+      return make_error_code(errc::io_error);
+    }
+    data->PushArg(size);
+    uint8_t* ptr = reinterpret_cast<uint8_t*>(data->data(i));
+    if (auto ec = ReadString({ptr, size}); ec)
+      return ec;
+
+    ptr[size] = '\0';  // null terminate
+
     cmd_size -= size;
   }
-
-  data->cmd_len -= cmd_size;
 
   return {};
 }
 
-io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
+std::error_code JournalReader::ReadEntry(journal::ParsedEntry* dest) {
   uint8_t int_op;
-  SET_OR_UNEXPECT(ReadUInt<uint8_t>(), int_op);
+  SET_OR_RETURN(ReadUInt<uint8_t>(), int_op);
   journal::Op opcode = static_cast<journal::Op>(int_op);
 
   if (opcode == journal::Op::SELECT) {
-    SET_OR_UNEXPECT(ReadUInt<uint16_t>(), dbid_);
-    return ReadEntry();
+    SET_OR_RETURN(ReadUInt<uint16_t>(), dbid_);
+    return ReadEntry(dest);
   }
 
-  journal::ParsedEntry entry;
-  entry.dbid = dbid_;
-  entry.opcode = opcode;
-
+  dest->dbid = dbid_;
+  dest->opcode = opcode;
+  dest->cmd.clear();
   if (opcode == journal::Op::PING) {
-    return entry;
+    return {};
   }
 
   if (opcode == journal::Op::LSN) {
-    SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
-    return entry;
+    SET_OR_RETURN(ReadUInt<uint64_t>(), dest->lsn);
+    return {};
   }
 
-  SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.txid);
-  SET_OR_UNEXPECT(ReadUInt<uint32_t>(), entry.shard_cnt);
+  SET_OR_RETURN(ReadUInt<uint64_t>(), dest->txid);
+  SET_OR_RETURN(ReadUInt<uint32_t>(), dest->shard_cnt);
 
-  VLOG(1) << "Read entry " << entry.ToString();
+  VLOG(1) << "Read entry " << dest->ToString();
 
-  auto ec = ReadCommand(&entry.cmd);
-  if (ec)
-    return make_unexpected(ec);
-
-  return entry;
+  return ReadCommand(&dest->cmd);
 }
 
 }  // namespace dfly
