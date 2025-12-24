@@ -313,7 +313,7 @@ TEST_F(QListTest, RemoveListpack) {
 }
 
 TEST_F(QListTest, DefragListpackRaw) {
-  PageUsage page_usage{CollectPageStats::YES, 100.0, UnlimitedQuota()};
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
   page_usage.SetForceReallocate(true);
 
   ql_.Push("first", QList::TAIL);
@@ -325,7 +325,7 @@ TEST_F(QListTest, DefragListpackRaw) {
 }
 
 TEST_F(QListTest, DefragPlainTextRaw) {
-  PageUsage page_usage{CollectPageStats::YES, 100.0, UnlimitedQuota()};
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
   page_usage.SetForceReallocate(true);
   string big(100000, 'x');
   ql_.Push(big, QList::HEAD);
@@ -335,7 +335,7 @@ TEST_F(QListTest, DefragPlainTextRaw) {
 }
 
 TEST_F(QListTest, DefragmentListpackCompressed) {
-  PageUsage page_usage{CollectPageStats::YES, 100.0, UnlimitedQuota()};
+  PageUsage page_usage{CollectPageStats::YES, 100.0};
   page_usage.SetForceReallocate(true);
 
   // MIN_COMPRESS_BYTES = 256

@@ -63,7 +63,7 @@ std::vector<void*> AllocateForTest(int size, std::size_t allocate_size, int fact
 }
 
 bool HasUnderutilizedMemory(const std::vector<void*>& ptrs, float ratio) {
-  PageUsage page_usage{CollectPageStats::NO, ratio, UnlimitedQuota()};
+  PageUsage page_usage{CollectPageStats::NO, ratio};
   auto it = std::find_if(ptrs.begin(), ptrs.end(), [&](auto p) {
     int r = p && page_usage.IsPageForObjectUnderUtilized(p);
     return r > 0;
@@ -558,7 +558,7 @@ TEST_F(CompactObjectTest, DefragHash) {
 
   // Find a listpack that is located on a underutilized page
   uint8_t* target_lp = nullptr;
-  PageUsage page_usage{CollectPageStats::NO, 0.8, UnlimitedQuota()};
+  PageUsage page_usage{CollectPageStats::NO, 0.8};
   for (size_t i = 0; i < lps.size(); i += 10) {
     if (page_usage.IsPageForObjectUnderUtilized(lps[i]))
       target_lp = lps[i];
@@ -595,7 +595,7 @@ TEST_F(CompactObjectTest, DefragSet) {
   StringSet* s = CompactObj::AllocateMR<StringSet>();
   s->Add("str");
   cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
-  PageUsage page_usage{CollectPageStats::NO, 0.8, UnlimitedQuota()};
+  PageUsage page_usage{CollectPageStats::NO, 0.8};
   ASSERT_FALSE(cobj_.DefragIfNeeded(&page_usage));
 }
 

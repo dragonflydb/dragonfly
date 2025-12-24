@@ -66,7 +66,7 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
-  PageUsage(CollectPageStats collect_stats, float threshold, CycleQuota quota);
+  PageUsage(CollectPageStats collect_stats, float threshold, CycleQuota quota = UnlimitedQuota());
 
   virtual ~PageUsage() = default;
 
