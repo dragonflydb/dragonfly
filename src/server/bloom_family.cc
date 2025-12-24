@@ -1,13 +1,11 @@
 // Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/bloom_family.h"
-
 #include "core/bloom.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -191,7 +189,7 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 
-void BloomFamily::Register(CommandRegistry* registry) {
+void RegisterBloomFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
   *registry << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(

@@ -2,17 +2,17 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/bitops_family.h"
+#include <absl/strings/match.h>
 
 #include <bitset>
 #include <nonstd/expected.hpp>
 
-#include "absl/strings/match.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -1380,7 +1380,7 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, 
 
 }  // namespace
 
-void BitOpsFamily::Register(CommandRegistry* registry) {
+void RegisterBitopsFamily(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily(acl::BITMAP);
   *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1}.SetHandler(&BitPos)

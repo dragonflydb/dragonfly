@@ -40,7 +40,6 @@ extern "C" {
 #include "server/multi_command_squasher.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
-#include "server/string_family.h"
 #include "server/transaction.h"
 
 using namespace std;

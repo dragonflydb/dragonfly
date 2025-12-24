@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/string_family.h"
-
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -23,6 +21,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -1722,7 +1721,7 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 
-void StringFamily::Register(CommandRegistry* registry) {
+void RegisterStringFamily(CommandRegistry* registry) {
   constexpr uint32_t kMSetMask =
       CO::JOURNALED | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
 

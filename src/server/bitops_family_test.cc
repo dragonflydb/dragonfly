@@ -1,9 +1,6 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/bitops_family.h"
-
 #include <bitset>
 #include <iomanip>
 #include <iostream>

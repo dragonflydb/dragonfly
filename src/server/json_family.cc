@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/json_family.h"
-
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
@@ -22,6 +20,7 @@
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/detail/wrapped_json_path.h"
@@ -30,7 +29,6 @@
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
 #include "server/sharding.h"
-#include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 
@@ -2202,7 +2200,7 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
 // For now I introduced only the JSON category which will be the default.
 // TODO: Add sensible defaults/categories to json commands
 
-void JsonFamily::Register(CommandRegistry* registry) {
+void RegisterJsonFamily(CommandRegistry* registry) {
   constexpr size_t kMsetFlags =
       CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
   registry->StartFamily();

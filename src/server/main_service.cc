@@ -43,17 +43,13 @@ extern "C" {
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
-#include "server/bitops_family.h"
-#include "server/bloom_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
+#include "server/command_families.h"
 #include "server/error.h"
 #include "server/generic_family.h"
-#include "server/geo_family.h"
-#include "server/hll_family.h"
 #include "server/hset_family.h"
 #include "server/http_api.h"
-#include "server/json_family.h"
 #include "server/list_family.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
@@ -62,7 +58,6 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/stream_family.h"
-#include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
@@ -3067,7 +3062,7 @@ void Service::RegisterCommands() {
   server_family_.Register(&registry_);
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);
-  StringFamily::Register(&registry_);
+  RegisterStringFamily(&registry_);
 
 #ifdef WITH_COLLECTION_CMDS
   SetFamily::Register(&registry_);
@@ -3077,11 +3072,11 @@ void Service::RegisterCommands() {
 #endif
 
 #ifdef WITH_EXTENSION_CMDS
-  GeoFamily::Register(&registry_);
-  BitOpsFamily::Register(&registry_);
-  HllFamily::Register(&registry_);
-  BloomFamily::Register(&registry_);
-  JsonFamily::Register(&registry_);
+  RegisterGeoFamily(&registry_);
+  RegisterBitopsFamily(&registry_);
+  RegisterHllFamily(&registry_);
+  RegisterBloomFamily(&registry_);
+  RegisterJsonFamily(&registry_);
 #endif
 
 #ifdef WITH_SEARCH

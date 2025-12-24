@@ -1,9 +1,6 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/string_family.h"
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"

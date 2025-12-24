@@ -14,7 +14,6 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
-#include "server/string_family.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
