@@ -43,8 +43,7 @@ HllBufferPtr InitHllPtr() {
 }  // namespace
 
 CycleQuota::CycleQuota(const uint64_t quota_usec)
-    : quota_cycles_{quota_usec == kMaxQuota ? kMaxQuota : base::CycleClock::FromUsec(quota_usec)} {
-  Arm();
+    : CycleQuota(base::CycleClock::FromUsec(quota_usec), true) {
 }
 
 void CycleQuota::Arm() {
@@ -59,6 +58,14 @@ bool CycleQuota::Depleted() const {
 
 uint64_t CycleQuota::UsedCycles() const {
   return base::CycleClock::Now() - start_cycles_;
+}
+
+CycleQuota CycleQuota::Unlimited() {
+  return CycleQuota(kMaxQuota, true);
+}
+
+CycleQuota::CycleQuota(const uint64_t quota_cycles, bool /*tag*/) : quota_cycles_{quota_cycles} {
+  Arm();
 }
 
 void CollectedPageStats::Merge(CollectedPageStats&& other, uint16_t shard_id) {

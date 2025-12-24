@@ -32,14 +32,14 @@ class CycleQuota {
 
   uint64_t UsedCycles() const;
 
+  static CycleQuota Unlimited();
+
  private:
+  explicit CycleQuota(uint64_t quota_cycles, bool /*tag*/);
+
   uint64_t quota_cycles_;
   uint64_t start_cycles_{0};
 };
-
-inline CycleQuota UnlimitedQuota() {
-  return CycleQuota(CycleQuota::kMaxQuota);
-}
 
 enum class CollectPageStats : uint8_t { YES, NO };
 
@@ -66,7 +66,8 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
-  PageUsage(CollectPageStats collect_stats, float threshold, CycleQuota quota = UnlimitedQuota());
+  PageUsage(CollectPageStats collect_stats, float threshold,
+            CycleQuota quota = CycleQuota::Unlimited());
 
   virtual ~PageUsage() = default;
 
