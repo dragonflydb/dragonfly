@@ -17,7 +17,6 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
@@ -825,7 +824,11 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
 }
 
 TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
-  Run({"DEBUG", "POPULATE", "5000", "key", "256"});
+  Run("DEBUG POPULATE 5000 key 256");
+  Run("FT.CREATE index ON HASH PREFIX 1 doc: SCHEMA t TAG WITHSUFFIXTRIE");
+  for (int i = 0; i < 1000; ++i) {
+    Run(absl::StrFormat("HSET doc:%d t category%d", i, i));
+  }
 
   shard_set->pool()->AwaitFiberOnAll([&](unsigned, ProactorBase*) {
     auto* shard = EngineShard::tlocal();
@@ -856,6 +859,9 @@ TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
     EXPECT_GT(cursor_states.size(), 1);
     EXPECT_EQ(cursor_states.back(), 0)
         << "did not conclude defragmenting in " << cursor_states.size() << " runs";
+
+    EXPECT_GT(shard->stats().defrag_realloc_total, 0);
+    EXPECT_GE(shard->stats().defrag_attempt_total, shard->stats().defrag_realloc_total);
   });
 }
 
