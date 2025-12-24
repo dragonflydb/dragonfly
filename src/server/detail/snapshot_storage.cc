@@ -61,6 +61,25 @@ pair<string, string> GetBucketPath(string_view path) {
 const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 #endif
 
+std::string EscapeRegex(string_view input) {
+  // List of regex special characters that need escaping
+  constexpr std::string_view chars{"\\.*+?"};
+  std::string escaped;
+
+  // Reserve space to avoid multiple reallocations
+  escaped.reserve(input.size() * 1.1);
+
+  for (char c : input) {
+    // If the character is in our specialChars list, prepend a backslash
+    if (chars.find(c) != std::string::npos) {
+      escaped += '\\';
+    }
+    escaped += c;
+  }
+
+  return escaped;
+}
+
 }  // namespace
 
 string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilename,
@@ -72,6 +91,8 @@ string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilen
   // and adding an extension if needed.
   fs::path fl_path{prefix};
   fl_path.append(dbfilename);
+  fl_path = EscapeRegex(fl_path.string());
+
   SubstituteFilenamePlaceholders(&fl_path,
                                  {.ts = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
                                   .year = "([0-9]{4})",
@@ -83,6 +104,7 @@ string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilen
   const std::regex re(fl_path.string());
 
   for (const SnapStat& key : keys) {
+    DVLOG(1) << "Checking object key: " << key.name << " against regex: " << fl_path.string();
     std::smatch m;
     if (std::regex_match(key.name, m, re)) {
       return key.name;
@@ -586,12 +608,12 @@ io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
     return nonstd::make_unexpected(
         GenericError{std::make_error_code(std::errc::invalid_argument), "Invalid S3 path"});
   }
-  const auto [bucket_name, obj_path] = *bucket_path;
-  const std::regex re(absl::StrReplaceAll(obj_path, {{"summary", "[0-9]{4}"}}));
+
+  auto& [bucket_name, obj_path] = *bucket_path;
 
   // Limit prefix to objects in the same 'directory' as load_path.
   const size_t pos = obj_path.find_last_of('/');
-  const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
+  const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos + 1);
 
   io::Result<std::vector<SnapStat>, GenericError> list_res = ListObjects(bucket_name, prefix);
   if (!list_res) {
@@ -599,8 +621,13 @@ io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
   }
 
   vector<string> paths;
+  obj_path = EscapeRegex(obj_path);
+  const std::regex re(absl::StrReplaceAll(obj_path, {{"summary", "[0-9]{4}"}}));
+
   for (const SnapStat& key : *list_res) {
     std::smatch m;
+    DVLOG(1) << "Checking object key: " << key.name << " against regex: " << obj_path;
+
     if (std::regex_match(key.name, m, re)) {
       paths.push_back(std::string(kS3Prefix) + bucket_name + "/" + key.name);
     }
@@ -632,7 +659,10 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
-    request.SetPrefix(std::string(prefix));
+    if (!prefix.empty())
+      request.SetPrefix(std::string(prefix));
+    request.SetDelimiter("/");
+
     if (!continuation_token.empty()) {
       request.SetContinuationToken(continuation_token);
     }
