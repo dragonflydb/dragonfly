@@ -846,7 +846,7 @@ TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
       PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota{CycleQuota::kDefaultDefragQuota}};
       page_usage.SetForceReallocate(true);
 
-      shard->DoDefrag(page_usage);
+      shard->DoDefrag(&page_usage);
       cursor_states.push_back(shard->GetDefragCursor());
       if (cursor_states.back() == 0)
         return;

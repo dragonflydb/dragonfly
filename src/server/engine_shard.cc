@@ -320,7 +320,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   return false;
 }
 
-std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage& page_usage) {
+std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
   // i.e. - Since we are using shared nothing access here, and all access
@@ -353,7 +353,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage& page_usage) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
       const ssize_t original_size = it->second.MallocUsed();
-      const bool did = it->second.DefragIfNeeded(&page_usage);
+      const bool did = it->second.DefragIfNeeded(page_usage);
       attempts++;
       if (did) {
         reallocations++;
@@ -362,8 +362,8 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage& page_usage) {
         }
       }
     });
-  } while (!page_usage.QuotaDepleted() && cur && namespaces);
-  const uint64_t used_cycles = page_usage.UsedQuotaCycles();
+  } while (!page_usage->QuotaDepleted() && cur && namespaces);
+  const uint64_t used_cycles = page_usage->UsedQuotaCycles();
   const uint64_t usec = base::CycleClock::ToUsec(used_cycles);
 
   defrag_state_.UpdateScanState(cur.token());
@@ -386,7 +386,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage& page_usage) {
         slice.shard_id(), used_cycles, usec, cursor_state);
   }
 
-  return page_usage.CollectedStats();
+  return page_usage->CollectedStats();
 }
 
 // the memory defragmentation task is as follow:
@@ -409,7 +409,7 @@ uint32_t EngineShard::DefragTask() {
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
     PageUsage page_usage{CollectPageStats::NO, threshold,
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
-    if (DoDefrag(page_usage)) {
+    if (DoDefrag(&page_usage)) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }

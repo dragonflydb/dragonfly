@@ -182,7 +182,7 @@ void MemoryCmd::Run(CmdArgList args) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         PageUsage page_usage{CollectPageStats::YES, threshold,
                              CycleQuota{CycleQuota::kDefaultDefragQuota}};
-        if (auto shard_res = shard->DoDefrag(page_usage); shard_res.has_value()) {
+        if (auto shard_res = shard->DoDefrag(&page_usage); shard_res.has_value()) {
           results[shard->shard_id()] = std::move(shard_res.value());
         }
       }

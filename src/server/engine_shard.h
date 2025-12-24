@@ -208,7 +208,7 @@ class EngineShard {
 
   // Scan the shard with the cursor and apply defragmentation for database entries.
   // Returns collected page stats if defragmentation was performed.
-  std::optional<CollectedPageStats> DoDefrag(PageUsage& page_usage);
+  std::optional<CollectedPageStats> DoDefrag(PageUsage* page_usage);
 
   uint64_t GetDefragCursor() const {
     return defrag_state_.cursor;
