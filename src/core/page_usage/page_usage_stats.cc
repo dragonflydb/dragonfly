@@ -54,7 +54,7 @@ void CycleQuota::Arm() {
 bool CycleQuota::Depleted() const {
   if (quota_cycles_ == kMaxQuota)
     return false;
-  return base::CycleClock::Now() - start_cycles_ >= quota_cycles_;
+  return UsedCycles() >= quota_cycles_;
 }
 
 uint64_t CycleQuota::UsedCycles() const {
