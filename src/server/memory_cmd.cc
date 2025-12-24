@@ -180,8 +180,9 @@ void MemoryCmd::Run(CmdArgList args) {
     std::vector<CollectedPageStats> results(shard_set->size());
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard) {
-        if (auto shard_res = shard->DoDefrag(CollectPageStats::YES, threshold);
-            shard_res.has_value()) {
+        PageUsage page_usage{CollectPageStats::YES, threshold,
+                             CycleQuota{CycleQuota::kDefaultDefragQuota}};
+        if (auto shard_res = shard->DoDefrag(&page_usage); shard_res.has_value()) {
           results[shard->shard_id()] = std::move(shard_res.value());
         }
       }

@@ -376,7 +376,7 @@ TEST_F(PageUsageStatsTest, QuotaChecks) {
     EXPECT_FALSE(p.QuotaDepleted());
   }
   {
-    PageUsage p{CollectPageStats::NO, 0, 4};
+    PageUsage p{CollectPageStats::NO, 0, CycleQuota{4}};
     util::ThisFiber::SleepFor(5us);
     EXPECT_TRUE(p.QuotaDepleted());
   }
@@ -399,7 +399,7 @@ TEST_F(PageUsageStatsTest, BlockList) {
   EXPECT_EQ(result.objects_moved, 2);
 
   // quota depleted without defragmentation
-  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  PageUsage p_zero{CollectPageStats::NO, 0.1, CycleQuota{0}};
   p_zero.SetForceReallocate(true);
   result = bl.Defragment(&p_zero);
   EXPECT_TRUE(result.quota_depleted);
@@ -415,7 +415,7 @@ TEST_F(PageUsageStatsTest, BlockListDefragmentResumes) {
     bl.Insert(i);
   }
 
-  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, CycleQuota{10}};
   p_small_quota.SetForceReallocate(true);
   util::ThisFiber::SleepFor(10us);
   auto result = bl.Defragment(&p_small_quota);
@@ -505,7 +505,7 @@ TEST_F(PageUsageStatsTest, DefragmentTagIndex) {
   // single doc with single term returned by `GetTags` should result in two reallocations.
   EXPECT_EQ(result.objects_moved, 2);
 
-  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  PageUsage p_zero{CollectPageStats::NO, 0.1, CycleQuota{0}};
   p_zero.SetForceReallocate(true);
   result = index.Defragment(&p_zero);
   EXPECT_TRUE(result.quota_depleted);
@@ -526,7 +526,7 @@ TEST_F(PageUsageStatsTest, TagIndexDefragResumeWithChanges) {
     index.Add(i, md);
   }
 
-  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, CycleQuota{10}};
   p_small_quota.SetForceReallocate(true);
   util::ThisFiber::SleepFor(10us);
   search::DefragmentResult result = index.Defragment(&p_small_quota);

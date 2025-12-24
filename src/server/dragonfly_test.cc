@@ -824,6 +824,41 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   });
 }
 
+TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
+  Run({"DEBUG", "POPULATE", "5000", "key", "256"});
+
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned, ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    if (!shard)
+      return;
+
+    // Try to run defrag at least this many times and stop early if cursor reaches the end (winds
+    // back to 0)
+    constexpr auto max_attempts = 500;
+
+    std::vector<uint64_t> cursor_states;
+    cursor_states.reserve(max_attempts);
+
+    cursor_states.push_back(shard->GetDefragCursor());
+    EXPECT_EQ(cursor_states.back(), 0);
+
+    for (int i = 0; i < max_attempts; ++i) {
+      PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota{CycleQuota::kDefaultDefragQuota}};
+      page_usage.SetForceReallocate(true);
+
+      shard->DoDefrag(&page_usage);
+      cursor_states.push_back(shard->GetDefragCursor());
+      if (cursor_states.back() == 0)
+        return;
+    }
+
+    // Defrag ran at least once
+    EXPECT_GT(cursor_states.size(), 1);
+    EXPECT_EQ(cursor_states.back(), 0)
+        << "did not conclude defragmenting in " << cursor_states.size() << " runs";
+  });
+}
+
 TEST_F(DflyEngineTest, Issue752) {
   // https://github.com/dragonflydb/dragonfly/issues/752
   // local_result_ member was not reset between commands
