@@ -43,8 +43,6 @@ struct TransactionData {
 
   bool IsGlobalCmd() const;
 
-  static TransactionData FromEntry(journal::ParsedEntry&& entry);
-
   TxId txid{0};
   DbIndex dbid{0};
   journal::ParsedEntry::CmdData command;
@@ -59,7 +57,8 @@ struct TransactionData {
 struct TransactionReader {
   TransactionReader(std::optional<uint64_t> lsn = std::nullopt) : lsn_(lsn) {
   }
-  std::optional<TransactionData> NextTxData(JournalReader* reader, ExecutionState* cntx);
+
+  bool NextTxData(JournalReader* reader, ExecutionState* cntx, TransactionData* dest);
 
  private:
   std::optional<uint64_t> lsn_ = 0;
