@@ -368,6 +368,10 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
 
   defrag_state_.UpdateScanState(cur.token());
 
+  page_usage->ExtendQuota(50);
+  const auto [quota_depleted, objects_moved] = shard_search_indices_->Defragment(page_usage);
+  reallocations += objects_moved;
+
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
