@@ -21,9 +21,9 @@
 #include "absl/base/macros.h"
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "core/detail/stateless_allocator.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
+#include "core/search/stateless_allocator.h"
 #include "core/search/vector_utils.h"
 
 extern "C" {
@@ -1135,11 +1135,11 @@ TEST_F(SearchTest, InvalidVectorParameter) {
 class SortIndexTest : public testing::Test {
  protected:
   void SetUp() override {
-    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
+    InitTLSearchMR(PMR_NS::get_default_resource());
   }
 
   void TearDown() override {
-    InitTLStatelessAllocMR(nullptr);
+    InitTLSearchMR(nullptr);
   }
 };
 
