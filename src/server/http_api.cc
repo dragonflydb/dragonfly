@@ -122,12 +122,7 @@ struct CaptureVisitor {
     absl::StrAppend(&str, "null");
   }
 
-  void operator()(payload::StoredReply sr) {
-    if (sr.ok) {
-      operator()(payload::SimpleString{"OK"});
-    } else {
-      operator()(payload::Null{});
-    }
+  void operator()(payload::ReplyFunction&& sr) {
   }
 
   void operator()(const payload::Error& err) {

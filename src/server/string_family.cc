@@ -700,7 +700,8 @@ void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmnd_cntx) {
     };
 
     OpResult<bool> result = cmnd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-    cmnd_cntx->SendStored(result.value_or(false));
+    MCRender render(cmnd_cntx->mc_command()->cmd_flags);
+    cmnd_cntx->SendSimpleString(render.RenderStored(result.value_or(false)));
   }
 }
 
@@ -727,7 +728,7 @@ void IncrByGeneric(string_view key, int64_t val, CommandContext* cmnd_cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      cmnd_cntx->rb()->SendLong(result.value());
+      cmnd_cntx->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
       cmnd_cntx->SendError(kInvalidIntErr);
@@ -1023,7 +1024,13 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
           GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
           return OpStatus::OK;
         });
-        return cmnd_cntx->SendStored(true);
+        if (cmnd_cntx->mc_command() != nullptr) {
+          cmnd_cntx->SendSimpleString(
+              MCRender{cmnd_cntx->mc_command()->cmd_flags}.RenderStored(true));
+        } else {
+          cmnd_cntx->SendOk();
+        }
+        return;
       }
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
@@ -1084,7 +1091,9 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
 
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.
-        return cmnd_cntx->SendStored(status == OpStatus::OK);
+        MCRender render(cmnd_cntx->mc_command()->cmd_flags);
+        cmnd_cntx->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+        return;
       }
       if (status == OpStatus::OUT_OF_MEMORY) {
         return cmnd_cntx->SendError(kOutOfMemory);
@@ -1124,7 +1133,15 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kOutOfMemory);
   }
 
-  cmnd_cntx->SendStored(result == OpStatus::OK);
+  if (cmnd_cntx->mc_command() != nullptr) {
+    MCRender render(cmnd_cntx->mc_command()->cmd_flags);
+    return cmnd_cntx->SendSimpleString(render.RenderStored(result == OpStatus::OK));
+  }
+  if (result == OpStatus::OK) {
+    cmnd_cntx->SendOk();
+  } else {
+    cmnd_cntx->SendNull();
+  }
 }
 
 /// (P)SETEX key seconds (milliseconds) value
@@ -1167,11 +1184,11 @@ void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
 
   switch (SetGeneric(sparams, key, value, *cmnd_cntx)) {
     case OpStatus::OK:
-      return cmnd_cntx->rb()->SendLong(1);  // Successfully set the value
+      return cmnd_cntx->SendLong(1);  // Successfully set the value
     case OpStatus::OUT_OF_MEMORY:
-      return cmnd_cntx->rb()->SendError(kOutOfMemory);
+      return cmnd_cntx->SendError(kOutOfMemory);
     case OpStatus::SKIPPED:
-      return cmnd_cntx->rb()->SendLong(0);  // Existed, zero updates performed
+      return cmnd_cntx->SendLong(0);  // Existed, zero updates performed
     default:
       LOG(FATAL) << "Invalid result";
   }
@@ -1302,7 +1319,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, val, cmnd_cntx);
 }
@@ -1313,7 +1330,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return cmnd_cntx->rb()->SendError(kInvalidFloatErr);
+    return cmnd_cntx->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1342,10 +1359,10 @@ void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return cmnd_cntx->rb()->SendError(kIncrOverflow);
+    return cmnd_cntx->SendError(kIncrOverflow);
   }
 
   return IncrByGeneric(key, -val, cmnd_cntx);
@@ -1475,7 +1492,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
     result = status;
 
   if (*result == OpStatus::OK) {
-    cmnd_cntx->rb()->SendOk();
+    cmnd_cntx->SendOk();
   } else {
     cmnd_cntx->SendError(*result);
   }
@@ -1515,7 +1532,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   };
   cmnd_cntx->tx->Execute(std::move(epilog_cb), true);
 
-  cmnd_cntx->rb()->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmnd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
 void CmdStrLen(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1625,11 +1642,11 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
@@ -1662,14 +1679,14 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmnd_cntx->rb()->SendError(kWrongTypeErr);
+        cmnd_cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmnd_cntx->rb()->SendError(kInvalidIntErr);
+        cmnd_cntx->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmnd_cntx->rb()->SendError(kOutOfMemory);
+        cmnd_cntx->SendError(kOutOfMemory);
         break;
       default:
         cmnd_cntx->SendError(result.status());

@@ -232,7 +232,7 @@ TEST_F(StringFamilyTest, MGetSet) {
   auto mget_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
       RespExpr resp = Run({"mget", "b", "x"});
-      ASSERT_EQ(RespExpr::ARRAY, resp.type);
+      ASSERT_THAT(resp, ArrLen(2));
       auto ivec = ToIntArr(resp);
 
       ASSERT_GE(ivec[1], ivec[0]);
