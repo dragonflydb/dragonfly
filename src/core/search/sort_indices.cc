@@ -4,10 +4,9 @@
 
 #include "core/search/sort_indices.h"
 
-#include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
-#include <absl/strings/numbers.h>
 #include <absl/strings/str_split.h>
+#include <base/logging.h>
 
 #include <algorithm>
 #include <optional>
@@ -20,7 +19,7 @@ using namespace std;
 
 namespace {
 template <typename T>
-using ScoreT = std::conditional_t<is_same_v<T, PMR_NS::string>, std::string, T>;
+using ScoreT = std::conditional_t<is_same_v<T, StatelessString>, std::string, T>;
 }  // namespace
 
 template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::HasValue() const {
@@ -29,11 +28,6 @@ template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::HasValue() 
 
 template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::IsNullValue() const {
   return std::holds_alternative<std::nullopt_t>(value);
-}
-
-template <typename T>
-SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr)
-    : values_{mr}, occupied_(mr) {
 }
 
 template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) const {
@@ -109,7 +103,7 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
 }
 
 template struct SimpleValueSortIndex<double>;
-template struct SimpleValueSortIndex<PMR_NS::string>;
+template struct SimpleValueSortIndex<StatelessString>;
 
 SimpleValueSortIndex<double>::ParsedSortValue NumericSortIndex::Get(const DocumentAccessor& doc,
                                                                     std::string_view field) {
@@ -123,7 +117,7 @@ SimpleValueSortIndex<double>::ParsedSortValue NumericSortIndex::Get(const Docume
   return ParsedSortValue{numbers_list->front()};
 }
 
-SimpleValueSortIndex<PMR_NS::string>::ParsedSortValue StringSortIndex::Get(
+SimpleValueSortIndex<StatelessString>::ParsedSortValue StringSortIndex::Get(
     const DocumentAccessor& doc, std::string_view field) {
   auto strings_list = doc.GetTags(field);
   if (!strings_list) {
@@ -132,7 +126,7 @@ SimpleValueSortIndex<PMR_NS::string>::ParsedSortValue StringSortIndex::Get(
   if (strings_list->empty()) {
     return ParsedSortValue{std::nullopt};
   }
-  return ParsedSortValue{PMR_NS::string{strings_list->front(), GetMemRes()}};
+  return ParsedSortValue{StatelessString{strings_list->front()}};
 }
 
 }  // namespace dfly::search
