@@ -32,6 +32,10 @@ template <typename T> class StatelessAllocator {
   }
 
   static value_type* allocate(size_type n) {
+    static_assert(
+        std::is_empty_v<StatelessAllocator>,
+        "StatelessAllocator must not contain state, so it can use empty base optimization");
+
     void* ptr = detail::tl_mr->allocate(n * sizeof(value_type), alignof(value_type));
     return static_cast<value_type*>(ptr);
   }
