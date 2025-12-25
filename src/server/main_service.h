@@ -36,8 +36,8 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::SinkReplyBuilder* builder,
-                                         facade::ConnectionContext* cntx) final;
+  facade::DispatchResult DispatchCommand(facade::ParsedArgs args,
+                                         facade::ParsedCommand* parsed_cmd) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
   facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,

@@ -451,12 +451,14 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   CmdArgVec args = conn_wrapper->Args(slice);
 
-  auto* context = conn_wrapper->cmd_cntx();
+  ConnectionContext* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
 
   DCHECK(context->transaction == nullptr) << id;
-
-  service_->DispatchCommand(ParsedArgs{args}, conn_wrapper->builder(), context);
+  CommandContext cmd_cntx;
+  cmd_cntx.Init(conn_wrapper->builder(), context);
+  cmd_cntx.Assign(args.begin(), args.end(), args.size());
+  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx);
 
   DCHECK(context->transaction == nullptr);
 

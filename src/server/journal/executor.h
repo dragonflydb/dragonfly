@@ -37,7 +37,7 @@ class JournalExecutor {
   }
 
  private:
-  facade::DispatchResult Execute(journal::ParsedEntry::CmdData& cmd);
+  facade::DispatchResult Execute(CommandContext* cmd_cntx);
 
   // Select database. Ensure it exists if accessed for first time.
   void SelectDb(DbIndex dbid);
