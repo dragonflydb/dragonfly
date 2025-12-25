@@ -465,7 +465,7 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
                            PMR_NS::memory_resource* mr, const Synonyms* synonyms)
     : schema_{schema}, options_{options}, synonyms_{synonyms} {
   CreateIndices(mr);
-  CreateSortIndices(mr);
+  CreateSortIndices();
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
@@ -513,7 +513,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
   }
 }
 
-void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
+void FieldIndices::CreateSortIndices() {
   for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::SORTABLE) == 0)
       continue;
@@ -521,10 +521,10 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
     switch (field_info.type) {
       case SchemaField::TAG:
       case SchemaField::TEXT:
-        sort_indices_[field_ident] = make_unique<StringSortIndex>(mr);
+        sort_indices_[field_ident] = make_unique<StringSortIndex>();
         break;
       case SchemaField::NUMERIC:
-        sort_indices_[field_ident] = make_unique<NumericSortIndex>(mr);
+        sort_indices_[field_ident] = make_unique<NumericSortIndex>();
         break;
       case SchemaField::VECTOR:
       case SchemaField::GEO:
