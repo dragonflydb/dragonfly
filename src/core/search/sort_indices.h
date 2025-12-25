@@ -4,15 +4,16 @@
 
 #pragma once
 
-#include "core/detail/stateless_allocator.h"
 #include "core/search/base.h"
+#include "core/search/stateless_allocator.h"
 
 namespace dfly::search {
 
-using StatelessString = std::basic_string<char, std::char_traits<char>, StatelessAllocator<char>>;
+using StatelessString =
+    std::basic_string<char, std::char_traits<char>, StatelessSearchAllocator<char>>;
 static_assert(sizeof(StatelessString) == sizeof(std::string));
 
-template <typename T> using StatelessVector = std::vector<T, StatelessAllocator<T>>;
+template <typename T> using StatelessVector = std::vector<T, StatelessSearchAllocator<T>>;
 static_assert(sizeof(StatelessVector<StatelessString>) == sizeof(std::vector<std::string>));
 
 template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
