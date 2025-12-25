@@ -50,7 +50,7 @@ std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids
   };
   std::partial_sort(ids->begin(), ids->begin() + std::min(ids->size(), limit), ids->end(), cb);
 
-  // Turn PMR string into std::string
+  // Turn stateless string into std::string
   vector<SortableValue> out(min(ids->size(), limit));
   for (size_t i = 0; i < out.size(); i++)
     out[i] = ScoreT<T>{values_[(*ids)[i]]};
@@ -96,10 +96,6 @@ std::vector<DocId> SimpleValueSortIndex<T>::GetAllDocsWithNonNullValues() const 
   }
 
   return result;
-}
-
-template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
-  return values_.get_allocator().resource();
 }
 
 template struct SimpleValueSortIndex<double>;

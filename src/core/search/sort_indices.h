@@ -40,8 +40,6 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
  protected:
   virtual ParsedSortValue Get(const DocumentAccessor& doc, std::string_view field_value) = 0;
 
-  PMR_NS::memory_resource* GetMemRes() const;
-
  private:
   StatelessVector<T> values_;
   StatelessVector<bool> occupied_;  // instead of optional<T> in values to avoid memory overhead
