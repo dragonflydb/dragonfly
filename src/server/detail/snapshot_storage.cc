@@ -63,7 +63,7 @@ const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 
 std::string EscapeRegex(string_view input) {
   // List of regex special characters that need escaping
-  constexpr std::string_view chars{"\\.*+?"};
+  constexpr std::string_view chars{"\\.^$|?*+()[]{}"};
   std::string escaped;
 
   // Reserve space to avoid multiple reallocations
