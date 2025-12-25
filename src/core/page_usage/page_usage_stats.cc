@@ -65,6 +65,9 @@ CycleQuota CycleQuota::Unlimited() {
 }
 
 void CycleQuota::Extend(const uint64_t quota_usec) {
+  if (quota_cycles_ == kMaxQuota)
+    return;
+
   quota_cycles_ += base::CycleClock::FromUsec(quota_usec);
 }
 
