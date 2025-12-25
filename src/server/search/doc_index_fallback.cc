@@ -3,6 +3,8 @@
 //
 
 #ifndef WITH_SEARCH
+#include "core/page_usage/page_usage_stats.h"
+#include "core/search/base.h"
 #include "server/search/doc_index.h"
 
 namespace dfly {
@@ -28,6 +30,10 @@ size_t ShardDocIndices::GetUsedMemory() const {
 }
 SearchStats ShardDocIndices::GetStats() const {
   return {};
+}
+
+search::DefragmentResult ShardDocIndices::Defragment(PageUsage*) {
+  return search::DefragmentResult{};
 }
 
 }  // namespace dfly
