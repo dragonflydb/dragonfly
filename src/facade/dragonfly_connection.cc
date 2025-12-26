@@ -2012,7 +2012,7 @@ bool Connection::ParseMCBatch() {
       CreateParsedCommand();
     }
     uint32_t consumed = 0;
-
+    memcache_parser_->set_last_unix_time(time(nullptr));
     MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
 
