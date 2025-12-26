@@ -23,6 +23,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
+#include "core/search/stateless_allocator.h"
 #include "core/search/vector_utils.h"
 
 extern "C" {
@@ -137,11 +138,13 @@ struct SchemaFieldInitializer {
   SchemaField::ParamsVariant special_params{std::monostate{}};
 };
 
-Schema MakeSimpleSchema(initializer_list<SchemaFieldInitializer> ilist) {
+Schema MakeSimpleSchema(initializer_list<SchemaFieldInitializer> ilist,
+                        bool make_sortable = false) {
   Schema schema;
+  uint8_t flags = make_sortable ? SchemaField::SORTABLE : 0;
   for (auto ifield : ilist) {
     auto& field = schema.fields[ifield.name];
-    field = {ifield.type, 0, string{ifield.name}, ifield.special_params};
+    field = {ifield.type, flags, string{ifield.name}, ifield.special_params};
   }
   return schema;
 }
@@ -1127,6 +1130,71 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   // Search should return empty results for invalid vector
   auto result = algo.Search(&indices);
   EXPECT_TRUE(result.ids.empty());
+}
+
+class SortIndexTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+};
+
+TEST_F(SortIndexTest, StringSort) {
+  constexpr auto field = "name";
+  const auto schema = MakeSimpleSchema({{field, SchemaField::TAG}}, true);
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{field, "charlie"}}});
+  indices.Add(1, MockedDocument{Map{{field, "alpha"}}});
+  indices.Add(2, MockedDocument{Map{{field, "bravo"}}});
+
+  std::vector<DocId> ids{0, 1, 2};
+  constexpr bool desc = false;
+
+  const auto index = indices.GetSortIndex(field);
+
+  index->Sort(&ids, ids.size(), desc);
+  std::vector<DocId> expected{1, 2, 0};
+  EXPECT_EQ(ids, expected);
+
+  index->Sort(&ids, ids.size(), !desc);
+  expected = {0, 2, 1};
+  EXPECT_EQ(ids, expected);
+
+  // conversion from stateless to normal string
+  auto lookup = index->Lookup(1);
+  EXPECT_TRUE(std::holds_alternative<std::string>(lookup));
+  EXPECT_EQ(std::get<std::string>(lookup), "alpha");
+}
+
+TEST_F(SortIndexTest, NumSort) {
+  constexpr auto field = "cost";
+  const auto schema = MakeSimpleSchema({{field, SchemaField::NUMERIC}}, true);
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{field, "2999"}}});
+  indices.Add(1, MockedDocument{Map{{field, "999"}}});
+  indices.Add(2, MockedDocument{Map{{field, "12"}}});
+
+  std::vector<DocId> ids{0, 1, 2};
+  constexpr bool desc = false;
+
+  auto index = indices.GetSortIndex(field);
+  index->Sort(&ids, ids.size(), desc);
+  std::vector<DocId> expected{2, 1, 0};
+  EXPECT_EQ(ids, expected);
+
+  index->Sort(&ids, ids.size(), !desc);
+  expected = {0, 1, 2};
+  EXPECT_EQ(ids, expected);
+
+  auto lookup = index->Lookup(1);
+  EXPECT_TRUE(std::holds_alternative<double>(lookup));
+  EXPECT_EQ(std::get<double>(lookup), 999);
 }
 
 // Enumeration for different search types
