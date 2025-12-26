@@ -147,8 +147,8 @@ struct CaptureVisitor {
       visit(*this, std::move(pl));
   }
 
-  void operator()(payload::StoredReply sr) {
-    LOG(FATAL) << "StoredReply not supported in non-capturing builder";
+  void operator()(payload::ReplyFunction&& rf) {
+    rf(rb);
   }
 
   SinkReplyBuilder* rb;

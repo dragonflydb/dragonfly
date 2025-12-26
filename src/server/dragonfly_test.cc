@@ -62,14 +62,14 @@ const char kKeySid2[] = "b";
 // (connection, transaction etc) families.
 class DflyEngineTest : public BaseFamilyTest {
  protected:
-  DflyEngineTest() : BaseFamilyTest() {
+  DflyEngineTest() {
     num_threads_ = kPoolThreadCount;
   }
 };
 
 class DflyEngineTestWithRegistry : public BaseFamilyTest {
  protected:
-  DflyEngineTestWithRegistry() : BaseFamilyTest() {
+  DflyEngineTestWithRegistry() {
     num_threads_ = kPoolThreadCount;
     ResetService();
   }
@@ -77,7 +77,7 @@ class DflyEngineTestWithRegistry : public BaseFamilyTest {
 
 class SingleThreadDflyEngineTest : public BaseFamilyTest {
  protected:
-  SingleThreadDflyEngineTest() : BaseFamilyTest() {
+  SingleThreadDflyEngineTest() {
     num_threads_ = 1;
   }
 };
@@ -347,10 +347,10 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
   ASSERT_THAT(resp, ArrLen(14));
 }
 
-TEST_F(DflyEngineTest, Memcache) {
-  using MP = MemcacheParser;
+using MP = MemcacheParser;
 
-  auto resp = RunMC(MP::SET, "key", "bar", 1);
+TEST_F(DflyEngineTest, Memcache) {
+  auto resp = RunMC(MP::SET, "key", MCArgs{"bar", 1});
   EXPECT_THAT(resp, ElementsAre("STORED"));
 
   resp = RunMC(MP::GETS, "key");
@@ -359,24 +359,24 @@ TEST_F(DflyEngineTest, Memcache) {
   resp = RunMC(MP::GET, "key");
   EXPECT_THAT(resp, ElementsAre("VALUE key 1 3", "bar", "END"));
 
-  resp = RunMC(MP::ADD, "key", "bar", 1);
+  resp = RunMC(MP::ADD, "key", MCArgs{"bar", 1});
   EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
 
-  resp = RunMC(MP::REPLACE, "key2", "bar", 1);
+  resp = RunMC(MP::REPLACE, "key2", MCArgs{"bar", 1});
   EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
 
-  resp = RunMC(MP::ADD, "key2", "bar2", 2);
+  resp = RunMC(MP::ADD, "key2", MCArgs{"bar2", 2});
   EXPECT_THAT(resp, ElementsAre("STORED"));
 
   resp = GetMC(MP::GET, {"key2", "key"});
   EXPECT_THAT(resp, ElementsAre("VALUE key2 2 4", "bar2", "VALUE key 1 3", "bar", "END"));
 
-  resp = RunMC(MP::APPEND, "key2", "val2", 0);
+  resp = RunMC(MP::APPEND, "key2", MCArgs{"val2", 0});
   EXPECT_THAT(resp, ElementsAre("STORED"));
   resp = RunMC(MP::GET, "key2");
   EXPECT_THAT(resp, ElementsAre("VALUE key2 2 8", "bar2val2", "END"));
 
-  resp = RunMC(MP::APPEND, "unkn", "val2", 0);
+  resp = RunMC(MP::APPEND, "unkn", MCArgs{"val2", 0});
   EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
 
   resp = RunMC(MP::GET, "unkn");
@@ -385,9 +385,9 @@ TEST_F(DflyEngineTest, Memcache) {
   resp = GetMC(MP::GETS, {"key", "key2", "unknown"});
   EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "VALUE key2 2 8 0", "bar2val2", "END"));
 
-  EXPECT_THAT(RunMC(MP::SET, "foo", "bar"), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "foo", MCArgs{"bar"}), ElementsAre("STORED"));
 
-  EXPECT_THAT(RunMC(MP::SET, "foo", "bar"), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "foo", MCArgs{"bar"}), ElementsAre("STORED"));
 
   // 30 seconds into the future
   auto future_ts = time(nullptr) + 30;
@@ -397,10 +397,19 @@ TEST_F(DflyEngineTest, Memcache) {
   EXPECT_THAT(GetMC(MP::GAT, {"1000"}),
               ElementsAre("SERVER_ERROR wrong number of arguments for 'gat' command"));
 
-  EXPECT_THAT(RunMC(MP::SET, "persisted-key", "bar"), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "persisted-key", MCArgs{"bar"}), ElementsAre("STORED"));
   // expiry of 0 removes the key expiry
   EXPECT_THAT(GetMC(MP::GAT, {"0", "persisted-key"}),
               ElementsAre("VALUE persisted-key 0 3", "bar", "END"));
+}
+
+TEST_F(DflyEngineTest, MemcacheIncr) {
+  auto resp = RunMC(MP::INCR, "key", MCArgs{1});
+  EXPECT_THAT(resp, ElementsAre("NOT_FOUND"));
+  resp = RunMC(MP::SET, "key", MCArgs{"1"});
+  EXPECT_THAT(resp, ElementsAre("STORED"));
+  resp = RunMC(MP::INCR, "key", MCArgs{5});
+  EXPECT_THAT(resp, ElementsAre("6"));
 }
 
 TEST_F(DflyEngineTest, MemcacheFlags) {

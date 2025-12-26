@@ -243,6 +243,8 @@ void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
+  if (str.empty())
+    return;
   ReplyScope scope(this);
   WritePieces(str, kCRLF);
 }

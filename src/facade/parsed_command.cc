@@ -14,15 +14,6 @@ namespace facade {
 
 using namespace std;
 
-namespace {
-
-inline void SendSimpleDirect(std::string_view str, SinkReplyBuilder* rb) {
-  if (!str.empty())  // empty string means no-reply
-    rb->SendSimpleString(str);
-}
-
-}  // namespace
-
 string MCRender::RenderNotFound() const {
   if (flags_.no_reply)
     return {};
@@ -35,15 +26,11 @@ string MCRender::RenderGetEnd() const {
   return "END";
 }
 
-std::string MCRender::RenderStored() const {
+std::string MCRender::RenderStored(bool ok) const {
   if (flags_.no_reply)
     return {};
-  return flags_.meta ? "HD" : "STORED";
-}
-
-std::string MCRender::RenderNotStored() const {
-  if (flags_.no_reply)
-    return {};
+  if (ok)
+    return flags_.meta ? "HD" : "STORED";
   return flags_.meta ? "NS" : "NOT_STORED";
 }
 
@@ -102,31 +89,37 @@ void ParsedCommand::SendError(const facade::ErrorReply& error) {
   SendError(error.ToSv(), error.kind);
 }
 
-void ParsedCommand::SendStored(bool ok) {
-  if (!is_deferred_reply_) {
-    SendDirect(payload::StoredReply{ok});
-  } else {
-    reply_payload_ = payload::StoredReply{ok};
-    NotifyReplied();
-  }
-}
-
 void ParsedCommand::SendSimpleString(std::string_view str) {
   if (!is_deferred_reply_) {
-    SendSimpleDirect(str, rb_);
+    rb_->SendSimpleString(str);
   } else {
     reply_payload_ = payload::make_simple_or_noreply(str);
     NotifyReplied();
   }
 }
 
+void ParsedCommand::SendLong(long val) {
+  if (is_deferred_reply_) {
+    reply_payload_ = long(val);
+    NotifyReplied();
+  } else {
+    rb_->SendLong(val);
+  }
+}
+
+void ParsedCommand::SendNull() {
+  if (is_deferred_reply_) {
+    reply_payload_ = payload::Null{};
+    NotifyReplied();
+  } else {
+    DCHECK(mc_cmd_ == nullptr);  // RESP only
+    static_cast<RedisReplyBuilder*>(rb_)->SendNull();
+  }
+}
+
 bool ParsedCommand::SendPayload() {
   if (is_deferred_reply_) {
-    if (const auto* stored = get_if<payload::StoredReply>(&reply_payload_); stored) {
-      SendDirect(*stored);
-    } else {
-      CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
-    }
+    CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
     reply_payload_ = {};
     return true;
   }
@@ -168,20 +161,6 @@ void ParsedCommand::NotifyReplied() {
     // TODO: this might crash as we currently do not wait for async commands on connection close.
     DCHECK(conn_cntx_);
     conn_cntx_->conn()->Notify();
-  }
-}
-
-void ParsedCommand::SendDirect(const payload::StoredReply& sr) {
-  if (sr.ok) {
-    if (mc_cmd_)
-      SendSimpleDirect(MCRender{mc_cmd_->cmd_flags}.RenderStored(), rb_);
-    else
-      rb_->SendOk();
-  } else {
-    if (mc_cmd_)
-      SendSimpleDirect(MCRender{mc_cmd_->cmd_flags}.RenderNotStored(), rb_);
-    else
-      static_cast<RedisReplyBuilder*>(rb_)->SendNull();
   }
 }
 
