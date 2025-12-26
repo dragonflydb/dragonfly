@@ -528,11 +528,14 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
     }
     // S3ClientConfiguration may request configuration and credentials from
     // EC2 metadata so must be run in a proactor thread.
-    Aws::S3::S3ClientConfiguration s3_conf{};
+    Aws::S3::S3ClientConfiguration s3_conf;
+    s3_conf.checksumConfig.responseChecksumValidation =
+        Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
+
     LOG(INFO) << "Creating AWS S3 client; region=" << s3_conf.region << "; https=" << std::boolalpha
               << https << "; endpoint=" << endpoint;
     if (!sign_payload) {
-      s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::ForceNever;
+      s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
     }
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider =
         std::make_shared<aws::CredentialsProviderChain>();
