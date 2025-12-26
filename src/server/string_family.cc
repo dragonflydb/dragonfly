@@ -1663,7 +1663,8 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
 }
 
 // Implements the memcache GAT command. The expected input is
-// GAT <expiry-in-seconds> key [keys...]
+// GAT key [keys...]
+// The expiry argument is stored in mc_command()->expire_ts
 void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
@@ -1674,20 +1675,11 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   if (cmnd_cntx->mc_command()->replies_cas_token())
     fetch_mask |= FETCH_MCVER;
 
-  SinkReplyBuilder::ReplyScope scope(builder);
-  auto* rb = static_cast<MCReplyBuilder*>(builder);
-  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
-
-  CmdArgParser parser{args};
-  const int64_t expire_ts = parser.Next<uint64_t>();
-  if (parser.HasError()) {
-    return cmnd_cntx->SendError(parser.TakeError().MakeReply());
-  }
-
   BlockingCounter tiering_bc{0};
   AggregateError tiering_err;
   std::vector<MGetResponse> mget_resp(shard_set->size());
 
+  int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
   const DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1702,6 +1694,10 @@ void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
   tiering_bc->Wait();
   if (auto err = std::move(tiering_err).Destroy(); err)
     return builder->SendError(err.message());
+
+  SinkReplyBuilder::ReplyScope scope(builder);
+  auto* rb = static_cast<MCReplyBuilder*>(builder);
+  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
 
   absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
   ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, true,
@@ -1752,7 +1748,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
       << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
-      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -3, 2, -1}.HFUNC(
+      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}.HFUNC(
              GAT);
 }
 

@@ -21,6 +21,14 @@ using MP = MemcacheParser;
 
 namespace {
 
+int64_t ToAbsolute(uint32_t ts, uint64_t now) {
+  // if expire_ts is greater than month it's a unix timestamp
+  // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
+  constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
+  int64_t expire_ts = ts && ts <= kExpireLimit ? ts + now : ts;
+  return expire_ts;
+}
+
 MP::CmdType From(string_view token) {
   static absl::flat_hash_map<string_view, MP::CmdType> cmd_map{
       {"set", MP::SET},       {"add", MP::ADD},         {"replace", MP::REPLACE},
@@ -61,7 +69,7 @@ MP::CmdType From(string_view token) {
   return MP::INVALID;
 }
 
-MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
+MP::Result ParseStore(ArgSlice tokens, int64_t now, MP::Command* res) {
   DCHECK_EQ(res->size(), 0u);
 
   const size_t num_tokens = tokens.size();
@@ -75,9 +83,12 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   // tokens[0] is key
   uint32_t bytes_len = 0;
   uint32_t flags;
-  if (!absl::SimpleAtoi(tokens[1], &flags) || !absl::SimpleAtoi(tokens[2], &res->expire_ts) ||
+  uint32_t expire_ts;
+  if (!absl::SimpleAtoi(tokens[1], &flags) || !absl::SimpleAtoi(tokens[2], &expire_ts) ||
       !absl::SimpleAtoi(tokens[3], &bytes_len))
     return MP::BAD_INT;
+
+  res->expire_ts = ToAbsolute(expire_ts, now);
 
   if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[4], &res->cas_unique)) {
     return MP::BAD_INT;
@@ -101,13 +112,15 @@ MP::Result ParseStore(ArgSlice tokens, MP::Command* res) {
   return MP::OK;
 }
 
-MP::Result ParseValueless(ArgSlice tokens, MP::Command* res) {
+MP::Result ParseValueless(ArgSlice tokens, int64_t now, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   size_t key_pos = 0;
+  uint32_t expire_ts;
   if (res->type == MP::GAT || res->type == MP::GATS) {
-    if (!absl::SimpleAtoi(tokens[0], &res->expire_ts)) {
+    if (!absl::SimpleAtoi(tokens[0], &expire_ts)) {
       return MP::BAD_INT;
     }
+    res->expire_ts = ToAbsolute(expire_ts, now);
     ++key_pos;
   }
 
@@ -190,7 +203,7 @@ bool ParseMetaMode(char m, MP::Command* res) {
 }
 
 // See https://raw.githubusercontent.com/memcached/memcached/refs/heads/master/doc/protocol.txt
-MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
+MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res) {
   DCHECK(!tokens.empty());
 
   if (res->type == MP::META_DEBUG) {
@@ -238,14 +251,15 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
   }
 
   string blob;
-
+  uint32_t expire_ts;
   for (size_t i = 0; i < tokens.size(); ++i) {
     string_view token = tokens[i];
 
     switch (token[0]) {
       case 'T':
-        if (!absl::SimpleAtoi(token.substr(1), &res->expire_ts))
+        if (!absl::SimpleAtoi(token.substr(1), &expire_ts))
           return MP::BAD_INT;
+        res->expire_ts = ToAbsolute(expire_ts, now);
         break;
       case 'b':
         if (token.size() != 1)
@@ -363,7 +377,7 @@ auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
       return MP::PARSE_ERROR;
     }
 
-    auto res = ParseStore(tokens_view, cmd);
+    auto res = ParseStore(tokens_view, last_unix_time_, cmd);
     if (res != MP::OK)
       return res;
     val_len_to_read_ = cmd->value().size() + 2;
@@ -374,7 +388,7 @@ auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
     if (tokens_view.empty())
       return MP::PARSE_ERROR;
 
-    auto res = ParseMeta(tokens_view, cmd);
+    auto res = ParseMeta(tokens_view, last_unix_time_, cmd);
     if (res != MP::OK)
       return res;
 
@@ -392,7 +406,7 @@ auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
     return MP::PARSE_ERROR;
   }
 
-  return ParseValueless(tokens_view, cmd);
+  return ParseValueless(tokens_view, last_unix_time_, cmd);
 }
 
 auto MP::ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest) -> Result {

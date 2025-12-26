@@ -89,8 +89,7 @@ class MemcacheParser {
       uint64_t delta;           // for DECR/INCR commands.
     };
 
-    uint32_t expire_ts =
-        0;  // relative (expire_ts <= month) or unix time (expire_ts > month) in seconds
+    int64_t expire_ts = 0;  // unix time (expire_ts > month) in seconds
 
     // flags for STORE commands
     uint32_t flags = 0;
@@ -127,11 +126,17 @@ class MemcacheParser {
 
   Result Parse(std::string_view str, uint32_t* consumed, Command* res);
 
+  void set_last_unix_time(int64_t t) {
+    last_unix_time_ = t;
+  }
+
  private:
   Result ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest);
   Result ParseInternal(ArgSlice tokens_view, Command* cmd);
+
   uint32_t val_len_to_read_ = 0;
   std::string tmp_buf_;
+  int64_t last_unix_time_ = 0;
 };
 
 }  // namespace facade
