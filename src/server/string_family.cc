@@ -609,15 +609,6 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
   return response;
 }
 
-MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
-                    const Transaction* t, EngineShard* shard) {
-  SearchConst find_op = [&](string_view key) {
-    const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
-    return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-  };
-  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
-}
-
 // Extend key with value, either prepend or append. Return size of stored string
 // after modification
 OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view key,
@@ -792,18 +783,26 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
-                   const Transaction* t, EngineShard* shard,
-                   const DbSlice::ExpireParams& expire_params) {
-  SearchMut find_op = [&](string_view key) {
-    return FindKeyAndSetExpiry(GetAndTouchParams{
-        .t = t,
-        .shard = shard,
-        .expire_params = expire_params,
-        .key = key,
-    });
-  };
-  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
+MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+                    const Transaction* t, EngineShard* shard,
+                    const DbSlice::ExpireParams* gat_params = nullptr) {
+  if (gat_params) {
+    SearchMut find_op = [&](string_view key) {
+      return FindKeyAndSetExpiry(GetAndTouchParams{
+          .t = t,
+          .shard = shard,
+          .expire_params = *gat_params,
+          .key = key,
+      });
+    };
+    return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
+  } else {
+    SearchConst find_op = [&](string_view key) {
+      const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+      return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    };
+    return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
+  }
 }
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
@@ -1374,7 +1373,8 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
+void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
+                 const DbSlice::ExpireParams* gat_params) {
   DCHECK_GE(args.size(), 1U);
 
   uint8_t fetch_mask = 0;
@@ -1392,7 +1392,8 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
 
   std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, fetch_mask, t, shard);
+    mget_resp[shard->shard_id()] =
+        OpMGet(tiering_bc, &tiering_err, fetch_mask, t, shard, gat_params);
     return OpStatus::OK;
   };
 
@@ -1436,6 +1437,21 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
         rb->SendNull();
     }
   }
+}
+
+void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
+  MGetGeneric(args, cmnd_cntx, nullptr);
+}
+
+// Implements the memcache GAT command. The expected input is
+// GAT key [keys...]
+// The expiry argument is stored in mc_command()->expire_ts
+void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
+  DCHECK(cmnd_cntx->mc_command());
+  int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
+  const DbSlice::ExpireParams expire_params{
+      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  MGetGeneric(args, cmnd_cntx, &expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1660,57 +1676,6 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
         break;
     }
   }
-}
-
-// Implements the memcache GAT command. The expected input is
-// GAT key [keys...]
-// The expiry argument is stored in mc_command()->expire_ts
-void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
-  DCHECK_GE(args.size(), 1U);
-
-  auto* builder = cmnd_cntx->rb();
-  DCHECK(cmnd_cntx->mc_command());
-
-  uint8_t fetch_mask = FETCH_MCFLAG;
-  if (cmnd_cntx->mc_command()->replies_cas_token())
-    fetch_mask |= FETCH_MCVER;
-
-  BlockingCounter tiering_bc{0};
-  AggregateError tiering_err;
-  std::vector<MGetResponse> mget_resp(shard_set->size());
-
-  int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
-  const DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] =
-        OpGAT(tiering_bc, &tiering_err, fetch_mask, t, shard, expire_params);
-    return OpStatus::OK;
-  };
-
-  const OpStatus result = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  CHECK_EQ(OpStatus::OK, result);
-
-  tiering_bc->Wait();
-  if (auto err = std::move(tiering_err).Destroy(); err)
-    return builder->SendError(err.message());
-
-  SinkReplyBuilder::ReplyScope scope(builder);
-  auto* rb = static_cast<MCReplyBuilder*>(builder);
-  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
-
-  absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, true,
-                      absl::MakeSpan(ordered_by_shard));
-  for (const auto& entry : ordered_by_shard) {
-    if (entry) {
-      rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0, entry->mc_flag,
-                    cmnd_cntx->mc_command()->replies_cas_token());
-    } else {
-      cmnd_cntx->SendMiss();
-    }
-  }
-  cmnd_cntx->SendGetEnd();
 }
 
 }  // namespace
