@@ -150,7 +150,6 @@ struct CaptureVisitor {
   void operator()(payload::ReplyFunction&& rf) {
     rf(rb);
   }
-
   SinkReplyBuilder* rb;
 };
 
