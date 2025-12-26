@@ -280,7 +280,6 @@ struct ConnectionState {
   ClientTracking tracking_info_;
 };
 
-class CommandContext;
 class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
@@ -327,10 +326,6 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
-
-  // A temporary variable, to allow passing CommandContext from DispatchMC to
-  // DispatchCommand without changing the function signature.
-  CommandContext* cmnd_ctx = nullptr;
 
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;

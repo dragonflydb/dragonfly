@@ -2863,28 +2863,29 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
     return;
   }
 
-  CmdArgVec arg_vec;
-  facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-
   // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
   // serialized as "TAG SORTABLE SEPARATOR x" but parser expects "TAG SEPARATOR x SORTABLE".
   // Reorder arguments if needed.
   // TODO: Remove this workaround after Apr 2026.
-  for (size_t i = 0; i + 2 < arg_vec.size(); ++i) {
-    std::string_view cur{arg_vec[i].data(), arg_vec[i].size()};
-    std::string_view next{arg_vec[i + 1].data(), arg_vec[i + 1].size()};
+  for (size_t i = 0; i + 2 < resp_vec.size(); ++i) {
+    std::string_view cur = resp_vec[i].GetView();
+    std::string_view next = resp_vec[i + 1].GetView();
     if (absl::EqualsIgnoreCase(cur, "SORTABLE") && absl::EqualsIgnoreCase(next, "SEPARATOR")) {
       // SORTABLE SEPARATOR x -> SEPARATOR x SORTABLE
-      std::swap(arg_vec[i], arg_vec[i + 1]);      // SEPARATOR SORTABLE x
-      std::swap(arg_vec[i + 1], arg_vec[i + 2]);  // SEPARATOR x SORTABLE
+      std::swap(resp_vec[i], resp_vec[i + 1]);      // SEPARATOR SORTABLE x
+      std::swap(resp_vec[i + 1], resp_vec[i + 2]);  // SEPARATOR x SORTABLE
     }
   }
 
   // Prepend command name (FT.CREATE or FT.SYNUPDATE)
-  string cmd_str{command_name};
-  arg_vec.insert(arg_vec.begin(), MutableSlice{cmd_str.data(), cmd_str.size()});
+  CommandContext cntx_cmd;
+  cntx_cmd.Init(&crb, &cntx);
 
-  service->DispatchCommand(facade::ParsedArgs{arg_vec}, &crb, &cntx);
+  cntx_cmd.PushArg(command_name);
+  for (unsigned i = 0; i < resp_vec.size(); i++) {
+    cntx_cmd.PushArg(resp_vec[i].GetView());
+  }
+  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

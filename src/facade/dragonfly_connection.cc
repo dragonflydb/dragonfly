@@ -156,8 +156,8 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
   }
 }
 
-size_t UsedMemoryInternal(const Connection::PipelineMessage& msg) {
-  return sizeof(msg) + msg.HeapMemory();
+size_t UsedMemoryInternal(const ParsedCommand& msg) {
+  return msg.GetSize() + msg.HeapMemory();
 }
 
 struct TrafficLogger {
@@ -429,7 +429,7 @@ struct Connection::AsyncOperations {
   }
 
   void operator()(const PubMessage& msg);
-  void operator()(PipelineMessage& msg);
+  void operator()(ParsedCommand& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
@@ -496,11 +496,11 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   rb->SendBulkStrArr(absl::Span<string_view>{arr.data(), i}, CollectionType::PUSH);
 }
 
-void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
-  DVLOG(2) << "Dispatching pipeline: " << msg.Front();
+void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
+  DVLOG(2) << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(ParsedArgs{msg}, self->reply_builder_.get(), self->cc_.get());
+  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd);
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -576,7 +576,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       flags_(0) {
   static atomic_uint32_t next_id{1};
 
-  constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
+  constexpr size_t kReqSz = sizeof(ParsedCommand);
   static_assert(kReqSz <= 256);
 
   // TODO: to move parser initialization to where we initialize the reply builder.
@@ -792,11 +792,11 @@ void Connection::HandleRequests() {
           break;
         case Protocol::MEMCACHE:
           reply_builder_.reset(new MCReplyBuilder(socket_.get()));
-          CreateParsedCommand();
           break;
         default:
           break;
       }
+      parsed_cmd_ = CreateParsedCommand();
       ConnectionFlow();
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
@@ -1180,8 +1180,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   RedisParser::Result result = RedisParser::OK;
 
   auto dispatch_sync = [this] {
-    RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
-    service_->DispatchCommand(ParsedArgs{tmp_cmd_vec_}, reply_builder_.get(), cc_.get());
+    FillBackedArgs(tmp_parse_args_, parsed_cmd_);
+    service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_);
   };
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
@@ -1669,15 +1669,16 @@ void Connection::AsyncFiber() {
 }
 
 Connection::PipelineMessagePtr Connection::FromArgs(const RespVec& args) {
-  PipelineMessagePtr ptr;
-  if (ptr = GetFromPipelinePool(); !ptr) {
-    // We must construct in place here, since there is a slice that uses memory locations
-    ptr = make_unique<PipelineMessage>();
+  PipelineMessagePtr ptr = GetFromPipelinePool();
+  if (ptr) {
+    // We fetch objects from the thread-shard pool, which were used by other connections.
+    // Thus, we need to re-initialize the reply builder and connection context.
+    ptr->Init(reply_builder_.get(), cc_.get());
+  } else {
+    ptr.reset(self_->CreateParsedCommand());
   }
 
-  auto map = [](const RespExpr& expr) { return expr.GetView(); };
-  auto range = base::it::Transform(map, base::it::Range(args.begin(), args.end()));
-  ptr->Assign(range.begin(), range.end(), args.size());
+  FillBackedArgs(args, ptr.get());
   return ptr;
 }
 
@@ -2009,7 +2010,7 @@ bool Connection::ParseMCBatch() {
 
   do {
     if (parsed_cmd_ == nullptr) {
-      CreateParsedCommand();
+      parsed_cmd_ = CreateParsedCommand();
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
@@ -2132,11 +2133,12 @@ bool Connection::ReplyMCBatch() {
   return !reply_builder_->GetError();
 }
 
-void Connection::CreateParsedCommand() {
-  parsed_cmd_ = service_->AllocateParsedCommand();
-  parsed_cmd_->Init(reply_builder_.get(), cc_.get());
+ParsedCommand* Connection::CreateParsedCommand() {
+  auto* res = service_->AllocateParsedCommand();
+  res->Init(reply_builder_.get(), cc_.get());
   if (protocol_ == Protocol::MEMCACHE)
-    parsed_cmd_->CreateMemcacheCommand();
+    res->CreateMemcacheCommand();
+  return res;
 }
 
 void Connection::EnqueueParsedCommand() {
