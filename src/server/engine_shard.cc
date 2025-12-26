@@ -310,6 +310,11 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     // finished checking.
     last_check_time = time(nullptr);
 
+    if (finfo.committed != finfo.committed_golden) {
+      LOG_FIRST_N(ERROR, 100) << "committed memory computed incorrectly: " << finfo.committed
+                              << " vs " << finfo.committed_golden;
+    }
+
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
       VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
