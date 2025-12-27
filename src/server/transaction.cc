@@ -987,6 +987,7 @@ void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
   cb_ptr_ = nullptr;
+  shard_data_.clear();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {

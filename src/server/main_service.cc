@@ -2076,6 +2076,8 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 }
 
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
+  using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
+
   auto* tx = cmd_cntx->tx;
   DCHECK(tx);
   DVLOG(2) << "CallFromScript " << ca.args[0];
@@ -2083,21 +2085,27 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
   auto* cntx = cmd_cntx->server_conn_cntx();
-  if (ca.async) {
+
+  bool error_abort = (ca.call_type & CT::PCALL) == 0;
+  bool async_call = ca.call_type & CT::LOCK;
+  bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
+
+  if (async_call) {
     auto& info = cntx->conn_state.script_info;
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(cmd); cid != nullptr) {
-      auto reply_mode = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      auto reply_mode = error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
-    } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
+    } else if (error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ca.args[0]);
     }
   }
 
-  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
+  bool need_flush = !async_call || findcmd_err.has_value() || tx_call;
+  if (auto err = FlushEvalAsyncCmds(cntx, need_flush); err) {
     CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
@@ -2106,14 +2114,25 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   if (findcmd_err.has_value()) {
     auto* prev = cmd_cntx->SwapReplier(&replier);
     cmd_cntx->SendError(*findcmd_err);
-    *ca.requested_abort |= ca.error_abort;
+    *ca.requested_abort |= error_abort;
     cmd_cntx->SwapReplier(prev);
   }
 
-  if (ca.async)
-    return;
-
-  DispatchCommand(ParsedArgs{ca.args}, &replier, cntx);
+  // Handle unlock/lock
+  switch (ca.call_type) {
+    case CT::LOCK:
+      cntx->transaction->UnlockMulti(true);
+      cntx->transaction->StartMultiNonAtomic();
+      return;
+    case CT::UNLOCK:
+      cntx->transaction->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
+      return;
+    case CT::ACALL:
+    case CT::APCALL:  // was handled above
+      return;
+    default:  // regular call
+      DispatchCommand(ParsedArgs{ca.args}, &replier, cntx);
+  };
 }
 
 void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
@@ -2301,7 +2320,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
-      args.async = false;
+      args.call_type =
+          static_cast<Interpreter::CallArgs::Type>(args.call_type & ~Interpreter::CallArgs::ACALL);
       CallFromScript(args, cmd_cntx);
     });
 
