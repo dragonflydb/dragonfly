@@ -36,8 +36,7 @@ class ServiceInterface {
   virtual ~ServiceInterface() {
   }
 
-  virtual DispatchResult DispatchCommand(ParsedArgs args, SinkReplyBuilder* builder,
-                                         ConnectionContext* cntx) = 0;
+  virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd) = 0;
 
   virtual DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen,
                                                   unsigned count, SinkReplyBuilder* builder,

@@ -82,9 +82,6 @@ class Connection : public util::Connection {
     bool force_unsubscribe = false;
   };
 
-  // Pipeline message, accumulated Redis command to be executed.
-  using PipelineMessage = cmn::BackedArguments;
-
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
 
@@ -110,8 +107,8 @@ class Connection : public util::Connection {
     bool invalidate_due_to_flush = false;
   };
 
-  // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
+  // Pipeline message, accumulated Redis command to be executed.
+  using PipelineMessagePtr = std::unique_ptr<ParsedCommand>;
   using PubMessagePtr = std::unique_ptr<PubMessage>;
 
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
@@ -384,7 +381,7 @@ class Connection : public util::Connection {
   // Returns true on successful execution, false on reply builder error.
   bool ReplyMCBatch();
 
-  void CreateParsedCommand();
+  ParsedCommand* CreateParsedCommand();
   void EnqueueParsedCommand();
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
   void DestroyParsedQueue();

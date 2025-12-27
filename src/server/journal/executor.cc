@@ -21,12 +21,10 @@ namespace dfly {
 
 namespace {
 // Build a CmdData from parts passed to absl::StrCat.
-template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... parts) {
+template <typename... Ts> void BuildFromParts(cmn::BackedArguments* dest, Ts... parts) {
   vector<string> raw_parts{absl::StrCat(std::forward<Ts>(parts))...};
 
-  journal::ParsedEntry::CmdData res;
-  res.Assign(raw_parts.begin(), raw_parts.end(), raw_parts.size());
-  return res;
+  dest->Assign(raw_parts.begin(), raw_parts.end(), raw_parts.size());
 }
 
 }  // namespace
@@ -46,21 +44,31 @@ JournalExecutor::~JournalExecutor() {
 
 facade::DispatchResult JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
   SelectDb(dbid);
-  return Execute(cmd);
+  CommandContext cntx_cmd;
+  cntx_cmd.Init(reply_builder_.get(), &conn_context_);
+
+  // TODO: we should improve interfaces in callers (replica and rdb_load) so that we pass
+  // CommandContext directly and avoid this swap.
+  cntx_cmd.SwapArgs(cmd);
+  return Execute(&cntx_cmd);
 }
 
 void JournalExecutor::FlushAll() {
-  auto cmd = BuildFromParts("FLUSHALL");
-  std::ignore = Execute(cmd);
+  CommandContext cmd;
+  cmd.Init(reply_builder_.get(), &conn_context_);
+  BuildFromParts(&cmd, "FLUSHALL");
+  std::ignore = Execute(&cmd);
 }
 
 void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
-  auto cmd = BuildFromParts("DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
-  std::ignore = Execute(cmd);
+  CommandContext cmd;
+  cmd.Init(reply_builder_.get(), &conn_context_);
+  BuildFromParts(&cmd, "DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
+  std::ignore = Execute(&cmd);
 }
 
-facade::DispatchResult JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
-  return service_->DispatchCommand(facade::ParsedArgs{cmd}, reply_builder_.get(), &conn_context_);
+facade::DispatchResult JournalExecutor::Execute(CommandContext* cmd_cntx) {
+  return service_->DispatchCommand(facade::ParsedArgs{*cmd_cntx}, cmd_cntx);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
@@ -68,8 +76,11 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
     ensured_dbs_.resize(dbid + 1);
 
   if (!ensured_dbs_[dbid]) {
-    auto cmd = BuildFromParts("SELECT", dbid);
-    std::ignore = Execute(cmd);
+    CommandContext cmd;
+
+    cmd.Init(reply_builder_.get(), &conn_context_);
+    BuildFromParts(&cmd, "SELECT", dbid);
+    std::ignore = Execute(&cmd);
     ensured_dbs_[dbid] = true;
 
     // TODO: This is a temporary fix for #4146.

@@ -184,15 +184,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
     return;
   }
 
-  vector<string> cmd_args;
   flexbuffers::Vector vec = doc.AsVector();
-  for (size_t i = 0; i < vec.size(); ++i) {
-    cmd_args.push_back(vec[i].AsString().c_str());
-  }
-  vector<string_view> cmd_slices(cmd_args.size());
-  for (size_t i = 0; i < cmd_args.size(); ++i) {
-    cmd_slices[i] = cmd_args[i];
-  }
 
   facade::ConnectionContext* context = (facade::ConnectionContext*)http_cntx->user_data();
   DCHECK(context);
@@ -200,7 +192,14 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   facade::CapturingReplyBuilder reply_builder;
 
   // TODO: to finish this.
-  service->DispatchCommand(facade::ParsedArgs{cmd_slices}, &reply_builder, context);
+
+  CommandContext cmd_cntx;
+
+  cmd_cntx.Init(&reply_builder, context);
+  for (size_t i = 0; i < vec.size(); ++i) {
+    cmd_cntx.PushArg(vec[i].AsString().c_str());
+  }
+  service->DispatchCommand(facade::ParsedArgs{cmd_cntx}, &cmd_cntx);
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
   auto response = http::MakeStringResponse();
