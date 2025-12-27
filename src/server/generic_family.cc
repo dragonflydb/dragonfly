@@ -1070,8 +1070,6 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
 
 void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
   atomic_uint32_t result{0};
-  auto* builder = cmd_cntx->rb();
-  bool is_mc = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
@@ -1087,14 +1085,15 @@ void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
   DVLOG(2) << "Del ts " << cmd_cntx->tx->txid();
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
-  if (is_mc) {
-    if (del_cnt == 0) {
-      cmd_cntx->SendNotFound();
+  if (cmd_cntx->mc_command()) {
+    MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
+    if (del_cnt) {
+      cmd_cntx->SendSimpleString(mc_render.RenderDeleted());
     } else {
-      cmd_cntx->SendDeleted();
+      cmd_cntx->SendSimpleString(mc_render.RenderNotFound());
     }
   } else {
-    builder->SendLong(del_cnt);
+    cmd_cntx->SendLong(del_cnt);
   }
 }
 

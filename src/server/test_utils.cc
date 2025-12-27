@@ -501,10 +501,9 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   DCHECK(context->transaction == nullptr);
 }
 
-auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value, uint32_t flags,
-                           chrono::seconds ttl) -> MCResponse {
+auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, value, flags, ttl); });
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, args); });
   }
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
@@ -514,10 +513,12 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
   auto& cmd = *cmd_cntx.mc_command();
   cmd.type = cmd_type;
 
-  string_view kv[2] = {key, value};
-  cmd_cntx.Assign(kv, kv + 2, 2);
-  cmd.flags = flags;
-  cmd.expire_ts = ttl.count();
+  string_view kv[2] = {key, args.value};
+  unsigned num_args = MP::IsStoreCmd(cmd_type) ? 2 : 1;
+  cmd_cntx.Assign(kv, kv + num_args, num_args);
+  cmd.flags = args.val_flags;
+  cmd.expire_ts = args.ttl.count();
+  cmd.delta = args.delta;
 
   auto* context = conn->cmd_cntx();
 
@@ -532,10 +533,10 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
 auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key); });
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, MCArgs{}); });
   }
 
-  return RunMC(cmd_type, key, string_view{}, 0, chrono::seconds{});
+  return RunMC(cmd_type, key, MCArgs{});
 }
 
 auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::string_view> list)
