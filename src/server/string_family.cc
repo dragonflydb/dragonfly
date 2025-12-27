@@ -1404,7 +1404,7 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
   }
 
   fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
-  AggregateError tiering_err;          // Fist tiering error
+  AggregateError tiering_err;          // First tiering error
 
   unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
