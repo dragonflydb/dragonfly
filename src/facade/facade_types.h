@@ -269,7 +269,7 @@ struct MemcacheCmdFlags {
       uint16_t return_ttl : 1;          // t
       uint16_t return_access_time : 1;  // l
       uint16_t return_hit : 1;          // h
-      uint16_t return_version : 1;      // c
+      uint16_t return_cas : 1;          // c
     };
   };
 };

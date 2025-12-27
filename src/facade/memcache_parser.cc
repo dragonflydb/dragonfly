@@ -134,6 +134,10 @@ MP::Result ParseValueless(ArgSlice tokens, int64_t now, MP::Command* res) {
     return MP::PARSE_ERROR;
   }
 
+  res->cmd_flags.return_cas = (res->type == MP::GETS || res->type == MP::GATS);
+  res->cmd_flags.return_value = true;
+  res->cmd_flags.return_flags = true;
+
   res->backed_args->PushArg(tokens[key_pos++]);
 
   if (key_pos < num_tokens && res->type == MP::STATS)
@@ -300,7 +304,7 @@ MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res) {
         res->cmd_flags.return_hit = true;
         break;
       case 'c':
-        res->cmd_flags.return_version = true;
+        res->cmd_flags.return_cas = true;
         break;
       default:
         LOG(WARNING) << "unknown meta flag: " << token;  // not yet implemented

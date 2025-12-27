@@ -213,14 +213,13 @@ MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
 void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
-                               std::string_view value, uint64_t mc_token, uint32_t mc_flag,
-                               bool send_cas_token) {
+                               std::string_view value, uint64_t mc_token, uint32_t mc_flag) {
   ReplyScope scope(this);
   if (cmd_flags.meta) {
     string flags;
     if (cmd_flags.return_flags)
       absl::StrAppend(&flags, " f", mc_flag);
-    if (cmd_flags.return_version)
+    if (cmd_flags.return_cas)
       absl::StrAppend(&flags, " c", mc_token);
     if (cmd_flags.return_value) {
       WritePieces("VA ", value.size(), flags, kCRLF, value, kCRLF);
@@ -229,7 +228,7 @@ void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
     }
   } else {
     WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
-    if (send_cas_token)
+    if (cmd_flags.return_cas)
       WritePieces(" ", mc_token);
 
     if (value.size() <= kMaxInlineSize) {
@@ -243,6 +242,8 @@ void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
+  if (str.empty())
+    return;
   ReplyScope scope(this);
   WritePieces(str, kCRLF);
 }

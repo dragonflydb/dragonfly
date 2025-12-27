@@ -90,8 +90,24 @@ class BaseFamilyTest : public ::testing::Test {
   void RunMany(const std::vector<std::vector<std::string>>& cmds);
 
   using MCResponse = std::vector<std::string>;
-  MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, std::string_view value,
-                   uint32_t flags = 0, std::chrono::seconds ttl = std::chrono::seconds{});
+
+  struct MCArgs {
+    std::string_view value;
+    uint32_t val_flags;
+    std::chrono::seconds ttl;
+    uint64_t delta;
+
+    explicit MCArgs(std::string_view v = {}, uint32_t f = 0) : value(v), val_flags(f) {
+      ttl = std::chrono::seconds{0};
+      delta = 0;
+    }
+
+    explicit MCArgs(uint64_t d) : MCArgs() {
+      delta = d;
+    }
+  };
+
+  MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, MCArgs args);
   MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key = std::string_view{});
   MCResponse GetMC(MemcacheParser::CmdType cmd_type, std::initializer_list<std::string_view> list);
 
