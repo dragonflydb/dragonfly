@@ -778,6 +778,59 @@ TEST_F(MultiTest, EvalOOO) {
   EXPECT_EQ(1 + 2 * kTimes, sum);
 }
 
+TEST_F(MultiTest, EvalLockingTest) {
+  string_view SCRIPT = R"(
+-- when the testing function asserted a condition, it communicates
+-- with the script by adding keys and increasing dbsize
+local function wait_for_latch(phase)
+  local db_size = 0
+  repeat
+    redis.call('INFO') -- to preempt
+    db_size = redis.call('DBSIZE')
+    print(db_size, phase)
+  until db_size == phase
+end
+
+-- so far KEYS are locked
+redis.call("MGET", "A", "B")
+wait_for_latch(1)
+-- now unlock all keys
+dragonfly.unlock()
+wait_for_latch(2)
+-- now lock two keys
+dragonfly.lock('C', 'D')
+wait_for_latch(3)
+  )";
+
+  auto incr_latch = [this, latch = 0]() mutable {
+    string key = "key-" + to_string(latch);
+    Run({"SET", key, "0"});
+    latch++;
+  };
+
+  auto script_fb = pp_->at(0)->LaunchFiber([this, SCRIPT] {
+    Run("script", {"EVAL", SCRIPT, "2", "A", "B"});
+  });
+
+  // Check basic script keys are locked
+  ExpectConditionWithinTimeout([this] { return IsLocked(0, "A") && IsLocked(0, "B"); });
+  incr_latch();
+
+  // Now check those no keys at all are locked
+  ExpectConditionWithinTimeout([this] {
+    return !IsLocked(0, "A") && !IsLocked(0, "B") && !IsLocked(0, "C") && !IsLocked(0, "D");
+  });
+  incr_latch();
+
+  // Check script locked C/D instead
+  ExpectConditionWithinTimeout([this] {
+    return !IsLocked(0, "A") && !IsLocked(0, "B") && IsLocked(0, "C") && IsLocked(0, "D");
+  });
+  incr_latch();
+
+  script_fb.JoinIfNeeded();
+}
+
 // Run MULTI/EXEC commands in parallel, where each command is:
 //        MULTI - SET k1 v - SET k2 v - SET k3 v - EXEC
 // but the order of the commands inside appears in any permutation.

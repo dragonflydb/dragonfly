@@ -2106,7 +2106,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   auto* cntx = cmd_cntx->server_conn_cntx();
 
   bool error_abort = (ca.call_type & CT::PCALL) == 0;
-  bool async_call = ca.call_type & CT::LOCK;
+  bool async_call = ca.call_type & CT::ACALL;
   bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
 
   if (async_call) {
@@ -2139,11 +2139,12 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
 
   // Handle unlock/lock
   switch (ca.call_type) {
-    case CT::LOCK:
+    case CT::UNLOCK:
       cntx->transaction->UnlockMulti(true);
       cntx->transaction->StartMultiNonAtomic();
       return;
-    case CT::UNLOCK:
+    case CT::LOCK:
+      cntx->transaction->MultiSwitchCmd(registry_.Find("EVAL"));
       cntx->transaction->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
       return;
     case CT::ACALL:

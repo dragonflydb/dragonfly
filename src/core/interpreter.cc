@@ -1049,11 +1049,8 @@ void Interpreter::UpdateGCParameters() {
 
 std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() {
   int argc = lua_gettop(lua_);
-  /* Require at least one argument */
-  if (argc == 0) {
-    PushError(lua_, "Please specify at least one argument for redis.call()");
-    return std::nullopt;
-  }
+  if (argc == 0)
+    return {{}};
 
   size_t blob_len = 0;
   char tmpbuf[64];
@@ -1131,6 +1128,7 @@ bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* ex
                                     SliceSpan args) {
   bool raise_error = (call_type & CallArgs::PCALL) == 0;
   bool async = call_type & CallArgs::ACALL;
+  bool tx = call_type & (CallArgs::LOCK | CallArgs::UNLOCK);
 
   // Calling with custom explorer is not supported with errors or async
   DCHECK(explorer == nullptr || (!raise_error && !async));
@@ -1160,7 +1158,7 @@ bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* ex
     return false;
   }
 
-  if (!async)
+  if (!async && !tx)
     DCHECK_EQ(1, lua_gettop(lua_));
 
   return true;
@@ -1198,6 +1196,12 @@ int Interpreter::RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* e
   {
     std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
     if (args.has_value()) {
+      // TODO: make more elegant
+      if (args->empty() && (call_type & CallArgs::UNLOCK) == 0) {
+        PushError(lua_, "Please specify at least one argument for redis.call()");
+        return true;
+      }
+
       raise_error = !CallRedisFunction(call_type, explorer, SliceSpan{*args});
     }
   }
