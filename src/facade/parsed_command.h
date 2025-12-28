@@ -183,10 +183,6 @@ class ParsedCommand : public cmn::BackedArguments {
   payload::Payload reply_payload_;  // captured reply payload for async dispatches
 };
 
-#ifdef __APPLE__
-static_assert(sizeof(ParsedCommand) == 216);
-#else
 static_assert(sizeof(ParsedCommand) == 224);
-#endif
 
 }  // namespace facade
