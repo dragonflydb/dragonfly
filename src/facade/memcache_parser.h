@@ -80,10 +80,6 @@ class MemcacheParser {
       return backed_args->data(1);
     }
 
-    bool replies_cas_token() const {
-      return type == GETS || type == GATS;
-    }
-
     union {
       uint64_t cas_unique = 0;  // for CAS COMMAND
       uint64_t delta;           // for DECR/INCR commands.

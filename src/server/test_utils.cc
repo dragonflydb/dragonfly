@@ -521,7 +521,11 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -
   cmd.flags = args.val_flags;
   cmd.expire_ts = args.ttl.count();
   cmd.delta = args.delta;
-
+  if (cmd.type >= MP::GET && cmd.type <= MP::GATS) {
+    cmd.cmd_flags.return_value = true;
+    cmd.cmd_flags.return_flags = true;
+    cmd.cmd_flags.return_cas = (cmd.type == MP::GETS || cmd.type == MP::GATS);
+  }
   auto* context = conn->cmd_cntx();
 
   DCHECK(context->transaction == nullptr);

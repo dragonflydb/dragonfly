@@ -1804,7 +1804,6 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
 }
 
 void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
-  absl::InlinedVector<string_view, 8> args;
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(parsed_cmd->rb());
   CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
   const auto& cmd = *parsed_cmd->mc_command();
@@ -1873,6 +1872,7 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       return;
   }
 
+  absl::InlinedVector<string_view, 8> args;
   args.emplace_back(cmd_name, strlen(cmd_name));
 
   if (!cmd.backed_args->empty()) {

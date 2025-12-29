@@ -121,15 +121,16 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
   }
 
-  void SendMiss() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderMiss());
-  }
-
   void SendLong(long val);
   void SendNull();
 
-  void SendGetEnd() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
+  template <typename F> void ReplyWith(F&& func) {
+    if (is_deferred_reply_) {
+      reply_payload_ = std::forward<F>(func);
+      NotifyReplied();
+    } else {
+      func(rb_);
+    }
   }
 
   // If payload exists, sends it to reply builder, resets it and returns true.
