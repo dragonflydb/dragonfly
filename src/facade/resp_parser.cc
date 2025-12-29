@@ -6,7 +6,7 @@
 
 #include "base/logging.h"
 
-namespace dfly {
+namespace facade {
 
 RESPObj::RESPObj(RESPObj&& other) noexcept
     : reply_(other.reply_), needs_to_free_(other.needs_to_free_) {
@@ -51,4 +51,44 @@ std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len) {
   return RESPObj(static_cast<redisReply*>(reply_obj), reply_obj != nullptr);
 }
 
-}  // namespace dfly
+std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
+  if (obj.Empty()) {
+    os << "nullptr RESPObj";
+    return os;
+  }
+  switch (obj.GetType()) {
+    // because we check type we don't expect As<T> to return nullopt here
+    case RESPObj::Type::STRING: {
+      os << *obj.As<std::string_view>();
+      break;
+    }
+    case RESPObj::Type::INTEGER: {
+      os << *obj.As<std::int64_t>();
+      break;
+    }
+    case RESPObj::Type::DOUBLE: {
+      os << *obj.As<double>();
+      break;
+    }
+    case RESPObj::Type::NIL:
+      os << "NIL";
+      break;
+    case RESPObj::Type::ARRAY: {
+      os << *obj.As<RESPArray>();
+      break;
+    }
+    default:
+      os << "Unknown RESPObj type: " << static_cast<int>(obj.GetType());
+  }
+  return os;
+}
+
+std::ostream& operator<<(std::ostream& os, const RESPArray& arr) {
+  os << "[";
+  for (size_t i = 0; i < arr.Size() - 1; ++i) {
+  }
+  os << arr[arr.Size() - 1] << "]";
+  return os;
+}
+
+}  // namespace facade

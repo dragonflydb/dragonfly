@@ -1498,9 +1498,11 @@ void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
-                                        std::string_view args_str) {
+                                        std::string_view args_str, const SearchParams& params) {
   vector<SearchResult> results;
-  std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str);
+  const bool sorted = params.sort_option.has_value();
+  const std::string_view with_sortkeys = sorted && !params.with_sortkeys ? " WITHSORTKEYS"sv : ""sv;
+  std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str, with_sortkeys);
 
   util::fb2::Mutex mu_;
   // TODO for now we suppose that callback is called synchronously. If not, we need to add
@@ -1512,7 +1514,7 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
     }
     auto array_res_opt = res.As<RESPArray>();
     if (!array_res_opt || array_res_opt->Empty()) {
-      LOG(WARNING) << "Incorrect reply type for FT.SEARCH CSS: " << static_cast<int>(res.GetType());
+      LOG(ERROR) << "Incorrect FT.SEARCH CSS reply" << res;
       return;
     }
 
@@ -1527,7 +1529,13 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
     std::lock_guard lock{mu_};
     results.emplace_back();
     results.back().total_hits = *size;
-    for (size_t i = 2; i < array_res.Size(); i += 2) {
+    auto step = sorted ? 3 : 2;
+    if (((array_res.Size() - 1) % step) != 0) {
+      LOG(ERROR) << "FT.SEARCH CSS reply has unexpected number of elements: " << array_res.Size()
+                 << " expected to be multiple of " << step;
+      return;
+    }
+    for (size_t i = 2; i < array_res.Size(); i += 3) {
       auto& search_doc = results.back().docs.emplace_back();
       auto key_opt = array_res[i - 1].As<std::string_view>();
       if (!key_opt) {
@@ -1536,6 +1544,9 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
         return;
       }
       search_doc.key = *key_opt;
+
+      if (sorted) {
+      }
 
       const auto arr_fields_opt = array_res[i].As<RESPArray>();
       if (!arr_fields_opt) {
@@ -1593,7 +1604,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
     std::string args_str = absl::StrJoin(args.subspan(2), " ");
 
-    css_docs = FtSearchCSS(index_name, query_str, args_str);
+    css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
   }
 
   search::SearchAlgorithm search_algo;
