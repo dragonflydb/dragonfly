@@ -50,7 +50,6 @@ extern "C" {
 #include "server/generic_family.h"
 #include "server/hset_family.h"
 #include "server/http_api.h"
-#include "server/list_family.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
 #include "server/script_mgr.h"
@@ -3046,7 +3045,7 @@ void Service::RegisterCommands() {
   Register(&registry_);
   server_family_.Register(&registry_);
   GenericFamily::Register(&registry_);
-  ListFamily::Register(&registry_);
+  RegisterListFamily(&registry_);
   RegisterStringFamily(&registry_);
 
 #ifdef WITH_COLLECTION_CMDS

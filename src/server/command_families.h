@@ -11,6 +11,7 @@ namespace dfly {
 class CommandRegistry;
 
 void RegisterStringFamily(CommandRegistry*);
+void RegisterListFamily(CommandRegistry*);
 void RegisterBitopsFamily(CommandRegistry*);
 void RegisterGeoFamily(CommandRegistry*);
 void RegisterHllFamily(CommandRegistry*);
