@@ -8,13 +8,11 @@
 
 namespace facade {
 
-void RespExpr::VecToArgList(const Vec& src, CmdArgVec* dest) {
-  dest->resize(src.size());
-  for (size_t i = 0; i < src.size(); ++i) {
-    DCHECK(src[i].type == RespExpr::STRING);
+void FillBackedArgs(const RespVec& src, cmn::BackedArguments* dest) {
+  auto map = [](const RespExpr& expr) { return expr.GetView(); };
+  auto range = base::it::Transform(map, base::it::Range(src.begin(), src.end()));
 
-    (*dest)[i] = ToSV(src[i].GetBuf());
-  }
+  dest->Assign(range.begin(), range.end(), src.size());
 }
 
 }  // namespace facade

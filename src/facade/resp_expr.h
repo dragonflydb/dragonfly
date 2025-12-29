@@ -62,8 +62,6 @@ class RespExpr {
   }
 
   static const char* TypeName(Type t);
-
-  static void VecToArgList(const Vec& src, CmdArgVec* dest);
 };
 
 using RespVec = RespExpr::Vec;
@@ -72,6 +70,8 @@ using RespSpan = absl::Span<const RespExpr>;
 inline std::string_view ToSV(RespExpr::Buffer buf) {
   return std::string_view{reinterpret_cast<const char*>(buf.data()), buf.size()};
 }
+
+void FillBackedArgs(const RespVec& src, cmn::BackedArguments* dest);
 
 }  // namespace facade
 

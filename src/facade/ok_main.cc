@@ -23,9 +23,8 @@ namespace {
 
 class OkService : public ServiceInterface {
  public:
-  DispatchResult DispatchCommand(ParsedArgs args, SinkReplyBuilder* builder,
-                                 ConnectionContext* cntx) final {
-    builder->SendOk();
+  DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd) final {
+    cmd->rb()->SendOk();
     return DispatchResult::OK;
   }
 
@@ -34,7 +33,11 @@ class OkService : public ServiceInterface {
                                           ConnectionContext* cntx) final {
     for (unsigned i = 0; i < count; i++) {
       ParsedArgs args = arg_gen();
-      DispatchCommand(args, builder, cntx);
+      ParsedCommand* cmd = AllocateParsedCommand();
+      cmd->Init(builder, cntx);
+
+      DispatchCommand(args, cmd);
+      delete cmd;
     }
     DispatchManyResult result{
         .processed = static_cast<uint32_t>(count),

@@ -93,6 +93,11 @@ class BackedArguments {
     return s1 + s2;
   }
 
+  void SwapArgs(cmn::BackedArguments& other) {
+    offsets_.swap(other.offsets_);
+    storage_.swap(other.storage_);
+  }
+
   // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
   using StorageType = absl::InlinedVector<char, kStorageCap>;
 
