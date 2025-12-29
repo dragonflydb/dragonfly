@@ -1048,7 +1048,7 @@ void Connection::ConnectionFlow() {
     if (ioloop_v2_) {
       // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
       // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
-      // a migration shall only call RegisterOnRev if it reached the main IoLoopV2 below.
+      // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
       migration_allowed_to_register_ = true;
       // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
@@ -2019,7 +2019,7 @@ bool Connection::ParseMCBatch() {
 
     io_buf_.ConsumeInput(consumed);
 
-    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type "
+    DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING)
       return false;
@@ -2315,10 +2315,12 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     }
 
     io_ec_ = ec;
-    return;
+  } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
+    io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
+    io_buf_.WriteAndCommit(buf.data(), buf.size());
+  } else {
+    LOG(FATAL) << "Should not reach here";
   }
-
-  DCHECK(false) << "Should not reach here";
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
@@ -2333,7 +2335,17 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     return ParserStatus::OK;
   }
 
+  if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
+#ifdef __linux__
+    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
+    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
+      static_cast<fb2::UringSocket*>(peer)->EnableRecvMultishot();
+    }
+#endif
+  }
+
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
+    DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
     DoReadOnRecv(n);
     io_event_.notify();
   });
@@ -2343,16 +2355,20 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   do {
     HandleMigrateRequest();
 
-    // Poll again for readiness. The event handler registered above is edge triggered
-    // (called once per socket readiness event). So, for example, it could be that the
-    // cb read less data than it is available because of io_buf_ capacity. If after
-    // an iteration the fiber does not poll the socket for more data it might deadlock.
-    // TODO maybe use a flag instead of a poll
-    DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-    io_event_.await([this]() {
-      return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
-             io_ec_;
-    });
+    if (io_buf_.InputLen() == 0) {
+      // Poll again for readiness. The event handler registered above is edge triggered
+      // We should read from the socket until EAGAIN or EWOULDBLOCK
+      // to make sure we consume all available data.
+      // See "Do I need to continuously read/write" question
+      // under https://man7.org/linux/man-pages/man7/epoll.7.html
+      // The exception is when we use io_uring with multishot recv enabled, in which case
+      // we rely on the kernel to keep feeding us data until we multishot is disabled.
+      DoReadOnRecv(FiberSocketBase::RecvNotification{true});
+      io_event_.await([this]() {
+        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
+               io_ec_;
+      });
+    }
 
     if (io_ec_) {
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
