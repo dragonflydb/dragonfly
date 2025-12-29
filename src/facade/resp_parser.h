@@ -154,9 +154,7 @@ class RESPIterator {
     } else {
       success = std::apply([this](auto&... args) { return Check<T, Ts...>(&args...); }, res);
     }
-    if (!success) {
-      index_ = obj_.Size();
-    }
+    SetError(!success);
     return res;
   }
 
@@ -176,6 +174,11 @@ class RESPIterator {
     }
     index_ = tmp_index;
     return false;
+  }
+
+  void SetError(bool set) {
+    if (set)
+      index_ = obj_.Size();
   }
 
  private:

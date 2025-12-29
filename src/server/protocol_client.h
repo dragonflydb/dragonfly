@@ -98,8 +98,8 @@ class ProtocolClient {
   io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
   io::Result<ReadRespRes> ReadRespReply(uint32_t timeout);
 
-  io::Result<dfly::RESPObj> TakeRespReply(uint32_t timeout, base::IoBuf* buffer = nullptr,
-                                          bool copy_msg = true);
+  io::Result<facade::RESPObj> TakeRespReply(uint32_t timeout, base::IoBuf* buffer = nullptr,
+                                            bool copy_msg = true);
 
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
@@ -148,7 +148,7 @@ class ProtocolClient {
   facade::RespVec resp_args_;
   base::IoBuf resp_buf_;
 
-  RESPParser resp_parser_;
+  facade::RESPParser resp_parser_;
 
   std::unique_ptr<util::FiberSocketBase> sock_;
   util::fb2::Mutex sock_mu_;

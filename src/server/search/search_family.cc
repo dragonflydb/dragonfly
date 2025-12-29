@@ -1505,75 +1505,43 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str, with_sortkeys);
 
   util::fb2::Mutex mu_;
-  // TODO for now we suppose that callback is called synchronously. If not, we need to add
-  // synchronization here for results vector modification.
-  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& res) {
-    if (res.Empty()) {
-      LOG(ERROR) << "FT.SEARCH CSS reply is empty";
-      return;
-    }
-    auto array_res_opt = res.As<RESPArray>();
-    if (!array_res_opt || array_res_opt->Empty()) {
-      LOG(ERROR) << "Incorrect FT.SEARCH CSS reply" << res;
-      return;
-    }
-
-    auto array_res = *array_res_opt;
-    const auto size = array_res[0].As<uint64_t>();
-    if (!size.has_value()) {
-      LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: "
-                 << static_cast<int>(array_res[0].GetType()) << "\n Cmd: " << cmd << "\n Reply: ";
-      return;
-    }
+  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& resp_obj) {
+    RESPIterator it{resp_obj};
+    const auto size = it.Next<uint64_t>();
 
     std::lock_guard lock{mu_};
-    results.emplace_back();
-    results.back().total_hits = *size;
-    auto step = sorted ? 3 : 2;
-    if (((array_res.Size() - 1) % step) != 0) {
-      LOG(ERROR) << "FT.SEARCH CSS reply has unexpected number of elements: " << array_res.Size()
-                 << " expected to be multiple of " << step;
-      return;
-    }
-    for (size_t i = 2; i < array_res.Size(); i += 3) {
-      auto& search_doc = results.back().docs.emplace_back();
-      auto key_opt = array_res[i - 1].As<std::string_view>();
-      if (!key_opt) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document key: "
-                   << static_cast<int>(array_res[i - 1].GetType());
-        return;
-      }
-      search_doc.key = *key_opt;
+    auto& res = results.emplace_back();
+    results.back().total_hits = size;
 
+    while (it.HasNext()) {
+      auto& search_doc = res.docs.emplace_back();
+      search_doc.key = it.Next<std::string>();
       if (sorted) {
-      }
-
-      const auto arr_fields_opt = array_res[i].As<RESPArray>();
-      if (!arr_fields_opt) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                   << static_cast<int>(array_res[i].GetType());
-        return;
-      }
-
-      const auto arr_fields = *arr_fields_opt;
-
-      if (arr_fields.Size() % 2 != 0) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
-                   << arr_fields.Size();
-        return;
-      }
-
-      for (size_t j = 0; j < arr_fields.Size(); j += 2) {
-        auto key = arr_fields[j].As<std::string_view>();
-        auto value = arr_fields[j + 1].As<std::string_view>();
-        if (!key || !value) {
-          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data [key : value]: "
-                     << static_cast<int>(arr_fields[j].GetType()) << " : "
-                     << static_cast<int>(arr_fields[j + 1].GetType());
-          return;
+        auto sort_score = it.Next<std::string_view>();
+        if (sort_score.empty() || (sort_score[0] != '#' && sort_score[0] != '$')) {
+          it.SetError();
+          break;
         }
-        search_doc.values.emplace(std::string(*key), std::string(*value));
+        if (sort_score[0] == '#') {  // It's a double
+          double sort_res = 0;
+          if (ParseDouble(sort_score.substr(1), &sort_res)) {
+            search_doc.sort_score = sort_res;
+          } else {
+            it.SetError();
+            break;
+          }
+        } else {  // It's a string
+          search_doc.sort_score = std::string(sort_score.substr(1));
+        }
       }
+
+      for (auto arr_fields = it.Next<RESPIterator>(); arr_fields.HasNext();) {
+        auto [key, value] = arr_fields.Next<std::string, std::string>();
+        search_doc.values.emplace(std::move(key), std::move(value));
+      }
+    }
+    if (it.HasError()) {
+      LOG(ERROR) << "FT.SEARCH CSS reply parsing error: " << resp_obj;
     }
   });
   // TODO add error handling
