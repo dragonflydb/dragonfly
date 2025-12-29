@@ -444,7 +444,7 @@ int DragonflyHashCommand(lua_State* lua) {
   // Collect output into custom string collector
   StringCollectorTranslator translator;
   void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(Interpreter::CallArgs::CALL,
+  reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(Interpreter::CallArgs::PCALL,
                                                             &translator);
 
   if (requires_sort)
@@ -1131,7 +1131,7 @@ bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* ex
   bool tx = call_type & (CallArgs::LOCK | CallArgs::UNLOCK);
 
   // Calling with custom explorer is not supported with errors or async
-  DCHECK(explorer == nullptr || (!raise_error && !async));
+  DCHECK(explorer == nullptr || (!raise_error && !async)) << int(call_type);
 
   // If no custom explorer is set, use default translator
   optional<RedisTranslator> translator;
@@ -1195,13 +1195,14 @@ int Interpreter::RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* e
   // uses longjmp which bypasses stack unwinding and skips the destruction of objects.
   {
     std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
-    if (args.has_value()) {
-      // TODO: make more elegant
-      if (args->empty() && (call_type & CallArgs::UNLOCK) == 0) {
-        PushError(lua_, "Please specify at least one argument for redis.call()");
-        return true;
-      }
 
+    // Verify argument are non-empty for all calls but unlock
+    if (args->empty() && (call_type & CallArgs::UNLOCK) == 0) {
+      PushError(lua_, "Please specify at least one argument for redis.call()");
+      args = nullopt;
+    }
+
+    if (args.has_value()) {
       raise_error = !CallRedisFunction(call_type, explorer, SliceSpan{*args});
     }
   }

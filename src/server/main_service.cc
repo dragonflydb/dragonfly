@@ -2109,8 +2109,8 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   bool async_call = ca.call_type & CT::ACALL;
   bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
 
+  auto& info = cntx->conn_state.script_info;
   if (async_call) {
-    auto& info = cntx->conn_state.script_info;
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
@@ -2137,15 +2137,23 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     cmd_cntx->SwapReplier(prev);
   }
 
-  // Handle unlock/lock
+  // Handle unlock/lock or default call
   switch (ca.call_type) {
     case CT::UNLOCK:
-      cntx->transaction->UnlockMulti(true);
-      cntx->transaction->StartMultiNonAtomic();
+      tx->UnlockMulti(true);
+      tx->StartMultiNonAtomic();
+      info->lock_tags.clear();
       return;
     case CT::LOCK:
-      cntx->transaction->MultiSwitchCmd(registry_.Find("EVAL"));
-      cntx->transaction->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
+      info->key_backing.resize(ca.args.size());
+      for (size_t i = 0; i < ca.args.size(); i++) {
+        info->key_backing[i] = ca.args[i];  // copy key
+        info->lock_tags.insert(LockTag(info->key_backing[i]));
+      }
+
+      tx->MultiSwitchCmd(registry_.Find("EVAL"));  // just to change command id
+      tx->Refurbish();
+      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
       return;
     case CT::ACALL:
     case CT::APCALL:  // was handled above

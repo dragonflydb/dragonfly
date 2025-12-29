@@ -779,6 +779,9 @@ TEST_F(MultiTest, EvalOOO) {
 }
 
 TEST_F(MultiTest, EvalLockingTest) {
+  // create all four keys that are read/written
+  Run({"MSET", "A", "0", "B", "0", "C", "0", "D", "0"});
+
   string_view SCRIPT = R"(
 -- when the testing function asserted a condition, it communicates
 -- with the script by adding keys and increasing dbsize
@@ -787,18 +790,27 @@ local function wait_for_latch(phase)
   repeat
     redis.call('INFO') -- to preempt
     db_size = redis.call('DBSIZE')
-    print(db_size, phase)
-  until db_size == phase
+  until db_size == 4 + phase
 end
 
--- so far KEYS are locked
-redis.call("MGET", "A", "B")
+-- so far KEYS=[A,B] are locked, set A, B
+redis.call("MSET", "A", "1", "B", "1")
 wait_for_latch(1)
--- now unlock all keys
+
+-- now unlock all keys and read A, B, set C, D
 dragonfly.unlock()
+local values = redis.call("MGET", "A", "B")
+assert(values[1] == "1")
+assert(values[2] == "1")
+redis.call("MSET", "C", "2", "D", "2")
 wait_for_latch(2)
--- now lock two keys
+
+-- now lock two keys: C, D
 dragonfly.lock('C', 'D')
+values = redis.call('MGET', 'C', 'D')
+assert(values[1] == "2")
+assert(values[2] == "2")
+
 wait_for_latch(3)
   )";
 
@@ -828,7 +840,9 @@ wait_for_latch(3)
   });
   incr_latch();
 
+  // Check all keys were unlocked after script finished
   script_fb.JoinIfNeeded();
+  EXPECT_TRUE(!IsLocked(0, "A") && !IsLocked(0, "B") && !IsLocked(0, "C") && !IsLocked(0, "D"));
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:
