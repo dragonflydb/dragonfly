@@ -116,7 +116,7 @@ class CompactObjectTest : public ::testing::Test {
     CheckEverythingDeallocated();
   }
 
-  CompactObj cobj_;
+  CompactValue cobj_;
   string tmp_;
 };
 
@@ -259,7 +259,7 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactObj obj{s, false};
+  CompactValue obj{s};
 
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
@@ -267,7 +267,7 @@ TEST_F(CompactObjectTest, NonInline) {
   EXPECT_EQ(s, obj);
 
   s.assign(25, 'b');
-  obj.SetString(s, false);
+  obj.SetString(s);
   EXPECT_EQ(s, obj);
   EXPECT_EQ(s.size(), obj.Size());
 }
@@ -275,13 +275,13 @@ TEST_F(CompactObjectTest, NonInline) {
 TEST_F(CompactObjectTest, InlineAsciiEncoded) {
   string s = "key:0000000000000";
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
-  CompactObj obj{s, false};
+  CompactValue obj{s};
   EXPECT_EQ(expected_val, obj.HashCode());
   EXPECT_EQ(s.size(), obj.Size());
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cobj_.SetString("0", false);
+  cobj_.SetString("0");
   EXPECT_EQ(0, cobj_.TryGetInt());
   EXPECT_EQ(1, cobj_.Size());
   EXPECT_EQ(cobj_, "0");
@@ -289,7 +289,7 @@ TEST_F(CompactObjectTest, Int) {
   EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
 
   cobj_.SetExpire(true);
-  cobj_.SetString("42", false);
+  cobj_.SetString("42");
   EXPECT_EQ(8181779779123079347, cobj_.HashCode());
   EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
   EXPECT_EQ(2, cobj_.Size());
@@ -299,15 +299,15 @@ TEST_F(CompactObjectTest, Int) {
 TEST_F(CompactObjectTest, MediumString) {
   string tmp(511, 'b');
 
-  cobj_.SetString(tmp, false);
+  cobj_.SetString(tmp);
   EXPECT_EQ(tmp.size(), cobj_.Size());
 
-  cobj_.SetString(tmp, false);
+  cobj_.SetString(tmp);
   EXPECT_EQ(tmp.size(), cobj_.Size());
   cobj_.Reset();
 
   tmp.assign(27463, 'c');
-  cobj_.SetString(tmp, false);
+  cobj_.SetString(tmp);
   EXPECT_EQ(27463, cobj_.Size());
 }
 
@@ -457,7 +457,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   std::optional<JsonType> json_option2 =
       ParseJsonUsingShardHeap(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
 
-  cobj_.SetString(json_str, false);
+  cobj_.SetString(json_str);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   JsonType* failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
@@ -479,7 +479,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   ASSERT_FALSE(json->contains("firstName"));
   std::optional<JsonType> set_array = ParseJsonUsingShardHeap("");
   // now set it to string again
-  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", false);
+  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
@@ -608,8 +608,8 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
       if (!ascii)
         test_str.push_back(char(200));  // non-ascii
 
-      CompactObj obj;
-      obj.SetString(test_str, false);
+      CompactValue obj;
+      obj.SetString(test_str);
 
       // Test StrEncoding helper
       auto strs = obj.GetRawString();
@@ -633,14 +633,14 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
 
 TEST_F(CompactObjectTest, ExternalRepresentation) {
   {
-    CompactObj obj;
-    obj.SetString("test", false);
+    CompactValue obj;
+    obj.SetString("test");
     obj.SetExternal(0, 4, CompactObj::ExternalRep::STRING);
     EXPECT_EQ(obj.ObjType(), OBJ_STRING);
   }
   {
     StringMap sm{};
-    CompactObj obj;
+    CompactValue obj;
     obj.SetRObjPtr(&sm);
     obj.SetExternal(0, 4, CompactObj::ExternalRep::SERIALIZED_MAP);
     EXPECT_EQ(obj.ObjType(), OBJ_HASH);
@@ -648,7 +648,7 @@ TEST_F(CompactObjectTest, ExternalRepresentation) {
 }
 
 TEST_F(CompactObjectTest, AsanTriggerReadOverflow) {
-  cobj_.SetString(string(32, 'a'), false);
+  cobj_.SetString(string(32, 'a'));
   auto dest = make_unique<char[]>(32);
   cobj_.GetString(dest.get());
 }
@@ -697,16 +697,22 @@ TEST_F(CompactObjectTest, Huffman) {
     ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
     for (unsigned i = 30; i < 2048; i += 10) {
       string data(i, 'a');
-      cobj_.SetString(data, domain == CompactObj::HUFF_KEYS);
+
+      variant<CompactKey, CompactValue> obj_backing;
+      if (domain)
+        obj_backing = CompactValue{};
+      auto& cobj = visit([&](auto& co) -> CompactObj& { return co; }, obj_backing);
+
+      visit([&](auto& co) { co.SetString(data); }, obj_backing);
       bool malloc_used = i >= 60;
-      ASSERT_EQ(malloc_used, cobj_.MallocUsed() > 0) << i;
-      ASSERT_EQ(data.size(), cobj_.Size());
-      ASSERT_EQ(CompactObj::HashCode(data), cobj_.HashCode());
+      ASSERT_EQ(malloc_used, cobj.MallocUsed() > 0) << i;
+      ASSERT_EQ(data.size(), cobj.Size());
+      ASSERT_EQ(CompactObj::HashCode(data), cobj.HashCode());
 
       string actual;
-      cobj_.GetString(&actual);
+      cobj.GetString(&actual);
       EXPECT_EQ(data, actual);
-      EXPECT_EQ(cobj_, data);
+      EXPECT_EQ(cobj, data);
     }
   }
 }

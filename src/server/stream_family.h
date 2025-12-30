@@ -11,7 +11,7 @@ namespace dfly {
 class CommandRegistry;
 
 class CompactObj;
-using PrimeValue = CompactObj;
+using PrimeValue = CompactValue;
 
 class StreamMemTracker {
  public:

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "facade/reply_builder.h"
+#include "facade/reply_mode.h"
 #include "facade/reply_payload.h"
 
 namespace facade {
@@ -53,7 +54,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   Payload Take();
 
   // Send payload to builder.
-  static void Apply(Payload&& pl, RedisReplyBuilder* builder);
+  static void Apply(Payload&& pl, SinkReplyBuilder* builder);
 
   // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> TryExtractError(const Payload& pl);

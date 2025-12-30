@@ -68,52 +68,50 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
 }
 
 bool TransactionData::IsGlobalCmd() const {
-  if (command.cmd_args.empty()) {
+  if (command.empty()) {
     return false;
   }
 
-  auto& args = command.cmd_args;
-  if (absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHDB"sv) ||
-      absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHALL"sv) ||
-      (absl::EqualsIgnoreCase(ToSV(args[0]), "DFLYCLUSTER"sv) &&
-       absl::EqualsIgnoreCase(ToSV(args[1]), "FLUSHSLOTS"sv))) {
+  string_view front = command.Front();
+
+  if (absl::EqualsIgnoreCase(front, "FLUSHDB"sv) || absl::EqualsIgnoreCase(front, "FLUSHALL"sv))
+    return true;
+
+  if (command.size() > 1 && absl::EqualsIgnoreCase(front, "DFLYCLUSTER"sv) &&
+      absl::EqualsIgnoreCase(command[1], "FLUSHSLOTS"sv)) {
     return true;
   }
 
   return false;
 }
 
-TransactionData TransactionData::FromEntry(journal::ParsedEntry&& entry) {
-  TransactionData data;
-  data.AddEntry(std::move(entry));
-  return data;
-}
-
-std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* reader,
-                                                             ExecutionState* cntx) {
+bool TransactionReader::NextTxData(JournalReader* reader, ExecutionState* cntx,
+                                   TransactionData* dest) {
   if (!cntx->IsRunning()) {
-    return std::nullopt;
+    return false;
   }
-  io::Result<journal::ParsedEntry> res;
-  if (res = reader->ReadEntry(); !res) {
-    cntx->ReportError(res.error());
-    return std::nullopt;
+  journal::ParsedEntry entry;
+  if (auto ec = reader->ReadEntry(&entry); ec) {
+    cntx->ReportError(ec);
+    return false;
   }
 
   // When LSN opcode is sent master does not increase journal lsn.
-  if (lsn_.has_value() && res->opcode != journal::Op::LSN) {
+  if (lsn_.has_value() && entry.opcode != journal::Op::LSN) {
     ++*lsn_;
     VLOG(2) << "read lsn: " << *lsn_;
   }
 
-  TransactionData tx_data = TransactionData::FromEntry(std::move(res.value()));
-  if (lsn_.has_value() && tx_data.opcode == journal::Op::LSN) {
-    DCHECK_NE(tx_data.lsn, 0u);
-    LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 10000)
-        << "master lsn:" << tx_data.lsn << " replica lsn" << *lsn_;
-    DCHECK_EQ(tx_data.lsn, *lsn_);
+  dest->command.clear();
+  dest->AddEntry(std::move(entry));
+
+  if (lsn_.has_value() && dest->opcode == journal::Op::LSN) {
+    DCHECK_NE(dest->lsn, 0u);
+    LOG_IF_EVERY_N(WARNING, dest->lsn != *lsn_, 10000)
+        << "master lsn:" << dest->lsn << " replica lsn" << *lsn_;
+    DCHECK_EQ(dest->lsn, *lsn_);
   }
-  return tx_data;
+  return true;
 }
 
 }  // namespace dfly

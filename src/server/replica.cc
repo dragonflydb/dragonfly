@@ -25,6 +25,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "facade/redis_parser.h"
+#include "facade/reply_capture.h"
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
@@ -71,9 +72,7 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
-using namespace boost::asio;
 using namespace facade;
-using absl::GetFlag;
 using absl::StrCat;
 
 namespace {
@@ -713,10 +712,10 @@ error_code Replica::ConsumeRedisStream() {
   };
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
-  CmdArgVec args_vector;
-
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
+  CommandContext cmnd_ctx;
+  cmnd_ctx.Init(&null_builder, &conn_context);
   while (true) {
     // Yield if the fiber has been running for long.
     if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
@@ -745,8 +744,9 @@ error_code Replica::ConsumeRedisStream() {
       return response.error();
     }
 
-    if (!LastResponseArgs().empty()) {
-      string cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
+    const auto& last_args = LastResponseArgs();
+    if (!last_args.empty()) {
+      string cmd = absl::CHexEscape(last_args[0].GetView());
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
@@ -760,8 +760,8 @@ error_code Replica::ConsumeRedisStream() {
           }
         }
 
-        facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
-        service_.DispatchCommand(facade::ParsedArgs{args_vector}, &null_builder, &conn_context);
+        FillBackedArgs(last_args, &cmnd_ctx);
+        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx);
       }
     }
 
@@ -997,14 +997,14 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   TransactionReader tx_reader{journal_rec_executed_.load(std::memory_order_relaxed) - 1};
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
-  std::optional<TransactionData> tx_data;
-  while ((tx_data = tx_reader.NextTxData(&reader, cntx))) {
-    DVLOG(3) << "Lsn: " << tx_data->lsn;
+  TransactionData tx_data;
+  while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
+    DVLOG(3) << "Lsn: " << tx_data.lsn;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-    if (tx_data->opcode == journal::Op::LSN) {
+    if (tx_data.opcode == journal::Op::LSN) {
       //  Do nothing
-    } else if (tx_data->opcode == journal::Op::PING) {
+    } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       auto* journal = ServerState::tlocal()->journal();
@@ -1014,7 +1014,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         journal->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
       }
     } else {
-      const bool is_successful = ExecuteTx(std::move(*tx_data), cntx);
+      const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
       if (is_successful) {
         // We only increment upon successful execution of the transaction.
         // The reason for this is that during partial sync we sent this

@@ -15,6 +15,7 @@
 
 #include "common/backed_args.h"
 #include "facade/acl_commands_def.h"
+#include "facade/connection_ref.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "facade/resp_expr.h"
@@ -81,12 +82,6 @@ class Connection : public util::Connection {
     bool force_unsubscribe = false;
   };
 
-  // Pipeline message, accumulated Redis command to be executed.
-  using PipelineMessage = cmn::BackedArguments;
-
-  // Pipeline message, accumulated Memcached command to be executed.
-  using MCPipelineMessage = ParsedCommand;
-
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
 
@@ -112,11 +107,10 @@ class Connection : public util::Connection {
     bool invalidate_due_to_flush = false;
   };
 
-  // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
+  // Pipeline message, accumulated Redis command to be executed.
+  using PipelineMessagePtr = std::unique_ptr<ParsedCommand>;
   using PubMessagePtr = std::unique_ptr<PubMessage>;
 
-  using MCPipelineMessagePtr = MCPipelineMessage*;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
@@ -131,8 +125,7 @@ class Connection : public util::Connection {
     }
 
     bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle) ||
-             std::holds_alternative<MCPipelineMessagePtr>(handle);
+      return std::holds_alternative<PipelineMessagePtr>(handle);
     }
 
     bool IsPubMsg() const {
@@ -145,9 +138,8 @@ class Connection : public util::Connection {
 
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
-                 AclUpdateMessagePtr, MigrationRequestMessage, CheckpointMessage,
-                 InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
+                 MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -160,37 +152,7 @@ class Connection : public util::Connection {
 
   enum Phase : uint8_t { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
-  // Weak reference to a connection, invalidated upon connection close.
-  // Used to dispatch async operations for the connection without worrying about pointer lifetime.
-  struct WeakRef {
-   public:
-    // Get residing thread of connection. Thread-safe.
-    unsigned LastKnownThreadId() const {
-      return last_known_thread_id_;
-    }
-    // Get pointer to connection if still valid, nullptr if expired.
-    // Can only be called from connection's thread. Validity is guaranteed
-    // only until the next suspension point.
-    Connection* Get() const;
-
-    // Returns thue if the reference expired. Thread-safe.
-    bool IsExpired() const;
-
-    // Returns client id.Thread-safe.
-    uint32_t GetClientId() const;
-
-    bool operator<(const WeakRef& other) const;
-    bool operator==(const WeakRef& other) const;
-
-   private:
-    friend class Connection;
-
-    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
-
-    std::weak_ptr<Connection> ptr_;
-    unsigned last_known_thread_id_;
-    uint32_t client_id_;
-  };
+  using WeakRef = ConnectionRef;
 
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
@@ -307,6 +269,14 @@ class Connection : public util::Connection {
 
   bool IsSending() const;
 
+  bool IsIoLoopV2() const {
+    return ioloop_v2_;
+  }
+
+  void Notify() {
+    io_event_.notify();
+  }
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -399,14 +369,29 @@ class Connection : public util::Connection {
   void DecrNumConns();
 
   bool IsReplySizeOverLimit() const;
-  void CreateParsedCommand();
+
+  // Returns true if one or more commands were parsed from the read buffer,
+  // and false if no complete commands could be parsed (for example, when
+  // parsing is pending more input).
+  bool ParseMCBatch();
+
+  // Returns true on successful execution, false on reply builder error.
+  bool ExecuteMCBatch();
+
+  // Returns true on successful execution, false on reply builder error.
+  bool ReplyMCBatch();
+
+  ParsedCommand* CreateParsedCommand();
+  void EnqueueParsedCommand();
+  void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+  void DestroyParsedQueue();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber async_fb_;             // async fiber (if started)
 
   std::error_code io_ec_;
-  util::fb2::CondVarAny io_event_;
+  util::fb2::EventCount io_event_;
 
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
   size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
@@ -419,6 +404,29 @@ class Connection : public util::Connection {
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
+
+  // Parsed commands queue.
+  //
+  // Commands move through the following stages in a single linked list:
+  //   1) parsed but not yet dispatched        : [parsed_to_execute_, ..., parsed_tail_]
+  //   2) dispatched but not yet completed     : between parsed_head_ and parsed_to_execute_
+  //   3) completed (replies ready to send)    : a prefix of [parsed_head_, ..., parsed_to_execute_)
+  //   4) replied and removed                  : before parsed_head_ (no longer in the list)
+  //
+  // Logical order diagram:
+  //   head -> ... -> (dispatched, waiting for completion) -> ... -> parsed_to_execute_ -> ... ->
+  //   tail
+  //
+  // parsed_to_execute_ is advanced as commands are dispatched for execution.
+  // Executed (completed) commands are kept in the queue until their replies are sent,
+  // in order to preserve reply ordering.
+  // ReplyMCBatch walks from parsed_head_ up to (but not including) parsed_to_execute_,
+  // replies commands that have completed, and removes only those replied commands from
+  // the queue, advancing parsed_head_ accordingly.
+  ParsedCommand* parsed_head_ = nullptr;
+  ParsedCommand* parsed_tail_ = nullptr;
+  ParsedCommand* parsed_to_execute_ = nullptr;
+  unsigned parsed_cmd_q_len_ = 0;
 
   uint32_t id_;
   Protocol protocol_;
@@ -477,6 +485,8 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
+      bool ioloop_v2_ : 1;  // whether this connection is running on ioloop v2
+
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
     };

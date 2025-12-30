@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <cstdint>
 #include <string_view>
 
 namespace cmn {
@@ -81,10 +82,20 @@ class BackedArguments {
 
   template <typename I> void Assign(I begin, I end, size_t len);
 
+  void Reserve(size_t arg_cnt, size_t total_size) {
+    offsets_.reserve(arg_cnt);
+    storage_.reserve(total_size);
+  }
+
   size_t HeapMemory() const {
     size_t s1 = offsets_.capacity() <= kLenCap ? 0 : offsets_.capacity() * sizeof(uint32_t);
     size_t s2 = storage_.capacity() <= kStorageCap ? 0 : storage_.capacity();
     return s1 + s2;
+  }
+
+  void SwapArgs(cmn::BackedArguments& other) {
+    offsets_.swap(other.offsets_);
+    storage_.swap(other.storage_);
   }
 
   // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
@@ -134,8 +145,14 @@ class BackedArguments {
   }
 
   void clear() {
-    offsets_.clear();
-    storage_.clear();
+    // Clear the contents without deallocating memory. clear() deallocates inlined_vector.
+    offsets_.resize(0);
+    storage_.resize(0);
+  }
+
+  std::string_view back() const {
+    assert(size() > 0);
+    return at(size() - 1);
   }
 
   // Reserves space for additional argument of given length at the end.
@@ -143,6 +160,20 @@ class BackedArguments {
     size_t old_size = storage_.size();
     offsets_.push_back(old_size);
     storage_.resize(old_size + len + 1);
+  }
+
+  void PushArg(std::string_view arg) {
+    PushArg(arg.size());
+    char* dest = storage_.data() + offsets_.back();
+    if (arg.size() > 0)
+      memcpy(dest, arg.data(), arg.size());
+    dest[arg.size()] = '\0';
+  }
+
+  void PopArg() {
+    uint32_t last_offs = offsets_.back();
+    offsets_.pop_back();
+    storage_.resize(last_offs);
   }
 
  protected:

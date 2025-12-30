@@ -319,9 +319,9 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
       return OpStatus::IO_ERROR;
 
     // TODO: allow saving string directly without proxy object
-    SerializerBase::DumpObject(PrimeValue{*res, false}, &sink);
+    SerializerBase::DumpValue(PrimeValue{*res}, &sink);
   } else {
-    SerializerBase::DumpObject(pv, &sink);
+    SerializerBase::DumpValue(pv, &sink);
   }
 
   return std::move(sink).str();
@@ -1070,8 +1070,6 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
 
 void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
   atomic_uint32_t result{0};
-  auto* builder = cmd_cntx->rb();
-  bool is_mc = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
@@ -1087,17 +1085,15 @@ void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
   DVLOG(2) << "Del ts " << cmd_cntx->tx->txid();
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
-  if (is_mc) {
-    using facade::MCReplyBuilder;
-    MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(builder);
-
-    if (del_cnt == 0) {
-      mc_builder->SendNotFound();
+  if (cmd_cntx->mc_command()) {
+    MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
+    if (del_cnt) {
+      cmd_cntx->SendSimpleString(mc_render.RenderDeleted());
     } else {
-      mc_builder->SendDeleted();
+      cmd_cntx->SendSimpleString(mc_render.RenderNotFound());
     }
   } else {
-    builder->SendLong(del_cnt);
+    cmd_cntx->SendLong(del_cnt);
   }
 }
 
@@ -1559,7 +1555,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   if (!fetch_result.ok()) {
     cmd_cntx->tx->Conclude();
     if (fetch_result == OpStatus::WRONG_TYPE)
-      return builder->SendError(fetch_result.status());
+      return cmd_cntx->SendError(fetch_result.status());
     else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
       return cmd_cntx->SendError("One or more scores can't be converted into double");
     else
@@ -1746,25 +1742,14 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
 
 void GenericFamily::Rename(CmdArgList args, CommandContext* cmd_cntx) {
   auto reply = RenameGeneric(args, false, cmd_cntx->tx);
-  auto* rb = cmd_cntx->rb();
-  if (!reply.status) {
-    return rb->SendError(reply);
-  }
-
-  OpStatus st = reply.status.value();
-  if (st == OpStatus::OK) {
-    rb->SendOk();
-  } else {
-    rb->SendError(reply);
-  }
+  cmd_cntx->SendError(reply);
 }
 
 void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto reply = RenameGeneric(args, true, cmd_cntx->tx);
   auto* rb = cmd_cntx->rb();
   if (!reply.status) {
-    rb->SendError(reply);
-    return;
+    return cmd_cntx->SendError(reply.ToSv(), reply.kind);
   }
 
   OpStatus st = reply.status.value();
@@ -1773,7 +1758,7 @@ void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
   } else if (st == OpStatus::KEY_EXISTS) {
     rb->SendLong(0);
   } else {
-    rb->SendError(reply);
+    cmd_cntx->SendError(st);
   }
 }
 
@@ -1783,7 +1768,7 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   bool replace = parser.Check("REPLACE");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!parser.Finalize()) {
-    return rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   if (k1 == k2) {
@@ -1942,7 +1927,7 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
-    return builder->SendError(ops.status());
+    return cmd_cntx->SendError(ops.status());
   }
 
   const ScanOpts& scan_op = ops.value();

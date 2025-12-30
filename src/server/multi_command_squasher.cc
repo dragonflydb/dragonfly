@@ -45,28 +45,24 @@ void CheckConnStateClean(const ConnectionState& state) {
 
 size_t Size(const CapturingReplyBuilder::Payload& payload) {
   size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
-  return visit(Overloaded{
-                   [&](monostate) { return payload_size; },
-                   [&](long) { return payload_size; },
-                   [&](double) { return payload_size; },
-                   [&](OpStatus) { return payload_size; },
-                   [&](payload::Null) { return payload_size; },
-                   // ignore SSO because it's insignificant
-                   [&](const payload::SimpleString& data) { return payload_size + data.size(); },
-                   [&](const payload::BulkString& data) { return payload_size + data.size(); },
-                   [&](const payload::Error& data) {
-                     return payload_size + data->first.size() + data->second.size();
-                   },
-                   [&](const unique_ptr<payload::CollectionPayload>& data) {
-                     if (!data || (data->len == 0 && data->type == CollectionType::ARRAY)) {
-                       return payload_size;
-                     }
-                     for (const auto& pl : data->arr) {
-                       payload_size += Size(pl);
-                     }
-                     return payload_size;
-                   },
-               },
+  return payload_size +
+         visit(Overloaded{[](const payload::SimpleString& data) { return data.size(); },
+                          [](const payload::BulkString& data) { return data.size(); },
+                          [](const payload::Error& data) {
+                            return data->first.size() + data->second.size();
+                          },
+                          [](const unique_ptr<payload::CollectionPayload>& data) {
+                            if (!data || (data->len == 0 && data->type == CollectionType::ARRAY)) {
+                              return 0ul;
+                            }
+                            size_t res = 0;
+                            for (const auto& pl : data->arr) {
+                              res += Size(pl);
+                            }
+                            return res;
+                          },
+                          // Other payload types are small
+                          [](const auto&) { return 0ul; }},
                payload);
 }
 

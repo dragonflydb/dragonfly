@@ -2,17 +2,17 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/bitops_family.h"
+#include <absl/strings/match.h>
 
 #include <bitset>
 #include <nonstd/expected.hpp>
 
-#include "absl/strings/match.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -339,7 +339,7 @@ void ElementAccess::Commit(string_view new_value) const {
       }
       context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
     } else {
-      element_iter_->second.SetValue(new_value);
+      element_iter_->second.SetString(new_value);
       post_updater_.Run();
     }
   }
@@ -573,15 +573,14 @@ void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
-  auto* builder = cmd_cntx->rb();
   if (!parser.Finalize()) {
-    return builder->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, builder);
+  HandleOpValueResult(res, cmd_cntx->rb());
 }
 
 // GCC yields a wrong warning about uninitialized optional use
@@ -1182,7 +1181,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
   // Second phase - save to target key if successful
   if (!joined_results) {
     cmd_cntx->tx->Conclude();
-    builder->SendError(joined_results.status());
+    cmd_cntx->SendError(joined_results.status());
     return;
   } else {
     auto op_result = joined_results.value();
@@ -1381,27 +1380,16 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, 
 
 }  // namespace
 
-namespace acl {
-constexpr uint32_t kBitPos = READ | BITMAP | SLOW;
-constexpr uint32_t kBitCount = READ | BITMAP | SLOW;
-constexpr uint32_t kBitField = WRITE | BITMAP | SLOW;
-constexpr uint32_t kBitFieldRo = READ | BITMAP | FAST;
-constexpr uint32_t kBitOp = WRITE | BITMAP | SLOW;
-constexpr uint32_t kGetBit = READ | BITMAP | FAST;
-constexpr uint32_t kSetBit = WRITE | BITMAP | SLOW;
-}  // namespace acl
-
-void BitOpsFamily::Register(CommandRegistry* registry) {
+void RegisterBitopsFamily(CommandRegistry* registry) {
   using CI = CommandId;
-  registry->StartFamily();
-  *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1, acl::kBitPos}.SetHandler(&BitPos)
-            << CI{"BITCOUNT", CO::READONLY, -2, 1, 1, acl::kBitCount}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::JOURNALED, -2, 1, 1, acl::kBitField}.SetHandler(&BitField)
-            << CI{"BITFIELD_RO", CO::READONLY, -2, 1, 1, acl::kBitFieldRo}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 2, -1, acl::kBitOp}.SetHandler(
-                   &BitOp)
-            << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1, acl::kGetBit}.SetHandler(&GetBit)
-            << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::kSetBit}.SetHandler(&SetBit);
+  registry->StartFamily(acl::BITMAP);
+  *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1}.SetHandler(&BitPos)
+            << CI{"BITCOUNT", CO::READONLY, -2, 1, 1}.SetHandler(&BitCount)
+            << CI{"BITFIELD", CO::JOURNALED, -2, 1, 1}.SetHandler(&BitField)
+            << CI{"BITFIELD_RO", CO::FAST | CO::READONLY, -2, 1, 1}.SetHandler(&BitFieldRo)
+            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 2, -1}.SetHandler(&BitOp)
+            << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
+            << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }
 
 }  // namespace dfly

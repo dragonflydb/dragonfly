@@ -20,6 +20,7 @@
 #include <string_view>
 
 namespace dfly {
+class PageUsage;
 
 using TmpJson = jsoncons::json;
 using JsonType = jsoncons::basic_json<char, jsoncons::sorted_policy, StatelessAllocator<char>>;
@@ -38,10 +39,9 @@ std::optional<TmpJson> JsonFromString(std::string_view input);
 // shards where mimalloc heap is initialized.
 std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 
-// Deep copy a JSON object, by first serializing it to a string and then deserializing the string.
-// The operation is intended to help during defragmentation, by copying into a page reserved for
-// malloc.
-JsonType DeepCopyJSON(const JsonType* j);
+// Defragments the given json object by traversing its tree structure non-recursively, examining
+// nodes and defragmenting as needed. Returns true if any object within the node was reallocated
+bool Defragment(JsonType& j, PageUsage* page_usage);
 
 template <typename Json = JsonType>
 auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)

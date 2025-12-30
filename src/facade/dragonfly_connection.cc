@@ -25,6 +25,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
+#include "facade/reply_builder.h"
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
@@ -155,8 +156,8 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
   }
 }
 
-size_t UsedMemoryInternal(const Connection::PipelineMessage& msg) {
-  return sizeof(msg) + msg.HeapMemory();
+size_t UsedMemoryInternal(const ParsedCommand& msg) {
+  return msg.GetSize() + msg.HeapMemory();
 }
 
 struct TrafficLogger {
@@ -412,9 +413,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const InvalidationMessage& msg) {
       return 0;
     }
-    size_t operator()(const MCPipelineMessagePtr& msg) {
-      return sizeof(MCPipelineMessage) + msg->HeapMemory();
-    }
   };
 
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
@@ -422,9 +420,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
 
 bool Connection::MessageHandle::IsReplying() const {
   return IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
-         holds_alternative<PipelineMessagePtr>(handle) ||
-         (holds_alternative<MCPipelineMessagePtr>(handle) &&
-          !get<MCPipelineMessagePtr>(handle)->mc_command()->no_reply);
+         holds_alternative<PipelineMessagePtr>(handle);
 }
 
 struct Connection::AsyncOperations {
@@ -433,8 +429,7 @@ struct Connection::AsyncOperations {
   }
 
   void operator()(const PubMessage& msg);
-  void operator()(PipelineMessage& msg);
-  void operator()(MCPipelineMessagePtr msg);
+  void operator()(ParsedCommand& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
@@ -501,20 +496,14 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   rb->SendBulkStrArr(absl::Span<string_view>{arr.data(), i}, CollectionType::PUSH);
 }
 
-void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
-  DVLOG(2) << "Dispatching pipeline: " << msg.Front();
+void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
+  DVLOG(2) << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(ParsedArgs{msg}, self->reply_builder_.get(), self->cc_.get());
+  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd);
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
-}
-
-void Connection::AsyncOperations::operator()(MCPipelineMessagePtr msg) {
-  ++self->local_stats_.cmds;
-  self->service_->DispatchMC(msg);
-  self->last_interaction_ = time(nullptr);
 }
 
 void Connection::AsyncOperations::operator()(const MigrationRequestMessage& msg) {
@@ -587,7 +576,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       flags_(0) {
   static atomic_uint32_t next_id{1};
 
-  constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
+  constexpr size_t kReqSz = sizeof(ParsedCommand);
   static_assert(kReqSz <= 256);
 
   // TODO: to move parser initialization to where we initialize the reply builder.
@@ -628,7 +617,6 @@ Connection::~Connection() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ssl_ctx_);
 #endif
-
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
@@ -642,7 +630,7 @@ void Connection::OnShutdown() {
 
   BreakOnce(POLLHUP);
   io_ec_ = make_error_code(errc::connection_aborted);
-  io_event_.notify_one();
+  io_event_.notify();
 }
 
 void Connection::OnPreMigrateThread() {
@@ -671,11 +659,10 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
 
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
+  if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
       DoReadOnRecv(n);
-      io_event_.notify_one();
+      io_event_.notify();
     });
   }
 
@@ -794,6 +781,8 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
+      // ioloop_v2 not supported for TLS connections yet.
+      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -803,19 +792,18 @@ void Connection::HandleRequests() {
           break;
         case Protocol::MEMCACHE:
           reply_builder_.reset(new MCReplyBuilder(socket_.get()));
-          CreateParsedCommand();
           break;
         default:
           break;
       }
+      parsed_cmd_ = CreateParsedCommand();
       ConnectionFlow();
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
       VLOG(1) << "Closed connection for peer "
               << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
       reply_builder_.reset();
-      service_->FreeParsedCommand(parsed_cmd_);
-      parsed_cmd_ = nullptr;
+      DestroyParsedQueue();
     }
     cc_.reset();
   }
@@ -1052,16 +1040,15 @@ void Connection::ConnectionFlow() {
   }
 
   error_code ec = reply_builder_->GetError();
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
     UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
-    if (io_loop_v2 && !is_tls_) {
+    if (ioloop_v2_) {
       // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
       // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
-      // a migration shall only call RegisterOnRev if it reached the main IoLoopV2 below.
+      // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
       migration_allowed_to_register_ = true;
       // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
@@ -1092,7 +1079,7 @@ void Connection::ConnectionFlow() {
   service_->OnConnectionClose(cc_.get());
   DecreaseStatsOnClose();
 
-  if (io_loop_v2 && !is_tls_) {
+  if (ioloop_v2_) {
     socket_->ResetOnRecvHook();
   }
 
@@ -1193,8 +1180,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   RedisParser::Result result = RedisParser::OK;
 
   auto dispatch_sync = [this] {
-    RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
-    service_->DispatchCommand(ParsedArgs{tmp_cmd_vec_}, reply_builder_.get(), cc_.get());
+    FillBackedArgs(tmp_parse_args_, parsed_cmd_);
+    service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_);
   };
 
   auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
@@ -1268,61 +1255,18 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 }
 
 auto Connection::ParseMemcache() -> ParserStatus {
-  uint32_t consumed = 0;
-  MemcacheParser::Result result = MemcacheParser::OK;
-
-  auto dispatch_sync = [this] { service_->DispatchMC(parsed_cmd_); };
-
-  auto dispatch_async = [this]() -> MessageHandle {
-    MCPipelineMessagePtr ptr = parsed_cmd_;
-    this->CreateParsedCommand();
-    return {ptr};
-  };
-
-  DCHECK(io_buf_.InputLen() > 0);
-
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
-
+  bool commands_parsed = false;
   do {
-    string_view str = ToSV(io_buf_.InputBuffer());
+    commands_parsed = ParseMCBatch();
 
-    if (str.empty()) {
-      return OK;
-    }
+    if (!ExecuteMCBatch())
+      return ERROR;
 
-    result = memcache_parser_->Parse(str, &consumed, parsed_cmd_->mc_command());
+    if (!ReplyMCBatch())
+      return ERROR;
+  } while (commands_parsed && io_buf_.InputLen() > 0);
 
-    io_buf_.ConsumeInput(consumed);
-
-    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type "
-             << unsigned(parsed_cmd_->mc_command()->type);
-    if (result == MemcacheParser::INPUT_PENDING) {
-      break;
-    }
-
-    memcache_parser_->Reset();
-    if (result == MemcacheParser::OK) {
-      DispatchSingle(io_buf_.InputLen() > 0, dispatch_sync, dispatch_async);
-    } else {
-      if (result == MemcacheParser::UNKNOWN_CMD) {
-        builder->SendSimpleString("ERROR");
-      } else if (result == MemcacheParser::PARSE_ERROR) {
-        builder->SendClientError("bad data chunk");
-      } else if (result == MemcacheParser::BAD_DELTA) {
-        builder->SendClientError("invalid numeric delta argument");
-      } else if (result != MemcacheParser::OK) {
-        builder->SendClientError("bad command line format");
-      }
-    }
-  } while (!builder->GetError());
-
-  parser_error_ = result;
-
-  if (result == MemcacheParser::INPUT_PENDING) {
-    return NEED_MORE;
-  }
-
-  return OK;
+  return commands_parsed ? OK : NEED_MORE;
 }
 
 void Connection::OnBreakCb(int32_t mask) {
@@ -1725,15 +1669,16 @@ void Connection::AsyncFiber() {
 }
 
 Connection::PipelineMessagePtr Connection::FromArgs(const RespVec& args) {
-  PipelineMessagePtr ptr;
-  if (ptr = GetFromPipelinePool(); !ptr) {
-    // We must construct in place here, since there is a slice that uses memory locations
-    ptr = make_unique<PipelineMessage>();
+  PipelineMessagePtr ptr = GetFromPipelinePool();
+  if (ptr) {
+    // We fetch objects from the thread-shard pool, which were used by other connections.
+    // Thus, we need to re-initialize the reply builder and connection context.
+    ptr->Init(reply_builder_.get(), cc_.get());
+  } else {
+    ptr.reset(self_->CreateParsedCommand());
   }
 
-  auto map = [](const RespExpr& expr) { return expr.GetView(); };
-  auto range = base::it::Transform(map, base::it::Range(args.begin(), args.end()));
-  ptr->Assign(range.begin(), range.end(), args.size());
+  FillBackedArgs(args, ptr.get());
   return ptr;
 }
 
@@ -1768,8 +1713,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
                                     //
-  const bool io_loop_v2 = GetFlag(FLAGS_experimental_io_loop_v2);
-  if (io_loop_v2 && !is_tls_ && socket_ && socket_->IsOpen()) {
+  if (ioloop_v2_ && socket_ && socket_->IsOpen()) {
     socket_->ResetOnRecvHook();
   }
 
@@ -1939,10 +1883,6 @@ void Connection::RecycleMessage(MessageHandle msg) {
       pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
-
-  if (auto* ptr = get_if<MCPipelineMessagePtr>(&msg.handle); ptr) {
-    service_->FreeParsedCommand(*ptr);
-  }
 }
 
 std::string Connection::LocalBindStr() const {
@@ -2065,11 +2005,201 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-void Connection::CreateParsedCommand() {
-  parsed_cmd_ = service_->AllocateParsedCommand();
-  parsed_cmd_->Init(reply_builder_.get(), cc_.get());
+bool Connection::ParseMCBatch() {
+  CHECK(io_buf_.InputLen() > 0);
+
+  do {
+    if (parsed_cmd_ == nullptr) {
+      parsed_cmd_ = CreateParsedCommand();
+    }
+    uint32_t consumed = 0;
+    memcache_parser_->set_last_unix_time(time(nullptr));
+    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
+                                                            &consumed, parsed_cmd_->mc_command());
+
+    io_buf_.ConsumeInput(consumed);
+
+    DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
+             << unsigned(parsed_cmd_->mc_command()->type);
+    if (result == MemcacheParser::INPUT_PENDING)
+      return false;
+
+    EnqueueParsedCommand();
+
+    if (result != MemcacheParser::OK) {
+      // We can not just reply directly to parse error, as we may have pipelined commands before.
+      // Fill the reply_payload with the error and continue parsing.
+      memcache_parser_->Reset();
+      auto client_error = [](string_view msg) { return absl::StrCat("CLIENT_ERROR ", msg); };
+
+      parsed_tail_->SetDeferredReply();
+      switch (result) {
+        case MemcacheParser::UNKNOWN_CMD:
+          parsed_tail_->SendSimpleString("ERROR");
+          break;
+        case MemcacheParser::PARSE_ERROR:
+          parsed_tail_->SendSimpleString(client_error("bad data chunk"));
+          break;
+        case MemcacheParser::BAD_DELTA:
+          parsed_tail_->SendSimpleString(client_error("invalid numeric delta argument"));
+          break;
+        default:
+          parsed_tail_->SendSimpleString(client_error("bad command line format"));
+          break;
+      }
+    }
+  } while (parsed_cmd_q_len_ < 128 && io_buf_.InputLen() > 0);
+  return true;
+}
+
+bool Connection::ExecuteMCBatch() {
+  // Execute sequentially all parsed commands.
+  while (parsed_to_execute_) {
+    auto* cmd = parsed_to_execute_;
+    bool is_head = (cmd == parsed_head_);
+
+    bool has_replied = false;
+
+    if (is_head) {
+      // Protocol parse errors create commands with already cached replies.
+      // Try sending payload now in case it's already set.
+      has_replied = cmd->SendPayload();
+      DVLOG(2) << "Maybe replying head: " << has_replied;
+    } else {
+      // We are not the head command, so we can not reply directly.
+      if (cmd->IsDeferredReply()) {
+        has_replied = true;  // The error reply is filled by the parser.
+      } else {
+        cmd->SetDeferredReply();
+      }
+    }
+
+    if (!has_replied) {
+      service_->DispatchMC(cmd);
+
+      // If the reply was not deferred, then DispatchMC has surely replied.
+      has_replied = !cmd->IsDeferredReply();
+      DVLOG(2) << "Executed command, has_replied: " << has_replied;
+    }
+    parsed_to_execute_ = cmd->next;
+
+    // Only if commands have deferred replies we need to keep them in the parsed queue
+    // until they complete.
+    if (is_head && has_replied) {
+      // This is head and it replied to the client socket, so we can remove it from the parsed
+      // queue right away.
+      // This optimization makes the ReplyMCBatch call a no-op unless we actually run asynchronous
+      // commands with deferred replies.
+      parsed_head_ = parsed_to_execute_;
+      ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+    }
+
+    if (reply_builder_->GetError()) {
+      return false;
+    }
+  }
+  if (parsed_head_ == nullptr)
+    parsed_tail_ = nullptr;
+  return true;
+}
+
+bool Connection::ReplyMCBatch() {
+  if (protocol_ != Protocol::MEMCACHE) {
+    // We do not support async replies for RESP protocol yet.
+    return true;
+  }
+
+  while (parsed_head_ != parsed_to_execute_) {
+    auto* cmd = parsed_head_;
+    if (!cmd->PollHeadForCompletion())
+      break;
+
+    // This command finished processing and can be replied.
+    auto* next = cmd->next;
+
+    cmd->SendPayload();
+    ReleaseParsedCommand(cmd, next != parsed_to_execute_ /* is_pipelined */);
+    parsed_head_ = next;
+    if (reply_builder_->GetError()) {
+      return false;
+    }
+  }
+
+  if (parsed_head_ == nullptr)
+    parsed_tail_ = nullptr;
+
+  // Flush any remaining data in the reply builder.
+  reply_builder_->Flush();
+  return !reply_builder_->GetError();
+}
+
+ParsedCommand* Connection::CreateParsedCommand() {
+  auto* res = service_->AllocateParsedCommand();
+  res->Init(reply_builder_.get(), cc_.get());
   if (protocol_ == Protocol::MEMCACHE)
-    parsed_cmd_->CreateMemcacheCommand();
+    res->CreateMemcacheCommand();
+  return res;
+}
+
+void Connection::EnqueueParsedCommand() {
+  parsed_cmd_->next = nullptr;
+  parsed_cmd_->parsed_cycle = base::CycleClock::Now();
+  if (parsed_head_ == nullptr) {
+    parsed_head_ = parsed_cmd_;
+    parsed_to_execute_ = parsed_cmd_;
+  } else {
+    parsed_tail_->next = parsed_cmd_;
+    if (parsed_to_execute_ == nullptr) {
+      // we've executed all the parsed commands so far.
+      parsed_to_execute_ = parsed_cmd_;
+    }
+    // We have a pipelined command
+    local_stats_.dispatch_entries_added++;
+  }
+  parsed_tail_ = parsed_cmd_;
+  stats_->dispatch_queue_bytes += parsed_cmd_->UsedMemory();
+
+  parsed_cmd_ = nullptr;  // ownership transferred
+  parsed_cmd_q_len_++;
+}
+
+void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
+  size_t used_mem = cmd->UsedMemory();
+  DCHECK_GE(stats_->dispatch_queue_bytes, used_mem);
+  DCHECK_GT(parsed_cmd_q_len_, 0u);
+  stats_->dispatch_queue_bytes -= used_mem;
+  --parsed_cmd_q_len_;
+  if (is_pipelined) {
+    stats_->pipelined_cmd_cnt++;
+    stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
+  }
+
+  // Cache a single command for immediate reuse, otherwise free it.
+  // TODO: we can cache parsed commands similarly to pipeline_req_pool_.
+  // In fact we should unify both approaches.
+  if (parsed_cmd_ == nullptr) {
+    parsed_cmd_ = cmd;
+    parsed_cmd_->ResetForReuse();
+  } else {
+    delete cmd;
+  }
+}
+
+void Connection::DestroyParsedQueue() {
+  while (parsed_head_ != nullptr) {
+    auto* cmd = parsed_head_;
+    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
+    parsed_head_ = cmd->next;
+
+    if (cmd->MarkForDestruction()) {  // whether async operation finished or not started
+      DVLOG(2) << "Deleting parsed command " << cmd;
+      delete cmd;
+    }
+  }
+  parsed_tail_ = nullptr;
+  parsed_cmd_q_len_ = 0;
+  delete parsed_cmd_;
+  parsed_cmd_ = nullptr;
 }
 
 void Connection::UpdateFromFlags() {
@@ -2108,12 +2238,12 @@ void Connection::EnsureMemoryBudget(unsigned tid) {
   thread_queue_backpressure[tid].EnsureBelowLimit();
 }
 
-Connection::WeakRef::WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
+ConnectionRef::ConnectionRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id,
                              uint32_t client_id)
     : ptr_{ptr}, last_known_thread_id_{thread_id}, client_id_{client_id} {
 }
 
-Connection* Connection::WeakRef::Get() const {
+Connection* ConnectionRef::Get() const {
   auto sptr = ptr_.lock();
 
   //  The connection can only be deleted on this thread, so
@@ -2131,11 +2261,11 @@ uint32_t Connection::WeakRef::GetClientId() const {
   return client_id_;
 }
 
-bool Connection::WeakRef::operator<(const WeakRef& other) const {
+bool ConnectionRef::operator<(const ConnectionRef& other) const {
   return client_id_ < other.client_id_;
 }
 
-bool Connection::WeakRef::operator==(const WeakRef& other) const {
+bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
@@ -2185,15 +2315,15 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     }
 
     io_ec_ = ec;
-    return;
+  } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
+    io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
+    io_buf_.WriteAndCommit(buf.data(), buf.size());
+  } else {
+    LOG(FATAL) << "Should not reach here";
   }
-
-  DCHECK(false) << "Should not reach here";
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
-  ParserStatus parse_status = OK;
-
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
@@ -2202,29 +2332,43 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // Return early because RegisterOnRecv() should not be called if the socket
   // is not open. Both migrations and replication hit this flow upon cancellations.
   if (!peer->IsOpen()) {
-    return parse_status;
+    return ParserStatus::OK;
   }
 
-  // TODO EnableRecvMultishot
+  if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
+#ifdef __linux__
+    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
+    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
+      static_cast<fb2::UringSocket*>(peer)->EnableRecvMultishot();
+    }
+#endif
+  }
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-    DCHECK(this);
+    DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
     DoReadOnRecv(n);
-    io_event_.notify_one();
+    io_event_.notify();
   });
+
+  ParserStatus parse_status = OK;
 
   do {
     HandleMigrateRequest();
 
-    // Poll again for readiness. The event handler registered above is edge triggered
-    // (called once per socket readiness event). So, for example, it could be that the
-    // cb read less data than it is available because of io_buf_ capacity. If after
-    // an iteration the fiber does not poll the socket for more data it might deadlock.
-    // TODO maybe use a flag instead of a poll
-    DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-    fb2::NoOpLock noop;
-    io_event_.wait(
-        noop, [this]() { return io_buf_.InputLen() > 0 || io_ec_ || io_buf_.AppendLen() == 0; });
+    if (io_buf_.InputLen() == 0) {
+      // Poll again for readiness. The event handler registered above is edge triggered
+      // We should read from the socket until EAGAIN or EWOULDBLOCK
+      // to make sure we consume all available data.
+      // See "Do I need to continuously read/write" question
+      // under https://man7.org/linux/man-pages/man7/epoll.7.html
+      // The exception is when we use io_uring with multishot recv enabled, in which case
+      // we rely on the kernel to keep feeding us data until we multishot is disabled.
+      DoReadOnRecv(FiberSocketBase::RecvNotification{true});
+      io_event_.await([this]() {
+        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
+               io_ec_;
+      });
+    }
 
     if (io_ec_) {
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
@@ -2243,7 +2387,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
-      DCHECK(io_buf_.AppendLen() == 0);
+      if (parsed_head_) {
+        ReplyMCBatch();
+      }
     }
 
     if (reply_builder_->GetError()) {
@@ -2297,7 +2443,6 @@ void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
   cstats.pipelined_cmd_cnt = 0;
   cstats.conn_received_cnt = 0;
-  cstats.pipelined_cmd_cnt = 0;
   cstats.command_cnt_main = 0;
   cstats.command_cnt_other = 0;
   cstats.io_read_cnt = 0;

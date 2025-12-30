@@ -36,6 +36,10 @@ class ClusterConfig {
     return my_id_;
   }
 
+  bool is_master() const {
+    return is_master_;
+  }
+
   // Returns the master configured for `id`.
   ClusterNodeInfo GetMasterNodeForSlot(SlotId id) const;
 
@@ -76,6 +80,7 @@ class ClusterConfig {
 
   ClusterConfig() = default;
 
+  bool is_master_ = false;
   std::string my_id_;
   ClusterShardInfos config_;
 

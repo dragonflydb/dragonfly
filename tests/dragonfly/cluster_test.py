@@ -3452,7 +3452,6 @@ async def test_replica_takeover_moved(
     assert await m1.client.execute_command("GET newk") == "foo"
 
 
-@pytest.mark.skip(reason="Flaky test, needs investigation #6200")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_search": "yes"})
 async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
     """
@@ -3464,7 +3463,7 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="coordinator=2,search_family=3,redis_parser=3",
+            vmodule="coordinator=2,search_family=3,protocol_client=3",
         )
         for i in range(3)
     ]
@@ -3490,12 +3489,14 @@ async def test_SearchRequestDistribution(df_factory: DflyInstanceFactory):
 
     cclient = instances[0].cluster_client()
 
-    docs_num = 2
+    docs_num = 100
     for i in range(0, docs_num):
         assert await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}") == 1
 
     async def search_test():
-        res = await nodes[0].client.execute_command("FT.SEARCH", "idx", "@title:test", "text")
+        res = await nodes[0].client.execute_command(
+            "FT.SEARCH", "idx", "@title:test", "text", "LIMIT", "0", "1000"
+        )
         assert res[0] == docs_num
         for i in range(0, docs_num):
             assert f"s{i}" in res
@@ -3518,7 +3519,6 @@ async def verify_keys_match_number_of_index_docs(client, expected_num_keys):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cluster_search": "yes"})
-@pytest.mark.skip(reason="Flaky test, needs investigation #6200")
 async def test_remove_docs_on_cluster_migration(df_factory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)

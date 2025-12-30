@@ -31,6 +31,7 @@ extern "C" {
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/dragonfly_connection.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -39,7 +40,6 @@ extern "C" {
 #include "server/multi_command_squasher.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
-#include "server/string_family.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -653,9 +653,10 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmnd_cntx) {
         "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC <path> | [STOP]",
-        "    Starts traffic logging to the specified path. If path is not specified,",
-        "    traffic logging is stopped.",
+        "TRAFFIC <path>/<file_prefix> | [STOP]",
+        "    Use <path>/<file_prefix> to start traffic logging to the specified path.",
+        "    All recorded files will have the specified prefix.",
+        "    Use 'STOP' or do not specify any arguments to stop traffic logging.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
         "COMPRESSION [IMPORT <bintable> | EXPORT | SET <bintable>] [type]",

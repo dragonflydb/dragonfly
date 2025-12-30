@@ -56,6 +56,8 @@ class MultiTest : public BaseFamilyTest {
   }
 };
 
+struct MultiTxTest : public MultiTest {};
+
 // Check constants are valid.
 TEST_F(MultiTest, VerifyConstants) {
   Run({"mget", kKeySid0, kKeySid1, kKeySid2});
@@ -114,6 +116,24 @@ TEST_F(MultiTest, Multi) {
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(MultiTxTest, MultiUnlock) {
+  auto* exec_cid = service_->FindCmd("EXEC");
+  boost::intrusive_ptr<Transaction> tx(new Transaction{exec_cid});
+
+  auto* ns = &namespaces->GetDefaultNamespace();
+  string_view keys[4] = {kKey1, kKey2, kKey3, kKey4};
+
+  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, keys); });
+
+  for (auto key : keys)
+    EXPECT_TRUE(IsLocked(0, key));
+
+  pp_->at(0)->Await([&] { tx->UnlockMulti(true); });
+
+  for (auto key : keys)
+    EXPECT_FALSE(IsLocked(0, key));
 }
 
 TEST_F(MultiTest, MultiGlobalCommands) {
@@ -331,6 +351,49 @@ TEST_F(MultiTest, MultiConsistent2) {
 
   for (auto& fb : fbs)
     fb.Join();
+}
+
+TEST_F(MultiTest, MultiConsistent3) {
+  GTEST_SKIP() << "Known consistency bug";
+
+  absl::SetFlag(&FLAGS_multi_exec_squash, false);
+  vector<Fiber> fbs;
+
+  auto run_multi = [this](string_view client) {
+    Run(client, {"multi"});
+    Run(client, {"incr", kKeySid0});
+    Run(client, {"incr", kKeySid1});
+    Run(client, {"incr", kKeySid2});
+    Run(client, {"exec"});
+  };
+
+  auto run_mget = [this](string_view client) {
+    auto resp = Run(client, {"mget", kKeySid0, kKeySid1, kKeySid2});
+    const auto& elems = resp.GetVec();
+    EXPECT_EQ(elems[0].GetString(), elems[1].GetString());
+    EXPECT_EQ(elems[1].GetString(), elems[2].GetString());
+  };
+
+  for (size_t i = 0; i < 10; i++) {
+    auto fb = pp_->at(i % pp_->size())->LaunchFiber([i, run_mget, run_multi] {
+      auto client = absl::StrCat("c", i);
+      for (size_t j = 0; j < 1000; j++) {
+        if (j % 2)
+          run_mget(client);
+        else
+          run_multi(client);
+        size_t sleep = 30 + j / 10 + 5 * i;
+        ThisFiber::SleepFor(chrono::microseconds(sleep));
+      }
+    });
+    fbs.emplace_back(std::move(fb));
+  }
+
+  for (auto& fb : fbs)
+    fb.JoinIfNeeded();
+
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.shard_stats.tx_optimistic_total, 100);
 }
 
 TEST_F(MultiTest, MultiRename) {

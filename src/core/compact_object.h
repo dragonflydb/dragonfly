@@ -186,19 +186,6 @@ class CompactObj {
   // For containers - returns number of elements in the container.
   size_t Size() const;
 
-  // TODO: We don't use c++ constructs (ctor, dtor, =) in objects of U,
-  // because we use memcpy here.
-  CompactObj AsRef() const {
-    CompactObj res;
-    memcpy(&res.u_, &u_, sizeof(u_));
-    res.taglen_ = taglen_;
-    res.huffman_domain_ = huffman_domain_;
-    res.mask_ = mask_;
-    res.mask_bits_.ref = 1;
-
-    return res;
-  }
-
   bool IsRef() const {
     return mask_bits_.ref;
   }
@@ -298,12 +285,6 @@ class CompactObj {
 
   const detail::RobjWrapper* GetRobjWrapper() const {
     return &u_.r_obj;
-  }
-
-  // For STR object.
-  void SetString(std::string_view str, bool is_key);
-  void SetValue(std::string_view val) {
-    SetString(val, false);
   }
 
   void GetString(std::string* res) const;
@@ -442,7 +423,8 @@ class CompactObj {
     return taglen_;
   }
 
- private:
+ protected:
+  void SetString(std::string_view str, bool is_key);
   void EncodeString(std::string_view str, bool is_key);
 
   // Requires: HasAllocated() - true.
@@ -487,10 +469,6 @@ class CompactObj {
     size_t bytes_used;
 
     bool DefragIfNeeded(PageUsage* page_usage);
-
-    // Computes if the contained object should be defragmented, by examining pointers within it and
-    // returning true if any of them reside in an underutilized page.
-    bool ShouldDefragment(PageUsage* page_usage) const;
   };
 
   struct FlatJsonT {
@@ -566,6 +544,41 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   return CmpNonInline(sv);
 }
 
+struct CompactKey : public CompactObj {
+  CompactKey() : CompactObj() {
+  }
+
+  explicit CompactKey(std::string_view str) : CompactObj{str, true} {
+  }
+
+  void SetString(std::string_view str) {
+    CompactObj::SetString(str, true);
+  }
+
+  CompactKey AsRef() const {
+    CompactKey res;
+    memcpy(&res.u_, &u_, sizeof(u_));
+    res.taglen_ = taglen_;
+    res.huffman_domain_ = huffman_domain_;
+    res.mask_ = mask_;
+    res.mask_bits_.ref = 1;
+
+    return res;
+  }
+};
+
+struct CompactValue : public CompactObj {
+  CompactValue() : CompactObj() {
+  }
+
+  explicit CompactValue(std::string_view str) : CompactObj{str, false} {
+  }
+
+  void SetString(std::string_view str) {
+    CompactObj::SetString(str, false);
+  }
+};
+
 std::string_view ObjTypeToString(CompactObjType type);
 
 // Returns kInvalidCompactObjType if sv is not a valid type.
@@ -576,7 +589,7 @@ namespace detail {
 struct TieredColdRecord : public ::boost::intrusive::list_base_hook<
                               boost::intrusive::link_mode<boost::intrusive::normal_link>> {
   uint64_t key_hash;  // Allows searching the entry in the dbslice.
-  CompactObj value;
+  CompactValue value;
   uint16_t db_index;
   uint32_t page_index;
 };

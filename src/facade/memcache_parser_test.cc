@@ -59,7 +59,7 @@ TEST_F(MCParserTest, Incr) {
   EXPECT_EQ(MemcacheParser::INCR, cmd_.type);
   EXPECT_EQ("a", cmd_.key());
   EXPECT_EQ(1, cmd_.delta);
-  EXPECT_FALSE(cmd_.no_reply);
+  EXPECT_FALSE(cmd_.cmd_flags.no_reply);
 
   st = Parse("incr a -1\r\n");
   EXPECT_EQ(MemcacheParser::BAD_DELTA, st);
@@ -96,7 +96,7 @@ TEST_F(MCParserTest, NoreplyBasic) {
   EXPECT_EQ(2, cmd_.expire_ts);
   EXPECT_EQ(3, cmd_.value().size());
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
-  EXPECT_TRUE(cmd_.no_reply);
+  EXPECT_TRUE(cmd_.cmd_flags.no_reply);
 
   st = Parse("set mykey2 4 5 6\r\n");
 
@@ -106,16 +106,16 @@ TEST_F(MCParserTest, NoreplyBasic) {
   EXPECT_EQ(5, cmd_.expire_ts);
   EXPECT_EQ(6, cmd_.value().size());
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
-  EXPECT_FALSE(cmd_.no_reply);
+  EXPECT_FALSE(cmd_.cmd_flags.no_reply);
 }
 
 TEST_F(MCParserTest, Meta) {
   MemcacheParser::Result st = Parse("ms key1 ");
   EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
-  EXPECT_EQ(0, consumed_);
-  st = Parse("ms key1 6 T1 F2\r\naaaaaa\r\n");
+  EXPECT_EQ(8, consumed_);
+  st = parser_.Parse("6 T1 F2\r\naaaaaa\r\n", &consumed_, &cmd_);
   EXPECT_EQ(MemcacheParser::OK, st);
-  EXPECT_EQ(25, consumed_);
+  EXPECT_EQ(17, consumed_);
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_EQ("key1", cmd_.key());
   EXPECT_EQ(2, cmd_.flags);
@@ -149,11 +149,11 @@ TEST_F(MCParserTest, Meta) {
   EXPECT_EQ(18, consumed_);
   EXPECT_EQ(MemcacheParser::GET, cmd_.type);
   EXPECT_EQ("key", cmd_.key());
-  EXPECT_TRUE(cmd_.return_flags);
-  EXPECT_TRUE(cmd_.return_value);
-  EXPECT_TRUE(cmd_.return_ttl);
-  EXPECT_TRUE(cmd_.return_access_time);
-  EXPECT_TRUE(cmd_.return_hit);
+  EXPECT_TRUE(cmd_.cmd_flags.return_flags);
+  EXPECT_TRUE(cmd_.cmd_flags.return_value);
+  EXPECT_TRUE(cmd_.cmd_flags.return_ttl);
+  EXPECT_TRUE(cmd_.cmd_flags.return_access_time);
+  EXPECT_TRUE(cmd_.cmd_flags.return_hit);
 }
 
 TEST_F(MCParserTest, Gat) {
@@ -173,6 +173,11 @@ TEST_F(MCParserTest, Gat) {
   EXPECT_EQ(cmd_.type, MemcacheParser::GATS);
   EXPECT_THAT(ToArgs(), ElementsAre("foo", "bar", "baz"));
   EXPECT_EQ(cmd_.expire_ts, 1000);
+
+  parser_.set_last_unix_time(2000);
+  res = Parse("gats 1000 foo bar baz\r\n");
+  EXPECT_EQ(MemcacheParser::OK, res);
+  EXPECT_EQ(cmd_.expire_ts, 3000);
 }
 
 TEST_F(MCParserTest, ValueState) {
@@ -208,7 +213,7 @@ class MCParserNoreplyTest : public MCParserTest {
     MemcacheParser::Result st = Parse(str);
 
     EXPECT_EQ(expected_res, st);
-    EXPECT_EQ(cmd_.no_reply, noreply);
+    EXPECT_EQ(cmd_.cmd_flags.no_reply, noreply);
   }
 };
 

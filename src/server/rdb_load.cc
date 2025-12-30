@@ -33,6 +33,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "facade/reply_capture.h"
 #include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -852,7 +853,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       pv_->ReserveString(config_.reserve);
       pv_->AppendString(blob);
     } else {
-      pv_->SetValue(blob);
+      pv_->SetString(blob);
     }
     return;
   }
@@ -2416,19 +2417,22 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   size_t done = 0;
   JournalExecutor ex{service};
   while (done < num_entries) {
-    journal::ParsedEntry entry{};
-    SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
+    journal::ParsedEntry entry;
+    auto ec = journal_reader_.ReadEntry(&entry);
+    if (ec)
+      return ec;
+
     done++;
 
-    if (entry.cmd.cmd_args.empty()) {
+    if (entry.cmd.empty()) {
       if (entry.opcode == journal::Op::PING) {
         continue;
       }
       return RdbError(errc::rdb_file_corrupted);
     }
 
-    if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
-        absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
+    if (absl::EqualsIgnoreCase(entry.cmd[0], "FLUSHALL") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FLUSHDB")) {
       // Applying a flush* operation in the middle of a load can cause out-of-sync deletions of
       // data that should not be deleted, see https://github.com/dragonflydb/dragonfly/issues/1231
       // By returning an error we are effectively restarting the replication.
@@ -2576,7 +2580,7 @@ void RdbLoader::FlushAllShards() {
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
-                                          CompactObj* pv) {
+                                          PrimeValue* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
@@ -2859,28 +2863,29 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
     return;
   }
 
-  CmdArgVec arg_vec;
-  facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-
   // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
   // serialized as "TAG SORTABLE SEPARATOR x" but parser expects "TAG SEPARATOR x SORTABLE".
   // Reorder arguments if needed.
   // TODO: Remove this workaround after Apr 2026.
-  for (size_t i = 0; i + 2 < arg_vec.size(); ++i) {
-    std::string_view cur{arg_vec[i].data(), arg_vec[i].size()};
-    std::string_view next{arg_vec[i + 1].data(), arg_vec[i + 1].size()};
+  for (size_t i = 0; i + 2 < resp_vec.size(); ++i) {
+    std::string_view cur = resp_vec[i].GetView();
+    std::string_view next = resp_vec[i + 1].GetView();
     if (absl::EqualsIgnoreCase(cur, "SORTABLE") && absl::EqualsIgnoreCase(next, "SEPARATOR")) {
       // SORTABLE SEPARATOR x -> SEPARATOR x SORTABLE
-      std::swap(arg_vec[i], arg_vec[i + 1]);      // SEPARATOR SORTABLE x
-      std::swap(arg_vec[i + 1], arg_vec[i + 2]);  // SEPARATOR x SORTABLE
+      std::swap(resp_vec[i], resp_vec[i + 1]);      // SEPARATOR SORTABLE x
+      std::swap(resp_vec[i + 1], resp_vec[i + 2]);  // SEPARATOR x SORTABLE
     }
   }
 
   // Prepend command name (FT.CREATE or FT.SYNUPDATE)
-  string cmd_str{command_name};
-  arg_vec.insert(arg_vec.begin(), MutableSlice{cmd_str.data(), cmd_str.size()});
+  CommandContext cntx_cmd;
+  cntx_cmd.Init(&crb, &cntx);
 
-  service->DispatchCommand(facade::ParsedArgs{arg_vec}, &crb, &cntx);
+  cntx_cmd.PushArg(command_name);
+  for (unsigned i = 0; i < resp_vec.size(); i++) {
+    cntx_cmd.PushArg(resp_vec[i].GetView());
+  }
+  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

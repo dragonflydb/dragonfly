@@ -2,10 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/hll_family.h"
-
-#include "server/acl/acl_commands_def.h"
-
 extern "C" {
 #include "redis/hyperloglog.h"
 }
@@ -13,6 +9,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -44,7 +41,7 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
         builder->SendError(kOutOfMemory);
         break;
       case OpStatus::INVALID_VALUE:
-        builder->SendError(HllFamily::kInvalidHllErr);
+        builder->SendError(kInvalidHllError);
         break;
       case OpStatus::CORRUPTED_HLL:
         builder->SendError(facade::StatusToMsg(OpStatus::CORRUPTED_HLL));
@@ -128,7 +125,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll = string{hll_sds, sdslen(hll_sds)};
     sdsfree(hll_sds);
   }
-  res.it->second.SetValue(hll);
+  res.it->second.SetString(hll);
   return std::min(updated, 1);
 }
 
@@ -300,7 +297,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
-    res.it->second.SetValue(hll);
+    res.it->second.SetString(hll);
 
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "SET", ArgSlice{key, hll});
@@ -320,7 +317,7 @@ void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
     if (result.value() == 0) {
       rb->SendOk();
     } else {
-      rb->SendError(HllFamily::kInvalidHllErr);
+      rb->SendError(kInvalidHllError);
     }
   } else {
     HandleOpValueResult(result, rb);
@@ -329,21 +326,12 @@ void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
 }  // namespace
 
-namespace acl {
-constexpr uint32_t kPFAdd = WRITE | HYPERLOGLOG | FAST;
-constexpr uint32_t kPFCount = READ | HYPERLOGLOG | SLOW;
-constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
-}  // namespace acl
-
-void HllFamily::Register(CommandRegistry* registry) {
+void RegisterHllFamily(CommandRegistry* registry) {
   using CI = CommandId;
-  registry->StartFamily();
-  *registry << CI{"PFADD", CO::JOURNALED, -3, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
-            << CI{"PFCOUNT", CO::READONLY, -2, 1, -1, acl::kPFCount}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kPFMerge}
-                   .SetHandler(PFMerge);
+  registry->StartFamily(acl::HYPERLOGLOG);
+  *registry << CI{"PFADD", CO::FAST | CO::JOURNALED, -3, 1, 1}.SetHandler(PFAdd)
+            << CI{"PFCOUNT", CO::READONLY, -2, 1, -1}.SetHandler(PFCount)
+            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1}.SetHandler(PFMerge);
 }
-
-const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";
 
 }  // namespace dfly

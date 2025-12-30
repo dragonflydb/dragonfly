@@ -237,10 +237,6 @@ class DenseSet {
     return entries_.size();
   }
 
-  size_t NumUsedBuckets() const {
-    return num_used_buckets_;
-  }
-
   size_t ObjMallocUsed() const {
     return obj_malloc_used_;
   }
@@ -412,9 +408,8 @@ class DenseSet {
   std::vector<DensePtr, DensePtrAllocator> entries_;
 
   mutable size_t obj_malloc_used_ = 0;
-  mutable uint32_t size_ = 0;              // number of elements in the set.
-  mutable uint32_t num_links_ = 0;         // number of links in the set.
-  mutable uint32_t num_used_buckets_ = 0;  // number of buckets used in entries_ array.
+  mutable uint32_t size_ = 0;       // number of elements in the set.
+  mutable uint32_t num_links_ = 0;  // number of links in the set.
   unsigned capacity_log_ = 0;
 
   uint32_t time_now_ = 0;

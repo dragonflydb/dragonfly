@@ -11,7 +11,7 @@
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
-#include "facade/reply_capture.h"
+#include "facade/reply_mode.h"
 #include "server/common.h"
 #include "server/tx_base.h"
 #include "server/version.h"
@@ -280,7 +280,6 @@ struct ConnectionState {
   ClientTracking tracking_info_;
 };
 
-class CommandContext;
 class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
@@ -328,10 +327,6 @@ class ConnectionContext : public facade::ConnectionContext {
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
 
-  // A temporary variable, to allow passing CommandContext from DispatchMC to
-  // DispatchCommand without changing the function signature.
-  CommandContext* cmnd_ctx = nullptr;
-
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;
 
@@ -355,6 +350,10 @@ class CommandContext : public facade::ParsedCommand {
     Init(rb, cntx);
   }
 
+  virtual size_t GetSize() const override {
+    return sizeof(CommandContext);
+  }
+
   const CommandId* cid = nullptr;
   Transaction* tx = nullptr;
 
@@ -371,6 +370,10 @@ class CommandContext : public facade::ParsedCommand {
 
   facade::Connection* conn() const {
     return conn_cntx_->conn();
+  }
+
+  facade::SinkReplyBuilder* SwapReplier(facade::SinkReplyBuilder* new_rb) {
+    return std::exchange(rb_, new_rb);
   }
 };
 

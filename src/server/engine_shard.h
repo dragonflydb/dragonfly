@@ -206,11 +206,13 @@ class EngineShard {
 
   void FinalizeMulti(Transaction* tx);
 
-  // Scan the shard with the cursor and apply defragmentation for database entries. An optional
-  // threshold can be passed, which will be used to determine if defragmentation should be
-  // performed.
-  // Returns true if defragmentation was performed.
-  std::optional<CollectedPageStats> DoDefrag(CollectPageStats collect_page_stats, float threshold);
+  // Scan the shard with the cursor and apply defragmentation for database entries.
+  // Returns collected page stats if defragmentation was performed.
+  std::optional<CollectedPageStats> DoDefrag(PageUsage* page_usage);
+
+  uint64_t GetDefragCursor() const {
+    return defrag_state_.cursor;
+  }
 
  private:
   struct DefragTaskState {

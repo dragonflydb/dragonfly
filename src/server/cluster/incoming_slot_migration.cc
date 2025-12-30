@@ -67,15 +67,15 @@ class ClusterShardMigration {
     uint64_t last_sleep = fb2::ProactorBase::GetMonotonicTimeNs();
 
     const uint64_t throttle_us = absl::GetFlag(FLAGS_slot_migration_throttle_us);
-
+    TransactionData tx_data;
     while (cntx->IsRunning()) {
       if (pause_) {
         ThisFiber::SleepFor(100ms);
         continue;
       }
 
-      auto tx_data = tx_reader.NextTxData(&reader, cntx);
-      if (!tx_data) {
+      bool success = tx_reader.NextTxData(&reader, cntx, &tx_data);
+      if (!success) {
         if (auto err = cntx->GetError(); err) {
           LOG(WARNING) << "Error reading from migration socket for shard " << source_shard_id_
                        << ": " << err.Format()
@@ -84,34 +84,35 @@ class ClusterShardMigration {
         break;
       }
 
-      while (tx_data->opcode == journal::Op::LSN) {
-        VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data->lsn;
-        last_attempt_.store(tx_data->lsn);
+      while (tx_data.opcode == journal::Op::LSN) {
+        VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data.lsn;
+        last_attempt_.store(tx_data.lsn);
         bc_->Dec();  // we can Join the flow now
         // if we get new data, attempt is failed
-        if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
+        if (success = tx_reader.NextTxData(&reader, cntx, &tx_data); !success) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
+
         if (in_migration_->GetState() == MigrationState::C_FATAL) {
           VLOG(1) << "Flow finalization " << source_shard_id_
                   << " canceled due memory limit reached";
           return;
         }
-        if (!tx_data->command.cmd_args.empty()) {
+        if (!tx_data.command.empty()) {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by "
-                  << tx_data->command.cmd_args[0];
+                  << tx_data.command.Front();
         } else {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by opcode "
-                  << (int)tx_data->opcode;
+                  << (int)tx_data.opcode;
         }
 
         bc_->Add();  // the flow isn't finished so we lock it again
       }
-      if (tx_data->opcode == journal::Op::PING) {
+      if (tx_data.opcode == journal::Op::PING) {
         // TODO check about ping logic
       } else {
-        auto err = ExecuteTx(std::move(*tx_data), cntx);
+        auto err = ExecuteTx(std::move(tx_data), cntx);
         // Break incoming slot migration if command reported OOM
         if (err == std::errc::not_enough_memory) {
           cntx->ReportError(std::string{kIncomingMigrationOOM});
@@ -169,9 +170,8 @@ class ClusterShardMigration {
                                                 : error_code();
     } else {
       // TODO check which global commands should be supported
-      std::string error =
-          absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
-                       " in cluster migration process.");
+      std::string error = absl::StrCat("We don't support command: ", tx_data.command[0],
+                                       " in cluster migration process.");
       LOG(ERROR) << error;
       cntx->ReportError(error);
       in_migration_->ReportError(error);

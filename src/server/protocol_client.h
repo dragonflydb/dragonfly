@@ -10,10 +10,10 @@
 
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
+#include "facade/resp_parser.h"
 #include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "server/owned_resp_expr.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
@@ -98,8 +98,8 @@ class ProtocolClient {
   io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
   io::Result<ReadRespRes> ReadRespReply(uint32_t timeout);
 
-  io::Result<OwnedRespExpr::Vec> TakeRespReply(uint32_t timeout, base::IoBuf* buffer = nullptr,
-                                               bool copy_msg = true);
+  io::Result<dfly::RESPObj> TakeRespReply(uint32_t timeout, base::IoBuf* buffer = nullptr,
+                                          bool copy_msg = true);
 
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
@@ -147,6 +147,8 @@ class ProtocolClient {
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   base::IoBuf resp_buf_;
+
+  RESPParser resp_parser_;
 
   std::unique_ptr<util::FiberSocketBase> sock_;
   util::fb2::Mutex sock_mu_;

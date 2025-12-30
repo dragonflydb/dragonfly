@@ -85,29 +85,18 @@ class MemcacheParser {
       uint64_t delta;           // for DECR/INCR commands.
     };
 
-    uint32_t expire_ts =
-        0;  // relative (expire_ts <= month) or unix time (expire_ts > month) in seconds
+    int64_t expire_ts = 0;  // unix time (expire_ts > month) in seconds
 
     // flags for STORE commands
     uint32_t flags = 0;
 
-    bool no_reply = false;  // q
-    bool meta = false;
-
-    // meta flags
-    bool base64 = false;              // b
-    bool return_flags = false;        // f
-    bool return_value = false;        // v
-    bool return_ttl = false;          // t
-    bool return_access_time = false;  // l
-    bool return_hit = false;          // h
-    bool return_version = false;      // c
+    MemcacheCmdFlags cmd_flags;
 
     // Does not own this object, only references it.
     cmn::BackedArguments* backed_args = nullptr;
   };
 
-  static_assert(sizeof(Command) == 48);
+  static_assert(sizeof(Command) == 40);
 
   enum Result : uint8_t {
     OK,
@@ -123,20 +112,27 @@ class MemcacheParser {
   }
 
   size_t UsedMemory() const {
-    return tmp_args_.capacity() * sizeof(std::string_view);
+    return tmp_buf_.capacity();
   }
 
   void Reset() {
     val_len_to_read_ = 0;
+    tmp_buf_.clear();
   }
 
   Result Parse(std::string_view str, uint32_t* consumed, Command* res);
 
+  void set_last_unix_time(int64_t t) {
+    last_unix_time_ = t;
+  }
+
  private:
   Result ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest);
+  Result ParseInternal(ArgSlice tokens_view, Command* cmd);
 
   uint32_t val_len_to_read_ = 0;
-  std::vector<std::string_view> tmp_args_;
+  std::string tmp_buf_;
+  int64_t last_unix_time_ = 0;
 };
 
 }  // namespace facade

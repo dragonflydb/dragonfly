@@ -49,7 +49,7 @@ jobs:
           apt update && apt install -y lcov pip
       - name: Cache build deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.ccache
@@ -89,7 +89,7 @@ jobs:
           echo ls covout
           ls covout/
       - name: Upload coverage
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: build/covout/

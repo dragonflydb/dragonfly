@@ -21,6 +21,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "util/fibers/pool.h"
@@ -450,12 +451,14 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   CmdArgVec args = conn_wrapper->Args(slice);
 
-  auto* context = conn_wrapper->cmd_cntx();
+  ConnectionContext* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
 
   DCHECK(context->transaction == nullptr) << id;
-
-  service_->DispatchCommand(ParsedArgs{args}, conn_wrapper->builder(), context);
+  CommandContext cmd_cntx;
+  cmd_cntx.Init(conn_wrapper->builder(), context);
+  cmd_cntx.Assign(args.begin(), args.end(), args.size());
+  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx);
 
   DCHECK(context->transaction == nullptr);
 
@@ -500,10 +503,9 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   DCHECK(context->transaction == nullptr);
 }
 
-auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value, uint32_t flags,
-                           chrono::seconds ttl) -> MCResponse {
+auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, value, flags, ttl); });
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, args); });
   }
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
@@ -513,11 +515,17 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
   auto& cmd = *cmd_cntx.mc_command();
   cmd.type = cmd_type;
 
-  string_view kv[2] = {key, value};
-  cmd_cntx.Assign(kv, kv + 2, 2);
-  cmd.flags = flags;
-  cmd.expire_ts = ttl.count();
-
+  string_view kv[2] = {key, args.value};
+  unsigned num_args = MP::IsStoreCmd(cmd_type) ? 2 : 1;
+  cmd_cntx.Assign(kv, kv + num_args, num_args);
+  cmd.flags = args.val_flags;
+  cmd.expire_ts = args.ttl.count();
+  cmd.delta = args.delta;
+  if (cmd.type >= MP::GET && cmd.type <= MP::GATS) {
+    cmd.cmd_flags.return_value = true;
+    cmd.cmd_flags.return_flags = true;
+    cmd.cmd_flags.return_cas = (cmd.type == MP::GETS || cmd.type == MP::GATS);
+  }
   auto* context = conn->cmd_cntx();
 
   DCHECK(context->transaction == nullptr);
@@ -531,10 +539,10 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
 auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key); });
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, MCArgs{}); });
   }
 
-  return RunMC(cmd_type, key, string_view{}, 0, chrono::seconds{});
+  return RunMC(cmd_type, key, MCArgs{});
 }
 
 auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::string_view> list)

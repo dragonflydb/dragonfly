@@ -15,6 +15,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/top_keys.h"
+#include "facade/dragonfly_connection.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
@@ -731,7 +732,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
-  PrimeKey co_key{key, true};
+  PrimeKey co_key{key};
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();

@@ -36,8 +36,8 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::SinkReplyBuilder* builder,
-                                         facade::ConnectionContext* cntx) final;
+  facade::DispatchResult DispatchCommand(facade::ParsedArgs args,
+                                         facade::ParsedCommand* parsed_cmd) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
   facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
@@ -62,7 +62,6 @@ class Service : public facade::ServiceInterface {
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;
-  void FreeParsedCommand(facade::ParsedCommand* cmd) final;
 
   const CommandId* FindCmd(std::string_view) const;
 
@@ -168,15 +167,15 @@ class Service : public facade::ServiceInterface {
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
-  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
-               SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
+                    bool read_only, CommandContext* cmd_cntx);
+  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter, bool read_only,
+               CommandContext* cmd_cntx);
 
   // Return optional payload - first received error that occured when executing commands.
-  std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
-                                                                           bool force = false);
+  std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
+                                                             bool force = false);
 
-  void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
+  void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 
   OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
 

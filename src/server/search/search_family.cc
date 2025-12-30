@@ -77,9 +77,9 @@ string IndexNotFoundMsg(string_view index_name) {
 // Returns false if no errors occured
 template <typename T>
 bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
-                         SinkReplyBuilder* builder) {
+                         CommandContext* cmd_cntx) {
   if (auto err = parser->TakeError(); err || !result) {
-    builder->SendError(!result ? result.error() : err.MakeReply());
+    cmd_cntx->SendError(!result ? result.error() : err.MakeReply());
     return true;
   }
 
@@ -1208,7 +1208,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
 
 }  // namespace
 
-void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   WarmupQueryParser();
 
   auto* builder = cmd_cntx->rb();
@@ -1222,7 +1222,7 @@ void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   bool is_cross_shard = parser.Check("CSS");
 
   auto parsed_index = CreateDocIndex(&parser);
-  if (SendErrorIfOccurred(parsed_index, &parser, builder)) {
+  if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
 
@@ -1249,8 +1249,7 @@ void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 
     // TODO add processing of the reply to make sure index was created successfully on all shards,
     // and prevent simultaneous creation of the same index.
-    auto req_future =
-        cluster::Coordinator::Current().DispatchAll(cmd, [](const OwnedRespExpr::Vec&) {});
+    auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [](const RESPObj&) {});
     // TODO add error handling
     CHECK(!req_future.Get());
   }
@@ -1282,14 +1281,13 @@ void SearchFamily::FtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendOk();
 }
 
-void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx->rb();
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -1305,14 +1303,14 @@ void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (!index_info) {
     cmd_cntx->tx->Conclude();
-    return builder->SendError("Index not found");
+    return cmd_cntx->SendError("Index not found");
   }
 
   // Parse additional schema
   DocIndex new_index{};
   new_index.type = index_info->type;
   auto parse_result = ParseSchema(&parser, &new_index);
-  if (SendErrorIfOccurred(parse_result, &parser, builder)) {
+  if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
     cmd_cntx->tx->Conclude();
     return;
   }
@@ -1340,7 +1338,7 @@ void SearchFamily::FtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   builder->SendOk();
 }
 
-void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   // Parse optional DD (Delete Documents) parameter
@@ -1400,7 +1398,7 @@ void SearchFamily::FtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
-void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   vector<DocIndexInfo> infos(shard_set->size());
@@ -1485,7 +1483,7 @@ void SearchFamily::FtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendLong(total_num_docs);
 }
 
-void SearchFamily::FtList(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
@@ -1507,65 +1505,72 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
   util::fb2::Mutex mu_;
   // TODO for now we suppose that callback is called synchronously. If not, we need to add
   // synchronization here for results vector modification.
-  auto req_future =
-      cluster::Coordinator::Current().DispatchAll(cmd, [&](const OwnedRespExpr::Vec& res) {
-        VLOG(3) << "FT.SEARCH CSS reply: " << res;
+  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& res) {
+    if (res.Empty()) {
+      LOG(ERROR) << "FT.SEARCH CSS reply is empty";
+      return;
+    }
+    auto array_res_opt = res.As<RESPArray>();
+    if (!array_res_opt || array_res_opt->Empty()) {
+      LOG(WARNING) << "Incorrect reply type for FT.SEARCH CSS: " << static_cast<int>(res.GetType());
+      return;
+    }
 
-        if (res.empty()) {
-          LOG(ERROR) << "FT.SEARCH CSS reply is empty";
+    auto array_res = *array_res_opt;
+    const auto size = array_res[0].As<uint64_t>();
+    if (!size.has_value()) {
+      LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: "
+                 << static_cast<int>(array_res[0].GetType()) << "\n Cmd: " << cmd << "\n Reply: ";
+      return;
+    }
+
+    std::lock_guard lock{mu_};
+    results.emplace_back();
+    results.back().total_hits = *size;
+    for (size_t i = 2; i < array_res.Size(); i += 2) {
+      auto& search_doc = results.back().docs.emplace_back();
+      auto key_opt = array_res[i - 1].As<std::string_view>();
+      if (!key_opt) {
+        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document key: "
+                   << static_cast<int>(array_res[i - 1].GetType());
+        return;
+      }
+      search_doc.key = *key_opt;
+
+      const auto arr_fields_opt = array_res[i].As<RESPArray>();
+      if (!arr_fields_opt) {
+        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
+                   << static_cast<int>(array_res[i].GetType());
+        return;
+      }
+
+      const auto arr_fields = *arr_fields_opt;
+
+      if (arr_fields.Size() % 2 != 0) {
+        LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
+                   << arr_fields.Size();
+        return;
+      }
+
+      for (size_t j = 0; j < arr_fields.Size(); j += 2) {
+        auto key = arr_fields[j].As<std::string_view>();
+        auto value = arr_fields[j + 1].As<std::string_view>();
+        if (!key || !value) {
+          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data [key : value]: "
+                     << static_cast<int>(arr_fields[j].GetType()) << " : "
+                     << static_cast<int>(arr_fields[j + 1].GetType());
           return;
         }
-        if (res[0].type == facade::RespExpr::Type::ERROR) {
-          LOG(WARNING) << "FT.SEARCH CSS reply error: " << res[0].GetView();
-          return;
-        }
-
-        const auto size = res[0].GetInt();
-        if (!size.has_value()) {
-          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: " << static_cast<int>(res[0].type)
-                     << "\n Cmd: " << cmd << "\n Reply: " << res;
-          return;
-        }
-
-        std::lock_guard lock{mu_};
-        results.emplace_back();
-        results.back().total_hits = *size;
-        for (size_t i = 2; i < res.size(); i += 2) {
-          auto& search_doc = results.back().docs.emplace_back();
-          search_doc.key = res[i - 1].GetString();
-          if (res[i].type != facade::RespExpr::Type::ARRAY) {
-            LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                       << static_cast<int>(res[i].type);
-            return;
-          }
-          const auto& arr_res = res[i].GetVec();
-          if (arr_res.size() % 2 != 0) {
-            LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
-                       << arr_res.size();
-            return;
-          }
-
-          for (size_t j = 0; j < arr_res.size(); j += 2) {
-            if (arr_res[j].type != facade::RespExpr::Type::STRING) {
-              LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                         << static_cast<int>(arr_res[j].type);
-              return;
-            }
-            if (arr_res[j + 1].type != facade::RespExpr::Type::STRING) {
-              LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                         << static_cast<int>(arr_res[j].type);
-              return;
-            }
-            search_doc.values.emplace(arr_res[j].GetString(), arr_res[j + 1].GetString());
-          }
-        }
-      });
+        search_doc.values.emplace(std::string(*key), std::string(*value));
+      }
+    }
+  });
   // TODO add error handling
   CHECK(!req_future.Get());
   return results;
 }
 
-void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
@@ -1574,7 +1579,7 @@ void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto* builder = cmd_cntx->rb();
   auto params = ParseSearchParams(&parser);
-  if (SendErrorIfOccurred(params, &parser, builder))
+  if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
   // Check query string length limit
@@ -1621,11 +1626,11 @@ void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
     });
 
     if (index_not_found.load(memory_order_relaxed))
-      return builder->SendError(string{index_name} + ": no such index");
+      return cmd_cntx->SendError(string{index_name} + ": no such index");
 
     for (const auto& res : docs) {
       if (res.error)
-        return builder->SendError(*res.error);
+        return cmd_cntx->SendError(*res.error);
     }
   }
 
@@ -1645,7 +1650,7 @@ void SearchFamily::FtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
 }
 
-void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view index_name = parser.Next();
@@ -1661,12 +1666,12 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   string_view query_str = parser.Next();
 
   auto params = ParseSearchParams(&parser);
-  if (SendErrorIfOccurred(params, &parser, rb))
+  if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str, &params->query_params))
-    return rb->SendError("query syntax error");
+    return cmd_cntx->SendError("query syntax error");
 
   search_algo.EnableProfiling();
 
@@ -1781,7 +1786,7 @@ void SearchFamily::FtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   string_view field_name = ArgS(args, 1);
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
@@ -1807,7 +1812,7 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
       result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
     } else {
       res.error().kind = facade::kSearchErrType;
-      return rb->SendError(res.error());
+      return cmd_cntx->SendError(res.error());
     }
   }
 
@@ -1817,12 +1822,12 @@ void SearchFamily::FtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }
 
-void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto* builder = cmd_cntx->rb();
 
   const auto params = ParseAggregatorParams(&parser);
-  if (SendErrorIfOccurred(params, &parser, builder))
+  if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
   // Check query string length limit
@@ -1881,19 +1886,19 @@ void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     for (size_t i = 0; i < params->joins.size(); ++i) {
       // Check join query string length limit
       if (params->joins[i].query.size() > max_query_bytes) {
-        return builder->SendError(absl::StrCat("Join query string is too long, max length is ",
-                                               max_query_bytes, " bytes"));
+        return cmd_cntx->SendError(absl::StrCat("Join query string is too long, max length is ",
+                                                max_query_bytes, " bytes"));
       }
 
       search::QueryParams empty_params;
       if (!search_algos[i + 1].Init(params->joins[i].query, &empty_params)) {
-        return builder->SendError("Query syntax error in JOIN");
+        return cmd_cntx->SendError("Query syntax error in JOIN");
       }
     }
 
     auto data_for_join = PreprocessDataForJoin(params->index, *params);
     if (!data_for_join) {
-      return builder->SendError(data_for_join.error());
+      return cmd_cntx->SendError(data_for_join.error());
     }
 
     // preaggregated_shard_data is preaggregation results per index per shard
@@ -1990,7 +1995,7 @@ void SearchFamily::FtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void SearchFamily::FtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -2052,7 +2057,7 @@ void SearchFamily::FtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
+void FtConfigHelp(CmdArgParser* parser, CommandContext* cmd_cntx) {
   string_view param = parser->Next();
 
   vector<string> names = config_registry.List(param);
@@ -2066,6 +2071,7 @@ void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
     }
   }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(res.size());
   for (const auto& flag : res) {
     rb->StartArray(5);
@@ -2077,7 +2083,7 @@ void FtConfigHelp(CmdArgParser* parser, RedisReplyBuilder* rb) {
   }
 }
 
-void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+void FtConfigGet(CmdArgParser* parser, CommandContext* cmd_cntx) {
   string_view param = parser->Next();
   vector<string> names = config_registry.List(param);
 
@@ -2094,21 +2100,22 @@ void FtConfigGet(CmdArgParser* parser, RedisReplyBuilder* rb) {
       res.push_back(flag->CurrentValue());
     }
   }
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendBulkStrArr(res, CollectionType::MAP);
 }
 
-void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
+void FtConfigSet(CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [param, value] = parser->Next<string_view, string_view>();
 
   if (!parser->Finalize()) {
-    rb->SendError(parser->TakeError().MakeReply());
+    cmd_cntx->SendError(parser->TakeError().MakeReply());
     return;
   }
 
   vector<string> names = config_registry.List(param);
   if (names.size() != 1 ||
       config_registry.GetFlag(names[0])->Filename().find(kCurrentFile) == std::string::npos) {
-    return rb->SendError("Invalid option name");
+    return cmd_cntx->SendError("Invalid option name");
   }
 
   ConfigRegistry::SetResult result = config_registry.Set(param, value);
@@ -2116,37 +2123,35 @@ void FtConfigSet(CmdArgParser* parser, RedisReplyBuilder* rb) {
   const char kErrPrefix[] = "FT.CONFIG SET failed (possibly related to argument '";
   switch (result) {
     case ConfigRegistry::SetResult::OK:
-      return rb->SendOk();
+      return cmd_cntx->SendOk();
     case ConfigRegistry::SetResult::UNKNOWN:
-      return rb->SendError(
+      return cmd_cntx->SendError(
           absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
           kConfigErrType);
 
     case ConfigRegistry::SetResult::READONLY:
-      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
-                           kConfigErrType);
+      return cmd_cntx->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
+                                 kConfigErrType);
 
     case ConfigRegistry::SetResult::INVALID:
-      return rb->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
-                           kConfigErrType);
+      return cmd_cntx->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                                 kConfigErrType);
   }
   ABSL_UNREACHABLE();
 }
 
-void SearchFamily::FtConfig(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtConfig(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-
   auto func = parser.MapNext("GET", &FtConfigGet, "SET", &FtConfigSet, "HELP", &FtConfigHelp);
 
   if (auto err = parser.TakeError(); err) {
-    rb->SendError("Unknown subcommand");
+    cmd_cntx->SendError("Unknown subcommand");
     return;
   }
-  func(&parser, rb);
+  func(&parser, cmd_cntx);
 }
 
-void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [index_name, group_id] = parser.Next<string_view, string>();
 
@@ -2194,7 +2199,7 @@ void SearchFamily::FtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->rb()->SendOk();
 }
 
-void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdFtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   // FT._DEBUG command stub for test compatibility
   // This command is used by integration tests to control internal behavior
   CmdArgParser parser{args};
@@ -2212,9 +2217,7 @@ void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
       parser.Next();  // variable name
       parser.Next();  // variable value
 
-      if (auto err = parser.TakeError(); err) {
-        return rb->SendError(err.MakeReply());
-      }
+      RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
       // Just acknowledge the command
       rb->SendOk();
@@ -2226,7 +2229,7 @@ void SearchFamily::FtDebug(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendOk();
 }
 
-#define HFUNC(x) SetHandler(&SearchFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
 // to set as the default for the search family of commands. More sensible defaults,

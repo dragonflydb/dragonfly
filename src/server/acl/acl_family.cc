@@ -29,6 +29,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
+#include "facade/reply_builder.h"
 #include "io/file.h"
 #include "io/file_util.h"
 #include "server/acl/acl_commands_def.h"
@@ -133,12 +134,11 @@ void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
   auto reg = registry_->GetRegistryWithWriteLock();
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
-  auto* builder = cmd_cntx->rb();
   auto req = ParseAclSetUser(args.subspan(1), false, has_all_keys);
 
-  auto error_case = [builder](ErrorReply&& error) { builder->SendError(error); };
+  auto error_case = [cmd_cntx](ErrorReply&& error) { cmd_cntx->SendError(error); };
 
-  auto update_case = [username, &reg, builder, this, exists](User::UpdateRequest&& req) {
+  auto update_case = [username, &reg, cmd_cntx, this, exists](User::UpdateRequest&& req) {
     auto& user = reg.registry[username];
     if (!exists) {
       User::UpdateRequest default_req;
@@ -149,7 +149,7 @@ void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
     const bool reset_channels = req.reset_channels;
     user.Update(std::move(req), CategoryToIdx(), reverse_cat_table_, CategoryToCommandsIndex());
     // Send ok first because the connection might get evicted
-    builder->SendOk();
+    cmd_cntx->SendOk();
     if (exists) {
       if (!reset_channels) {
         StreamUpdatesToAllProactorConnections(string(username), user.AclCommands(), user.Keys(),

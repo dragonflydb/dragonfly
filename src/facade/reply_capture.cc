@@ -21,7 +21,7 @@ using namespace payload;
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
   last_error_ = str;
   SKIP_LESS(ReplyMode::ONLY_ERR);
-  Capture(make_unique<pair<string, string>>(str, type));
+  Capture(make_error(str, type));
 }
 
 void CapturingReplyBuilder::SendNullArray() {
@@ -113,7 +113,7 @@ struct CaptureVisitor {
   }
 
   void operator()(double v) {
-    rb->SendDouble(v);
+    static_cast<RedisReplyBuilder*>(rb)->SendDouble(v);
   }
 
   void operator()(const payload::SimpleString& ss) {
@@ -121,39 +121,39 @@ struct CaptureVisitor {
   }
 
   void operator()(const payload::BulkString& bs) {
-    rb->SendBulkString(bs);
+    static_cast<RedisReplyBuilder*>(rb)->SendBulkString(bs);
   }
 
   void operator()(payload::Null) {
-    rb->SendNull();
+    static_cast<RedisReplyBuilder*>(rb)->SendNull();
   }
 
   void operator()(const payload::Error& err) {
     rb->SendError(err->first, err->second);
   }
 
-  void operator()(OpStatus status) {
-    rb->SendError(status);
-  }
-
   void operator()(const unique_ptr<payload::CollectionPayload>& cp) {
+    auto* builder = static_cast<RedisReplyBuilder*>(rb);
     if (!cp) {
-      rb->SendNullArray();
+      builder->SendNullArray();
       return;
     }
     if (cp->len == 0 && cp->type == CollectionType::ARRAY) {
-      rb->SendEmptyArray();
+      builder->SendEmptyArray();
       return;
     }
-    rb->StartCollection(cp->len, cp->type);
+    builder->StartCollection(cp->len, cp->type);
     for (auto& pl : cp->arr)
       visit(*this, std::move(pl));
   }
 
-  RedisReplyBuilder* rb;
+  void operator()(payload::ReplyFunction&& rf) {
+    rf(rb);
+  }
+  SinkReplyBuilder* rb;
 };
 
-void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
+void CapturingReplyBuilder::Apply(Payload&& pl, SinkReplyBuilder* rb) {
   if (auto* crb = dynamic_cast<CapturingReplyBuilder*>(rb); crb != nullptr) {
     crb->SendDirect(std::move(pl));
     return;

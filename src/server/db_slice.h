@@ -6,7 +6,7 @@
 
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
-#include "facade/dragonfly_connection.h"
+#include "facade/connection_ref.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -513,7 +513,7 @@ class DbSlice {
   }
 
   // Track keys for the client represented by the the weak reference to its connection.
-  void TrackKey(const facade::Connection::WeakRef& conn_ref, std::string_view key) {
+  void TrackKey(const facade::ConnectionRef& conn_ref, std::string_view key) {
     client_tracking_map_[key].insert(conn_ref);
   }
 
@@ -676,7 +676,7 @@ class DbSlice {
   bool expired_keys_events_recording_ = true;
 
   struct Hash {
-    size_t operator()(const facade::Connection::WeakRef& c) const {
+    size_t operator()(const facade::ConnectionRef& c) const {
       return std::hash<uint32_t>()(c.GetClientId());
     }
   };
@@ -688,11 +688,11 @@ class DbSlice {
   // absl::flat_hash_map<std::string,
   //                    absl::flat_hash_set<facade::Connection::WeakRef, Hash>>
   //                    client_tracking_map_
-  using HashSetAllocator = PMR_NS::polymorphic_allocator<facade::Connection::WeakRef>;
+  using HashSetAllocator = PMR_NS::polymorphic_allocator<facade::ConnectionRef>;
 
   using ConnectionHashSet =
-      absl::flat_hash_set<facade::Connection::WeakRef, Hash,
-                          absl::container_internal::hash_default_eq<facade::Connection::WeakRef>,
+      absl::flat_hash_set<facade::ConnectionRef, Hash,
+                          absl::container_internal::hash_default_eq<facade::ConnectionRef>,
                           HashSetAllocator>;
 
   using AllocatorType = PMR_NS::polymorphic_allocator<std::pair<std::string, ConnectionHashSet>>;
