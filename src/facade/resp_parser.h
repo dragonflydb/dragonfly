@@ -44,11 +44,7 @@ class RESPObj {
     return reply_ == nullptr;
   }
 
-  size_t Size() const {
-    if (!reply_)
-      return 0;
-    return reply_->elements;
-  }
+  size_t Size() const;
 
   Type GetType() const;
 
@@ -94,6 +90,78 @@ class RESPParser {
   redisReader* reader_;
 };
 
+std::ostream& operator<<(std::ostream& os, const RESPObj& obj);
+std::ostream& operator<<(std::ostream& os, const RESPArray& arr);
+
+class RESPIterator {
+ public:
+  RESPIterator() = default;
+  RESPIterator(const RESPObj& obj) : obj_(obj) {
+  }
+
+  RESPIterator(RESPIterator&&) = default;
+  RESPIterator& operator=(RESPIterator&&) = default;
+
+  bool HasNext() const {
+    return index_ < obj_.Size();
+  }
+
+  bool HasError() const {
+    return index_ == std::numeric_limits<decltype(index_)>::max();
+  }
+
+  // Consume next values and return as tuple or single value
+  // if extraction fails, set error state
+  template <class T = std::string_view, class... Ts> auto Next() {
+    std::conditional_t<sizeof...(Ts) == 0, T, std::tuple<T, Ts...>> res{};
+    bool success = true;
+    if constexpr (sizeof...(Ts) == 0) {
+      success = Check(&res);
+    } else {
+      success = std::apply([this](auto&... args) { return Check<T, Ts...>(&args...); }, res);
+    }
+    SetError(!success);
+    return res;
+  }
+
+  // increase index only if all args are successfully extracted
+  template <class Arg, class... Args> bool Check(Arg* arg, Args*... args) {
+    auto tmp_index = index_;
+    if (index_ + sizeof...(Args) < obj_.Size()) {
+      if (auto arr = obj_.As<RESPArray>(); arr.has_value()) {
+        if (GetEntry(*arr, index_++, arg) && (GetEntry(*arr, index_++, args) && ...)) {
+          return true;
+        }
+      } else if (auto val = obj_.As<Arg>(); val.has_value()) {
+        assert(sizeof...(Args) == 0 && index_ == 0);
+        *arg = std::move(*val);
+        return true;
+      }
+    }
+    index_ = tmp_index;
+    return false;
+  }
+
+  void SetError(bool set = true) {
+    if (set)
+      index_ = std::numeric_limits<decltype(index_)>::max();
+  }
+
+ private:
+  template <class Arg> bool GetEntry(const RESPArray& arr, size_t idx, Arg* arg) {
+    if (auto val = arr[idx].As<Arg>(); val.has_value()) {
+      *arg = std::move(*val);
+
+      return true;
+    }
+    return false;
+  }
+
+ private:
+  RESPObj obj_;
+  size_t index_ = 0;
+};
+
 template <class T> std::optional<T> RESPObj::As() const {
   if (!reply_) {
     return std::nullopt;
@@ -123,77 +191,5 @@ template <class T> std::optional<T> RESPObj::As() const {
   // TODO add other types and errors processing
   return std::nullopt;
 }
-
-std::ostream& operator<<(std::ostream& os, const RESPObj& obj);
-std::ostream& operator<<(std::ostream& os, const RESPArray& arr);
-
-class RESPIterator {
- public:
-  RESPIterator() = default;
-  RESPIterator(const RESPObj& obj) : obj_(obj) {
-  }
-
-  RESPIterator(RESPIterator&&) = default;
-  RESPIterator& operator=(RESPIterator&&) = default;
-
-  bool HasNext() const {
-    return index_ < obj_.Size();
-  }
-
-  bool HasError() const {
-    return index_ >= obj_.Size();
-  }
-
-  // Consume next values and return as tuple or single value
-  // if extraction fails, set error state
-  template <class T = std::string_view, class... Ts> auto Next() {
-    std::conditional_t<sizeof...(Ts) == 0, T, std::tuple<T, Ts...>> res;
-    bool success = true;
-    if constexpr (sizeof...(Ts) == 0) {
-      success = Check(&res);
-    } else {
-      success = std::apply([this](auto&... args) { return Check<T, Ts...>(&args...); }, res);
-    }
-    SetError(!success);
-    return res;
-  }
-
-  // increase index only if all args are successfully extracted
-  template <class Arg, class... Args> bool Check(Arg* arg, Args*... args) {
-    auto tmp_index = index_;
-    if (index_ + sizeof...(Args) < obj_.Size()) {
-      if (auto arr = obj_.As<RESPArray>(); arr.has_value()) {
-        if (GetEntry(*arr, index_++, arg) && (GetEntry(*arr, index_++, args) && ...)) {
-          return true;
-        }
-      } else if (auto val = obj_.As<Arg>(); val.has_value()) {
-        assert(sizeof...(Args) == 0 && index_ == 0);
-        *arg = std::move(*val);
-        return true;
-      }
-    }
-    index_ = tmp_index;
-    return false;
-  }
-
-  void SetError(bool set) {
-    if (set)
-      index_ = obj_.Size();
-  }
-
- private:
-  template <class Arg> bool GetEntry(const RESPArray& arr, size_t idx, Arg* arg) {
-    if (auto val = arr[idx].As<Arg>(); val.has_value()) {
-      *arg = std::move(*val);
-
-      return true;
-    }
-    return false;
-  }
-
- private:
-  RESPObj obj_;
-  size_t index_ = 0;
-};
 
 }  // namespace facade

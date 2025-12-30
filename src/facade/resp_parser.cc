@@ -30,6 +30,12 @@ RESPObj::Type RESPObj::GetType() const {
   return static_cast<Type>(reply_->type);
 }
 
+size_t RESPObj::Size() const {
+  if (!reply_)
+    return 0;
+  return GetType() == Type::ARRAY ? reply_->elements : 1;
+}
+
 std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len) {
   int status = REDIS_OK;
   if (len != 0) {  // if no new data we check is previoud data produced a reply
@@ -85,7 +91,8 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
 
 std::ostream& operator<<(std::ostream& os, const RESPArray& arr) {
   os << "[";
-  for (size_t i = 0; i < arr.Size() - 1; ++i) {
+  for (int64_t i = 0; i < (int64_t)arr.Size() - 1; ++i) {
+    os << arr[i] << ", ";
   }
   os << arr[arr.Size() - 1] << "]";
   return os;
