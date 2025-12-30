@@ -37,8 +37,6 @@ class RespSrvParser {
    * accessing res. However, if parser returns INPUT_PENDING a caller may discard consumed
    * part of str because parser caches the intermediate state internally according to 'consumed'
    * result.
-   *
-   *
    */
 
   Result Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* dest);
