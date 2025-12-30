@@ -1345,6 +1345,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
 
+    // Allow SELECT only for global/non-atomic mode
+    if (cid->name() == "SELECT" && mode == Transaction::LOCK_AHEAD)
+      return ErrorReply{"This Redis command is not allowed from script"};
+
     if (cid->IsTransactional()) {
       auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, mode);
 

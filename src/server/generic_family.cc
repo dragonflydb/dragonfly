@@ -2050,7 +2050,7 @@ constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
-  constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
+  constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::WRITE, -2, 1, -1, acl::kDel}.HFUNC(Del)
