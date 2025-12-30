@@ -186,6 +186,9 @@ if(WITH_SIMSIMD)
         -DSIMSIMD_DYNAMIC_DISPATCH=1 \
         -DSIMSIMD_NATIVE_F16=${SIMSIMD_NATIVE_F16_VAL} \
         -DSIMSIMD_NATIVE_BF16=${SIMSIMD_NATIVE_BF16_VAL} \
+        -DSIMSIMD_TARGET_SVE_BF16=1 \
+        -DSIMSIMD_TARGET_SVE_F16=1  \
+        -DSIMSIMD_TARGET_SVE2=1 \
         -I<SOURCE_DIR>/include -c <SOURCE_DIR>/c/lib.c -o <SOURCE_DIR>/lib.o && \
       ar rcs <SOURCE_DIR>/libsimsimd.a <SOURCE_DIR>/lib.o"
     INSTALL_COMMAND bash -c "\
