@@ -24,7 +24,7 @@ auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* 
     buf_stash_.clear();
 
     if (str[0] == '*') {
-      // We recognized a non-INLINE state, starting with '$'
+      // We recognized a non-INLINE state, starting with '*'
       str.remove_prefix(1);
       *consumed += 1;
       state_ = ARRAY_LEN_S;
