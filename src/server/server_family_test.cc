@@ -629,6 +629,23 @@ TEST_F(ServerFamilyTest, ConfigNormalization) {
               RespArray(ElementsAre("replica_priority", "13")));
 }
 
+// Verify CONFIG GET returns numeric bytes for memory configs (Redis/Valkey compatibility).
+TEST_F(ServerFamilyTest, ConfigGetMemoryBytes) {
+  absl::FlagSaver fs;
+
+  // Set maxmemory using human-readable format
+  EXPECT_THAT(Run({"config", "set", "maxmemory", "1GB"}), "OK");
+
+  // CONFIG GET should return numeric bytes, not human-readable format
+  EXPECT_THAT(Run({"config", "get", "maxmemory"}),
+              RespArray(ElementsAre("maxmemory", "1073741824")));
+
+  // Test another value
+  EXPECT_THAT(Run({"config", "set", "maxmemory", "512MB"}), "OK");
+  EXPECT_THAT(Run({"config", "get", "maxmemory"}),
+              RespArray(ElementsAre("maxmemory", "536870912")));
+}
+
 TEST_F(ServerFamilyTest, CommandDocsOk) {
   EXPECT_THAT(Run({"command", "docs"}), ErrArg("COMMAND DOCS Not Implemented"));
 }

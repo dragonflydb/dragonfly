@@ -1,9 +1,6 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/json_family.h"
-
 #include <absl/flags/flag.h>
 #include <absl/strings/str_replace.h>
 

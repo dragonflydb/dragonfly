@@ -284,6 +284,11 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
       "8c4dafdf9b6b7bcf511a0d1ec0518bed9260e16d",  // django-cacheops see #6119
       "3fc258d735c924d5652fceb90b41bea1f1f29e4b",  // django-cacheops see #6119
       "43d401bd2bd0ad864c3ca221512cda1b6215ec23",  // django-cacheops see #272
+      // Cm_Cache_Backend_Redis (Magento) - until
+      // https://github.com/colinmollenhour/Cm_Cache_Backend_Redis/pull/186 is merged
+      "1617c9fb2bda7d790bb1aaa320c1099d81825e64",  // Cm_Cache_Backend_Redis LUA_SAVE
+      "39383dcf36d2e71364a666b2a806bc8219cd332d",  // Cm_Cache_Backend_Redis LUA_CLEAN
+      "6990147f5d1999b936dac3b6f7e5d2071908bcf3",  // Cm_Cache_Backend_Redis LUA_GC
   };
 
   if (find(begin(kUndeclaredShas), end(kUndeclaredShas), sha) != end(kUndeclaredShas)) {

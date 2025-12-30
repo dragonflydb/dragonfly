@@ -16,6 +16,7 @@
 #include "common/arg_range.h"
 #include "common/backed_args.h"
 #include "facade/op_status.h"
+#include "strings/human_readable.h"
 
 namespace facade {
 
@@ -268,7 +269,7 @@ struct MemcacheCmdFlags {
       uint16_t return_ttl : 1;          // t
       uint16_t return_access_time : 1;  // l
       uint16_t return_hit : 1;          // h
-      uint16_t return_version : 1;      // c
+      uint16_t return_cas : 1;          // c
     };
   };
 };
@@ -287,20 +288,7 @@ inline thread_local FacadeStats* tl_facade_stats = nullptr;
 
 void ResetStats();
 
-// TODO: move this flag to helio (base/flags.h)
-struct MemoryBytesFlag {
-  size_t value = 0;
-
-  MemoryBytesFlag(size_t s = 0) : value(s) {  // NOLINT
-  }
-
-  operator size_t() const {  // NOLINT
-    return value;
-  }
-};
-
-bool AbslParseFlag(std::string_view in, MemoryBytesFlag* flag, std::string* err);
-std::string AbslUnparseFlag(const MemoryBytesFlag& flag);
+using MemoryBytesFlag = strings::MemoryBytesFlag;
 
 // Constants for socket bufring.
 constexpr uint16_t kRecvSockGid = 0;

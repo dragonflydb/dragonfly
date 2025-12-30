@@ -1,11 +1,6 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include "server/list_family.h"
-
-#include "facade/cmd_arg_parser.h"
-#include "server/acl/acl_commands_def.h"
-
 extern "C" {
 #include "redis/sds.h"
 }
@@ -15,8 +10,11 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/qlist.h"
+#include "facade/cmd_arg_parser.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -1306,7 +1304,7 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 
-void ListFamily::Register(CommandRegistry* registry) {
+void RegisterListFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::LIST);
   *registry
       << CI{"LPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)

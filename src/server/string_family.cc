@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/string_family.h"
-
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -23,6 +21,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -481,10 +480,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 }
 
 struct GetResp {
-  string key;  // TODO: to use backing storage to optimize this as well.
   string_view value;
   uint64_t mc_ver = 0;
   uint32_t mc_flag = 0;
+  uint32_t ttl_sec = 0;
 };
 
 struct MGetResponse {
@@ -495,10 +494,6 @@ struct MGetResponse {
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
 
-// fetch_mask values
-constexpr uint8_t FETCH_MCFLAG = 0x1;
-constexpr uint8_t FETCH_MCVER = 0x2;
-
 template <typename Iter> using SearchKey = std::function<OpResult<Iter>(string_view)>;
 
 // A find operation which can mutate, for commands which can write, eg GAT
@@ -508,7 +503,7 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
                          const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
@@ -560,8 +555,8 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
   // Allocate enough for all values
   response.storage = make_unique<char[]>(total_size);
   char* next = response.storage.get();
-  bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
-  bool fetch_mcver = fetch_mask & FETCH_MCVER;
+  bool fetch_mcflag = cmd_flags.return_flags;
+  bool fetch_cas = cmd_flags.return_cas;
   const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
 
   for (size_t i = 0; i < items.size(); ++i) {
@@ -595,12 +590,20 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
     resp.value = string_view(next, size);
     next += size;
 
+    // Note - correct behavior is to return TTL before it was updated by GAT,
+    // but this is complex to implement so we return the updated TTL.
+    if (value.HasExpire() && cmd_flags.return_ttl) {
+      auto exp_it = db_slice.GetDBTable(t->GetDbIndex())->expire.Find(it->first);
+      int64_t expire_time_ms = db_slice.ExpireTime(exp_it->second);
+      int64_t ttl_ms = expire_time_ms - t->GetDbContext().time_now_ms;
+      resp.ttl_sec = ttl_ms > 0 ? static_cast<uint32_t>((ttl_ms + 999) / 1000) : 0;
+    }
     if (fetch_mcflag) {
       if (value.HasFlag()) {
         resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
       }
 
-      if (fetch_mcver) {
+      if (fetch_cas) {
         resp.mc_ver = it.GetVersion();
       }
     }
@@ -608,15 +611,6 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
   key_index.clear();
 
   return response;
-}
-
-MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
-                    const Transaction* t, EngineShard* shard) {
-  SearchConst find_op = [&](string_view key) {
-    const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
-    return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-  };
-  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 // Extend key with value, either prepend or append. Return size of stored string
@@ -710,7 +704,8 @@ void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmnd_cntx) {
     };
 
     OpResult<bool> result = cmnd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-    cmnd_cntx->SendStored(result.value_or(false));
+    MCRender render(cmnd_cntx->mc_command()->cmd_flags);
+    cmnd_cntx->SendSimpleString(render.RenderStored(result.value_or(false)));
   }
 }
 
@@ -737,7 +732,7 @@ void IncrByGeneric(string_view key, int64_t val, CommandContext* cmnd_cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      cmnd_cntx->rb()->SendLong(result.value());
+      cmnd_cntx->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
       cmnd_cntx->SendError(kInvalidIntErr);
@@ -793,18 +788,26 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
-                   const Transaction* t, EngineShard* shard,
-                   const DbSlice::ExpireParams& expire_params) {
-  SearchMut find_op = [&](string_view key) {
-    return FindKeyAndSetExpiry(GetAndTouchParams{
-        .t = t,
-        .shard = shard,
-        .expire_params = expire_params,
-        .key = key,
-    });
-  };
-  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
+MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
+                    const Transaction* t, EngineShard* shard,
+                    const DbSlice::ExpireParams* gat_params = nullptr) {
+  if (gat_params) {
+    SearchMut find_op = [&](string_view key) {
+      return FindKeyAndSetExpiry(GetAndTouchParams{
+          .t = t,
+          .shard = shard,
+          .expire_params = *gat_params,
+          .key = key,
+      });
+    };
+    return CollectKeys(std::move(wait_bc), err, cmd_flags, t, shard, std::move(find_op));
+  } else {
+    SearchConst find_op = [&](string_view key) {
+      const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+      return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    };
+    return CollectKeys(std::move(wait_bc), err, cmd_flags, t, shard, std::move(find_op));
+  }
 }
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
@@ -1025,7 +1028,13 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
           GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
           return OpStatus::OK;
         });
-        return cmnd_cntx->SendStored(true);
+        if (cmnd_cntx->mc_command() != nullptr) {
+          cmnd_cntx->SendSimpleString(
+              MCRender{cmnd_cntx->mc_command()->cmd_flags}.RenderStored(true));
+        } else {
+          cmnd_cntx->SendOk();
+        }
+        return;
       }
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
@@ -1086,7 +1095,9 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
 
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.
-        return cmnd_cntx->SendStored(status == OpStatus::OK);
+        MCRender render(cmnd_cntx->mc_command()->cmd_flags);
+        cmnd_cntx->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+        return;
       }
       if (status == OpStatus::OUT_OF_MEMORY) {
         return cmnd_cntx->SendError(kOutOfMemory);
@@ -1126,7 +1137,15 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kOutOfMemory);
   }
 
-  cmnd_cntx->SendStored(result == OpStatus::OK);
+  if (cmnd_cntx->mc_command() != nullptr) {
+    MCRender render(cmnd_cntx->mc_command()->cmd_flags);
+    return cmnd_cntx->SendSimpleString(render.RenderStored(result == OpStatus::OK));
+  }
+  if (result == OpStatus::OK) {
+    cmnd_cntx->SendOk();
+  } else {
+    cmnd_cntx->SendNull();
+  }
 }
 
 /// (P)SETEX key seconds (milliseconds) value
@@ -1169,11 +1188,11 @@ void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
 
   switch (SetGeneric(sparams, key, value, *cmnd_cntx)) {
     case OpStatus::OK:
-      return cmnd_cntx->rb()->SendLong(1);  // Successfully set the value
+      return cmnd_cntx->SendLong(1);  // Successfully set the value
     case OpStatus::OUT_OF_MEMORY:
-      return cmnd_cntx->rb()->SendError(kOutOfMemory);
+      return cmnd_cntx->SendError(kOutOfMemory);
     case OpStatus::SKIPPED:
-      return cmnd_cntx->rb()->SendLong(0);  // Existed, zero updates performed
+      return cmnd_cntx->SendLong(0);  // Existed, zero updates performed
     default:
       LOG(FATAL) << "Invalid result";
   }
@@ -1304,7 +1323,7 @@ void CmdIncrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, val, cmnd_cntx);
 }
@@ -1315,7 +1334,7 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmnd_cntx) {
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return cmnd_cntx->rb()->SendError(kInvalidFloatErr);
+    return cmnd_cntx->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1344,17 +1363,17 @@ void CmdDecrBy(CmdArgList args, CommandContext* cmnd_cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return cmnd_cntx->rb()->SendError(kIncrOverflow);
+    return cmnd_cntx->SendError(kIncrOverflow);
   }
 
   return IncrByGeneric(key, -val, cmnd_cntx);
 }
 
 // Reorder per-shard results according to argument order of primary command
-void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t, bool is_memcache,
+void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t,
                          absl::Span<optional<GetResp>> dest) {
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!t->IsActive(sid))
@@ -1367,33 +1386,31 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
       if (!src.resp_arr[src_indx])
         continue;
 
+      DCHECK_LT(it.index(), dest.size());
       auto& item = dest[it.index()];
-      item = std::move(src.resp_arr[src_indx]);
-      if (is_memcache)
-        item->key = *it;
+      item = src.resp_arr[src_indx];
     }
   }
 }
 
-void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
+void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
+                 const DbSlice::ExpireParams* gat_params) {
   DCHECK_GE(args.size(), 1U);
 
-  uint8_t fetch_mask = 0;
-  auto* builder = cmnd_cntx->rb();
-  const bool is_memcache = cmnd_cntx->mc_command() != nullptr;
+  MemcacheCmdFlags cmd_flags;
 
-  if (is_memcache) {
-    fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx->mc_command()->replies_cas_token())
-      fetch_mask |= FETCH_MCVER;
+  if (cmnd_cntx->mc_command()) {
+    cmd_flags = cmnd_cntx->mc_command()->cmd_flags;
   }
 
   fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
-  AggregateError tiering_err;          // Fist tiering error
+  AggregateError tiering_err;          // First tiering error
 
-  std::vector<MGetResponse> mget_resp(shard_set->size());
+  unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, fetch_mask, t, shard);
+    mget_resp[shard->shard_id()] =
+        OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_params);
     return OpStatus::OK;
   };
 
@@ -1403,40 +1420,64 @@ void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
   if (auto err = std::move(tiering_err).Destroy(); err)
-    return builder->SendError(err.message());
+    return cmnd_cntx->SendError(err.message());
 
-  // reorder shard results back according to argument order
-  absl::FixedArray<optional<GetResp>, 8> res(args.size());
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, is_memcache, absl::MakeSpan(res));
+  size_t arg_len = args.size();
 
-  SinkReplyBuilder::ReplyScope scope(builder);
-  if (is_memcache) {
-    // TODO: implement deferred support for MGET, which prevents us from running SET,GET in async
-    // pipeline.
-    DCHECK(!cmnd_cntx->IsDeferredReply());
-    auto* rb = static_cast<MCReplyBuilder*>(builder);
-    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);  // memcache is never squashed
-    for (const auto& entry : res) {
-      if (entry) {
-        // TODO: we will need to pass the whole response to ParsedCommand to support
-        // capturing MC replies.
-        rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0,
-                      entry->mc_flag, cmnd_cntx->mc_command()->replies_cas_token());
-      } else {
-        cmnd_cntx->SendMiss();
+  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
+  ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmnd_cntx->tx,
+                      absl::MakeSpan(mget_results.get(), arg_len));
+
+  if (cmnd_cntx->mc_command()) {
+    // We can not access `args` inside the lambda below if it runs asynchronously.
+    // Access to arguments must be done via cmnd_cntx.
+    auto replier = [mget_results = std::move(mget_results), cmnd_cntx](SinkReplyBuilder* builder) {
+      auto* mc_builder = static_cast<MCReplyBuilder*>(builder);
+      facade::MCRender mc_render{cmnd_cntx->mc_command()->cmd_flags};
+      for (size_t i = 0; i < cmnd_cntx->size(); ++i) {
+        const auto& entry = mget_results[i];
+        if (entry) {
+          mc_builder->SendValue(cmnd_cntx->mc_command()->cmd_flags, cmnd_cntx->at(i), entry->value,
+                                0, entry->mc_flag, entry->ttl_sec);
+        } else {
+          mc_builder->SendSimpleString(mc_render.RenderMiss());
+        }
       }
-    }
-    cmnd_cntx->SendGetEnd();
+      mc_builder->SendSimpleString(mc_render.RenderGetEnd());
+    };
+    cmnd_cntx->ReplyWith(std::move(replier));
   } else {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->StartArray(res.size());
-    for (const auto& entry : res) {
-      if (entry)
-        rb->SendBulkString(entry->value);
-      else
-        rb->SendNull();
-    }
+    // TODO: remove arg_len capture once we store RESP arguments inside cmnd_cntx.
+    auto replier = [arg_len, mget_results = std::move(mget_results),
+                    cmnd_cntx](SinkReplyBuilder* builder) {
+      auto* redis_builder = static_cast<RedisReplyBuilder*>(builder);
+      redis_builder->StartArray(arg_len);
+      for (size_t i = 0; i < arg_len; ++i) {
+        const auto& entry = mget_results[i];
+        if (entry) {
+          redis_builder->SendBulkString(entry->value);
+        } else {
+          redis_builder->SendNull();
+        }
+      }
+    };
+    cmnd_cntx->ReplyWith(std::move(replier));
   }
+}
+
+void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
+  MGetGeneric(args, cmnd_cntx, nullptr);
+}
+
+// Implements the memcache GAT command. The expected input is
+// GAT key [keys...]
+// The expiry argument is stored in mc_command()->expire_ts
+void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
+  DCHECK(cmnd_cntx->mc_command());
+  int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
+  const DbSlice::ExpireParams expire_params{
+      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  MGetGeneric(args, cmnd_cntx, &expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1460,7 +1501,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
     result = status;
 
   if (*result == OpStatus::OK) {
-    cmnd_cntx->rb()->SendOk();
+    cmnd_cntx->SendOk();
   } else {
     cmnd_cntx->SendError(*result);
   }
@@ -1500,7 +1541,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   };
   cmnd_cntx->tx->Execute(std::move(epilog_cb), true);
 
-  cmnd_cntx->rb()->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmnd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
 void CmdStrLen(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1610,11 +1651,11 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return cmnd_cntx->rb()->SendError(kInvalidIntErr);
+    return cmnd_cntx->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
@@ -1647,14 +1688,14 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmnd_cntx->rb()->SendError(kWrongTypeErr);
+        cmnd_cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmnd_cntx->rb()->SendError(kInvalidIntErr);
+        cmnd_cntx->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmnd_cntx->rb()->SendError(kOutOfMemory);
+        cmnd_cntx->SendError(kOutOfMemory);
         break;
       default:
         cmnd_cntx->SendError(result.status());
@@ -1663,66 +1704,11 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 }
 
-// Implements the memcache GAT command. The expected input is
-// GAT <expiry-in-seconds> key [keys...]
-void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
-  DCHECK_GE(args.size(), 1U);
-
-  auto* builder = cmnd_cntx->rb();
-  DCHECK(cmnd_cntx->mc_command());
-
-  uint8_t fetch_mask = FETCH_MCFLAG;
-  if (cmnd_cntx->mc_command()->replies_cas_token())
-    fetch_mask |= FETCH_MCVER;
-
-  SinkReplyBuilder::ReplyScope scope(builder);
-  auto* rb = static_cast<MCReplyBuilder*>(builder);
-  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
-
-  CmdArgParser parser{args};
-  const int64_t expire_ts = parser.Next<uint64_t>();
-  if (parser.HasError()) {
-    return cmnd_cntx->SendError(parser.TakeError().MakeReply());
-  }
-
-  BlockingCounter tiering_bc{0};
-  AggregateError tiering_err;
-  std::vector<MGetResponse> mget_resp(shard_set->size());
-
-  const DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] =
-        OpGAT(tiering_bc, &tiering_err, fetch_mask, t, shard, expire_params);
-    return OpStatus::OK;
-  };
-
-  const OpStatus result = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  CHECK_EQ(OpStatus::OK, result);
-
-  tiering_bc->Wait();
-  if (auto err = std::move(tiering_err).Destroy(); err)
-    return builder->SendError(err.message());
-
-  absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx->tx, true,
-                      absl::MakeSpan(ordered_by_shard));
-  for (const auto& entry : ordered_by_shard) {
-    if (entry) {
-      rb->SendValue(cmnd_cntx->mc_command()->cmd_flags, entry->key, entry->value, 0, entry->mc_flag,
-                    cmnd_cntx->mc_command()->replies_cas_token());
-    } else {
-      cmnd_cntx->SendMiss();
-    }
-  }
-  cmnd_cntx->SendGetEnd();
-}
-
 }  // namespace
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 
-void StringFamily::Register(CommandRegistry* registry) {
+void RegisterStringFamily(CommandRegistry* registry) {
   constexpr uint32_t kMSetMask =
       CO::JOURNALED | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
 
@@ -1753,7 +1739,7 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
       << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
-      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -3, 2, -1}.HFUNC(
+      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}.HFUNC(
              GAT);
 }
 

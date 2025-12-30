@@ -376,7 +376,7 @@ TEST_F(PageUsageStatsTest, QuotaChecks) {
     EXPECT_FALSE(p.QuotaDepleted());
   }
   {
-    PageUsage p{CollectPageStats::NO, 0, 4};
+    PageUsage p{CollectPageStats::NO, 0, CycleQuota{4}};
     util::ThisFiber::SleepFor(5us);
     EXPECT_TRUE(p.QuotaDepleted());
   }
@@ -399,7 +399,7 @@ TEST_F(PageUsageStatsTest, BlockList) {
   EXPECT_EQ(result.objects_moved, 2);
 
   // quota depleted without defragmentation
-  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  PageUsage p_zero{CollectPageStats::NO, 0.1, CycleQuota{0}};
   p_zero.SetForceReallocate(true);
   result = bl.Defragment(&p_zero);
   EXPECT_TRUE(result.quota_depleted);
@@ -415,7 +415,7 @@ TEST_F(PageUsageStatsTest, BlockListDefragmentResumes) {
     bl.Insert(i);
   }
 
-  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, CycleQuota{10}};
   p_small_quota.SetForceReallocate(true);
   util::ThisFiber::SleepFor(10us);
   auto result = bl.Defragment(&p_small_quota);
@@ -505,7 +505,7 @@ TEST_F(PageUsageStatsTest, DefragmentTagIndex) {
   // single doc with single term returned by `GetTags` should result in two reallocations.
   EXPECT_EQ(result.objects_moved, 2);
 
-  PageUsage p_zero{CollectPageStats::NO, 0.1, 0};
+  PageUsage p_zero{CollectPageStats::NO, 0.1, CycleQuota{0}};
   p_zero.SetForceReallocate(true);
   result = index.Defragment(&p_zero);
   EXPECT_TRUE(result.quota_depleted);
@@ -526,7 +526,7 @@ TEST_F(PageUsageStatsTest, TagIndexDefragResumeWithChanges) {
     index.Add(i, md);
   }
 
-  PageUsage p_small_quota{CollectPageStats::NO, 0.1, 10};
+  PageUsage p_small_quota{CollectPageStats::NO, 0.1, CycleQuota{10}};
   p_small_quota.SetForceReallocate(true);
   util::ThisFiber::SleepFor(10us);
   search::DefragmentResult result = index.Defragment(&p_small_quota);
@@ -622,50 +622,6 @@ void InitBenchMemRes() {
 }
 
 }  // namespace
-
-void BM_JSONDefragSerialize(benchmark::State& state) {
-  InitBenchMemRes();
-
-  std::string json_data = GenerateTestJSON(state.range(0));
-
-  for (auto _ : state) {
-    state.PauseTiming();
-    auto parsed = ParseJsonUsingShardHeap(json_data);
-    DCHECK(parsed.has_value());
-    state.ResumeTiming();
-
-    JsonType defragmented = DeepCopyJSON(&parsed.value());
-    benchmark::DoNotOptimize(defragmented);
-  }
-}
-
-BENCHMARK(BM_JSONDefragSerialize)
-    ->ArgName("objects_per_json")
-    ->RangeMultiplier(5)
-    ->Range(100, 10000);
-
-void BM_JSONDefragTreeWalk(benchmark::State& state) {
-  InitBenchMemRes();
-
-  std::string json_data = GenerateTestJSON(state.range(0));
-
-  for (auto _ : state) {
-    state.PauseTiming();
-    auto parsed = ParseJsonUsingShardHeap(json_data);
-    PageUsage p{CollectPageStats::NO, 0.1};
-    // Assumes every single node has to be defragmented. not realistic!
-    p.SetForceReallocate(true);
-    state.ResumeTiming();
-
-    Defragment(parsed.value(), &p);
-    benchmark::DoNotOptimize(parsed);
-  }
-}
-
-BENCHMARK(BM_JSONDefragTreeWalk)
-    ->ArgName("objects_per_json")
-    ->RangeMultiplier(5)
-    ->Range(100, 10000);
 
 void BM_JSONDefragSelective(benchmark::State& state) {
   InitBenchMemRes();

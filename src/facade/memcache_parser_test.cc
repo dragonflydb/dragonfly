@@ -173,6 +173,11 @@ TEST_F(MCParserTest, Gat) {
   EXPECT_EQ(cmd_.type, MemcacheParser::GATS);
   EXPECT_THAT(ToArgs(), ElementsAre("foo", "bar", "baz"));
   EXPECT_EQ(cmd_.expire_ts, 1000);
+
+  parser_.set_last_unix_time(2000);
+  res = Parse("gats 1000 foo bar baz\r\n");
+  EXPECT_EQ(MemcacheParser::OK, res);
+  EXPECT_EQ(cmd_.expire_ts, 3000);
 }
 
 TEST_F(MCParserTest, ValueState) {

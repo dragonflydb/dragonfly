@@ -43,7 +43,7 @@ struct EntryPayloadVisitor {
 
 // Extract payload from entry in string form.
 std::string ExtractPayload(ParsedEntry& entry) {
-  std::string out = ConCat(entry.cmd.cmd_args);
+  std::string out = ConCat(entry.cmd);
 
   if (!out.empty())
     out.pop_back();
@@ -114,16 +114,17 @@ TEST(Journal, WriteRead) {
   io::BufSource source{&buf};
   JournalReader reader{&source, 0};
 
+  ParsedEntry res;
   for (unsigned i = 0; i < test_entries.size(); i++) {
     auto& expected = test_entries[i];
 
-    auto res = reader.ReadEntry();
-    ASSERT_TRUE(res.has_value());
+    auto ec = reader.ReadEntry(&res);
+    ASSERT_FALSE(ec);
 
-    ASSERT_EQ(expected.opcode, res->opcode);
-    ASSERT_EQ(expected.txid, res->txid);
-    ASSERT_EQ(expected.dbid, res->dbid);
-    ASSERT_EQ(ExtractPayload(expected), ExtractPayload(*res));
+    ASSERT_EQ(expected.opcode, res.opcode);
+    ASSERT_EQ(expected.txid, res.txid);
+    ASSERT_EQ(expected.dbid, res.dbid);
+    ASSERT_EQ(ExtractPayload(expected), ExtractPayload(res));
   }
 }
 

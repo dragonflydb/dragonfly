@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/list_family.h"
-
 #include <absl/strings/match.h>
 
 #include <random>
@@ -15,7 +13,6 @@
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
-#include "server/string_family.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 #include "util/fibers/fibers.h"

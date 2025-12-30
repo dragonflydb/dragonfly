@@ -17,6 +17,30 @@ struct hdr_histogram;
 
 namespace dfly {
 
+class CycleQuota {
+ public:
+  static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
+  static constexpr uint64_t kDefaultDefragQuota = 150;
+
+  explicit CycleQuota(uint64_t quota_usec);
+
+  // Sets the starting point for the quota to be counted from. Can be called multiple times to reset
+  // the quota counter.
+  void Arm();
+
+  bool Depleted() const;
+
+  uint64_t UsedCycles() const;
+
+  static CycleQuota Unlimited();
+
+ private:
+  explicit CycleQuota(uint64_t quota_cycles, bool /*tag*/);
+
+  uint64_t quota_cycles_;
+  uint64_t start_cycles_{0};
+};
+
 enum class CollectPageStats : uint8_t { YES, NO };
 
 struct CollectedPageStats {
@@ -42,10 +66,17 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
-  virtual ~PageUsage() = default;
-  static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
+  PageUsage(CollectPageStats collect_stats, float threshold,
+            CycleQuota quota = CycleQuota::Unlimited());
 
-  PageUsage(CollectPageStats collect_stats, float threshold, uint64_t quota_usec = kMaxQuota);
+  virtual ~PageUsage() = default;
+
+  // Resets the quota timer to split defragmentation into different groups with separate quotas.
+  // For example, first defragment objects with a quota and then defragment search indices with the
+  // same quota independently.
+  void ArmQuotaTimer();
+
+  uint64_t UsedQuotaCycles() const;
 
   virtual bool IsPageForObjectUnderUtilized(void* object);
 
@@ -98,9 +129,7 @@ class PageUsage {
 
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};
-
-  uint64_t quota_cycles_;
-  uint64_t start_cycles_;
+  CycleQuota quota_;
 };
 
 }  // namespace dfly

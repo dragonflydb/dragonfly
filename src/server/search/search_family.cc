@@ -1498,71 +1498,50 @@ void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view query,
-                                        std::string_view args_str) {
+                                        std::string_view args_str, const SearchParams& params) {
   vector<SearchResult> results;
-  std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str);
+  const bool sorted = params.sort_option.has_value();
+  const std::string_view with_sortkeys = sorted && !params.with_sortkeys ? " WITHSORTKEYS"sv : ""sv;
+  std::string cmd = absl::StrCat("FT.SEARCH ", idx, " ", query, " CSS ", args_str, with_sortkeys);
 
   util::fb2::Mutex mu_;
-  // TODO for now we suppose that callback is called synchronously. If not, we need to add
-  // synchronization here for results vector modification.
-  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& res) {
-    if (res.Empty()) {
-      LOG(ERROR) << "FT.SEARCH CSS reply is empty";
-      return;
-    }
-    auto array_res_opt = res.As<RESPArray>();
-    if (!array_res_opt || array_res_opt->Empty()) {
-      LOG(WARNING) << "Incorrect reply type for FT.SEARCH CSS: " << static_cast<int>(res.GetType());
-      return;
-    }
-
-    auto array_res = *array_res_opt;
-    const auto size = array_res[0].As<uint64_t>();
-    if (!size.has_value()) {
-      LOG(ERROR) << "FT.SEARCH CSS reply unexpected type: "
-                 << static_cast<int>(array_res[0].GetType()) << "\n Cmd: " << cmd << "\n Reply: ";
-      return;
-    }
+  auto req_future = cluster::Coordinator::Current().DispatchAll(cmd, [&](const RESPObj& resp_obj) {
+    RESPIterator it{resp_obj};
+    const auto size = it.Next<uint64_t>();
 
     std::lock_guard lock{mu_};
-    results.emplace_back();
-    results.back().total_hits = *size;
-    for (size_t i = 2; i < array_res.Size(); i += 2) {
-      auto& search_doc = results.back().docs.emplace_back();
-      auto key_opt = array_res[i - 1].As<std::string_view>();
-      if (!key_opt) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document key: "
-                   << static_cast<int>(array_res[i - 1].GetType());
-        return;
-      }
-      search_doc.key = *key_opt;
+    auto& res = results.emplace_back();
+    results.back().total_hits = size;
 
-      const auto arr_fields_opt = array_res[i].As<RESPArray>();
-      if (!arr_fields_opt) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data: "
-                   << static_cast<int>(array_res[i].GetType());
-        return;
-      }
-
-      const auto arr_fields = *arr_fields_opt;
-
-      if (arr_fields.Size() % 2 != 0) {
-        LOG(ERROR) << "FT.SEARCH CSS reply unexpected number of elements for document data: "
-                   << arr_fields.Size();
-        return;
-      }
-
-      for (size_t j = 0; j < arr_fields.Size(); j += 2) {
-        auto key = arr_fields[j].As<std::string_view>();
-        auto value = arr_fields[j + 1].As<std::string_view>();
-        if (!key || !value) {
-          LOG(ERROR) << "FT.SEARCH CSS reply unexpected type for document data [key : value]: "
-                     << static_cast<int>(arr_fields[j].GetType()) << " : "
-                     << static_cast<int>(arr_fields[j + 1].GetType());
-          return;
+    while (it.HasNext()) {
+      auto& search_doc = res.docs.emplace_back();
+      search_doc.key = it.Next<std::string>();
+      if (sorted) {
+        auto sort_score = it.Next<std::string_view>();
+        if (sort_score.empty() || (sort_score[0] != '#' && sort_score[0] != '$')) {
+          it.SetError();
+          break;
         }
-        search_doc.values.emplace(std::string(*key), std::string(*value));
+        if (sort_score[0] == '#') {  // It's a double
+          double sort_res = 0;
+          if (ParseDouble(sort_score.substr(1), &sort_res)) {
+            search_doc.sort_score = sort_res;
+          } else {
+            it.SetError();
+            break;
+          }
+        } else {  // It's a string
+          search_doc.sort_score = std::string(sort_score.substr(1));
+        }
       }
+
+      for (auto arr_fields = it.Next<RESPIterator>(); arr_fields.HasNext();) {
+        auto [key, value] = arr_fields.Next<std::string, std::string>();
+        search_doc.values.emplace(std::move(key), std::move(value));
+      }
+    }
+    if (it.HasError()) {
+      LOG(ERROR) << "FT.SEARCH CSS reply parsing error: " << resp_obj;
     }
   });
   // TODO add error handling
@@ -1593,7 +1572,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
     std::string args_str = absl::StrJoin(args.subspan(2), " ");
 
-    css_docs = FtSearchCSS(index_name, query_str, args_str);
+    css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
   }
 
   search::SearchAlgorithm search_algo;

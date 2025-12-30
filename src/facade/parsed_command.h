@@ -24,8 +24,7 @@ class MCRender {
   std::string RenderMiss() const;
   std::string RenderDeleted() const;
   std::string RenderGetEnd() const;
-  std::string RenderStored() const;
-  std::string RenderNotStored() const;
+  std::string RenderStored(bool ok) const;
 
  private:
   MemcacheCmdFlags flags_;
@@ -118,22 +117,20 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString("OK");
   }
 
-  void SendStored(bool ok /* true - ok, false - skipped*/);
-
   void SendNotFound() {  // For MC only.
     SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
   }
 
-  void SendMiss() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderMiss());
-  }
+  void SendLong(long val);
+  void SendNull();
 
-  void SendGetEnd() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderGetEnd());
-  }
-
-  void SendDeleted() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderDeleted());
+  template <typename F> void ReplyWith(F&& func) {
+    if (is_deferred_reply_) {
+      reply_payload_ = std::forward<F>(func);
+      NotifyReplied();
+    } else {
+      func(rb_);
+    }
   }
 
   // If payload exists, sends it to reply builder, resets it and returns true.
@@ -166,8 +163,6 @@ class ParsedCommand : public cmn::BackedArguments {
   bool CheckDoneAndMarkHead();
   void NotifyReplied();
 
-  void SendDirect(const payload::StoredReply& sr);
-
   // Synchronization state bits. The reply callback in a shard thread sets ASYNC_REPLY_DONE
   // when payload is filled. It also notifies the connection if the command is marked as HEAD_REPLY.
   // The connection fiber checks for ASYNC_REPLY_DONE and sets HEAD_REPLY via
@@ -189,10 +184,6 @@ class ParsedCommand : public cmn::BackedArguments {
   payload::Payload reply_payload_;  // captured reply payload for async dispatches
 };
 
-#ifdef __APPLE__
-static_assert(sizeof(ParsedCommand) == 216);
-#else
 static_assert(sizeof(ParsedCommand) == 224);
-#endif
 
 }  // namespace facade

@@ -43,18 +43,13 @@ extern "C" {
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
-#include "server/bitops_family.h"
-#include "server/bloom_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
+#include "server/command_families.h"
 #include "server/error.h"
 #include "server/generic_family.h"
-#include "server/geo_family.h"
-#include "server/hll_family.h"
 #include "server/hset_family.h"
 #include "server/http_api.h"
-#include "server/json_family.h"
-#include "server/list_family.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
 #include "server/script_mgr.h"
@@ -62,7 +57,6 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/stream_family.h"
-#include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
@@ -1417,12 +1411,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilder* builder,
-                                        facade::ConnectionContext* cntx) {
+DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
+                                        facade::ParsedCommand* parsed_cmd) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
-  absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
+  absl::Cleanup clear_last_error([parsed_cmd]() { parsed_cmd->rb()->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args.Front());
@@ -1430,11 +1424,12 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
 
   if (cid == nullptr) {
     auto reply = ReportUnknownCmd(cmd);
-    builder->SendError(reply.ToSv(), reply.kind);
+    parsed_cmd->SendError(reply.ToSv(), reply.kind);
     return DispatchResult::ERROR;
   }
 
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  CommandContext* cmnd_cntx = static_cast<CommandContext*>(parsed_cmd);
+  ConnectionContext* dfly_cntx = cmnd_cntx->server_conn_cntx();
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
@@ -1442,24 +1437,28 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
   CmdArgVec tmp_vec;
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
 
-  if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
-    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
-              << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
-  }
+  if (cmnd_cntx->conn()) {  // no owner in replica context.
+    auto* conn = cmnd_cntx->conn();
 
-  // Don't interrupt running multi commands or admin connections.
-  if (etl.IsPaused() && !dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
-    bool is_write = cid->IsJournaled();
-    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
-    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+    if (VLOG_IS_ON(2)) {
+      LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
+                << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
+    }
 
-    cntx->paused = true;
-    etl.AwaitPauseState(is_write);
-    cntx->paused = false;
+    // Don't interrupt running multi commands or admin connections.
+    if (etl.IsPaused() && !dispatching_in_multi && !conn->IsPrivileged()) {
+      bool is_write = cid->IsJournaled();
+      is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
+      is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+
+      dfly_cntx->paused = true;
+      etl.AwaitPauseState(is_write);
+      dfly_cntx->paused = false;
+    }
   }
 
   if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
-    LOG_IF(WARNING, cntx->replica_conn || !cntx->conn() /* no owner in replica context */)
+    LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
@@ -1477,7 +1476,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
       }
     }
     DCHECK(!err->status);
-    builder->SendError(err->ToSv(), err->kind);
+    cmnd_cntx->SendError(err->ToSv(), err->kind);
     return DispatchResult::ERROR;
   }
 
@@ -1495,7 +1494,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
     if (cid->IsJournaled()) {
       exec_info.is_write = true;
     }
-    builder->SendSimpleString("QUEUED");
+    cmnd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
 
@@ -1510,7 +1509,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
           dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
 
       if (status != OpStatus::OK) {
-        builder->SendError(StatusToMsg(status));
+        cmnd_cntx->SendError(status);
         return DispatchResult::ERROR;
       }
     }
@@ -1525,7 +1524,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
         if (auto st =
                 dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
             st != OpStatus::OK) {
-          builder->SendError(StatusToMsg(st));
+          cmnd_cntx->SendError(StatusToMsg(st));
           return DispatchResult::ERROR;
         }
       }
@@ -1538,21 +1537,13 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, SinkReplyBuilde
   }
 
   DispatchResult res = DispatchResult::ERROR;
-  if (dfly_cntx->cmnd_ctx) {
-    // Currently only used by memcache flow.
-
-    dfly_cntx->cmnd_ctx->cid = cid;
-    dfly_cntx->cmnd_ctx->tx = dfly_cntx->transaction;
-    res = InvokeCmd(tail_args, dfly_cntx->cmnd_ctx);
-  } else {
-    // TODO: eventually Resp flow should be migrated to use CommandContext too.
-    CommandContext command_ctx{cid, dfly_cntx->transaction, builder, dfly_cntx};
-    res = InvokeCmd(tail_args, &command_ctx);
-  }
+  cmnd_cntx->cid = cid;
+  cmnd_cntx->tx = dfly_cntx->transaction;
+  res = InvokeCmd(tail_args, cmnd_cntx);
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
-    builder->SendError("Internal Error");
-    builder->CloseConnection();
+    cmnd_cntx->SendError("Internal Error");
+    cmnd_cntx->rb()->CloseConnection();
   }
 
   if (!dispatching_in_multi) {
@@ -1727,6 +1718,8 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   MultiCommandSquasher::Stats stats;
 
   uint64_t start_cycles = base::CycleClock::Now();
+  CommandContext dummy_cmd_cntx;
+  dummy_cmd_cntx.Init(builder, dfly_cntx);
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1786,7 +1779,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, builder, cntx);
+    DispatchCommand(args, &dummy_cmd_cntx);
     dispatched++;
   }
 
@@ -1810,7 +1803,6 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
 }
 
 void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
-  absl::InlinedVector<string_view, 8> args;
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(parsed_cmd->rb());
   CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
   const auto& cmd = *parsed_cmd->mc_command();
@@ -1879,27 +1871,13 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       return;
   }
 
+  absl::InlinedVector<string_view, 8> args;
   args.emplace_back(cmd_name, strlen(cmd_name));
-
-  // if expire_ts is greater than month it's a unix timestamp
-  // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
-  constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
-  const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
-                                 ? cmd.expire_ts + time(nullptr)
-                                 : cmd.expire_ts;
-
-  // For GAT/GATS commands, the expiry precedes the keys which will be looked up:
-  // GAT|GATS <expiry> key [key...]
-  if (cmd.type == MemcacheParser::GAT || cmd.type == MemcacheParser::GATS) {
-    char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
-    args.emplace_back(ttl, next - ttl);
-  }
 
   if (!cmd.backed_args->empty()) {
     args.emplace_back(cmd.key());
   }
 
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
     args.emplace_back(value);
 
@@ -1907,8 +1885,8 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       args.emplace_back(store_opt, strlen(store_opt));
     }
 
-    if (expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
-      char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
+    if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
+      char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
       args.emplace_back(ttl_op, 4);
       args.emplace_back(ttl, next - ttl);
     }
@@ -1925,8 +1903,7 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       args.emplace_back(store_opt, strlen(store_opt));
     }
   }
-  dfly_cntx->cmnd_ctx = static_cast<CommandContext*>(parsed_cmd);
-  DispatchCommand(ParsedArgs{args}, mc_builder, cntx);
+  DispatchCommand(ParsedArgs{args}, parsed_cmd);
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
@@ -2159,7 +2136,9 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     case CT::APCALL:  // was handled above
       return;
     default:  // regular call
-      DispatchCommand(ParsedArgs{ca.args}, &replier, cntx);
+      auto* prev = cmd_cntx->SwapReplier(&replier);
+      DispatchCommand(ParsedArgs{ca.args}, cmd_cntx);
+      cmd_cntx->SwapReplier(prev);
   };
 }
 
@@ -3095,8 +3074,8 @@ void Service::RegisterCommands() {
   Register(&registry_);
   server_family_.Register(&registry_);
   GenericFamily::Register(&registry_);
-  ListFamily::Register(&registry_);
-  StringFamily::Register(&registry_);
+  RegisterListFamily(&registry_);
+  RegisterStringFamily(&registry_);
 
 #ifdef WITH_COLLECTION_CMDS
   SetFamily::Register(&registry_);
@@ -3106,11 +3085,11 @@ void Service::RegisterCommands() {
 #endif
 
 #ifdef WITH_EXTENSION_CMDS
-  GeoFamily::Register(&registry_);
-  BitOpsFamily::Register(&registry_);
-  HllFamily::Register(&registry_);
-  BloomFamily::Register(&registry_);
-  JsonFamily::Register(&registry_);
+  RegisterGeoFamily(&registry_);
+  RegisterBitopsFamily(&registry_);
+  RegisterHllFamily(&registry_);
+  RegisterBloomFamily(&registry_);
+  RegisterJsonFamily(&registry_);
 #endif
 
 #ifdef WITH_SEARCH
