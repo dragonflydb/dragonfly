@@ -187,9 +187,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     update_probability_generator_.seed(random_seed + 1);
 
     size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
-    size_data_per_element_ = size_links_level0_ + data_size_ + sizeof(labeltype);
+    size_data_per_element_ = size_links_level0_ + sizeof(char*) + sizeof(labeltype);
     offsetData_ = size_links_level0_;
-    label_offset_ = size_links_level0_ + data_size_;
+    label_offset_ = size_links_level0_ + sizeof(char*);
     offsetLevel0_ = 0;
 
     data_level0_memory_ =
