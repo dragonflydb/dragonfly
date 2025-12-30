@@ -1830,6 +1830,13 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
     return builder->SendOk();
   }
 
+  // Only global/non-atomic multi transactions can change dbs safely,
+  // locked-ahead transactions acquired keys ahead for a specific dbindex
+  if (auto* tx = cntx->transaction; tx && tx->IsMulti()) {
+    if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
+      return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
+  }
+
   if (cntx->conn_state.exec_info.IsRunning()) {
     return cmd_cntx->SendError("SELECT is not allowed in a transaction");
   }
@@ -2043,7 +2050,7 @@ constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
-  constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
+  constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.HFUNC(Del)

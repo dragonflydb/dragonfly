@@ -4,6 +4,7 @@
 
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_replace.h>
 #include <gmock/gmock.h>
 
 #include "base/flags.h"
@@ -1360,6 +1361,43 @@ TEST_F(MultiTest, EvalShaRo) {
 
   resp = Run({"evalsha_ro", write_sha, "1", "foo"});
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
+}
+
+TEST_F(MultiTest, EvalSelect) {
+  string_view script = R"(--!df flags=X
+redis.call('SET', 'A', ARGV[1])
+redis.call('SELECT', '1')
+redis.call('SET', 'A', ARGV[2])
+return 'OK';
+)";
+  auto script_global = absl::StrReplaceAll(script, {{"X", "allow-undeclared-keys"}});
+  auto resp = Run({"EVAL", script_global, "0", "G1", "G2"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"SELECT", "0"});
+  EXPECT_EQ(Run({"GET", "A"}), "G1");
+  Run({"SELECT", "1"});
+  EXPECT_EQ(Run({"GET", "A"}), "G2");
+  Run({"SELECT", "0"});
+
+  auto script_nonatomic = absl::StrReplaceAll(script, {{"X", "disable-atomicity"}});
+  resp = Run({"EVAL", script_nonatomic, "0", "G3", "G4"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"SELECT", "0"});
+  EXPECT_EQ(Run({"GET", "A"}), "G3");
+  Run({"SELECT", "1"});
+  EXPECT_EQ(Run({"GET", "A"}), "G4");
+  Run({"SELECT", "0"});
+
+  // Don't allow in regular transactions
+  string_view script_fail = R"(
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SELECT', '1')
+redis.call('SET', KEYS[1], ARGV[1])
+)";
+  resp = Run({"EVAL", script_fail, "1", "A", "wont-work"});
+  EXPECT_THAT(resp, ErrArg("SELECT is not allowed in regular"));
 }
 
 TEST_F(MultiTest, StoredCmdBytesMetric) {
