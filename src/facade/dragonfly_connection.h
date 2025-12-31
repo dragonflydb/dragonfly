@@ -48,6 +48,7 @@ class ConnectionContext;
 class RedisParser;
 class ServiceInterface;
 class SinkReplyBuilder;
+class RespSrvParser;
 
 // Connection represents an active connection for a client.
 //
@@ -401,7 +402,7 @@ class Connection : public util::Connection {
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
   io::IoBuf io_buf_;  // used in io loop and parsers
-  std::unique_ptr<RedisParser> redis_parser_;
+  std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
 
@@ -457,8 +458,8 @@ class Connection : public util::Connection {
   BreakerCb breaker_cb_;
 
   // Used by redis parser to avoid allocations
-  RespVec tmp_parse_args_;
-  CmdArgVec tmp_cmd_vec_;
+  // RespVec tmp_parse_args_;
+  // CmdArgVec tmp_cmd_vec_;
 
   // Used to keep track of borrowed references. Does not really own itself
   std::shared_ptr<Connection> self_;

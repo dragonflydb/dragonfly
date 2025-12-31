@@ -24,8 +24,8 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
+#include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
@@ -126,11 +126,11 @@ namespace facade {
 
 namespace {
 
-void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
+void SendProtocolError(RespSrvParser::Result pres, SinkReplyBuilder* builder) {
   constexpr string_view res = "-ERR Protocol error: "sv;
-  if (pres == RedisParser::BAD_BULKLEN) {
+  if (pres == RespSrvParser::BAD_BULKLEN) {
     builder->SendProtocolError(absl::StrCat(res, "invalid bulk length"));
-  } else if (pres == RedisParser::BAD_ARRAYLEN) {
+  } else if (pres == RespSrvParser::BAD_ARRAYLEN) {
     builder->SendProtocolError(absl::StrCat(res, "invalid multibulk length"));
   } else {
     builder->SendProtocolError(absl::StrCat(res, "parse error"));
@@ -230,9 +230,9 @@ void OpenTrafficLogger(string_view base_path) {
   std::ignore = tl_traffic_logger.log_file->Write(version);
 }
 
-void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
+void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
                 ServiceInterface::ContextInfo ci) {
-  string_view cmd = resp.front().GetView();
+  string_view cmd = args.Front();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
 
@@ -260,7 +260,7 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
 
   // has_more, num_parts
   write_u32(has_more ? 1 : 0);
-  write_u32(uint32_t(resp.size()));
+  write_u32(uint32_t(args.size()));
 
   // Grab the lock and check if the file is still open.
   lock_guard lk{tl_traffic_logger.mutex};
@@ -268,14 +268,14 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
     return;
 
   // part_len, ...
-  for (auto part : resp) {
+  for (auto part : args) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
       }
       next = stack_buf;
     }
-    write_u32(part.GetView().size());
+    write_u32(part.size());
   }
 
   // Write the data itself.
@@ -285,10 +285,9 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
   }
 
-  for (auto part : resp) {
-    if (auto blob_len = part.GetView().size(); blob_len > 0) {
-      blobs[index++] =
-          iovec{.iov_base = const_cast<char*>(part.GetView().data()), .iov_len = blob_len};
+  for (auto part : args) {
+    if (auto blob_len = part.size(); blob_len > 0) {
+      blobs[index++] = iovec{.iov_base = const_cast<char*>(part.data()), .iov_len = blob_len};
 
       if (index >= blobs.size()) {
         if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
@@ -582,9 +581,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser(RedisParser::Mode::SERVER,
-                                          GetFlag(FLAGS_max_multi_bulk_len),
-                                          GetFlag(FLAGS_max_bulk_len)));
+      redis_parser_.reset(
+          new RespSrvParser(GetFlag(FLAGS_max_multi_bulk_len), GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_ = make_unique<MemcacheParser>();
@@ -1089,7 +1087,7 @@ void Connection::ConnectionFlow() {
     VLOG(1) << "Error parser status " << parser_error_;
 
     if (redis_parser_) {
-      SendProtocolError(RedisParser::Result(parser_error_), reply_builder_.get());
+      SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
     } else {
       DCHECK(memcache_parser_);
       reply_builder_->SendProtocolError("bad command line format");
@@ -1177,14 +1175,20 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
 Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   uint32_t consumed = 0;
-  RedisParser::Result result = RedisParser::OK;
+  RespSrvParser::Result result = RespSrvParser::OK;
 
   auto dispatch_sync = [this] {
-    FillBackedArgs(tmp_parse_args_, parsed_cmd_);
+    // FillBackedArgs(tmp_parse_args_, parsed_cmd_);
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_);
   };
 
-  auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
+  auto dispatch_async = [this]() -> MessageHandle {
+    PipelineMessagePtr ptr = GetFromPipelinePool();
+    auto* res = std::exchange(parsed_cmd_, ptr.release());
+    if (!parsed_cmd_)
+      parsed_cmd_ = CreateParsedCommand();
+    return {PipelineMessagePtr{res}};
+  };
 
   io::Bytes read_buffer = io_buf_.InputBuffer();
   // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
@@ -1194,20 +1198,13 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
   do {
-    result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
+    DCHECK(parsed_cmd_);
+    result = redis_parser_->Parse(read_buffer, &consumed, parsed_cmd_);
     request_consumed_bytes_ += consumed;
     total_consumed += consumed;
-    if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
-      // If we get a non-STRING type (e.g., NIL, ARRAY), it's a protocol error.
-      bool valid_input = std::all_of(tmp_parse_args_.begin(), tmp_parse_args_.end(),
-                                     [](const auto& arg) { return arg.type == RespExpr::STRING; });
-      if (!valid_input) {
-        LOG(WARNING) << "Invalid argument - expected all STRING types";
-        result = RedisParser::BAD_STRING;
-        break;
-      }
-
-      DVLOG(2) << "Got Args with first token " << ToSV(tmp_parse_args_.front().GetBuf());
+    if (result == RespSrvParser::OK) {
+      DCHECK(!parsed_cmd_->empty());
+      DVLOG(2) << "Got Args with first token " << parsed_cmd_->Front();
 
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
@@ -1215,13 +1212,12 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       bool has_more = consumed < read_buffer.size();
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
-        LogTraffic(id_, has_more, absl::MakeSpan(tmp_parse_args_),
-                   service_->GetContextInfo(cc_.get()));
+        LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
-    if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
+    if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
           << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
@@ -1235,15 +1231,15 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       stats_->num_read_yields++;
       ThisFiber::Yield();
     }
-  } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
+  } while (RespSrvParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
 
   io_buf_.ConsumeInput(total_consumed);
 
   parser_error_ = result;
-  if (result == RedisParser::OK)
+  if (result == RespSrvParser::OK)
     return OK;
 
-  if (result == RedisParser::INPUT_PENDING) {
+  if (result == RespSrvParser::INPUT_PENDING) {
     DCHECK_EQ(read_buffer.size(), 0u);
 
     return NEED_MORE;
@@ -1946,7 +1942,6 @@ bool Connection::IsHttp() const {
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + cmn::HeapSize(dispatch_q_) + cmn::HeapSize(name_) +
-               cmn::HeapSize(tmp_parse_args_) + cmn::HeapSize(tmp_cmd_vec_) +
                cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
                cmn::HeapSize(reply_builder_);
 
