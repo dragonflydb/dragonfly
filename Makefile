@@ -4,16 +4,18 @@ HELIO_RELEASE_FLAGS = -DHELIO_RELEASE_FLAGS="-g"
 HELIO_USE_STATIC_LIBS = ON
 HELIO_OPENSSL_USE_STATIC_LIBS = ON
 HELIO_ENABLE_GIT_VERSION = ON
-HELIO_WITH_UNWIND = OFF
+HELIO_WITH_UNWIND ?= OFF
 RELEASE_DIR=build-release
+WITH_SIMSIMD ?= ON
 
 # Some distributions (old fedora) have incorrect dependencies for crypto
 # so we add -lz for them.
 LINKER_FLAGS=-lz
 
 # equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
+# Override HELIO_MARCH_OPT via environment: make HELIO_MARCH_OPT="-march=native"
 ifneq (, $(filter $(BUILD_ARCH),x86_64 amd64))
-HELIO_MARCH_OPT := -march=core2 -msse4.1 -mpopcnt -mtune=skylake
+HELIO_MARCH_OPT ?= -march=core2 -msse4.1 -mpopcnt -mtune=skylake
 endif
 
 # For release builds we link statically libstdc++ and libgcc. Currently,
@@ -25,6 +27,7 @@ HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
               -DBoost_USE_STATIC_LIBS=$(HELIO_USE_STATIC_LIBS) \
               -DOPENSSL_USE_STATIC_LIBS=$(HELIO_OPENSSL_USE_STATIC_LIBS) \
               -DENABLE_GIT_VERSION=$(HELIO_ENABLE_GIT_VERSION) \
+			  -DWITH_SIMSIMD=$(WITH_SIMSIMD) \
               -DWITH_UNWIND=$(HELIO_WITH_UNWIND) -DMARCH_OPT="$(HELIO_MARCH_OPT)"
 
 .PHONY: default
