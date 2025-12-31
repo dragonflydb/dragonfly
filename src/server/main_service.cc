@@ -2588,7 +2588,7 @@ void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
   string_view messages[] = {ArgS(args, 1)};
 
   auto* cs = ServerState::tlocal()->channel_store();
-  cmd_cntx->rb()->SendLong(cs->SendMessages(channel, messages, sharded));
+  cmd_cntx->SendLong(cs->SendMessages(channel, messages, sharded));
 }
 
 void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {

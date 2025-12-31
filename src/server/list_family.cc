@@ -804,7 +804,7 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return cmd_cntx->rb()->SendLong(result.value());
+    return cmd_cntx->SendLong(result.value());
   }
 
   return cmd_cntx->SendError(result.status());
@@ -1074,9 +1074,9 @@ void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cmd_cntx->rb()->SendLong(result.value());
+    cmd_cntx->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cmd_cntx->rb()->SendLong(0);
+    cmd_cntx->SendLong(0);
   } else {
     cmd_cntx->SendError(result.status());
   }
@@ -1251,7 +1251,7 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   };
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb()->SendLong(result.value_or(0));
+    return cmd_cntx->SendLong(result.value_or(0));
   }
   cmd_cntx->SendError(result.status());
 }
