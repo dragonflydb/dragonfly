@@ -599,7 +599,7 @@ struct HSetReplies {
     switch (result.status()) {
       case OpStatus::OK:
       case OpStatus::KEY_NOTFOUND:
-        return cmd_cntx->rb()->SendLong(result.value_or(0));
+        return cmd_cntx->SendLong(result.value_or(0));
       default:
         return cmd_cntx->SendError(result.status());
     };
@@ -743,7 +743,7 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    cmd_cntx->rb()->SendLong(get<int64_t>(param));
+    cmd_cntx->SendLong(get<int64_t>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:

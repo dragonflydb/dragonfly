@@ -1170,7 +1170,7 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  return cmd_cntx->rb()->SendLong(result.load(memory_order_acquire));
+  return cmd_cntx->SendLong(result.load(memory_order_acquire));
 }
 
 void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1179,7 +1179,7 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1209,7 +1209,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1238,7 +1238,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
   }
 
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1289,7 +1289,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
   } else {
-    cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+    cmd_cntx->SendLong(status == OpStatus::OK);
   }
 }
 
@@ -1323,7 +1323,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
   }
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1346,7 +1346,7 @@ void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
   DVLOG(2) << "Stick ts " << transaction->txid();
 
   uint32_t match_cnt = result.load(memory_order_relaxed);
-  cmd_cntx->rb()->SendLong(match_cnt);
+  cmd_cntx->SendLong(match_cnt);
 }
 
 // Used to conditionally store double score
@@ -1694,7 +1694,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    cmd_cntx->rb()->SendLong(*result);
+    cmd_cntx->SendLong(*result);
     return;
   }
 
