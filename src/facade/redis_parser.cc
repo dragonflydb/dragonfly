@@ -3,7 +3,6 @@
 //
 #include "facade/redis_parser.h"
 
-#include <absl/flags/flag.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/numbers.h>
 
