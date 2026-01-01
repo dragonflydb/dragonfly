@@ -58,11 +58,10 @@ spec:
         app.kubernetes.io/instance: test
     spec:
       serviceAccountName: test-dragonfly
-      securityContext:
-        allowPrivilegeEscalation: false
       containers:
         - name: dragonfly
           securityContext:
+            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
           image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.35.1"
           imagePullPolicy: IfNotPresent
