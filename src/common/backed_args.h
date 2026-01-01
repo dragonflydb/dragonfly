@@ -16,6 +16,8 @@ class BackedArguments {
   constexpr static size_t kStorageCap = 88;
 
  public:
+  using value_type = std::string_view;
+
   BackedArguments() {
   }
 

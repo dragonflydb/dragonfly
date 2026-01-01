@@ -122,7 +122,7 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = res.status();
   if (res) {
     if (res->front())
-      return cmd_cntx->rb()->SendLong(*res->front());
+      return cmd_cntx->SendLong(*res->front());
     else
       status = res->front().status();
   }
@@ -138,7 +138,7 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
-  return cmd_cntx->rb()->SendLong(res ? res->front() : 0);
+  return cmd_cntx->SendLong(res ? res->front() : 0);
 }
 
 void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {

@@ -229,6 +229,10 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
     config.reserve = pending_read_.reserve;
 
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
+      // Handle value_expired gracefully - all fields expired during deserialize
+      if (ec.value() == rdb::errc::value_expired) {
+        return OpStatus::SKIPPED;
+      }
       // we failed - report and exit
       LOG(WARNING) << "error while trying to read data: " << ec;
       return OpStatus::INVALID_VALUE;
@@ -522,8 +526,16 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   auto add_res =
       loader.Add(dest_key_, serialized_value_->value, op_args.db_cntx, restore_args, &db_slice);
 
-  if (!add_res)
+  if (!add_res) {
+    // SKIPPED means all fields expired during deserialize - treat as success
+    if (add_res.status() == OpStatus::SKIPPED) {
+      if (dest_found_ && shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+      }
+      return OpStatus::OK;
+    }
     return add_res.status();
+  }
 
   LOG_IF(DFATAL, !add_res->is_new)
       << "Unexpected override for key " << dest_key_ << " " << dest_found_;
@@ -1170,7 +1182,7 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  return cmd_cntx->rb()->SendLong(result.load(memory_order_acquire));
+  return cmd_cntx->SendLong(result.load(memory_order_acquire));
 }
 
 void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1179,7 +1191,7 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1209,7 +1221,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1238,7 +1250,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
   }
 
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1289,7 +1301,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
   } else {
-    cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+    cmd_cntx->SendLong(status == OpStatus::OK);
   }
 }
 
@@ -1323,7 +1335,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
   }
-  cmd_cntx->rb()->SendLong(status == OpStatus::OK);
+  cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1346,7 +1358,7 @@ void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
   DVLOG(2) << "Stick ts " << transaction->txid();
 
   uint32_t match_cnt = result.load(memory_order_relaxed);
-  cmd_cntx->rb()->SendLong(match_cnt);
+  cmd_cntx->SendLong(match_cnt);
 }
 
 // Used to conditionally store double score
@@ -1694,7 +1706,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    cmd_cntx->rb()->SendLong(*result);
+    cmd_cntx->SendLong(*result);
     return;
   }
 
@@ -1827,6 +1839,13 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   if (cntx->conn_state.db_index == index) {
     // accept a noop.
     return builder->SendOk();
+  }
+
+  // Only global/non-atomic multi transactions can change dbs safely,
+  // locked-ahead transactions acquired keys ahead for a specific dbindex
+  if (auto* tx = cntx->transaction; tx && tx->IsMulti()) {
+    if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
+      return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
 
   if (cntx->conn_state.exec_info.IsRunning()) {
@@ -2042,7 +2061,7 @@ constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
-  constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
+  constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.HFUNC(Del)

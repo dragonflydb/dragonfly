@@ -320,7 +320,8 @@ def memcached_client(df_server: DflyInstance):
 
     yield client
 
-    client.flush_all()
+    client.flush_all()  # clean up after test
+    client.quit()
 
 
 @pytest.fixture(scope="session")

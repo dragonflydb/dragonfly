@@ -1904,9 +1904,9 @@ void DestroyGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::OK:
-      return cmd_cntx->rb()->SendLong(1);
+      return cmd_cntx->SendLong(1);
     case OpStatus::SKIPPED:
-      return cmd_cntx->rb()->SendLong(0);
+      return cmd_cntx->SendLong(0);
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
@@ -1930,9 +1930,9 @@ void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      return cmd_cntx->rb()->SendLong(1);
+      return cmd_cntx->SendLong(1);
     case OpStatus::KEY_EXISTS:
-      return cmd_cntx->rb()->SendLong(0);
+      return cmd_cntx->SendLong(0);
     case OpStatus::SKIPPED:
       return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
@@ -1959,7 +1959,7 @@ void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      return cmd_cntx->rb()->SendLong(*result);
+      return cmd_cntx->SendLong(*result);
     case OpStatus::SKIPPED:
       return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
@@ -2847,7 +2847,7 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb()->SendLong(*result);
+    return cmd_cntx->SendLong(*result);
   }
 
   cmd_cntx->SendError(result.status());
@@ -3128,7 +3128,7 @@ void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb()->SendLong(*result);
+    return cmd_cntx->SendLong(*result);
   }
 
   return cmd_cntx->SendError(result.status());
@@ -3354,7 +3354,7 @@ void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb()->SendLong(*result);
+    return cmd_cntx->SendLong(*result);
   }
 
   cmd_cntx->SendError(result.status());
