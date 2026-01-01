@@ -180,6 +180,7 @@ if(WITH_SIMSIMD)
     simsimd
     URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
     BUILD_IN_SOURCE 1
+    CONFIGURE_COMMAND echo skip
     BUILD_COMMAND bash -c "\
       mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && \
       ${CMAKE_C_COMPILER} -O3 -fPIC -DNDEBUG \
