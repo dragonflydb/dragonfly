@@ -61,7 +61,7 @@ jobs:
         include:
           # Build with these flags
           - name: debian
-            container: ubuntu-dev:20
+            container: ubuntu-dev:20-gcc14
           - name: rpm
             container: fedora:30
     container:
@@ -87,6 +87,11 @@ jobs:
           # Work around https://github.com/actions/checkout/issues/766
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
+
+          # set WITH_SIMSIMD=OFF for fedora:30
+          if [ "${{ matrix.container }}" == 'fedora:30' ]; then
+            export WITH_SIMSIMD="OFF"
+          fi
           ./tools/release.sh
 
           # once the build is over, we want to generate a Debian package
@@ -99,7 +104,7 @@ jobs:
 
     - name: Run regression tests
       # Fedora 30 has older python packages, so this fails during requirements installation.
-      if  : matrix.container != 'fedora:30'
+      if: matrix.container != 'fedora:30'
       uses: ./.github/actions/regression-tests
       with:
         dfly-executable: dragonfly-x86_64
