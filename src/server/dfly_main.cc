@@ -900,6 +900,7 @@ Usage: dragonfly [FLAGS]
   }
 
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
+  LOG(WARNING) << "XXX Happy 2026!";
 
   struct sigaction act;
   act.sa_handler = sigill_hdlr;
