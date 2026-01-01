@@ -117,6 +117,16 @@ void ParsedCommand::SendNull() {
   }
 }
 
+void ParsedCommand::SendEmptyArray() {
+  if (is_deferred_reply_) {
+    reply_payload_ = make_unique<payload::CollectionPayload>(0, CollectionType::ARRAY);
+    NotifyReplied();
+  } else {
+    DCHECK(mc_cmd_ == nullptr);  // RESP only
+    static_cast<RedisReplyBuilder*>(rb_)->SendEmptyArray();
+  }
+}
+
 bool ParsedCommand::SendPayload() {
   if (is_deferred_reply_) {
     CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
