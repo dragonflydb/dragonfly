@@ -6,6 +6,7 @@
 
 #include <absl/strings/match.h>
 
+#include <memory>
 #include <new>
 
 #include "base/flags.h"
@@ -181,7 +182,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
       cmd_name == "EVALSHA_RO") {
-    multi_.reset(new MultiData);
+    multi_ = make_unique<MultiData>();
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
   }
@@ -467,7 +468,6 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
 void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
                                         bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
-
   DCHECK(multi_);
   DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
@@ -987,6 +987,12 @@ void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
   cb_ptr_ = nullptr;
+
+  kv_fp_.clear();
+  shard_data_.clear();
+
+  if (multi_)
+    multi_ = make_unique<MultiData>();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {

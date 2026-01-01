@@ -55,8 +55,16 @@ class Interpreter {
 
     ObjectExplorer* translator;
 
-    bool async;        // async by acall
-    bool error_abort;  // abort on errors (not pcall)
+    // Valid combinations of different call modes, mixing features as bitmasks
+    enum Type : uint8_t {
+      CALL = 0b00,    // regular call
+      PCALL = 0b01,   // pcall - return errors as values
+      ACALL = 0b10,   // regular call + async
+      APCALL = 0b11,  // pcall + async
+
+      LOCK = 0b10'00,    // lock keys
+      UNLOCK = 0b01'00,  // unlock keys
+    } call_type;
 
     // The function can request an abort due to an error, even if error_abort is false.
     // It happens when async cmds are flushed and result in an uncatched error.
@@ -134,7 +142,7 @@ class Interpreter {
   }
 
   // Invoke command with arguments from lua stack, given options and possibly custom explorer
-  int RedisGenericCommand(bool raise_error, bool async, ObjectExplorer* explorer = nullptr);
+  int RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* explorer = nullptr);
 
  private:
   // Returns true if function was successfully added,
@@ -142,13 +150,8 @@ class Interpreter {
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
   bool IsTableSafe() const;
 
-  static int RedisCallCommand(lua_State* lua);
-  static int RedisPCallCommand(lua_State* lua);
-  static int RedisACallCommand(lua_State* lua);
-  static int RedisAPCallCommand(lua_State* lua);
-
   std::optional<absl::FixedArray<std::string_view, 4>> PrepareArgs();
-  bool CallRedisFunction(bool raise_error, bool async, ObjectExplorer* explorer, SliceSpan args);
+  bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer, SliceSpan args);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
