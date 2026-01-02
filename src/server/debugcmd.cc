@@ -1596,8 +1596,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
 
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx_, stub_tx.get()};
   absl::InsecureBitGen gen;
+
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
@@ -1628,9 +1628,9 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       auto args_span = absl::MakeSpan(args_view);
       stub_tx->MultiSwitchCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
-      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
+      stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
 
-      CommandContext cmnd_cntx{cid, stub_tx.get(), &crb, &local_cntx};
+      CommandContext cmnd_cntx{cid, stub_tx.get(), &crb, cntx_};
       sf_.service().InvokeCmd(args_span, &cmnd_cntx);
     }
 
@@ -1650,8 +1650,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       auto args_span = absl::MakeSpan(args_view);
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->MultiSwitchCmd(cid);
-      stub_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args_span);
-      CommandContext cmnd_cntx{cid, stub_tx.get(), &crb, &local_cntx};
+      stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
+      CommandContext cmnd_cntx{cid, stub_tx.get(), &crb, cntx_};
       sf_.service().InvokeCmd(args_span, &cmnd_cntx);
     }
   }

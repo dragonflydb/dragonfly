@@ -352,6 +352,10 @@ class Transaction {
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::pair<ShardId, LockFp>>& GetMultiFps() const;
 
+  bool IsSquashedStub() const {
+    return multi_ && multi_->role == SQUASHED_STUB;
+  }
+
   uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;
   }

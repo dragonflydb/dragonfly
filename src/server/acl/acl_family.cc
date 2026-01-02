@@ -585,7 +585,7 @@ void AclFamily::DryRun(CmdArgList args, CommandContext* cmd_cntx) {
 
   const auto& user = registry.find(username)->second;
   // Stub, used to mimic connection context for a user.
-  ConnectionContext stub(nullptr, nullptr);
+  ConnectionContext stub(nullptr, acl::UserCredentials{});
   stub.acl_commands = user.AclCommandsRef();
   // "mock" without an actual connection we can't know which db is active so we skip this check
   // for DryRun.
