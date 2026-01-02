@@ -1473,14 +1473,16 @@ void Connection::SquashPipeline() {
     if (tl_squash_test_hook_active && i == 0) {
       tl_squash_test_hook_active = false;
       // Inject control message at front - simulates race condition
-      SendAclUpdateAsync(AclUpdateMessage{.username = "test"});
+      SendAclUpdateAsync(AclUpdateMessage{
+          .username = "test", .commands = {}, .keys = {}, .pub_sub = {}, .db_indx = 0});
     }
 #endif
-    // Skip any control messages that were inserted at the front
-    while (i < dispatch_q_.size() && dispatch_q_[i].IsControl()) {
-      i++;
+    // Count control messages at front
+    size_t ctrl_offset = 0;
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+      ctrl_offset++;
     }
-    const auto& elem = dispatch_q_[i++];
+    const auto& elem = dispatch_q_[ctrl_offset + i++];
     CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
     const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
 

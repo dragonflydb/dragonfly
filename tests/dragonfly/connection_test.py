@@ -949,7 +949,13 @@ async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
 @dfly_args({"proactor_threads": "1", "pipeline_squash": 1})
 async def test_squash_pipeline_with_control_message(async_client: aioredis.Redis):
     # Activate the test hook that injects a control message during SquashPipeline
-    await async_client.execute_command("DEBUG", "SQUASH_HOOK")
+    # This hook is only available in debug builds
+    try:
+        await async_client.execute_command("DEBUG", "SQUASH_HOOK")
+    except ResponseError as e:
+        if "Unknown subcommand" in str(e):
+            pytest.skip("DEBUG SQUASH_HOOK not available in release build")
+        raise
 
     # Send pipelined commands - this triggers SquashPipeline which will crash before fix
     p = async_client.pipeline(transaction=False)
