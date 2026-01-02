@@ -1467,7 +1467,8 @@ void Connection::SquashPipeline() {
   uint64_t start = CycleClock::Now();
 
   // We use indexes as iterators are invalidated when pushing into the queue.
-  auto get_next_fn = [i = 0, this]() mutable -> ParsedArgs {
+  // Control messages may be inserted at the front during iteration, so we skip them.
+  auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
 #ifndef NDEBUG
     if (tl_squash_test_hook_active && i == 0) {
       tl_squash_test_hook_active = false;
@@ -1475,6 +1476,10 @@ void Connection::SquashPipeline() {
       SendAclUpdateAsync(AclUpdateMessage{.username = "test"});
     }
 #endif
+    // Skip any control messages that were inserted at the front
+    while (i < dispatch_q_.size() && dispatch_q_[i].IsControl()) {
+      i++;
+    }
     const auto& elem = dispatch_q_[i++];
     CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
     const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
