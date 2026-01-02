@@ -753,6 +753,14 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmnd_cntx) {
   if (subcmd == "SEGMENTS") {
     return Segments(args.subspan(1), cmnd_cntx);
   }
+
+#ifndef NDEBUG
+  if (subcmd == "SQUASH_HOOK") {
+    facade::ActivateSquashTestHook();
+    return cmnd_cntx->SendOk();
+  }
+#endif
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cmnd_cntx->SendError(reply, kSyntaxErrType);
 }

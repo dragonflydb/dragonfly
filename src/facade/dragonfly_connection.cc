@@ -124,6 +124,14 @@ using nonstd::make_unexpected;
 
 namespace facade {
 
+#ifndef NDEBUG
+thread_local bool tl_squash_test_hook_active = false;
+
+void ActivateSquashTestHook() {
+  tl_squash_test_hook_active = true;
+}
+#endif
+
 namespace {
 
 void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
@@ -1459,8 +1467,22 @@ void Connection::SquashPipeline() {
   uint64_t start = CycleClock::Now();
 
   // We use indexes as iterators are invalidated when pushing into the queue.
-  auto get_next_fn = [i = 0, this]() mutable -> ParsedArgs {
-    const auto& elem = dispatch_q_[i++];
+  // Control messages may be inserted at the front during iteration, so we skip them.
+  auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
+#ifndef NDEBUG
+    if (tl_squash_test_hook_active && i == 0) {
+      tl_squash_test_hook_active = false;
+      // Inject control message at front - simulates race condition
+      SendAclUpdateAsync(AclUpdateMessage{
+          .username = "test", .commands = {}, .keys = {}, .pub_sub = {}, .db_indx = 0});
+    }
+#endif
+    // Count control messages at front
+    size_t ctrl_offset = 0;
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+      ctrl_offset++;
+    }
+    const auto& elem = dispatch_q_[ctrl_offset + i++];
     CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
     const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
 
