@@ -1598,6 +1598,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK_EQ(args.Size() % 3, 0u);
 
   OpStatus result = OpStatus::OK;
+  auto margin1 = GetUnusedMargin();
+  if (margin1 < 7000) {
+    LOG(FATAL) << "low margin " << margin1
+               << " cmnd count: " << facade::tl_facade_stats->conn_stats.command_cnt_main;
+  }
+
   size_t stored = 0;
   for (auto it = args.begin(); it != args.end();) {
     string_view key = *(it++);
@@ -1613,7 +1619,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 
   auto margin = GetUnusedMargin();
   if (margin < 7000) {
-    LOG(FATAL) << "low margin " << margin
+    LOG(FATAL) << "low margin " << margin << " before " << margin1
                << " cmnd count: " << facade::tl_facade_stats->conn_stats.command_cnt_main;
   }
 

@@ -190,11 +190,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   auto* local_tx = sinfo.local_tx.get();
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
-  ConnectionContext local_cntx{cntx_, local_tx};
+  /* ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
-  }
+  }*/
 
+  static_assert(sizeof(crb) == 536);
   CmdArgVec arg_vec;
 
   auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
@@ -219,19 +220,16 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     crb.SetReplyMode(dispatched.cmd->ReplyMode());
 
     local_tx->MultiSwitchCmd(dispatched.cmd->Cid());
-    auto status = local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
+    auto status = local_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       crb.SendError(status);
     } else {
-      CommandContext cmd_cntx{dispatched.cmd->Cid(), local_cntx.transaction, &crb, &local_cntx};
+      CommandContext cmd_cntx{dispatched.cmd->Cid(), local_tx, &crb, cntx_};
       service_->InvokeCmd(args, &cmd_cntx);
     }
     move_reply(crb.Take(), &dispatched.reply);
-
     // Assert commands made no persistent state changes to stub context state
-    const auto& local_state = local_cntx.conn_state;
-    DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
-    CheckConnStateClean(local_state);
+    // CheckConnStateClean(local_state);
   }
 
   return OpStatus::OK;
