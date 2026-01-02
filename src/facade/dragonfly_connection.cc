@@ -1787,7 +1787,14 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 void Connection::LaunchAsyncFiberIfNeeded() {
   if (!async_fb_.IsJoinable() && !migration_in_process_) {
     VLOG(1) << "[" << id_ << "] LaunchAsyncFiberIfNeeded ";
-    async_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch", [this]() { AsyncFiber(); });
+    // Use 128KB stack instead of default 64KB to prevent stack overflow.
+    // The async fiber performs command dispatch which can have deep call stacks,
+    // especially during OOM handling. See https://github.com/dragonflydb/dragonfly/issues/6309
+    constexpr size_t kAsyncFiberStackSize = 128 * 1024;
+    async_fb_ = fb2::Fiber(fb2::Fiber::Opts{.launch = fb2::Launch::post,
+                                            .name = "connection_dispatch",
+                                            .stack_size = kAsyncFiberStackSize},
+                           [this]() { AsyncFiber(); });
   }
 }
 
