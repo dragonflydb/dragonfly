@@ -123,7 +123,7 @@ constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
 #else
 // Increase stack size for debug builds, because some compilers can create exec, that consumes much
 // mores stack.
-constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
+constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
 #endif
 
 enum class TermColor { kDefault, kRed, kGreen, kYellow };
