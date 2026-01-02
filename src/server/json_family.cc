@@ -31,6 +31,7 @@
 #include "server/sharding.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/detail/fiber_interface.h"
 
 // clang-format off
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
@@ -1583,6 +1584,16 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                is_xx_condition);
 }
 
+static auto GetUnusedMargin() {
+  const uint8_t* bottom =
+      reinterpret_cast<uint8_t*>(util::fb2::detail::FiberActive()->stack_bottom());
+  const uint8_t* ptr = bottom;
+  while (*ptr == 0xAB) {
+    ++ptr;
+  }
+  return ptr - bottom;
+};
+
 OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK_EQ(args.Size() % 3, 0u);
 
@@ -1598,6 +1609,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     }
 
     stored++;
+  }
+
+  auto margin = GetUnusedMargin();
+  if (margin < 7000) {
+    LOG(FATAL) << "low margin " << margin
+               << " cmnd count: " << facade::tl_facade_stats->conn_stats.command_cnt_main;
   }
 
   // Replicate custom journal, see OpMSet
@@ -1690,6 +1707,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 3u);
 
+  auto margin1 = GetUnusedMargin();
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() % 3 != 0) {
     return builder->SendError(facade::WrongNumArgsError("json.mset"));
@@ -1705,6 +1723,12 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   cmd_cntx->tx->ScheduleSingleHop(cb);
+  auto margin2 = GetUnusedMargin();
+
+  if (margin2 < 7000) {
+    LOG(FATAL) << "low margin " << margin2 << " beffore: " << margin1
+               << " cmnd count: " << facade::tl_facade_stats->conn_stats.command_cnt_main;
+  }
 
   if (*status != OpStatus::OK)
     return cmd_cntx->SendError(*status);

@@ -82,6 +82,16 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
   }
 }
 
+static auto GetUnusedMargin() {
+  const uint8_t* bottom =
+      reinterpret_cast<uint8_t*>(util::fb2::detail::FiberActive()->stack_bottom());
+  const uint8_t* ptr = bottom;
+  while (*ptr == 0xAB) {
+    ++ptr;
+  }
+  return ptr - bottom;
+};
+
 class PrimeEvictionPolicy {
  public:
   static constexpr bool can_evict = true;  // we implement eviction functionality.
@@ -199,12 +209,20 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
     }
   }
 
+  auto unused_margin = GetUnusedMargin();
+  if (unused_margin < 7000) {
+    LOG(FATAL) << "GarbageCollect: low margin " << unused_margin;
+  }
   return res;
 }
 
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
+
+  auto prev_margin = GetUnusedMargin();
+  auto margin = util::ThisFiber::GetStackMargin(&prev_margin);
+  size_t margin2;
 
   // Disable flush journal changes to prevent preemtion in evict.
   journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
@@ -217,6 +235,12 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
   last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
     // don't evict sticky items
+    auto unused_margin = GetUnusedMargin();
+    if (unused_margin < 7000) {
+      LOG(FATAL) << "GarbageCollect: low margin " << unused_margin << " prev margin " << prev_margin
+                 << " margin " << margin << " margin2 " << margin2;
+    }
+
     if (last_slot_it->first.IsSticky()) {
       return 0;
     }
@@ -234,11 +258,22 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
       RecordExpiryBlocking(cntx_.db_index, key);
     }
     db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
+    margin2 = util::ThisFiber::GetStackMargin(&key);
 
     ++evicted_;
+    auto unused_margin2 = GetUnusedMargin();
+    if (unused_margin2 < 7000) {
+      LOG(FATAL) << "GarbageCollect: low margin " << unused_margin2 << " prev unused "
+                 << unused_margin << " margin " << margin << " margin2 " << margin2;
+    }
   }
   me->ShiftRight(bucket_it);
 
+  auto unused_margin = GetUnusedMargin();
+  if (unused_margin < 7000) {
+    LOG(FATAL) << "GarbageCollect: low margin " << unused_margin << " prev margin " << prev_margin
+               << " margin " << margin << " margin2 " << margin2;
+  }
   return 1;
 }
 
@@ -737,11 +772,14 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   ssize_t table_before = db.prime.mem_usage();
 
+  auto margin_prev = GetUnusedMargin();
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
+    auto margin_after = GetUnusedMargin();
     LOG_EVERY_T(WARNING, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
-                            << " reclaimed: " << reclaimed << " offset: " << memory_offset;
+                            << " reclaimed: " << reclaimed << " offset: " << memory_offset
+                            << " margin_prev: " << margin_prev << " margin_after: " << margin_after;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -816,11 +854,20 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
+    auto margin = GetUnusedMargin();
+    if (margin < 7000) {
+      LOG(FATAL) << "Del: low margin " << margin;
+    }
   }
 
   if (it->second.HasExpire()) {
     exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
     DCHECK(!exp_it.is_done());
+  }
+
+  auto margin = GetUnusedMargin();
+  if (margin < 7000) {
+    LOG(FATAL) << "Del: low margin " << margin;
   }
 
   PerformDeletionAtomic(it, exp_it, table, async);
@@ -1796,6 +1843,10 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   DbTableStats& stats = table->stats;
   PrimeValue& pv = del_it->second;
 
+  auto margin1 = GetUnusedMargin();
+  if (margin1 < 7000) {
+    LOG(FATAL) << "Low memory margin before deletion: " << margin1 << " bytes";
+  }
   if (pv.HasStashPending()) {
     string scratch;
     string_view key = del_it->first.GetSlice(&scratch);
@@ -1811,6 +1862,12 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
     AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
+
+  auto margin2 = GetUnusedMargin();
+  if (margin2 < 7000) {
+    LOG(FATAL) << "Low memory margin before deletion: " << margin2
+               << " bytes, before : " << margin1;
+  }
 
   if (async && MayDeleteAsynchronously(pv)) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
@@ -1828,6 +1885,12 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   if (table->slots_stats) {
     SlotId sid = KeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;
+  }
+
+  auto margin3 = GetUnusedMargin();
+  if (margin3 < 7000) {
+    LOG(FATAL) << "Low memory margin before deletion: " << margin3
+               << " bytes, before : " << margin1;
   }
 
   table->prime.Erase(del_it.GetInnerIt());

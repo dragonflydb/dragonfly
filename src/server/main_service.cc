@@ -1655,6 +1655,19 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
   }
 
+  auto GetUnusedMargin = [] {
+    const uint8_t* bottom = reinterpret_cast<uint8_t*>(fb2::detail::FiberActive()->stack_bottom());
+    const uint8_t* ptr = bottom;
+    while (*ptr == 0xAB) {
+      ++ptr;
+    }
+    return ptr - bottom;
+  };
+  uint32_t margin1 = GetUnusedMargin();
+  if (margin1 < 7000) {
+    LOG(FATAL) << "low margin " << margin1 << " before command " << cid->name()
+               << " cmnd count: " << facade::tl_facade_stats->conn_stats.command_cnt_main;
+  }
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
@@ -1668,6 +1681,12 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     return DispatchResult::ERROR;
   }
 
+  auto margin2 = GetUnusedMargin();
+  if (margin2 < 7000) {
+    LOG(FATAL) << "low margin " << margin2 << " on command " << cid->name() << " prev margin "
+               << margin1
+               << " cmnd count: " << facade::tl_facade_stats->conn_stats.command_cnt_main;
+  }
   DispatchResult res = DispatchResult::OK;
   if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
     // Set flag if OOM reported

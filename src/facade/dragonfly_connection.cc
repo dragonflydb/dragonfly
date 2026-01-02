@@ -1175,6 +1175,15 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
+static uint32_t GetUnusedMargin() {
+  const uint8_t* bottom = reinterpret_cast<uint8_t*>(fb2::detail::FiberActive()->stack_bottom());
+  const uint8_t* ptr = bottom;
+  while (*ptr == 0xAB) {
+    ++ptr;
+  }
+  return ptr - bottom;
+}
+
 Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
@@ -1220,6 +1229,14 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       }
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
+      uint32_t margin = GetUnusedMargin();
+      if (margin < 5000) {
+        LOG(FATAL) << "low margin " << margin << " on command "
+                   << tmp_parse_args_.front().GetString()
+                   << " cmnd count: " << tl_facade_stats->conn_stats.command_cnt_main;
+      }
+
+      util::ThisFiber::CheckSafetyMargin();
     }
     if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.

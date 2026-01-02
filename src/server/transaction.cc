@@ -678,12 +678,27 @@ bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
   return is_concluding;
 }
 
+static auto GetUnusedMargin() {
+  const uint8_t* bottom =
+      reinterpret_cast<uint8_t*>(util::fb2::detail::FiberActive()->stack_bottom());
+  const uint8_t* ptr = bottom;
+  while (*ptr == 0xAB) {
+    ++ptr;
+  }
+  return ptr - bottom;
+};
+
 void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
 
   RunnableResult result;
   try {
+    auto margin_before = GetUnusedMargin();
     result = (*cb_ptr_)(this, shard);
+    auto margin_after = GetUnusedMargin();
+    if (margin_after < 7000) {
+      LOG(ERROR) << "Fiber ovrrflow, before " << margin_before << " after " << margin_after;
+    }
 
     if (unique_shard_cnt_ == 1) {
       cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
