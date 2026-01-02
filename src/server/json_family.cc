@@ -527,6 +527,10 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   parsed_json.reset();
   updater.SetJsonSize();
 
+  auto margin = GetUnusedMargin();
+  if (margin < 7000) {
+    LOG(FATAL) << "Low memory margin after setting full json: " << margin << " bytes";
+  }
   // We need to manually run add document here
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
 

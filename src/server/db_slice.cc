@@ -1843,10 +1843,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   DbTableStats& stats = table->stats;
   PrimeValue& pv = del_it->second;
 
-  auto margin1 = GetUnusedMargin();
-  if (margin1 < 7000) {
-    LOG(FATAL) << "Low memory margin before deletion: " << margin1 << " bytes";
-  }
   if (pv.HasStashPending()) {
     string scratch;
     string_view key = del_it->first.GetSlice(&scratch);
@@ -1865,8 +1861,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
 
   auto margin2 = GetUnusedMargin();
   if (margin2 < 7000) {
-    LOG(FATAL) << "Low memory margin before deletion: " << margin2
-               << " bytes, before : " << margin1;
+    LOG(FATAL) << "Low memory margin before deletion: " << margin2 << " bytes";
   }
 
   if (async && MayDeleteAsynchronously(pv)) {
@@ -1890,10 +1885,15 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   auto margin3 = GetUnusedMargin();
   if (margin3 < 7000) {
     LOG(FATAL) << "Low memory margin before deletion: " << margin3
-               << " bytes, before : " << margin1;
+               << " bytes, before : " << margin2;
   }
 
   table->prime.Erase(del_it.GetInnerIt());
+
+  auto margin1 = GetUnusedMargin();
+  if (margin1 < 7000) {
+    LOG(FATAL) << "Low memory margin before deletion: " << margin1 << " bytes, before: " << margin2;
+  }
 
   // Note, currently we do not shrink our tables upon deletion.
   // This DCHECK ensures that if we decide to do so, we will have to update table_memory_
