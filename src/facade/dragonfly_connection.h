@@ -44,6 +44,10 @@ constexpr size_t kReqStorageSize = 120;
 
 namespace facade {
 
+#ifndef NDEBUG
+void ActivateSquashTestHook();
+#endif
+
 class ConnectionContext;
 class RedisParser;
 class ServiceInterface;
