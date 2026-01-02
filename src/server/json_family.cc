@@ -436,6 +436,16 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
   }
 }
 
+static auto GetUnusedMargin() {
+  const uint8_t* bottom =
+      reinterpret_cast<uint8_t*>(util::fb2::detail::FiberActive()->stack_bottom());
+  const uint8_t* ptr = bottom;
+  while (*ptr == 0xAB) {
+    ++ptr;
+  }
+  return ptr - bottom;
+};
+
 /* Converts a JSONPath to a JSONPointer.
    E.g. $[a][b][0] -> /a/b/0.
    V1 JSONPath is not supported. */
@@ -1587,16 +1597,6 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   return OpSet(op_args, key, path, res_json_path.value(), json_str, is_nx_condition,
                is_xx_condition);
 }
-
-static auto GetUnusedMargin() {
-  const uint8_t* bottom =
-      reinterpret_cast<uint8_t*>(util::fb2::detail::FiberActive()->stack_bottom());
-  const uint8_t* ptr = bottom;
-  while (*ptr == 0xAB) {
-    ++ptr;
-  }
-  return ptr - bottom;
-};
 
 OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK_EQ(args.Size() % 3, 0u);
