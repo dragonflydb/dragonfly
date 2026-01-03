@@ -35,6 +35,17 @@
 5. **Follow Architecture** - See [Universal Patterns](#universal-architecture-patterns) below
 
 ---
+
+### Pull Request Guidelines
+
+**Conciseness is Key**: PR descriptions should be short, focused, and easy to scan.
+- **Title**: Imperative, descriptive (e.g., "Fix fiber stack overflow in test_reply_guard_oom").
+- **Summary**: 1-2 sentences explaining *what* changed and *why*.
+- **Changes**: Bullet points for key changes.
+- **Fixes**: Link issues (e.g., "Fixes #123").
+
+---
+
 ### GitHub Copilot
 
 > **Access**: Auto-referenced via `.github/copilot-instructions.md`
