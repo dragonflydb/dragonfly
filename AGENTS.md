@@ -46,11 +46,6 @@
 
 **Always Update Description**: When pushing changes that affect the PR scope, update the description on GitHub.
 - **Try**: `gh pr edit <PR_NUMBER> --body-file <PATH_TO_SUMMARY>`
-- **Verify**: Run `gh pr view <PR_NUMBER> --json body` to confirm.
-- **Fallback**: If `gh pr edit` fails silently, use `gh api` with Python to safely patch the body:
-  ```bash
-  python3 -c 'import json, subprocess; body = open("pr_summary.md").read(); subprocess.run(["gh", "api", "/repos/{owner}/{repo}/pulls/{number}", "-X", "PATCH", "--input", "-"], input=json.dumps({"body": body}).encode("utf-8"))'
-  ```
 
 ---
 
