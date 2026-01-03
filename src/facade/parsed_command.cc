@@ -51,7 +51,6 @@ void ParsedCommand::ResetForReuse() {
   is_deferred_reply_ = false;
   reply_payload_ = std::monostate{};
 
-  state_.store(0, std::memory_order_relaxed);
   offsets_.clear();
   if (HeapMemory() > 1024) {
     storage_.clear();  // also deallocates the heap.
@@ -64,7 +63,6 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) {
     rb_->SendError(str, type);
   } else {
     reply_payload_ = payload::make_error(str, type);
-    NotifyReplied();
   }
 }
 
@@ -79,7 +77,6 @@ void ParsedCommand::SendError(facade::OpStatus status) {
       reply_payload_ = payload::SimpleString{"OK"};
     else
       reply_payload_ = payload::make_error(StatusToMsg(status));
-    NotifyReplied();
   }
 }
 
@@ -94,14 +91,12 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
     rb_->SendSimpleString(str);
   } else {
     reply_payload_ = payload::make_simple_or_noreply(str);
-    NotifyReplied();
   }
 }
 
 void ParsedCommand::SendLong(long val) {
   if (is_deferred_reply_) {
     reply_payload_ = long(val);
-    NotifyReplied();
   } else {
     rb_->SendLong(val);
   }
@@ -110,7 +105,6 @@ void ParsedCommand::SendLong(long val) {
 void ParsedCommand::SendNull() {
   if (is_deferred_reply_) {
     reply_payload_ = payload::Null{};
-    NotifyReplied();
   } else {
     DCHECK(mc_cmd_ == nullptr);  // RESP only
     static_cast<RedisReplyBuilder*>(rb_)->SendNull();
@@ -118,50 +112,21 @@ void ParsedCommand::SendNull() {
 }
 
 bool ParsedCommand::SendPayload() {
-  if (is_deferred_reply_) {
+  if (reply_payload_.index() > 0) {
     CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
     reply_payload_ = {};
     return true;
   }
+  if (task_blocker != nullptr) {
+    task_blocker->Wait();  // will be removed
+    replier(rb_);
+  }
   return false;
 }
 
-bool ParsedCommand::CheckDoneAndMarkHead() {
-  uint8_t state = state_.load(std::memory_order_acquire);
-
-  while ((state & ASYNC_REPLY_DONE) == 0) {
-    // If we marked it as head already, return false.
-    if (state & HEAD_REPLY) {
-      return false;
-    }
-
-    // Mark it as head. If succeeded (i.e ASYNC_REPLY_DONE is still not set), return false
-    if (state_.compare_exchange_weak(state, state | HEAD_REPLY, std::memory_order_acq_rel)) {
-      return false;
-    }
-    // Otherwise, retry with updated state.
-  }
-
-  // ASYNC_REPLY_DONE is set, return true.
-  return true;
-}
-
-void ParsedCommand::NotifyReplied() {
-  // A synchronization point. We set ASYNC_REPLY_DONE to mark it's safe now to read the payload.
-  uint8_t prev_state = state_.fetch_or(ASYNC_REPLY_DONE, std::memory_order_acq_rel);
-
-  DVLOG(1) << "ParsedCommand::NotifyReplied with state " << unsigned(prev_state);
-
-  if (prev_state & DELETE_INTENT) {
-    delete this;
-    return;
-  }
-  // If it was marked as head already, notify the connection that the head is done.
-  if (prev_state & HEAD_REPLY) {
-    // TODO: this might crash as we currently do not wait for async commands on connection close.
-    DCHECK(conn_cntx_);
-    conn_cntx_->conn()->Notify();
-  }
+bool ParsedCommand::CanReply() const {
+  return reply_payload_.index() > 0 ||
+         (task_blocker != nullptr && task_blocker->DEBUG_Count() == 0);
 }
 
 }  // namespace facade

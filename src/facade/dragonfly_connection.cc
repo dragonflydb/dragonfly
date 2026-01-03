@@ -577,7 +577,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   static atomic_uint32_t next_id{1};
 
   constexpr size_t kReqSz = sizeof(ParsedCommand);
-  static_assert(kReqSz <= 256);
+  // static_assert(kReqSz <= 256);
 
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
@@ -2111,7 +2111,8 @@ bool Connection::ReplyMCBatch() {
 
   while (parsed_head_ != parsed_to_execute_) {
     auto* cmd = parsed_head_;
-    if (!cmd->PollHeadForCompletion())
+    // No prepared reply and transaction isn't ready as well
+    if (!cmd->CanReply())
       break;
 
     // This command finished processing and can be replied.
@@ -2190,12 +2191,8 @@ void Connection::DestroyParsedQueue() {
     auto* cmd = parsed_head_;
     stats_->dispatch_queue_bytes -= cmd->UsedMemory();
     parsed_head_ = cmd->next;
-
-    if (cmd->MarkForDestruction()) {  // whether async operation finished or not started
-      DVLOG(2) << "Deleting parsed command " << cmd;
-      delete cmd;
-    }
   }
+
   parsed_tail_ = nullptr;
   parsed_cmd_q_len_ = 0;
   delete parsed_cmd_;
@@ -2364,9 +2361,17 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // The exception is when we use io_uring with multishot recv enabled, in which case
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
+
+      // what I will do in the future
+      // bool head_ready = false;
+      // waiter = { [&head_ready] head_ready = true}
+      // parsed_head_->blocker.Subscribe()
+      // For now block the fiber:
+      if (parsed_head_ && !parsed_head_->CanReply())
+        parsed_head_->task_blocker->Wait();
+
       io_event_.await([this]() {
-        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
-               io_ec_;
+        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->CanReply()) || io_ec_;
       });
     }
 

@@ -1057,61 +1057,6 @@ void CmdSet(CmdArgList args, CommandContext* cmnd_cntx) {
     return cmnd_cntx->SendError(kSyntaxErr);
   }
 
-  if (cmnd_cntx->AsyncExecutionAllowed()) {
-    // TODO: run asynchronous flow and exit.
-    // 1.
-    //    a. Transaction should support non-blocking execution for single hop/single shard commands.
-    //    b. Transaction ScheduleSingleHop accepts absl::FunctionRef which can not be used for
-    //       async operations. We need to change it to accept std::function or similar.
-    //       As a result, we will need to introduce a new transactional API for async operations.
-    //    c. Scheduling needs to be written for async operations. The good news is that for single
-    //       hop/single shard operations, the scheduling always succeeds.
-    //    4. Multi shard async operations are more complicated, as we may need to retry scheduling
-    //       attempts and then to execute the callback. However, it is possible to do -
-    //       we just need to reimplement the logic, so that the last scheduled shard
-    //       triggers the next asynchronous operation instead of running in coordinator thread.
-    // 2. No need to worry about tiering at this point.
-    // 3. Provide customizable reply mechanism that is called from the shard thread and passes
-    //    the response to ParsedCommand. There is equivalent to what we do today when passing
-    //    the response back via ScheduleSingleHop. But if we store in ParsedCommand, we do not need
-    //    to worry about reordering of responses, as pipelined ParsedCommands will be
-    //    already ordered.
-
-    boost::intrusive_ptr<Transaction> tr_ptr(cmnd_cntx->tx);
-    auto cb = [cmnd_cntx, sparams, tr_ptr]() {
-      EngineShard* shard = EngineShard::tlocal();
-      bool explicit_journal = cmnd_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-      SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
-
-      // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
-      // So we can use mc_command data.
-      // For Memcache, we use the values from the command.
-      // TODO: we will need to get arguments in a different way for Redis protocol.
-      DCHECK(cmnd_cntx->mc_command());
-      std::string_view key = cmnd_cntx->mc_command()->key();
-      std::string_view value = cmnd_cntx->mc_command()->value();
-
-      OpStatus status = set_cmd.Set(sparams, key, value);
-
-      if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
-        // Relevant to MC.
-        MCRender render(cmnd_cntx->mc_command()->cmd_flags);
-        cmnd_cntx->SendSimpleString(render.RenderStored(status == OpStatus::OK));
-        return;
-      }
-      if (status == OpStatus::OUT_OF_MEMORY) {
-        return cmnd_cntx->SendError(kOutOfMemory);
-      }
-      LOG(FATAL) << "TBD " << status;
-    };
-
-    cmnd_cntx->SetDeferredReply();  // we defer the reply for sure.
-    ShardId shard_id = cmnd_cntx->tx->GetUniqueShard();
-    shard_set->Add(shard_id, cb);
-
-    return;
-  }
-
   optional<StringResult> prev;
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
@@ -1208,6 +1153,28 @@ void CmdGet(CmdArgList args, CommandContext* cmnd_cntx) {
   };
 
   GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
+}
+
+AsyncHandlerReply CmdGet2(CmdArgList args, CommandContext* cmnd_cntx) {
+  string_view key = args[0];
+  if (key == "BAD")
+    return ErrorReply{"Bad key"};
+
+  auto* strres = new OpResult<StringResult>();
+  auto cb = [key, strres](Transaction* tx, EngineShard* es) {
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok())
+      *strres = it_res.status();
+    else
+      *strres = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
+    return OpStatus::OK;
+  };
+
+  cmnd_cntx->tx->Execute(cb, true, true);
+  return [strres](SinkReplyBuilder* rb) {
+    GetReplies{rb}.Send(std::move(*strres));
+    delete strres;
+  };
 }
 
 void CmdGetDel(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1445,7 +1412,7 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
       }
       mc_builder->SendSimpleString(mc_render.RenderGetEnd());
     };
-    cmnd_cntx->ReplyWith(std::move(replier));
+    replier(cmnd_cntx->rb());
   } else {
     // TODO: remove arg_len capture once we store RESP arguments inside cmnd_cntx.
     auto replier = [arg_len, mget_results = std::move(mget_results),
@@ -1461,7 +1428,7 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
         }
       }
     };
-    cmnd_cntx->ReplyWith(std::move(replier));
+    replier(cmnd_cntx->rb());
   }
 }
 
@@ -1726,6 +1693,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
+      << CI{"GET2", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(&CmdGet2)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)

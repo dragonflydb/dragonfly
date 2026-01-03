@@ -16,6 +16,10 @@
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
 
+namespace facade {
+class SinkReplyBuilder;
+};
+
 namespace dfly {
 
 namespace CO {
@@ -93,6 +97,12 @@ template <typename T> class MoveOnly {
   T value_{};
 };
 
+// Replier function that is invoked after a result is ready
+using AsyncHandlerReplier = std::function<void(facade::SinkReplyBuilder*)>;
+
+// Either error or replier with scheduled tx
+using AsyncHandlerReply = std::variant<facade::ErrorReply, AsyncHandlerReplier>;
+
 class CommandId : public facade::CommandId {
  public:
   using CmdArgList = facade::CmdArgList;
@@ -114,12 +124,19 @@ class CommandId : public facade::CommandId {
 
   using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                      void(CmdArgList, CommandContext*) const>;
+
+  using AsyncHandler = std::function<AsyncHandlerReply(CmdArgList, CommandContext*)>;
+
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
   // Returns the invoke time in usec.
   void Invoke(CmdArgList args, CommandContext* cmd_cntx) const {
     handler_(args, cmd_cntx);
+  }
+
+  void InvokeAsync(CmdArgList args, CommandContext* cmd_cntx) const {
+    async_handler_(args, cmd_cntx);
   }
 
   // Returns error if validation failed, otherwise nullopt
@@ -150,6 +167,12 @@ class CommandId : public facade::CommandId {
     return std::move(*this);
   }
 
+  template <typename F> CommandId&& SetAsyncHandler(F&& f) && {
+    AsyncToSync(f);  // Wrap handler as sync handler
+    WrapAsync(f);    // Wrap async handler
+    return std::move(*this);
+  }
+
   CommandId&& SetValidator(ArgValidator f) && {
     validator_ = std::move(f);
     return std::move(*this);
@@ -174,6 +197,10 @@ class CommandId : public facade::CommandId {
     return is_alias_;
   }
 
+  bool HasAsyncHanlder() const {
+    return async_handler_ != nullptr;
+  }
+
   hdr_histogram* GetLatencyHist() const {
     return latency_histogram_;
   }
@@ -190,6 +217,9 @@ class CommandId : public facade::CommandId {
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
  private:
+  void AsyncToSync(AsyncHandlerReply (*)(CmdArgList, CommandContext*));
+  void WrapAsync(AsyncHandlerReply (*)(CmdArgList, CommandContext*));
+
   std::optional<CO::PubSubKind> kind_pubsub_;
   std::optional<CO::MultiControlKind> kind_multi_ctr_;
 
@@ -199,7 +229,7 @@ class CommandId : public facade::CommandId {
   bool can_be_monitored_{true};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
-  Handler handler_;
+  Handler handler_, async_handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };

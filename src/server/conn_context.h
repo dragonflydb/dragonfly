@@ -357,6 +357,8 @@ class CommandContext : public facade::ParsedCommand {
   const CommandId* cid = nullptr;
   Transaction* tx = nullptr;
 
+  boost::intrusive_ptr<Transaction> keepalive_tx;  // keepalive tx
+
   uint64_t start_time_ns = 0;
 
   // number of commands in the last exec body.

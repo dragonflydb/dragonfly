@@ -18,6 +18,7 @@
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/server_state.h"
+#include "server/transaction.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
@@ -270,6 +271,32 @@ void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
   if (latency_histogram_) {
     hdr_record_value(latency_histogram_, latency_usec);
   }
+}
+
+void CommandId::AsyncToSync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*)) {
+  handler_ = [f](CmdArgList args, CommandContext* cntx) {
+    auto reply = f(args, cntx);
+    if (std::holds_alternative<facade::ErrorReply>(reply)) {
+      cntx->SendError(std::get<facade::ErrorReply>(reply));
+    } else {
+      DCHECK(!cntx->IsDeferredReply()) << "Sync and deferred?";
+      cntx->tx->Blocker()->Wait();
+      std::get<AsyncHandlerReplier>(reply)(cntx->rb());
+    }
+  };
+}
+
+void CommandId::WrapAsync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*)) {
+  async_handler_ = [f](CmdArgList args, CommandContext* cntx) {
+    auto reply = f(args, cntx);
+    if (std::holds_alternative<facade::ErrorReply>(reply)) {
+      cntx->SendError(std::get<facade::ErrorReply>(reply));
+    } else {
+      cntx->keepalive_tx = cntx->tx;
+      cntx->task_blocker = cntx->tx->Blocker();
+      cntx->replier = std::move(std::get<AsyncHandlerReplier>(reply));
+    }
+  };
 }
 
 CommandRegistry::CommandRegistry() {

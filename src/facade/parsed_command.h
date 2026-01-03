@@ -8,6 +8,10 @@
 #include "facade/memcache_parser.h"
 #include "facade/reply_payload.h"
 
+namespace util::fb2 {
+class EmbeddedBlockingCounter;
+}  // namespace util::fb2
+
 namespace facade {
 
 class ConnectionContext;
@@ -124,66 +128,25 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendLong(long val);
   void SendNull();
 
-  template <typename F> void ReplyWith(F&& func) {
-    if (is_deferred_reply_) {
-      reply_payload_ = std::forward<F>(func);
-      NotifyReplied();
-    } else {
-      func(rb_);
-    }
-  }
-
   // If payload exists, sends it to reply builder, resets it and returns true.
   // Otherwise, returns false.
   bool SendPayload();
+  bool CanReply() const;
 
-  // Polls whether the command can be finalized for execution.
-  // If it was executed synchronously, returns true.
-  // If it was dispatched asynchronously, marks it as head command and returns
-  // true if it finished executing and its reply is ready, false otherwise.
-  bool PollHeadForCompletion() {
-    if (!is_deferred_reply_)
-      return true;  // assert(holds_alternative<monostate>(cmd->TakeReplyPayload()));
+  util::fb2::EmbeddedBlockingCounter* task_blocker;
+  std::function<void(facade::SinkReplyBuilder*)> replier;
 
-    return CheckDoneAndMarkHead();
-  }
-
-  // Returns true if the caller can destroy this ParsedCommand.
-  // false, if the command will be destroyed by its asynchronous callback.
-  bool MarkForDestruction() {
-    if (!is_deferred_reply_)
-      return true;
-    uint8_t prev_state = state_.fetch_or(DELETE_INTENT, std::memory_order_acq_rel);
-
-    // If the reply is already done, we can destroy it now.
-    return (prev_state & ASYNC_REPLY_DONE) != 0;
-  }
+  payload::Payload reply_payload_;  // captured reply payload for async dispatches
 
  private:
-  bool CheckDoneAndMarkHead();
-  void NotifyReplied();
-
-  // Synchronization state bits. The reply callback in a shard thread sets ASYNC_REPLY_DONE
-  // when payload is filled. It also notifies the connection if the command is marked as HEAD_REPLY.
-  // The connection fiber checks for ASYNC_REPLY_DONE and sets HEAD_REPLY via
-  // CheckDoneAndMarkHead().
-  enum StateBits : uint8_t {
-    ASYNC_REPLY_DONE = 1 << 0,
-    HEAD_REPLY = 1 << 1,  // it's the first command in the reply chain.
-    DELETE_INTENT = 1 << 2,
-  };
-  std::atomic_uint8_t state_{0};
-
   // whether the command can be dispatched asynchronously.
   bool allow_async_execution_ = false;
 
   // if false then the reply was sent directly to reply builder,
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
-
-  payload::Payload reply_payload_;  // captured reply payload for async dispatches
 };
 
-static_assert(sizeof(ParsedCommand) == 224);
+static_assert(sizeof(ParsedCommand) == 264);
 
 }  // namespace facade
