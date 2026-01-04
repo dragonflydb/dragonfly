@@ -43,10 +43,6 @@
 - **Summary**: 1-2 sentences explaining *what* changed and *why*.
 - **Changes**: Bullet points for key changes.
 - **Fixes**: Link issues (e.g., "Fixes #123").
-
-**Always Update Description**: When pushing changes that affect the PR scope, update the description on GitHub.
-- **Try**: `gh pr edit <PR_NUMBER> --body-file <PATH_TO_SUMMARY>`
-
 ---
 
 ### GitHub Copilot
