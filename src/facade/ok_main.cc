@@ -21,6 +21,11 @@ namespace facade {
 
 namespace {
 
+struct CmdContext : public facade::ParsedCommand {
+  void ReuseInternal() final {
+  }
+};
+
 class OkService : public ServiceInterface {
  public:
   DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd) final {
@@ -52,6 +57,10 @@ class OkService : public ServiceInterface {
 
   ConnectionContext* CreateContext(Connection* owner) final {
     return new ConnectionContext{owner};
+  }
+
+  ParsedCommand* AllocateParsedCommand() final {
+    return new CmdContext{};
   }
 };
 

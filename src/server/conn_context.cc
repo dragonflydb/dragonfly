@@ -286,4 +286,11 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
   return option_ == OPTIN ? match : !match;
 }
 
+void CommandContext::ReuseInternal() {
+  cid = nullptr;
+  tx = nullptr;
+  start_time_ns = 0;
+  exec_body_len = 0;
+}
+
 }  // namespace dfly

@@ -1184,7 +1184,11 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_);
   };
 
-  auto dispatch_async = [this]() -> MessageHandle { return {FromArgs(tmp_parse_args_)}; };
+  auto dispatch_async = [this]() -> MessageHandle {
+    PipelineMessagePtr ptr = GetFromPoolOrCreate();
+    FillBackedArgs(tmp_parse_args_, ptr.get());
+    return {std::move(ptr)};
+  };
 
   io::Bytes read_buffer = io_buf_.InputBuffer();
   // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
@@ -1668,20 +1672,6 @@ void Connection::AsyncFiber() {
   qbp.pipeline_cnd.notify_all();
 }
 
-Connection::PipelineMessagePtr Connection::FromArgs(const RespVec& args) {
-  PipelineMessagePtr ptr = GetFromPipelinePool();
-  if (ptr) {
-    // We fetch objects from the thread-shard pool, which were used by other connections.
-    // Thus, we need to re-initialize the reply builder and connection context.
-    ptr->Init(reply_builder_.get(), cc_.get());
-  } else {
-    ptr.reset(self_->CreateParsedCommand());
-  }
-
-  FillBackedArgs(args, ptr.get());
-  return ptr;
-}
-
 void Connection::ShrinkPipelinePool() {
   if (pipeline_req_pool_.empty())
     return;
@@ -1692,13 +1682,19 @@ void Connection::ShrinkPipelinePool() {
   }
 }
 
-Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
+Connection::PipelineMessagePtr Connection::GetFromPoolOrCreate() {
   if (pipeline_req_pool_.empty())
-    return nullptr;
+    return PipelineMessagePtr{CreateParsedCommand()};
 
   auto ptr = std::move(pipeline_req_pool_.back());
-  stats_->pipeline_cmd_cache_bytes -= UsedMemoryInternal(*ptr);
   pipeline_req_pool_.pop_back();
+
+  stats_->pipeline_cmd_cache_bytes -= UsedMemoryInternal(*ptr);
+  ptr->ResetForReuse();
+
+  ptr->Init(reply_builder_.get(), cc_.get());
+  ptr->ConfigureMCExtension(protocol_ == Protocol::MEMCACHE);
+
   return ptr;
 }
 
@@ -2010,7 +2006,9 @@ bool Connection::ParseMCBatch() {
 
   do {
     if (parsed_cmd_ == nullptr) {
-      parsed_cmd_ = CreateParsedCommand();
+      // Happens with pipelined commands after the first one.
+      PipelineMessagePtr ptr = GetFromPoolOrCreate();
+      parsed_cmd_ = ptr.release();
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
@@ -2024,11 +2022,13 @@ bool Connection::ParseMCBatch() {
     if (result == MemcacheParser::INPUT_PENDING)
       return false;
 
+    // We push the command to the parsed queue even in case of parse errors,
+    // so that we can reply in order.
     EnqueueParsedCommand();
 
     if (result != MemcacheParser::OK) {
       // We can not just reply directly to parse error, as we may have pipelined commands before.
-      // Fill the reply_payload with the error and continue parsing.
+      // Fill the reply_payload into parsed_tail_ with the error and continue parsing.
       memcache_parser_->Reset();
       auto client_error = [](string_view msg) { return absl::StrCat("CLIENT_ERROR ", msg); };
 
@@ -2054,6 +2054,8 @@ bool Connection::ParseMCBatch() {
 
 bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
+
+  unsigned num_pipelined = 0;
   while (parsed_to_execute_) {
     auto* cmd = parsed_to_execute_;
     bool is_head = (cmd == parsed_head_);
@@ -2075,12 +2077,24 @@ bool Connection::ExecuteMCBatch() {
     }
 
     if (!has_replied) {
+      DCHECK(cmd->conn_cntx() == cc_.get());
       service_->DispatchMC(cmd);
 
       // If the reply was not deferred, then DispatchMC has surely replied.
       has_replied = !cmd->IsDeferredReply();
       DVLOG(2) << "Executed command, has_replied: " << has_replied;
     }
+
+    if (has_replied) {
+      if (num_pipelined > 0) {
+        stats_->pipeline_dispatch_commands += num_pipelined;
+        stats_->pipeline_dispatch_calls++;
+        num_pipelined = 0;
+      }
+    } else {
+      num_pipelined++;
+    }
+
     parsed_to_execute_ = cmd->next;
 
     // Only if commands have deferred replies we need to keep them in the parsed queue
@@ -2098,6 +2112,11 @@ bool Connection::ExecuteMCBatch() {
       return false;
     }
   }
+
+  if (num_pipelined > 0) {
+    stats_->pipeline_dispatch_commands += num_pipelined;
+    stats_->pipeline_dispatch_calls++;
+  }
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
   return true;
@@ -2109,6 +2128,7 @@ bool Connection::ReplyMCBatch() {
     return true;
   }
 
+  reply_builder_->SetBatchMode(true);
   while (parsed_head_ != parsed_to_execute_) {
     auto* cmd = parsed_head_;
     if (!cmd->PollHeadForCompletion())
@@ -2128,6 +2148,7 @@ bool Connection::ReplyMCBatch() {
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
 
+  reply_builder_->SetBatchMode(false);
   // Flush any remaining data in the reply builder.
   reply_builder_->Flush();
   return !reply_builder_->GetError();
@@ -2136,8 +2157,7 @@ bool Connection::ReplyMCBatch() {
 ParsedCommand* Connection::CreateParsedCommand() {
   auto* res = service_->AllocateParsedCommand();
   res->Init(reply_builder_.get(), cc_.get());
-  if (protocol_ == Protocol::MEMCACHE)
-    res->CreateMemcacheCommand();
+  res->ConfigureMCExtension(protocol_ == Protocol::MEMCACHE);
   return res;
 }
 
@@ -2159,8 +2179,11 @@ void Connection::EnqueueParsedCommand() {
   parsed_tail_ = parsed_cmd_;
   stats_->dispatch_queue_bytes += parsed_cmd_->UsedMemory();
 
-  parsed_cmd_ = nullptr;  // ownership transferred
   parsed_cmd_q_len_++;
+
+  // We do not recreate parsed_cmd_ here, to support non-pipelined usage pattern,
+  // where we will reuse the same parsed_cmd_ object again after we execute it.
+  parsed_cmd_ = nullptr;  // ownership transferred
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
@@ -2174,14 +2197,13 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
     stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
   }
 
-  // Cache a single command for immediate reuse, otherwise free it.
-  // TODO: we can cache parsed commands similarly to pipeline_req_pool_.
-  // In fact we should unify both approaches.
   if (parsed_cmd_ == nullptr) {
     parsed_cmd_ = cmd;
     parsed_cmd_->ResetForReuse();
   } else {
-    delete cmd;
+    // TODO: limit pipeline_cmd_cache_bytes.
+    stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*cmd);
+    pipeline_req_pool_.emplace_back(cmd);
   }
 }
 
@@ -2427,8 +2449,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         if (io_buf_.AppendLen() == 0U) {
           // it can happen with memcached but not for RedisParser, because RedisParser fully
           // consumes the passed buffer
-          LOG_EVERY_T(WARNING, 10)
-              << "Maximum io_buf length reached, consider to increase max_client_iobuf_len flag";
+          LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
+                                   << ", consider to increase max_client_iobuf_len flag";
         }
       }
     } else if (parse_status != OK) {

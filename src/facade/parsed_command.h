@@ -64,9 +64,14 @@ class ParsedCommand : public cmn::BackedArguments {
     conn_cntx_ = conn_cntx;
   }
 
-  void CreateMemcacheCommand() {
-    mc_cmd_ = std::make_unique<MemcacheParser::Command>();
-    mc_cmd_->backed_args = this;
+  // If true, creates mc specific fields, false - destroys them.
+  void ConfigureMCExtension(bool is_mc) {
+    if (is_mc && !mc_cmd_) {
+      mc_cmd_ = std::make_unique<MemcacheParser::Command>();
+      mc_cmd_->backed_args = this;
+    } else if (!is_mc) {
+      mc_cmd_.reset();
+    }
   }
 
   SinkReplyBuilder* rb() const {
@@ -158,6 +163,9 @@ class ParsedCommand : public cmn::BackedArguments {
     // If the reply is already done, we can destroy it now.
     return (prev_state & ASYNC_REPLY_DONE) != 0;
   }
+
+ protected:
+  virtual void ReuseInternal() = 0;
 
  private:
   bool CheckDoneAndMarkHead();

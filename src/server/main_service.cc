@@ -1808,6 +1808,8 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
   const auto& cmd = *parsed_cmd->mc_command();
   string_view value = cmd.value();
   auto* cntx = cmd_ctx->server_conn_cntx();
+  DCHECK(cntx->transaction == nullptr);
+
   char cmd_name[16];
   char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
