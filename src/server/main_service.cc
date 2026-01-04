@@ -292,9 +292,6 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
                                CmdArgList tail_args) {
   std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", cntx->conn_state.db_index);
 
-  if (cntx->conn_state.squashing_info)
-    cntx = cntx->conn_state.squashing_info->owner;
-
   string endpoint;
   if (cntx->conn_state.script_info) {
     endpoint = "lua";
@@ -1255,12 +1252,6 @@ optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_i
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
                                                       const ConnectionContext* cntx,
                                                       string_view error_msg, ArgSlice tail_args) {
-  // If we are on a squashed context we need to use the owner, because the
-  // context we are operating on is a stub and the acl username is not copied
-  // See: MultiCommandSquasher::SquashedHopCb
-  if (cntx->conn_state.squashing_info)
-    cntx = cntx->conn_state.squashing_info->owner;
-
   if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
     return ErrorReply(absl::StrCat("-NOPERM ", cntx->authed_username, " ", error_msg));
   }

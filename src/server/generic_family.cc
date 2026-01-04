@@ -1843,7 +1843,7 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Only global/non-atomic multi transactions can change dbs safely,
   // locked-ahead transactions acquired keys ahead for a specific dbindex
-  if (auto* tx = cntx->transaction; tx && tx->IsMulti()) {
+  if (auto* tx = cmd_cntx->tx; tx && tx->IsMulti()) {
     if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
