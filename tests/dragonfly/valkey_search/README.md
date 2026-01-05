@@ -27,6 +27,8 @@ Integration tests from [valkey-search](https://github.com/valkey-io/valkey-searc
 
 ## Running Tests
 
+**Note:** If the `integration/` directory hasn't been synced, pytest will skip these tests with a warning message. This is expected behavior and allows other tests to run normally.
+
 ```bash
 # All tests
 pytest tests/dragonfly/valkey_search/integration/ -v
@@ -58,3 +60,4 @@ tests/dragonfly/valkey_search/
 4. **Adapter** (`valkey_search_test_case_dragonfly.py`) creates real Dragonfly instances with replicas
 5. **Original tests run unchanged** - all adaptation happens in infrastructure layer
 6. **Python 3.8 compatibility** - sync script patches all `.py` files to add `from __future__ import annotations`
+7. **Graceful degradation** - if `integration/` is not synced, pytest skips these tests with a clear warning message

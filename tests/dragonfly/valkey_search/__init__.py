@@ -11,6 +11,9 @@ import os
 import warnings
 from . import util
 
+# Constants
+SEPARATOR_LENGTH = 80
+
 # Try to import from integration directory, which may not exist if not synced
 try:
     from .integration import compatibility
@@ -19,7 +22,7 @@ except (ModuleNotFoundError, ImportError) as e:
     INTEGRATION_AVAILABLE = False
     compatibility = None
     warnings.warn(
-        f"\n{'='*80}\n"
+        f"\n{'='*SEPARATOR_LENGTH}\n"
         f"WARNING: Valkey-search integration tests are not available.\n"
         f"The 'integration' directory was not found or could not be imported.\n"
         f"\n"
@@ -28,7 +31,7 @@ except (ModuleNotFoundError, ImportError) as e:
         f"  ./sync-valkey-search-tests.sh\n"
         f"\n"
         f"These tests will be skipped during pytest collection.\n"
-        f"{'='*80}",
+        f"{'='*SEPARATOR_LENGTH}",
         UserWarning,
         stacklevel=2
     )

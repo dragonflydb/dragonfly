@@ -70,11 +70,13 @@ def pytest_ignore_collect(collection_path, config):
     Skip collection of integration tests if the integration directory is not available.
     This prevents pytest from trying to collect tests from a directory that doesn't exist.
     """
-    # Convert path to string for comparison
-    path_str = str(collection_path)
+    from pathlib import Path
+    
+    # Convert to Path object for robust path operations
+    path = Path(collection_path)
     
     # If this is inside the integration directory and integration is not available, skip it
-    if "valkey_search/integration" in path_str and not INTEGRATION_AVAILABLE:
+    if "valkey_search/integration" in str(path) and not INTEGRATION_AVAILABLE:
         return True
     
     return False
