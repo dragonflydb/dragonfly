@@ -127,6 +127,10 @@ class JsonAutoUpdater {
     return GetPrimeValue().GetJson();
   }
 
+  const DbSlice::Iterator& GetIterator() const {
+    return it_.it;
+  }
+
  private:
   size_t GetMemoryUsage() const {
     return static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
@@ -499,35 +503,36 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   JsonAutoUpdater updater(op_args, key, *std::move(it_res),
                           {.disable_indexing = true, .update_on_delete = false});
 
-  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-  if (!parsed_json) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    if (type == OBJ_JSON) {
-      // We need to add the document to the indexes, because we removed it before
-      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+  {
+    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+    if (!parsed_json) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      if (type == OBJ_JSON) {
+        // We need to add the document to the indexes, because we removed it before
+        op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, updater.GetPrimeValue());
+      }
+      return OpStatus::INVALID_JSON;
     }
-    return OpStatus::INVALID_JSON;
+
+    op_args.GetDbSlice().RemoveExpire(op_args.db_cntx.db_index, updater.GetIterator());
+
+    if (JsonEnconding() == kEncodingJsonFlat) {
+      flexbuffers::Builder fbb;
+      json::FromJsonType(*parsed_json, &fbb);
+      fbb.Finish();
+      const auto& buf = fbb.GetBuffer();
+      updater.GetPrimeValue().SetJson(buf.data(), buf.size());
+    } else {
+      updater.GetPrimeValue().SetJson(std::move(*parsed_json));
+    }
+
+    // We should reset parsed_json before setting the size of the json, because
+    // std::optional still holds the value and it will be deallocated
   }
-
-  op_args.GetDbSlice().RemoveExpire(op_args.db_cntx.db_index, it_res->it);
-
-  if (JsonEnconding() == kEncodingJsonFlat) {
-    flexbuffers::Builder fbb;
-    json::FromJsonType(*parsed_json, &fbb);
-    fbb.Finish();
-    const auto& buf = fbb.GetBuffer();
-    updater.GetPrimeValue().SetJson(buf.data(), buf.size());
-  } else {
-    updater.GetPrimeValue().SetJson(std::move(*parsed_json));
-  }
-
-  // We should do reset before setting the size of the json, because
-  // std::optional still holds the value and it will be deallocated
-  parsed_json.reset();
   updater.SetJsonSize();
 
   // We need to manually run add document here
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, updater.GetPrimeValue());
 
   return OpStatus::OK;
 }
