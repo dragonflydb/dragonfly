@@ -126,6 +126,11 @@ class MemcacheParser {
     last_unix_time_ = t;
   }
 
+  // temporary debug accessor.
+  uint32_t DEBUG_val_len_to_read() const {
+    return val_len_to_read_;
+  }
+
  private:
   Result ConsumeValue(std::string_view str, uint32_t* consumed, Command* dest);
   Result ParseInternal(ArgSlice tokens_view, Command* cmd);

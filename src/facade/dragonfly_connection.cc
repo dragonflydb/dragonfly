@@ -6,6 +6,7 @@
 #include "facade/dragonfly_connection.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
@@ -2014,8 +2015,14 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
+    unsigned val_len_to_read = memcache_parser_->DEBUG_val_len_to_read();
     MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
+    if (result == MemcacheParser::PARSE_ERROR) {
+      LOG_FIRST_N(WARNING, 5) << "Memcache parse error, cmd_cnt: " << local_stats_.cmds
+                              << " val_len_to_read: " << val_len_to_read
+                              << ", chunk: " << absl::CEscape(io::View(io_buf_.InputBuffer()));
+    }
 
     io_buf_.ConsumeInput(consumed);
 
