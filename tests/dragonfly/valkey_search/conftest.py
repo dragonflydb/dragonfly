@@ -49,6 +49,7 @@ SKIP_TESTS = [
     "integration/test_valkey_search_acl.py::TestCommandsACLs::test_valkey_search_cmds_categories",
 ]
 
+
 # Apply dfly_args to all test classes in this directory
 def pytest_collection_modifyitems(items):
     """Apply dfly_args decorator to all test classes and skip marked tests"""
@@ -73,9 +74,9 @@ def pytest_ignore_collect(collection_path, config):
     """
     # Convert to Path object for robust path operations
     path = Path(collection_path)
-    
+
     # If this is inside the integration directory and integration is not available, skip it
     if "valkey_search/integration" in str(path) and not INTEGRATION_AVAILABLE:
         return True
-    
+
     return False

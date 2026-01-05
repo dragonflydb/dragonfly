@@ -17,6 +17,7 @@ SEPARATOR_LENGTH = 80
 # Try to import from integration directory, which may not exist if not synced
 try:
     from .integration import compatibility
+
     INTEGRATION_AVAILABLE = True
 except (ModuleNotFoundError, ImportError) as e:
     INTEGRATION_AVAILABLE = False
@@ -33,7 +34,7 @@ except (ModuleNotFoundError, ImportError) as e:
         f"These tests will be skipped during pytest collection.\n"
         f"{'='*SEPARATOR_LENGTH}",
         UserWarning,
-        stacklevel=2
+        stacklevel=2,
     )
 
 # Only set up the mock modules if integration is available

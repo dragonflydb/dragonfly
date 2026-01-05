@@ -31,7 +31,7 @@
 1. **Read Before Edit** - Always read files before modifying
 2. **Test After Changes** - Run tests immediately: `ctest -V -L DFLY` / `pytest dragonfly/`
 3. **Init Submodules** - `git submodule update --init --recursive`
-4. **Format Code** - `pre-commit run --files <files>`
+4. **Format Code** - `pre-commit run --files <files>` (REQUIRED before PR submission)
 5. **Follow Architecture** - See [Universal Patterns](#universal-architecture-patterns) below
 
 ---
@@ -43,6 +43,13 @@
 - **Summary**: 1-2 sentences explaining *what* changed and *why*.
 - **Changes**: Bullet points for key changes.
 - **Fixes**: Link issues (e.g., "Fixes #123").
+
+**Pre-commit Checks Required**: Before submitting a PR, you MUST run pre-commit hooks to ensure code formatting:
+```bash
+pre-commit run --files <modified-files>
+```
+This validates C++ (clang-format) and Python (black) formatting. PRs with formatting violations will fail CI checks.
+
 ---
 
 ### GitHub Copilot
@@ -470,7 +477,9 @@ Before claiming a task is complete, verify:
 ### Pre-commit & Style
 
 - [ ] Pre-commit hooks installed: `pre-commit install`
+- [ ] **Pre-commit checks pass on all modified files**: `pre-commit run --files <files>`
 - [ ] Code formatted with clang-format (C++) and black (Python)
+- [ ] No formatting violations remain (CI will fail otherwise)
 
 ### Documentation
 
