@@ -334,10 +334,8 @@ class Transaction {
   // Return debug information about a transaction, include shard local info if passed
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
-  // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
-  // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
-  // to it must not block.
-  void PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args);
+  // Prepare transaction to do a single ScheduleSingleHop() for squashing
+  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args, MultiMode mode);
 
   // Write a journal entry to a shard journal with the given payload.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,

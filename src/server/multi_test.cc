@@ -17,6 +17,7 @@
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -55,6 +56,16 @@ class MultiTest : public BaseFamilyTest {
   MultiTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
+};
+
+class SingleShardMultiTest : public BaseFamilyTest {
+ protected:
+  SingleShardMultiTest() : BaseFamilyTest() {
+    num_threads_ = 5;
+    absl::SetFlag(&FLAGS_num_shards, 1);
+  }
+
+  absl::FlagSaver saver_;
 };
 
 struct MultiTxTest : public MultiTest {};
@@ -1002,6 +1013,19 @@ TEST_F(MultiTest, ScriptBadCommand) {
 
   resp = Run({"eval", s4, "0"});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(SingleShardMultiTest, MultiSquashSingleShard) {
+  string_view script = R"(--!df flags=allow-undeclared-keys
+redis.call('SET', 'first', 'works');
+redis.call('SET', 'second', 'too');
+redis.call('SET', 'third', 'as well');
+)";
+
+  Run({"EVAL", script, "0"});
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 1u);
 }
 
 TEST_F(MultiTest, MultiEvalModeConflict) {

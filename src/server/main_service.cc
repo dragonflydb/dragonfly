@@ -2218,12 +2218,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
   return false;
 }
 
-static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode multi_mode,
+// `multi_mode` is the deduced multi mode that is not yet set on the transaction
+static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_mode,
                                    const Transaction& tx) {
-  if (!sid.has_value() || multi_mode != Transaction::LOCK_AHEAD) {
-    return false;
-  }
-
   if (tx.GetMultiMode() != Transaction::NOT_DETERMINED) {
     // We may be running EVAL under MULTI. Currently RunSingleShardMulti() will attempt to lock
     // keys, in which case will be already locked by MULTI. We could optimize this path as well
@@ -2231,7 +2228,11 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode
     return false;
   }
 
-  return true;
+  // If we have only a single shard, we can run a global command without hops
+  if (shard_set->size() == 1 && multi_mode == Transaction::GLOBAL)
+    return true;
+
+  return one_shard && multi_mode == Transaction::LOCK_AHEAD;
 }
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
@@ -2295,7 +2296,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     sinfo.reset();
   };
 
-  if (CanRunSingleShardMulti(sid, script_mode, *tx)) {
+  if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -2304,7 +2305,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareMultiForScheduleSingleHop(conn_cntx->ns, *sid, conn_cntx->db_index(), args);
+    tx->PrepareSingleSquash(conn_cntx->ns, sid.value_or(0), conn_cntx->db_index(), args,
+                            script_mode);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
           new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
