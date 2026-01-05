@@ -3,7 +3,6 @@ Pytest configuration for valkey-search tests on Dragonfly
 """
 
 import pytest
-import os
 from pathlib import Path
 from .. import dfly_args
 
