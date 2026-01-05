@@ -8,63 +8,87 @@ by replacing valkeytestframework imports with Dragonfly equivalents.
 import sys
 import types
 import os
+import warnings
 from . import util
-from .integration import compatibility
 
-# Add current directory to path for imports
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+# Try to import from integration directory, which may not exist if not synced
+try:
+    from .integration import compatibility
+    INTEGRATION_AVAILABLE = True
+except (ModuleNotFoundError, ImportError) as e:
+    INTEGRATION_AVAILABLE = False
+    compatibility = None
+    warnings.warn(
+        f"\n{'='*80}\n"
+        f"WARNING: Valkey-search integration tests are not available.\n"
+        f"The 'integration' directory was not found or could not be imported.\n"
+        f"\n"
+        f"To enable these tests, run:\n"
+        f"  cd tests/dragonfly/valkey_search\n"
+        f"  ./sync-valkey-search-tests.sh\n"
+        f"\n"
+        f"These tests will be skipped during pytest collection.\n"
+        f"{'='*80}",
+        UserWarning,
+        stacklevel=2
+    )
 
-# Import the Dragonfly-specific test case classes
-exec(open(os.path.join(current_dir, "valkey_search_test_case_dragonfly.py")).read())
+# Only set up the mock modules if integration is available
+if INTEGRATION_AVAILABLE:
+    # Add current directory to path for imports
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
 
-# Create a mock module for valkey_search_test_case
-mock_module = types.ModuleType("valkey_search_test_case")
-mock_module.ValkeySearchTestCaseBase = ValkeySearchTestCaseBase
-mock_module.ValkeySearchTestCaseDebugMode = ValkeySearchTestCaseDebugMode
-mock_module.ValkeySearchClusterTestCase = ValkeySearchClusterTestCase
-mock_module.ValkeySearchClusterTestCaseDebugMode = ValkeySearchClusterTestCaseDebugMode
-mock_module.Node = Node
-mock_module.ReplicationGroup = ReplicationGroup
+    # Import the Dragonfly-specific test case classes
+    exec(open(os.path.join(current_dir, "valkey_search_test_case_dragonfly.py")).read())
 
-# Replace the module in sys.modules
-sys.modules["valkey_search_test_case"] = mock_module
+    # Create a mock module for valkey_search_test_case
+    mock_module = types.ModuleType("valkey_search_test_case")
+    mock_module.ValkeySearchTestCaseBase = ValkeySearchTestCaseBase
+    mock_module.ValkeySearchTestCaseDebugMode = ValkeySearchTestCaseDebugMode
+    mock_module.ValkeySearchClusterTestCase = ValkeySearchClusterTestCase
+    mock_module.ValkeySearchClusterTestCaseDebugMode = ValkeySearchClusterTestCaseDebugMode
+    mock_module.Node = Node
+    mock_module.ReplicationGroup = ReplicationGroup
 
-# Also need to provide valkeytestframework modules
-valkey_test_framework = types.ModuleType("valkeytestframework")
+    # Replace the module in sys.modules
+    sys.modules["valkey_search_test_case"] = mock_module
 
-valkey_test_case = types.ModuleType("valkeytestframework.valkey_test_case")
-valkey_test_case.ValkeyTestCase = ValkeyTestCase
-valkey_test_case.ReplicationTestCase = ReplicationTestCase
-valkey_test_case.ValkeyServerHandle = ValkeyServerHandle
+    # Also need to provide valkeytestframework modules
+    valkey_test_framework = types.ModuleType("valkeytestframework")
 
-util_module = types.ModuleType("valkeytestframework.util")
-waiters_module = types.ModuleType("valkeytestframework.util.waiters")
+    valkey_test_case = types.ModuleType("valkeytestframework.valkey_test_case")
+    valkey_test_case.ValkeyTestCase = ValkeyTestCase
+    valkey_test_case.ReplicationTestCase = ReplicationTestCase
+    valkey_test_case.ValkeyServerHandle = ValkeyServerHandle
 
-waiters_module.wait_for_true = util.waiters.wait_for_true
-waiters_module.wait_for_equal = util.waiters.wait_for_equal
-waiters_module.wait_for_not_equal = util.waiters.wait_for_not_equal
-waiters_module.wait_for_condition = util.waiters.wait_for_condition
-util_module.waiters = waiters_module
+    util_module = types.ModuleType("valkeytestframework.util")
+    waiters_module = types.ModuleType("valkeytestframework.util.waiters")
 
-# Also add direct util module access
-sys.modules["util"] = util_module
-sys.modules["util.waiters"] = waiters_module
+    waiters_module.wait_for_true = util.waiters.wait_for_true
+    waiters_module.wait_for_equal = util.waiters.wait_for_equal
+    waiters_module.wait_for_not_equal = util.waiters.wait_for_not_equal
+    waiters_module.wait_for_condition = util.waiters.wait_for_condition
+    util_module.waiters = waiters_module
 
-conftest_module = types.ModuleType("valkeytestframework.conftest")
-conftest_module.resource_port_tracker = types.ModuleType("resource_port_tracker")
+    # Also add direct util module access
+    sys.modules["util"] = util_module
+    sys.modules["util.waiters"] = waiters_module
 
-# Setup compatibility as a module in sys.modules
-sys.modules["compatibility"] = compatibility
+    conftest_module = types.ModuleType("valkeytestframework.conftest")
+    conftest_module.resource_port_tracker = types.ModuleType("resource_port_tracker")
 
-# Also set up the submodules
-if hasattr(compatibility, "data_sets"):
-    sys.modules["compatibility.data_sets"] = compatibility.data_sets
+    # Setup compatibility as a module in sys.modules
+    sys.modules["compatibility"] = compatibility
 
-# Add all modules to sys.modules
-sys.modules["valkeytestframework"] = valkey_test_framework
-sys.modules["valkeytestframework.valkey_test_case"] = valkey_test_case
-sys.modules["valkeytestframework.util"] = util_module
-sys.modules["valkeytestframework.util.waiters"] = waiters_module
-sys.modules["valkeytestframework.conftest"] = conftest_module
+    # Also set up the submodules
+    if hasattr(compatibility, "data_sets"):
+        sys.modules["compatibility.data_sets"] = compatibility.data_sets
+
+    # Add all modules to sys.modules
+    sys.modules["valkeytestframework"] = valkey_test_framework
+    sys.modules["valkeytestframework.valkey_test_case"] = valkey_test_case
+    sys.modules["valkeytestframework.util"] = util_module
+    sys.modules["valkeytestframework.util.waiters"] = waiters_module
+    sys.modules["valkeytestframework.conftest"] = conftest_module

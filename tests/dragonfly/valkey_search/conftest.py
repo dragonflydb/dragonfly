@@ -3,7 +3,13 @@ Pytest configuration for valkey-search tests on Dragonfly
 """
 
 import pytest
+import os
 from .. import dfly_args
+
+
+# Check if integration directory exists
+INTEGRATION_DIR = os.path.join(os.path.dirname(__file__), "integration")
+INTEGRATION_AVAILABLE = os.path.isdir(INTEGRATION_DIR)
 
 
 # List of tests to skip - add test node IDs here
@@ -42,7 +48,6 @@ SKIP_TESTS = [
     "integration/test_valkey_search_acl.py::TestCommandsACLs::test_valkey_search_cmds_categories",
 ]
 
-
 # Apply dfly_args to all test classes in this directory
 def pytest_collection_modifyitems(items):
     """Apply dfly_args decorator to all test classes and skip marked tests"""
@@ -58,3 +63,18 @@ def pytest_collection_modifyitems(items):
         for skip_pattern in SKIP_TESTS:
             if skip_pattern in item_path:
                 item.add_marker(pytest.mark.skip(reason=f"Test skipped: {skip_pattern}"))
+
+
+def pytest_ignore_collect(collection_path, config):
+    """
+    Skip collection of integration tests if the integration directory is not available.
+    This prevents pytest from trying to collect tests from a directory that doesn't exist.
+    """
+    # Convert path to string for comparison
+    path_str = str(collection_path)
+    
+    # If this is inside the integration directory and integration is not available, skip it
+    if "valkey_search/integration" in path_str and not INTEGRATION_AVAILABLE:
+        return True
+    
+    return False
