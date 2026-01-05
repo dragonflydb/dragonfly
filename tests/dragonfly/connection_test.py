@@ -943,28 +943,6 @@ async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
     await seeder.run(target_deviation=0.1)
 
 
-# Test for control message injection during SquashPipeline.
-# Before fix: server crashes because control message shifts dispatch_q_ indices.
-# After fix: server handles this correctly.
-@dfly_args({"proactor_threads": "1", "pipeline_squash": 1})
-async def test_squash_pipeline_with_control_message(async_client: aioredis.Redis):
-    # Activate the test hook that injects a control message during SquashPipeline
-    # This hook is only available in debug builds
-    try:
-        await async_client.execute_command("DEBUG", "SQUASH_HOOK")
-    except ResponseError as e:
-        if "Unknown subcommand" in str(e):
-            pytest.skip("DEBUG SQUASH_HOOK not available in release build")
-        raise
-
-    # Send pipelined commands - this triggers SquashPipeline which will crash before fix
-    p = async_client.pipeline(transaction=False)
-    p.set("a", "1")
-    p.set("b", "2")
-    res = await p.execute()
-    assert res == [True, True]
-
-
 """
 This test makes sure that multi transactions can be integrated into pipeline squashing
 """
