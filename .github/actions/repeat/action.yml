@@ -39,6 +39,12 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Sync valkey-search tests
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search
+        # main branch revision
+        ./sync-valkey-search-tests.sh 90124dc91756b24cb2e58e5c4eea5b8d53004ea6
     - name: Repeat pytests
       id: main
       shell: bash
