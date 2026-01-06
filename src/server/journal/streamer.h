@@ -36,7 +36,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void ConsumeJournalChange(const journal::JournalChangeItem& item);
 
   // Must be called on context cancellation for unblocking
-  // and manual cleanup. If unregistered a listener, returns true.
+  // and manual cleanup. If it unregistered a listener, returns true.
   virtual bool Cancel();
 
   size_t UsedBytes() const;

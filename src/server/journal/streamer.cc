@@ -533,9 +533,12 @@ bool RestoreStreamer::Cancel() {
   cntx_->Cancel();
   if (sver != 0) {
     db_slice_->UnregisterOnChange(sver);
-    return JournalStreamer::Cancel();
   }
-  return false;
+  bool res = JournalStreamer::Cancel();
+  LOG_IF(WARNING, res != (sver != 0)) << "Journal and DBSlice unregister state mismatch in "
+                                         "RestoreStreamer Cancel. DBSlice unregister state: "
+                                      << (sver != 0) << ", Journal unregister state: " << res;
+  return res && (sver != 0);
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalChangeItem& item) const {
