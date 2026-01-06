@@ -586,7 +586,6 @@ void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, Cm
   } else {
     DCHECK_EQ(mode, GLOBAL);
     InitGlobal();
-    EnableShard(sid);
   }
 }
 

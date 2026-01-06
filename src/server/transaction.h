@@ -303,6 +303,10 @@ class Transaction {
     return multi_->mode;
   }
 
+  MultiRole GetMultiRole() const {
+    return multi_->role;
+  }
+
   // Whether the transaction is multi and runs in an atomic mode.
   // This, instead of just IsMulti(), should be used to check for the possibility of
   // different optimizations, because they can safely be applied to non-atomic multi

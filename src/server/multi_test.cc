@@ -1016,16 +1016,23 @@ TEST_F(MultiTest, ScriptBadCommand) {
 }
 
 TEST_F(SingleShardMultiTest, MultiSquashSingleShard) {
-  string_view script = R"(--!df flags=allow-undeclared-keys
+  string_view script = R"(
+--!df flags=allow-undeclared-keys
 redis.call('SET', 'first', 'works');
 redis.call('SET', 'second', 'too');
 redis.call('SET', 'third', 'as well');
+return 'OK';
 )";
 
-  Run({"EVAL", script, "0"});
+  auto resp = Run({"EVAL", script, "0"});
+  EXPECT_EQ(resp, "OK");
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 1u);
+
+  EXPECT_EQ(Run({"GET", "first"}), "works");
+  EXPECT_EQ(Run({"GET", "second"}), "too");
+  EXPECT_EQ(Run({"GET", "third"}), "as well");
 }
 
 TEST_F(MultiTest, MultiEvalModeConflict) {

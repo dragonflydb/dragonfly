@@ -1385,15 +1385,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
     return ErrorReply{"This Redis command is not allowed from script"};
 
   if (under_script) {
-    DCHECK(dfly_cntx.transaction);
+    auto* tx = dfly_cntx.transaction;
+    DCHECK(tx);
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
-    Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
+    Transaction::MultiMode mode = tx->GetMultiMode();
+    Transaction::MultiRole role = tx->GetMultiRole();
     bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
 
-    if (cid.IsTransactional()) {
+    if (cid.IsTransactional() && role != Transaction::SQUASHED_STUB) {
       auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, &cid, tail_args, mode);
 
       if (err.has_value()) {
