@@ -206,6 +206,35 @@ TEST_F(MCParserTest, ParseError) {
   EXPECT_EQ(MemcacheParser::PARSE_ERROR, parser_.Parse("\r", &consumed_, &cmd_));
 }
 
+// Test for the bug where \r\n command line terminator split across TCP packets
+// would cause parse errors.
+TEST_F(MCParserTest, SplitCRLFInCommandLine) {
+  // Simulate TCP fragmentation where command line ends with \r but \n comes in next packet
+  auto st = Parse("set k10 0 0 3 noreply\r");
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+  EXPECT_EQ(consumed_, 22);
+
+  // Now the \n arrives followed by the value and another command
+  st = parser_.Parse("\nd10\r\nget k11\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(consumed_, 6);  // \n + d10\r\n
+  EXPECT_EQ(cmd_.type, MemcacheParser::SET);
+  EXPECT_EQ(cmd_.key(), "k10");
+  EXPECT_EQ(cmd_.value(), "d10");
+  EXPECT_TRUE(cmd_.cmd_flags.no_reply);
+}
+
+// Test edge case: empty command line when \r\n split
+TEST_F(MCParserTest, SplitCRLFEmptyCommand) {
+  // Just \r with nothing before it
+  auto st = Parse("\r");
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+
+  // Now \n arrives - should be parse error since command line is empty
+  st = parser_.Parse("\nget key\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, st);
+}
+
 class MCParserNoreplyTest : public MCParserTest {
  protected:
   void RunTest(string_view str, bool noreply,
