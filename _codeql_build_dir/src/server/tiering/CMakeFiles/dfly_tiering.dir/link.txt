@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/libdfly_tiering.a CMakeFiles/dfly_tiering.dir/decoders.cc.o CMakeFiles/dfly_tiering.dir/disk_storage.cc.o CMakeFiles/dfly_tiering.dir/external_alloc.cc.o CMakeFiles/dfly_tiering.dir/op_manager.cc.o CMakeFiles/dfly_tiering.dir/serialized_map.cc.o CMakeFiles/dfly_tiering.dir/small_bins.cc.o
-/usr/bin/ranlib ../../../lib/libdfly_tiering.a

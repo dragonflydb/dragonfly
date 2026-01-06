@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../lib/libio.a CMakeFiles/io.dir/file.cc.o CMakeFiles/io.dir/file_util.cc.o CMakeFiles/io.dir/io.cc.o CMakeFiles/io.dir/line_reader.cc.o CMakeFiles/io.dir/proc_reader.cc.o CMakeFiles/io.dir/zstd_sinksource.cc.o
-/usr/bin/ranlib ../../lib/libio.a

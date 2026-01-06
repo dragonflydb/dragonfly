@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/libdfly_search_server.a CMakeFiles/dfly_search_server.dir/aggregator.cc.o CMakeFiles/dfly_search_server.dir/doc_accessors.cc.o CMakeFiles/dfly_search_server.dir/doc_index.cc.o CMakeFiles/dfly_search_server.dir/search_family.cc.o CMakeFiles/dfly_search_server.dir/index_join.cc.o CMakeFiles/dfly_search_server.dir/global_hnsw_index.cc.o
-/usr/bin/ranlib ../../../lib/libdfly_search_server.a

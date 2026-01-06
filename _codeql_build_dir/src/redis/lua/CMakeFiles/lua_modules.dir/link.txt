@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/liblua_modules.a CMakeFiles/lua_modules.dir/cjson/fpconv.c.o CMakeFiles/lua_modules.dir/cjson/strbuf.c.o CMakeFiles/lua_modules.dir/cjson/lua_cjson.c.o CMakeFiles/lua_modules.dir/cmsgpack/lua_cmsgpack.c.o CMakeFiles/lua_modules.dir/struct/lua_struct.c.o CMakeFiles/lua_modules.dir/bit/bit.c.o
-/usr/bin/ranlib ../../../lib/liblua_modules.a

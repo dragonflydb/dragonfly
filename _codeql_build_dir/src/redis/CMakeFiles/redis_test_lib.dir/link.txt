@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../lib/libredis_test_lib.a CMakeFiles/redis_test_lib.dir/dict.c.o CMakeFiles/redis_test_lib.dir/siphash.c.o
-/usr/bin/ranlib ../../lib/libredis_test_lib.a

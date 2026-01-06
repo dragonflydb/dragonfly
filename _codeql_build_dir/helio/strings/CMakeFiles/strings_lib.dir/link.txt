@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../lib/libstrings_lib.a CMakeFiles/strings_lib.dir/escaping.cc.o CMakeFiles/strings_lib.dir/human_readable.cc.o
-/usr/bin/ranlib ../../lib/libstrings_lib.a
