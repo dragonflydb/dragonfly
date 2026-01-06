@@ -64,6 +64,13 @@ CycleQuota CycleQuota::Unlimited() {
   return CycleQuota(kMaxQuota, true);
 }
 
+void CycleQuota::Extend(const uint64_t quota_usec) {
+  if (quota_cycles_ == kMaxQuota)
+    return;
+
+  quota_cycles_ += base::CycleClock::FromUsec(quota_usec);
+}
+
 CycleQuota::CycleQuota(const uint64_t quota_cycles, bool /*tag*/) : quota_cycles_{quota_cycles} {
   Arm();
 }
@@ -217,6 +224,10 @@ bool PageUsage::ConsumePageStats(mi_page_usage_stats_t stat) {
 
 bool PageUsage::QuotaDepleted() const {
   return quota_.Depleted();
+}
+
+void PageUsage::ExtendQuota(uint64_t quota_usec) {
+  quota_.Extend(quota_usec);
 }
 
 }  // namespace dfly

@@ -34,6 +34,11 @@ class CycleQuota {
 
   static CycleQuota Unlimited();
 
+  // Extends the quota by the given amount. If any quota was already left over, it is also retained
+  // on top of the newly added quota. For example, if 80 usec was left, and we extend by 50 usec,
+  // the task now has 130 usec before the quota will be depleted.
+  void Extend(uint64_t quota_usec);
+
  private:
   explicit CycleQuota(uint64_t quota_cycles, bool /*tag*/);
 
@@ -102,6 +107,8 @@ class PageUsage {
 
   bool QuotaDepleted() const;
 
+  void ExtendQuota(uint64_t quota_usec);
+
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
   float threshold_;
@@ -127,9 +134,10 @@ class PageUsage {
 
   UniquePages unique_pages_;
 
+  CycleQuota quota_;
+
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};
-  CycleQuota quota_;
 };
 
 }  // namespace dfly
