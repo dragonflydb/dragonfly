@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libtls_lib.a CMakeFiles/tls_lib.dir/tls_engine.cc.o CMakeFiles/tls_lib.dir/tls_socket.cc.o
+/usr/bin/ranlib ../../../lib/libtls_lib.a

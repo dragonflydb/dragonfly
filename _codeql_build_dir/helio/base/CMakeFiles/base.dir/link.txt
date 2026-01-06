@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../lib/libbase.a CMakeFiles/base.dir/cpu_features.cc.o CMakeFiles/base.dir/hash.cc.o CMakeFiles/base.dir/histogram.cc.o CMakeFiles/base.dir/init.cc.o CMakeFiles/base.dir/logging.cc.o CMakeFiles/base.dir/proc_util.cc.o CMakeFiles/base.dir/pthread_utils.cc.o CMakeFiles/base.dir/varz_node.cc.o CMakeFiles/base.dir/cuckoo_map.cc.o CMakeFiles/base.dir/io_buf.cc.o CMakeFiles/base.dir/segment_pool.cc.o
+/usr/bin/ranlib ../../lib/libbase.a

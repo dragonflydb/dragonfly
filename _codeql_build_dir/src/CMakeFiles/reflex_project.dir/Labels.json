@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/reflex_project"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/reflex_project.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/reflex_project-complete.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-build.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-configure.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-download.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-install.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-mkdir.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-patch.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/reflex_project-stamp/reflex_project-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"reflex_project"
+		],
+		"name" : "reflex_project"
+	}
+}

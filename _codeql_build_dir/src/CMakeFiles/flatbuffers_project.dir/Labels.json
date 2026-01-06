@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/flatbuffers_project"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/flatbuffers_project.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/flatbuffers_project-complete.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-build.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-configure.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-download.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-install.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-mkdir.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-patch.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/flatbuffers_project-stamp/flatbuffers_project-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"flatbuffers_project"
+		],
+		"name" : "flatbuffers_project"
+	}
+}

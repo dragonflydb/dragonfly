@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../lib/libfacade_test.a CMakeFiles/facade_test.dir/facade_test.cc.o
+/usr/bin/ranlib ../../lib/libfacade_test.a
