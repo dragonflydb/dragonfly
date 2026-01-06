@@ -46,9 +46,7 @@ class ServiceInterface {
 
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
-  virtual ParsedCommand* AllocateParsedCommand() {
-    return new ParsedCommand();
-  }
+  virtual ParsedCommand* AllocateParsedCommand() = 0;
 
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }

@@ -375,6 +375,9 @@ class CommandContext : public facade::ParsedCommand {
   facade::SinkReplyBuilder* SwapReplier(facade::SinkReplyBuilder* new_rb) {
     return std::exchange(rb_, new_rb);
   }
+
+ protected:
+  void ReuseInternal() final;
 };
 
 }  // namespace dfly
