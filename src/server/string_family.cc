@@ -379,15 +379,45 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 OpStatus OpMSetEx(const OpArgs& op_args, const ShardArgs& args, const SetCmd::SetParams& params) {
   DCHECK(!args.Empty() && args.Size() % 2 == 0);
 
-  SetCmd sg(op_args, true);  // explicit journaling
+  SetCmd sg(op_args, false);  // disable auto journaling, we'll do it manually
 
   OpStatus result = OpStatus::OK;
+  size_t stored = 0;
   for (auto it = args.begin(); it != args.end();) {
     string_view key = *(it++);
     string_view value = *(it++);
     if (auto status = sg.Set(params, key, value); status != OpStatus::OK) {
       result = status;
       break;
+    }
+
+    stored++;
+  }
+
+  // Above loop could have partial success (e.g. OOM), replicate only what changed
+  if (auto journal = op_args.shard->journal(); journal) {
+    if (stored > 0) {
+      // Build MSETEX journal command: MSETEX numkeys key value [key value ...] [options]
+      // Need to keep strings alive for the duration of RecordJournal call
+      string numkeys_str = absl::StrCat(stored);
+      string exp_str;
+      
+      vector<string_view> journal_args;
+      journal_args.push_back(numkeys_str);
+      
+      // Add key-value pairs for successfully stored items
+      size_t kv_count = stored * 2;
+      journal_args.insert(journal_args.end(), args.begin(), args.begin() + kv_count);
+      
+      // Add expiration options if present
+      if (params.flags & SetCmd::SET_EXPIRE_AFTER_MS) {
+        exp_str = absl::StrCat(params.expire_after_ms + op_args.db_cntx.time_now_ms);
+        journal_args.insert(journal_args.end(), {"PXAT", exp_str});
+      } else if (params.flags & SetCmd::SET_KEEP_EXPIRE) {
+        journal_args.push_back("KEEPTTL");
+      }
+      
+      RecordJournal(op_args, "MSETEX", journal_args, op_args.tx->GetUniqueShardCnt());
     }
   }
 
