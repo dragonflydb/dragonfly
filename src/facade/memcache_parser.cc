@@ -332,7 +332,8 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   }
 
   cmd->cmd_flags.raw = 0;  // re-initialize
-  auto pos = str.find("\r\n");
+
+  size_t pos = str.find('\n');
   if (pos == string_view::npos) {
     // We need more data to parse the command. For get/gets commands this line can be very long.
     // we limit maximum buffer capacity in the higher levels using max_client_iobuf_len.
@@ -341,17 +342,21 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return INPUT_PENDING;
   }
 
-  *consumed = pos + 2;
+  *consumed = pos + 1;
   string_view main_cmd;
+
   if (tmp_buf_.empty()) {
-    if (pos == 0) {
-      return PARSE_ERROR;
-    }
     main_cmd = str.substr(0, pos);
   } else {
     tmp_buf_.append(str.substr(0, pos));
     main_cmd = tmp_buf_;
   }
+
+  // main_cmd is \n stripped, so it should end with \r.
+  if (main_cmd.empty() || main_cmd.back() != '\r') {
+    return PARSE_ERROR;
+  }
+  main_cmd.remove_suffix(1);  // remove trailing \r
 
   // cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
   // get <key>*\r\n
@@ -362,7 +367,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   Result res = ParseInternal(absl::MakeSpan(tokens), cmd);
   tmp_buf_.clear();
   if (val_len_to_read_ > 0)
-    return ConsumeValue(str.substr(pos + 2), consumed, cmd);
+    return ConsumeValue(str.substr(pos + 1), consumed, cmd);
   return res;
 };
 
