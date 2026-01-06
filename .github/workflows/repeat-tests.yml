@@ -89,6 +89,9 @@ jobs:
           pwd
           ls -l ..
 
+      - name: Sync valkey tests
+        uses: ./.github/actions/sync-valkey-tests
+
       - name: Run tests on repeat
         uses: ./.github/actions/repeat
         with:
