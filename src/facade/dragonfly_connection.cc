@@ -661,10 +661,12 @@ void Connection::OnPostMigrateThread() {
   }
 
   if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
+#if 0
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
       DoReadOnRecv(n);
       io_event_.notify();
     });
+#endif
   }
 
   migration_in_process_ = false;
@@ -1260,6 +1262,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
 }
 
 auto Connection::ParseMemcache() -> ParserStatus {
+  DVLOG(1) << "Parsing Memcache " << io_buf_.InputLen();
   bool commands_parsed = false;
   do {
     commands_parsed = ParseMCBatch();
@@ -1269,8 +1272,9 @@ auto Connection::ParseMemcache() -> ParserStatus {
 
     if (!ReplyMCBatch())
       return ERROR;
-  } while (commands_parsed && io_buf_.InputLen() > 0);
+  } while (io_buf_.InputLen() > 0);
 
+  DVLOG(1) << "Parsing Memcache End " << io_buf_.InputLen();
   return commands_parsed ? OK : NEED_MORE;
 }
 
@@ -2370,6 +2374,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     return ParserStatus::OK;
   }
 
+#if 0
   if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
 #ifdef __linux__
     fb2::UringProactor* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
@@ -2384,33 +2389,71 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     DoReadOnRecv(n);
     io_event_.notify();
   });
+#endif
 
   ParserStatus parse_status = OK;
 
+  iovec iov;
+
+  static const auto kEofErr = boost::asio::error::make_error_code(boost::asio::error::eof);
+  bool read_armed = false;
+  std::unique_ptr<uint8_t[]> temp_buf(new uint8_t[8192]);
+
   do {
     HandleMigrateRequest();
+    DCHECK(parse_status == OK);
 
-    if (io_buf_.InputLen() == 0) {
-      // Poll again for readiness. The event handler registered above is edge triggered
-      // We should read from the socket until EAGAIN or EWOULDBLOCK
-      // to make sure we consume all available data.
-      // See "Do I need to continuously read/write" question
-      // under https://man7.org/linux/man-pages/man7/epoll.7.html
-      // The exception is when we use io_uring with multishot recv enabled, in which case
-      // we rely on the kernel to keep feeding us data until we multishot is disabled.
-      DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-      io_event_.await([this]() {
-        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
-               io_ec_;
+    phase_ = READ_SOCKET;
+
+    DCHECK(!io_ec_);
+
+    if (!read_armed && io_buf_.AppendLen() > 0) {
+      read_armed = true;
+      DVLOG(1) << "Arming read iobuf append len: " << io_buf_.AppendLen();
+      // io::MutableBytes append_buf = io_buf_.AppendBuffer();
+      iov.iov_base = temp_buf.get();
+      iov.iov_len = 8192;
+
+      socket_->AsyncReadSome(&iov, 1, [&](io::Result<size_t> recv_sz) {
+        last_interaction_ = time(nullptr);
+
+        // In case the socket was closed orderly, we get 0 bytes read.
+        if (recv_sz) {
+          if (*recv_sz) {
+            DVLOG(1) << "Read " << *recv_sz << " bytes";
+
+            size_t commit_sz = *recv_sz;
+            io_buf_.WriteAndCommit(temp_buf.get(), commit_sz);
+
+            stats_->io_read_bytes += commit_sz;
+            local_stats_.net_bytes_in += commit_sz;
+
+            ++stats_->io_read_cnt;
+            ++local_stats_.read_cnt;
+          } else {
+            io_ec_ = kEofErr;
+          }
+        } else {
+          io_ec_ = recv_sz.error();
+        }
+        read_armed = false;
+        io_event_.notify();
       });
     }
 
+    io_event_.await([this] {
+      return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
+             io_ec_;
+    });
+
     if (io_ec_) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
+      DCHECK(!read_armed) << io_ec_;
+      LOG_IF(WARNING, cntx()->replica_conn && io_ec_ != kEofErr) << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
     }
 
     phase_ = PROCESS;
+
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (io_buf_.InputLen() > 0) {
@@ -2421,14 +2464,21 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         parse_status = ParseMemcache();
       }
     } else {
-      parse_status = NEED_MORE;
       if (parsed_head_) {
         ReplyMCBatch();
       }
     }
 
     if (reply_builder_->GetError()) {
+      io_event_.await([&] { return !read_armed; });
+
       return reply_builder_->GetError();
+    }
+
+    if (io_ec_) {
+      DCHECK(!read_armed) << io_ec_;
+      LOG_IF(WARNING, cntx()->replica_conn && io_ec_ != kEofErr) << "async io error: " << io_ec_;
+      return std::exchange(io_ec_, {});
     }
 
     if (parse_status == NEED_MORE) {
@@ -2470,6 +2520,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       break;
     }
   } while (peer->IsOpen());
+
+  io_event_.await([&] { return !read_armed; });
 
   return parse_status;
 }
