@@ -1460,8 +1460,14 @@ void Connection::SquashPipeline() {
   uint64_t start = CycleClock::Now();
 
   // We use indexes as iterators are invalidated when pushing into the queue.
-  auto get_next_fn = [i = 0, this]() mutable -> ParsedArgs {
-    const auto& elem = dispatch_q_[i++];
+  // Control messages may be inserted at the front during iteration, so we skip them.
+  auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
+    // Count control messages at front
+    size_t ctrl_offset = 0;
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+      ctrl_offset++;
+    }
+    const auto& elem = dispatch_q_[ctrl_offset + i++];
     CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
     const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
 
