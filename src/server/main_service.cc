@@ -1390,12 +1390,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
     Transaction::MultiMode mode = tx->GetMultiMode();
-    Transaction::MultiRole role = tx->GetMultiRole();
     bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
 
-    if (cid.IsTransactional() && role != Transaction::SQUASHED_STUB) {
+    if (cid.IsTransactional()) {
       auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, &cid, tail_args, mode);
 
       if (err.has_value()) {
@@ -2307,11 +2306,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareSingleSquash(conn_cntx->ns, sid.value_or(0), conn_cntx->db_index(), args,
+    tx->PrepareSingleSquash(conn_cntx->ns, sid.value_or(0), conn_cntx->db_index(), eval_args.keys,
                             script_mode);
+
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
+          new Transaction{tx, sid.value_or(0), slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
@@ -2320,7 +2320,9 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    if (*sid != ss->thread_index()) {
+    tx->UnlockMulti();
+
+    if (sid.value_or(0) != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << conn_cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);

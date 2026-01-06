@@ -230,6 +230,9 @@ class Transaction {
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
+  // Prepare transaction to do a single ScheduleSingleHop() for squashing
+  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys, MultiMode mode);
+
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(Namespace* ns, DbIndex dbid);
 
@@ -303,10 +306,6 @@ class Transaction {
     return multi_->mode;
   }
 
-  MultiRole GetMultiRole() const {
-    return multi_->role;
-  }
-
   // Whether the transaction is multi and runs in an atomic mode.
   // This, instead of just IsMulti(), should be used to check for the possibility of
   // different optimizations, because they can safely be applied to non-atomic multi
@@ -337,9 +336,6 @@ class Transaction {
 
   // Return debug information about a transaction, include shard local info if passed
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
-
-  // Prepare transaction to do a single ScheduleSingleHop() for squashing
-  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args, MultiMode mode);
 
   // Write a journal entry to a shard journal with the given payload.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,

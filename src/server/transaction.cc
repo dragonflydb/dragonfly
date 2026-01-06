@@ -574,19 +574,16 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   return res;
 }
 
-void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args,
+void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys,
                                       MultiMode mode) {
-  multi_.reset();
-  InitBase(ns, db, args);
   if (mode == LOCK_AHEAD) {
-    EnableShard(sid);
-    OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
-    CHECK(key_index);
-    StoreKeysInArgs(*key_index);
+    StartMultiLockedAhead(ns, db, keys, true);
   } else {
     DCHECK_EQ(mode, GLOBAL);
-    InitGlobal();
+    StartMultiGlobal(ns, db);
   }
+  EnableShard(sid);
+  MultiBecomeSquasher();
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.
