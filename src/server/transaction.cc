@@ -354,7 +354,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
-  DCHECK_EQ(full_args_.size() % key_index.step, 0u) << full_args_;
+  DCHECK_EQ(key_index.NumArgs() % key_index.step, 0u) << full_args_;
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
@@ -1640,6 +1640,15 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         step = 3;
       } else {
         step = 2;
+      }
+      // For VARIADIC_KEYS with INTERLEAVED_KEYS, end represents key count, so adjust for
+      // interleaving
+      if (num_custom_keys >= 0) {
+        end = start + num_custom_keys * step;
+        // Validate that we have enough arguments
+        if (end > args.size()) {
+          return OpStatus::SYNTAX_ERR;
+        }
       }
     } else {
       step = 1;

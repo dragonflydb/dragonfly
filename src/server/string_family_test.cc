@@ -939,4 +939,49 @@ TEST_F(StringFamilyTest, EmptyKeys) {
   EXPECT_EQ(Run({"SUBSTR", "foo", "0", "-1"}), "");
 }
 
+TEST_F(StringFamilyTest, MSetEx) {
+  // Basic usage - sets two keys with expiration
+  EXPECT_EQ(1, CheckedInt({"msetex", "2", "key1", "val1", "key2", "val2", "EX", "100"}));
+  EXPECT_EQ(Run({"get", "key1"}), "val1");
+  EXPECT_EQ(Run({"get", "key2"}), "val2");
+  EXPECT_THAT(Run({"ttl", "key1"}), IntArg(100));
+  EXPECT_THAT(Run({"ttl", "key2"}), IntArg(100));
+
+  // Basic usage without expiration
+  EXPECT_EQ(1, CheckedInt({"msetex", "1", "key3", "val3"}));
+  EXPECT_EQ(Run({"get", "key3"}), "val3");
+  EXPECT_THAT(Run({"ttl", "key3"}), IntArg(-1));
+
+  // PX option (milliseconds)
+  EXPECT_EQ(1, CheckedInt({"msetex", "1", "key4", "val4", "PX", "5000"}));
+  EXPECT_EQ(Run({"get", "key4"}), "val4");
+  auto ttl = Run({"pttl", "key4"});
+  EXPECT_GT(get<int64_t>(ttl.u), 4000);
+
+  // KEEPTTL option
+  Run({"set", "ttl_key", "original", "EX", "200"});
+  EXPECT_EQ(1, CheckedInt({"msetex", "1", "ttl_key", "new_value", "KEEPTTL"}));
+  EXPECT_EQ(Run({"get", "ttl_key"}), "new_value");
+  auto ttl_val = Run({"ttl", "ttl_key"});
+  EXPECT_GT(get<int64_t>(ttl_val.u), 0);
+  EXPECT_LE(get<int64_t>(ttl_val.u), 200);
+
+  // Error cases
+  EXPECT_THAT(Run({"msetex", "abc", "k", "v"}), ErrArg("not an integer"));  // invalid numkeys
+  EXPECT_THAT(Run({"msetex", "0", "k", "v"}), ErrArg("not an integer"));    // numkeys <= 0
+  EXPECT_THAT(Run({"msetex", "2", "k", "v"}), ErrArg("syntax"));  // not enough key-value pairs
+  EXPECT_THAT(Run({"msetex", "1", "k", "v", "EX", "10", "PX", "1000"}),
+              ErrArg("syntax"));  // multiple expiration options
+  EXPECT_THAT(Run({"msetex", "1", "k", "v", "EX", "0"}),
+              ErrArg("invalid expire time"));  // zero expiration
+  EXPECT_THAT(Run({"msetex", "1", "k", "v", "EX", "-1"}),
+              ErrArg("invalid expire time"));  // negative expiration
+
+  // NX/XX options are unsupported due to atomicity constraints in multi-threaded execution
+  EXPECT_THAT(Run({"msetex", "1", "k", "v", "NX"}), ErrArg("unsupported option"));
+  EXPECT_THAT(Run({"msetex", "1", "k", "v", "XX"}), ErrArg("unsupported option"));
+  EXPECT_THAT(Run({"msetex", "2", "k1", "v1", "k2", "v2", "NX", "EX", "100"}),
+              ErrArg("unsupported option"));
+}
+
 }  // namespace dfly

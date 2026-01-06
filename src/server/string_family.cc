@@ -117,6 +117,25 @@ size_t SetRangeInternal(std::string* value, size_t start, std::string_view range
   return value->size();
 }
 
+// Helper to calculate expiration time in milliseconds from ExpireParams.
+// Returns the relative expiration time in ms on success, or nullopt if the expiration is invalid.
+// The returned value is suitable for SetCmd::SetParams::expire_after_ms.
+optional<uint64_t> ParseExpireTime(int64_t int_val, bool is_ms, bool is_absolute) {
+  DbSlice::ExpireParams expiry{
+      .value = int_val,
+      .unit = is_ms ? TimeUnit::MSEC : TimeUnit::SEC,
+      .absolute = is_absolute,
+  };
+
+  int64_t now_ms = GetCurrentTimeMs();
+  auto [_, abs_ms] = expiry.Calculate(now_ms, false);
+  if (abs_ms < 0) {
+    return nullopt;
+  }
+
+  return expiry.Calculate(now_ms, true).first;
+}
+
 OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -353,6 +372,25 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
       RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
     }
   }
+  return result;
+}
+
+// MSETEX version that accepts SetParams for expiration options.
+OpStatus OpMSetEx(const OpArgs& op_args, const ShardArgs& args, const SetCmd::SetParams& params) {
+  DCHECK(!args.Empty() && args.Size() % 2 == 0);
+
+  SetCmd sg(op_args, true);  // explicit journaling
+
+  OpStatus result = OpStatus::OK;
+  for (auto it = args.begin(); it != args.end();) {
+    string_view key = *(it++);
+    string_view value = *(it++);
+    if (auto status = sg.Set(params, key, value); status != OpStatus::OK) {
+      result = status;
+      break;
+    }
+  }
+
   return result;
 }
 
@@ -1160,20 +1198,14 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmnd_cntx) {
   if (exp_int < 1)
     return cmnd_cntx->SendError(InvalidExpireTime(cmd_name));
 
-  DbSlice::ExpireParams expiry{
-      .value = exp_int,
-      .unit = cmd_name.front() == 'P' ? TimeUnit::MSEC : TimeUnit::SEC,
-      .absolute = false,
-  };
-
-  int64_t now_ms = GetCurrentTimeMs();
-  auto [_, abs_ms] = expiry.Calculate(now_ms, false);
-  if (abs_ms < 0)
+  bool is_ms = (cmd_name.front() == 'P');
+  auto expire_ms = ParseExpireTime(exp_int, is_ms, false);
+  if (!expire_ms)
     return cmnd_cntx->SendError(InvalidExpireTime("set"));
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
+  sparams.expire_after_ms = *expire_ms;
   cmnd_cntx->SendError(SetGeneric(sparams, key, value, *cmnd_cntx));
 }
 
@@ -1507,6 +1539,93 @@ void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
   }
 }
 
+// MSETEX numkeys key value [key value ...] [EX seconds|PX milliseconds|EXAT timestamp|PXAT
+// timestamp|KEEPTTL]
+void CmdMSetEx(CmdArgList args, CommandContext* cmnd_cntx) {
+  CmdArgParser parser{args};
+
+  // Parse numkeys
+  auto numkeys = parser.Next<int64_t>();
+  if (parser.HasError() || numkeys <= 0) {
+    return cmnd_cntx->SendError(kInvalidIntErr);
+  }
+
+  // Skip key-value pairs (numkeys * 2 arguments)
+  size_t kv_count = static_cast<size_t>(numkeys) * 2;
+  if (!parser.HasAtLeast(kv_count)) {
+    return cmnd_cntx->SendError(kSyntaxErr);
+  }
+  parser.Skip(kv_count);
+
+  SetCmd::SetParams sparams;
+
+  // Parse optional arguments after key-value pairs
+  while (parser.HasNext()) {
+    if (parser.Check("NX") || parser.Check("XX")) {
+      return cmnd_cntx->SendError("unsupported option");
+    }
+
+    if (parser.Check("KEEPTTL")) {
+      if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS) {
+        return cmnd_cntx->SendError(kSyntaxErr);
+      }
+      sparams.flags |= SetCmd::SET_KEEP_EXPIRE;
+      continue;
+    }
+
+    bool is_ms = false;
+    bool is_absolute = false;
+
+    if (parser.Check("PX")) {
+      is_ms = true;
+    } else if (parser.Check("PXAT")) {
+      is_ms = true;
+      is_absolute = true;
+    } else if (parser.Check("EXAT")) {
+      is_absolute = true;
+    } else if (!parser.Check("EX")) {
+      return cmnd_cntx->SendError(kSyntaxErr);
+    }
+
+    // We matched one of EX/PX/EXAT/PXAT
+    if (sparams.flags & (SetCmd::SET_EXPIRE_AFTER_MS | SetCmd::SET_KEEP_EXPIRE)) {
+      return cmnd_cntx->SendError(kSyntaxErr);
+    }
+
+    int64_t int_val = parser.Next<int64_t>();
+    if (parser.HasError() || int_val <= 0) {
+      return cmnd_cntx->SendError(InvalidExpireTime("msetex"));
+    }
+
+    auto expire_ms = ParseExpireTime(int_val, is_ms, is_absolute);
+    if (!expire_ms) {
+      return cmnd_cntx->SendError(InvalidExpireTime("msetex"));
+    }
+
+    sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+    sparams.expire_after_ms = *expire_ms;
+  }
+
+  AggregateStatus result;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
+    auto status = OpMSetEx(t->GetOpArgs(shard), shard_args, sparams);
+    if (status != OpStatus::OK) {
+      result = status;
+    }
+    return OpStatus::OK;
+  };
+
+  cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
+
+  if (*result != OpStatus::OK) {
+    cmnd_cntx->SendLong(0);
+  } else {
+    cmnd_cntx->SendLong(1);
+  }
+}
+
 void CmdMSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   atomic_bool exists{false};
 
@@ -1733,6 +1852,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
+      << CI{"MSETEX",
+            CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS | CO::INTERLEAVED_KEYS |
+                CO::NO_AUTOJOURNAL,
+            -4, 2, -1}
+             .HFUNC(MSetEx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
       << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
       << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
