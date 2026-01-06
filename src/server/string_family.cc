@@ -361,7 +361,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     stored++;
   }
 
-  // Above loop could have parial success (e.g. OOM), replicate only what changed
+  // Above loop could have partial success (e.g. OOM), replicate only what changed
   if (auto journal = op_args.shard->journal(); journal) {
     if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
@@ -402,7 +402,9 @@ OpStatus OpMSetEx(const OpArgs& op_args, const ShardArgs& args, const SetCmd::Se
       string numkeys_str = absl::StrCat(stored);
       string exp_str;
       
+      // Reserve capacity: 1 (numkeys) + stored*2 (key-value pairs) + up to 2 (expiration params)
       vector<string_view> journal_args;
+      journal_args.reserve(1 + stored * 2 + 2);
       journal_args.push_back(numkeys_str);
       
       // Add key-value pairs for successfully stored items
