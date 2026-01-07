@@ -460,8 +460,6 @@ TEST_F(MultiTest, MultiWithoutTx) {
 }
 
 TEST_F(MultiTest, MultiCommandsWithBonusKeys) {
-  GTEST_SKIP() << "FOR NOW";
-
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
 
@@ -1017,7 +1015,31 @@ TEST_F(MultiTest, ScriptBadCommand) {
   EXPECT_EQ(resp, "OK");
 }
 
-TEST_F(SingleShardMultiTest, MultiSquashSingleShard) {
+TEST_F(MultiTest, MultiSquash) {
+  string_view script = R"(
+redis.call('APPEND', KEYS[1], ARGV[1]);
+redis.call('GET', KEYS[1]);
+redis.call('APPEND', KEYS[1], ARGV[2])
+return 'OK';
+)";
+
+  auto resp = Run({"EVAL", script, "1", "A", "works", "reliably"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"EVAL", script, "1", "A", "once", "again"});
+  EXPECT_EQ(resp, "OK");
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 2u);
+  // EXPECT_EQ(metrics.shard_stats.tx_ooo_total, 2u);
+
+  auto a_expect = absl::StrCat("works", "reliably", "once", "again");
+  EXPECT_EQ(Run({"GET", "A"}), a_expect);
+}
+
+// Check that single shard script running with allow-undeclared-keys (i..e global)
+// running on a single shard setup can be squashed with "shardlocal" execution
+TEST_F(SingleShardMultiTest, MultiSquashGlobalSingleShard) {
   string_view script = R"(
 --!df flags=allow-undeclared-keys
 redis.call('SET', 'first', 'works');
@@ -1029,6 +1051,7 @@ return 'OK';
   auto resp = Run({"EVAL", script, "0"});
   EXPECT_EQ(resp, "OK");
 
+  // Check call was shardlocal and out of order
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 1u);
 

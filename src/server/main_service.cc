@@ -2298,6 +2298,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
+    ShardId real_sid = sid.value_or(0);
+
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -2306,12 +2308,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareSingleSquash(conn_cntx->ns, sid.value_or(0), conn_cntx->db_index(), eval_args.keys,
+    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys,
                             script_mode);
 
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, sid.value_or(0), slot_checker.GetUniqueSlotId()};
+          new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
@@ -2320,12 +2322,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    tx->UnlockMulti();
-
-    if (sid.value_or(0) != ss->thread_index()) {
+    if (real_sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << conn_cntx->conn() << " from "
-              << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
-      conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
+              << ProactorBase::me()->GetPoolIndex() << " to " << real_sid;
+      conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(real_sid), false);
     }
   } else {
     Transaction::MultiMode tx_mode = tx->GetMultiMode();

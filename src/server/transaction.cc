@@ -584,6 +584,8 @@ void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, Cm
   }
   EnableShard(sid);
   MultiBecomeSquasher();
+
+  coordinator_state_ |= COORD_CONCLUDING;  // conclude immediately
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.
