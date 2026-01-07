@@ -13,6 +13,7 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "core/search/indices.h"
+#include "core/search/stateless_allocator.h"
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
@@ -733,6 +734,7 @@ io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) c
 }
 
 ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap()} {
+  InitTLSearchMR(&local_mr_);
 }
 
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
