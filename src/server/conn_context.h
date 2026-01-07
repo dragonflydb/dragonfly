@@ -274,7 +274,6 @@ struct ConnectionState {
   ExecInfo exec_info;
   ReplicationInfo replication_info;
 
-  std::optional<SquashingInfo> squashing_info;
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
   ClientTracking tracking_info_;
@@ -283,7 +282,6 @@ struct ConnectionState {
 class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
-  ConnectionContext(const ConnectionContext* owner, Transaction* tx);
 
   struct DebugInfo {
     uint32_t shards_count = 0;

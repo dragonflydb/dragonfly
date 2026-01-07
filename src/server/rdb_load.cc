@@ -2841,8 +2841,9 @@ namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
                               string_view error_context) {
-  facade::CapturingReplyBuilder crb{};
-  ConnectionContext cntx{nullptr, nullptr};
+  facade::CapturingReplyBuilder crb;
+
+  ConnectionContext cntx{nullptr, acl::UserCredentials{}};
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
