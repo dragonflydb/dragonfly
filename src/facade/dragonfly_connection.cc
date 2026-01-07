@@ -2349,6 +2349,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
+  bool head_ready = false;
+  auto head_updater = [this, &head_ready]() {
+    head_ready = true;
+    io_event_.notify();
+  };
+  util::fb2::detail::Waiter head_waiter{head_updater};
+
   do {
     HandleMigrateRequest();
 
@@ -2362,17 +2369,15 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
 
-      // what I will do in the future
-      // bool head_ready = false;
-      // waiter = { [&head_ready] head_ready = true}
-      // parsed_head_->blocker.Subscribe()
-      // For now block the fiber:
       if (parsed_head_ && !parsed_head_->CanReply())
-        parsed_head_->task_blocker->Wait();
+        parsed_head_->task_blocker->OnCompletion(&head_waiter);
 
       io_event_.await([this]() {
         return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->CanReply()) || io_ec_;
       });
+
+      if (parsed_head_ && parsed_head_->CanReply())
+        head_ready = false;  // reset head_ready state
     }
 
     if (io_ec_) {

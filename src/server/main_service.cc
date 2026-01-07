@@ -1662,7 +1662,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    if (cmd_cntx->AsyncExecutionAllowed() && cid->HasAsyncHanlder())
+    if (cid->HasAsyncHanlder())
       cid->InvokeAsync(tail_args, cmd_cntx);
     else
       cid->Invoke(tail_args, cmd_cntx);

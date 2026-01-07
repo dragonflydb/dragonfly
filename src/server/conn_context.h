@@ -7,6 +7,8 @@
 #include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 #include "acl/acl_commands_def.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
@@ -356,8 +358,6 @@ class CommandContext : public facade::ParsedCommand {
 
   const CommandId* cid = nullptr;
   Transaction* tx = nullptr;
-
-  boost::intrusive_ptr<Transaction> keepalive_tx;  // keepalive tx
 
   uint64_t start_time_ns = 0;
 

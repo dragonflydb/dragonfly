@@ -1170,8 +1170,10 @@ AsyncHandlerReply CmdGet2(CmdArgList args, CommandContext* cmnd_cntx) {
     return OpStatus::OK;
   };
 
+  boost::intrusive_ptr<Transaction> keepalive{cmnd_cntx->tx};
+
   cmnd_cntx->tx->Execute(cb, true, true);
-  return [strres](SinkReplyBuilder* rb) {
+  return [strres, keepalive = std::move(keepalive)](SinkReplyBuilder* rb) {
     GetReplies{rb}.Send(std::move(*strres));
     delete strres;
   };

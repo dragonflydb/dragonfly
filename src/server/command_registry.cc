@@ -288,11 +288,12 @@ void CommandId::AsyncToSync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*))
 
 void CommandId::WrapAsync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*)) {
   async_handler_ = [f](CmdArgList args, CommandContext* cntx) {
+    VLOG(0) << "Running async";
     auto reply = f(args, cntx);
     if (std::holds_alternative<facade::ErrorReply>(reply)) {
       cntx->SendError(std::get<facade::ErrorReply>(reply));
     } else {
-      cntx->keepalive_tx = cntx->tx;
+      // cntx->keepalive_tx = cntx->tx;
       cntx->task_blocker = cntx->tx->Blocker();
       cntx->replier = std::move(std::get<AsyncHandlerReplier>(reply));
     }
