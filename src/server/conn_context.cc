@@ -168,7 +168,8 @@ size_t ConnectionState::UsedMemory() const {
 }
 
 size_t ConnectionContext::UsedMemory() const {
-  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state);
+  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state) +
+         HeapSize(authed_username) + HeapSize(acl_commands);
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {

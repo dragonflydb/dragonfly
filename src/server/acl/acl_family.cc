@@ -117,8 +117,13 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
     if (!connection->IsHttp() && connection->cntx()) {
-      connection->SendAclUpdateAsync(facade::Connection::AclUpdateMessage{
-          user, update_commands, update_keys, update_pub_sub, db});
+      auto* cntx = static_cast<dfly::ConnectionContext*>(connection->cntx());
+      if (user == cntx->authed_username) {
+        cntx->acl_commands = update_commands;
+        cntx->keys = update_keys;
+        cntx->pub_sub = update_pub_sub;
+        cntx->acl_db_idx = db;
+      }
     }
   };
 
@@ -166,15 +171,21 @@ void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
-  return TraverseEvictImpl([&](auto* ctx) { return ctx && users.contains(ctx->authed_username); },
-                           main_listener_, pool_);
+  return TraverseEvictImpl(
+      [&](auto* ctx) {
+        auto* dfly_ctx = static_cast<dfly::ConnectionContext*>(ctx);
+        return ctx && users.contains(dfly_ctx->authed_username);
+      },
+      main_listener_, pool_);
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     const UserRegistry::RegistryType& registry) {
   return TraverseEvictImpl(
       [&](auto* ctx) {
-        return ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username);
+        auto* dfly_ctx = static_cast<dfly::ConnectionContext*>(ctx);
+        return ctx && dfly_ctx->authed_username != "default" &&
+               registry.contains(dfly_ctx->authed_username);
       },
       main_listener_, pool_);
 }

@@ -328,6 +328,17 @@ class ConnectionContext : public facade::ConnectionContext {
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;
 
+  // ACL's
+  // TODO fix inherit actual values from default
+  std::string authed_username{"default"};
+  std::vector<uint64_t> acl_commands;
+  // keys
+  dfly::acl::AclKeys keys{{}, true};
+  // pub/sub
+  dfly::acl::AclPubSub pub_sub{{}, true};
+  // db index, std::numeric_limits<size_t>::max for ALL db's
+  size_t acl_db_idx = 0;
+
  private:
   void EnableMonitoring(bool enable) {
     subscriptions++;  // required to support the monitoring
