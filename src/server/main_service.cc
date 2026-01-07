@@ -1282,8 +1282,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_c
     return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
-  return VerifyConnectionAclStatus(cmd_cntx.cid, cmd_cntx.server_conn_cntx(),
-                                   "ACL rules changed between the MULTI and EXEC", tail_args);
+  return std::nullopt;
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,

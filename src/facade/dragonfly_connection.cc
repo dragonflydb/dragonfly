@@ -397,14 +397,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
     }
-    size_t operator()(const AclUpdateMessagePtr& msg) {
-      size_t key_cap = std::accumulate(
-          msg->keys.key_globs.begin(), msg->keys.key_globs.end(), 0, [](auto acc, auto& str) {
-            return acc + (str.first.capacity() * sizeof(char)) + sizeof(str.second);
-          });
-      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(char) +
-             msg->commands.capacity() * sizeof(uint64_t) + key_cap;
-    }
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
     }
@@ -432,7 +424,6 @@ struct Connection::AsyncOperations {
   void operator()(const PubMessage& msg);
   void operator()(ParsedCommand& msg);
   void operator()(const MonitorMessage& msg);
-  void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
   void operator()(CheckpointMessage msg);
   void operator()(const InvalidationMessage& msg);
@@ -449,17 +440,6 @@ struct Connection::AsyncOperations {
 void Connection::AsyncOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
-}
-
-void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
-  if (self->cntx()) {
-    if (msg.username == self->cntx()->authed_username) {
-      self->cntx()->acl_commands = msg.commands;
-      self->cntx()->keys = msg.keys;
-      self->cntx()->pub_sub = msg.pub_sub;
-      self->cntx()->acl_db_idx = msg.db_indx;
-    }
-  }
 }
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
@@ -1468,7 +1448,7 @@ void Connection::SquashPipeline() {
   auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
     // Count control messages at front
     size_t ctrl_offset = 0;
-    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsCheckPoint()) {
       ctrl_offset++;
     }
     const auto& elem = dispatch_q_[ctrl_offset + i++];
@@ -1506,7 +1486,7 @@ void Connection::SquashPipeline() {
     stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
   }
   auto it = dispatch_q_.begin();
-  while (it->IsControl())  // Skip all newly received intrusive messages
+  while (it->IsCheckPoint())  // Skip all newly received intrusive messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit) {
@@ -1532,7 +1512,7 @@ void Connection::ClearPipelinedMessages() {
   // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsControl())
+    if (msg.IsCheckPoint())
       visit(async_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
@@ -1555,7 +1535,7 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "df:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
+  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsCheckPoint();
   absl::StrAppend(&info, "dq:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dq:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dq:intrusive=", intrusive_front, ", ");
@@ -1763,10 +1743,6 @@ void Connection::SendMonitorMessageAsync(string msg) {
   SendAsync({MonitorMessage{std::move(msg)}});
 }
 
-void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
-}
-
 void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
   if (!IsCurrentlyDispatching())
     return;
@@ -1803,7 +1779,7 @@ void Connection::SendAsync(MessageHandle msg) {
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints) if
   // async_fb_ is running (joinable).
-  if (cc_->conn_closing && (!msg.IsControl() || !async_fb_.IsJoinable()))
+  if (cc_->conn_closing && (!msg.IsCheckPoint() || !async_fb_.IsJoinable()))
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
@@ -1843,9 +1819,9 @@ void Connection::SendAsync(MessageHandle msg) {
     pending_pipeline_bytes_ += used_mem;
   }
 
-  if (msg.IsControl()) {
+  if (msg.IsCheckPoint()) {
     auto it = dispatch_q_.begin();
-    while (it < dispatch_q_.end() && it->IsControl())
+    while (it < dispatch_q_.end() && it->IsCheckPoint())
       ++it;
     dispatch_q_.insert(it, std::move(msg));
   } else {
