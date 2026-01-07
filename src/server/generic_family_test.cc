@@ -1452,4 +1452,13 @@ TEST_F(GenericFamilyTest, CopyKeyExists) {
   EXPECT_EQ(Run({"get", "destination"}), "value1");
 }
 
+TEST_F(GenericFamilyTest, HashFieldExpiryDuringDeserialize) {
+  Run({"HSETEX", "src", "1", "field1", "value1"});
+
+  // Advance time past field TTL - now field is expired
+  AdvanceTime(2000);
+
+  Run({"RENAME", "src", "dst"});
+}
+
 }  // namespace dfly

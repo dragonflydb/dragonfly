@@ -1711,7 +1711,7 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
   }
   LOG_IF(WARNING, !add_result) << "Unexpected status " << add_result.status();
 
-  return cmd_cntx->rb()->SendLong(range_result->size());
+  return cmd_cntx->SendLong(range_result->size());
 }
 
 void ZRangeGeneric(CmdArgList args, ZSetFamily::RangeParams range_params,
@@ -1816,7 +1816,7 @@ void ZRemRangeGeneric(string_view key, const ZSetFamily::ZRangeSpec& range_spec,
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb()->SendLong(*result);
+    cmd_cntx->SendLong(*result);
   }
 }
 
@@ -2211,7 +2211,7 @@ void CmdZCard(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  cmd_cntx->rb()->SendLong(result.value());
+  cmd_cntx->SendLong(result.value());
 }
 
 void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2233,7 +2233,7 @@ void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb()->SendLong(*result);
+    cmd_cntx->SendLong(*result);
   }
 }
 
@@ -2599,7 +2599,7 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb()->SendLong(*result);
+    cmd_cntx->SendLong(*result);
   }
 }
 
@@ -2702,7 +2702,7 @@ void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
-    cmd_cntx->rb()->SendLong(*result);
+    cmd_cntx->SendLong(*result);
   }
 }
 

@@ -6,6 +6,7 @@
 #include "facade/dragonfly_connection.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
@@ -1459,8 +1460,14 @@ void Connection::SquashPipeline() {
   uint64_t start = CycleClock::Now();
 
   // We use indexes as iterators are invalidated when pushing into the queue.
-  auto get_next_fn = [i = 0, this]() mutable -> ParsedArgs {
-    const auto& elem = dispatch_q_[i++];
+  // Control messages may be inserted at the front during iteration, so we skip them.
+  auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
+    // Count control messages at front
+    size_t ctrl_offset = 0;
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+      ctrl_offset++;
+    }
+    const auto& elem = dispatch_q_[ctrl_offset + i++];
     CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
     const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
 
@@ -2014,8 +2021,14 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
+    unsigned val_len_to_read = memcache_parser_->DEBUG_val_len_to_read();
     MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
+    if (result == MemcacheParser::PARSE_ERROR) {
+      LOG_FIRST_N(WARNING, 5) << "Memcache parse error, cmd_cnt: " << local_stats_.cmds
+                              << " val_len_to_read: " << val_len_to_read
+                              << ", chunk: " << absl::CEscape(io::View(io_buf_.InputBuffer()));
+    }
 
     io_buf_.ConsumeInput(consumed);
 

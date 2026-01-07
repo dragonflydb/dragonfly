@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/list_family.h"
-
 #include <absl/strings/match.h>
 
 #include <random>

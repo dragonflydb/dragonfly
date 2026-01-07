@@ -1,11 +1,6 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include "server/list_family.h"
-
-#include "facade/cmd_arg_parser.h"
-#include "server/acl/acl_commands_def.h"
-
 extern "C" {
 #include "redis/sds.h"
 }
@@ -15,8 +10,11 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/qlist.h"
+#include "facade/cmd_arg_parser.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -806,7 +804,7 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
 
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return cmd_cntx->rb()->SendLong(result.value());
+    return cmd_cntx->SendLong(result.value());
   }
 
   return cmd_cntx->SendError(result.status());
@@ -1076,9 +1074,9 @@ void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cmd_cntx->rb()->SendLong(result.value());
+    cmd_cntx->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cmd_cntx->rb()->SendLong(0);
+    cmd_cntx->SendLong(0);
   } else {
     cmd_cntx->SendError(result.status());
   }
@@ -1253,7 +1251,7 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   };
   OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->rb()->SendLong(result.value_or(0));
+    return cmd_cntx->SendLong(result.value_or(0));
   }
   cmd_cntx->SendError(result.status());
 }
@@ -1306,7 +1304,7 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 
-void ListFamily::Register(CommandRegistry* registry) {
+void RegisterListFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::LIST);
   *registry
       << CI{"LPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
