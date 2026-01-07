@@ -344,8 +344,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 }
 
 OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts& scan_op) {
-  constexpr size_t HASH_TABLE_ENTRIES_FACTOR = 2;  // return key/value
-
   /* We set the max number of iterations to ten times the specified
    * COUNT, so if the hash table is in a pathological state (very
    * sparsely populated) we avoid to block too much time at the cost
@@ -353,14 +351,17 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   constexpr size_t INTERATION_FACTOR = 10;
 
   StringVec res;
-  uint32_t count = scan_op.limit * HASH_TABLE_ENTRIES_FACTOR;
+  // If NOVALUES, we expect 1 element per match (key). Otherwise, 2 elements (key + value).
+  uint32_t count = scan_op.limit * (scan_op.novalues ? 1 : 2);
 
   if (auto lw = hw.Get<detail::ListpackWrap>(); lw) {
     // TODO: Optimize unnecessary value reads from iterator
     for (const auto [key, value] : *lw) {
       if (scan_op.Matches(key)) {
         res.emplace_back(key);
-        res.emplace_back(value);
+        if (!scan_op.novalues) {
+          res.emplace_back(value);
+        }
       }
     }
     *cursor = 0;
@@ -375,8 +376,10 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
       size_t len = sdslen(val);
       if (scan_op.Matches(string_view(val, len))) {
         res.emplace_back(val, len);
-        val = StringMap::GetValue(val);
-        res.emplace_back(val, sdslen(val));
+        if (!scan_op.novalues) {
+          val = StringMap::GetValue(val);
+          res.emplace_back(val, sdslen(val));
+        }
       }
     };
 
@@ -812,13 +815,13 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("invalid cursor");
   }
 
-  // HSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 6) {
+  // HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
+  if (args.size() > 7) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
     return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2), true);
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
