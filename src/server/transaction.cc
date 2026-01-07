@@ -577,7 +577,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
 void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys,
                                       MultiMode mode) {
   if (mode == LOCK_AHEAD) {
-    StartMultiLockedAhead(ns, db, keys, true);
+    StartMultiLockedAhead(ns, db, keys, true);  // delay locking until first hop
   } else {
     DCHECK_EQ(mode, GLOBAL);
     StartMultiGlobal(ns, db);
@@ -585,7 +585,8 @@ void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, Cm
   EnableShard(sid);
   MultiBecomeSquasher();
 
-  coordinator_state_ |= COORD_CONCLUDING;  // conclude immediately
+  // As we never change commands, conclude immediately
+  coordinator_state_ |= COORD_CONCLUDING;
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.

@@ -2265,8 +2265,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
 
-  optional<ShardId> sid;
-
+  optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
@@ -2298,7 +2297,9 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
-    ShardId real_sid = sid.value_or(0);
+    // It might be that there are no declared keys, but there is only a single shard
+    DCHECK(sid.has_value() || shard_set->size() == 1);
+    ShardId real_sid = sid.value_or(ShardId(0));
 
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
@@ -2322,7 +2323,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    if (real_sid != ss->thread_index()) {
+    // Migration only makes sense if there are distinct shards
+    if (sid.has_value() && real_sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << conn_cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << real_sid;
       conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(real_sid), false);
