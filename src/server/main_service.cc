@@ -2298,8 +2298,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     // It might be that there are no declared keys, but there is only a single shard
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
     DCHECK(sid.has_value() || shard_set->size() == 1);
     ShardId real_sid = sid.value_or(ShardId(0));
+#pragma GCC diagnostic pop
 
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
