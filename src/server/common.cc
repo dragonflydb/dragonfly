@@ -18,6 +18,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/interpreter.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -210,15 +211,10 @@ SearchStats& SearchStats::operator+=(const SearchStats& o) {
 
 OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args, bool allow_novalues) {
   ScanOpts scan_opts;
+  facade::CmdArgParser parser(args);
 
-  for (unsigned i = 0; i < args.size(); ++i) {
-    std::string opt = absl::AsciiStrToUpper(args[i]);
-
-    // ==========================================================
-    // Handle Flags (Options that take NO values). We must check these first.
-    // If matched, consume the flag and immediately continue to the next iteration.
-    // ==========================================================
-    if (opt == "NOVALUES") {
+  while (parser.HasNext()) {
+    if (parser.Check("NOVALUES")) {
       if (!allow_novalues) {
         return facade::OpStatus::SYNTAX_ERR;
       }
@@ -226,38 +222,36 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args, bool allow_novalues) {
       continue;
     }
 
-    // ==========================================================
-    // Handle Key-Value Options
-    // If we reached here, the option MUST have a corresponding value.
-    // We check `i + 1` to prevent reading past the end of the array.
-    // ==========================================================
-    if (i + 1 >= args.size()) {
-      return facade::OpStatus::SYNTAX_ERR;
-    }
-
-    std::string_view val = args[i + 1];
-    if (opt == "COUNT") {
-      if (!absl::SimpleAtoi(val, &scan_opts.limit)) {
-        return facade::OpStatus::INVALID_INT;
-      }
+    if (parser.Check("COUNT")) {
+      scan_opts.limit = parser.Next<size_t>();
       if (scan_opts.limit == 0)
         scan_opts.limit = 1;
-    } else if (opt == "MATCH") {
-      string_view pattern = val;
+      continue;
+    }
+
+    if (parser.Check("MATCH")) {
+      std::string_view pattern = parser.Next();
       if (pattern != "*")
         scan_opts.matcher.reset(new GlobMatcher{pattern, true});
-    } else if (opt == "TYPE") {
-      CompactObjType obj_type = ObjTypeFromString(val);
+      continue;
+    }
+
+    if (parser.Check("TYPE")) {
+      CompactObjType obj_type = ObjTypeFromString(parser.Next());
       if (obj_type == kInvalidCompactObjType) {
         return facade::OpStatus::SYNTAX_ERR;
       }
       scan_opts.type_filter = obj_type;
-    } else if (opt == "BUCKET") {
-      if (!absl::SimpleAtoi(val, &scan_opts.bucket_id)) {
-        return facade::OpStatus::INVALID_INT;
-      }
-    } else if (opt == "ATTR") {
-      string_view mask = val;
+      continue;
+    }
+
+    if (parser.Check("BUCKET")) {
+      scan_opts.bucket_id = parser.Next<unsigned>();
+      continue;
+    }
+
+    if (parser.Check("ATTR")) {
+      std::string_view mask = parser.Next();
       if (mask == "v") {
         scan_opts.mask = ScanOpts::Mask::Volatile;
       } else if (mask == "p") {
@@ -269,15 +263,24 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args, bool allow_novalues) {
       } else {
         return facade::OpStatus::SYNTAX_ERR;
       }
-    } else if (opt == "MINMSZ") {
-      if (!absl::SimpleAtoi(val, &scan_opts.min_malloc_size)) {
-        return facade::OpStatus::INVALID_INT;
-      }
-    } else {
-      return facade::OpStatus::SYNTAX_ERR;
+      continue;
     }
-    ++i;  // consume the value
+
+    if (parser.Check("MINMSZ")) {
+      scan_opts.min_malloc_size = parser.Next<size_t>();
+      continue;
+    }
+    return facade::OpStatus::SYNTAX_ERR;
   }
+
+  // Check for parsing errors (e.g. missing values or invalid integers)
+  if (auto err = parser.TakeError()) {
+    if (err.type == facade::CmdArgParser::INVALID_INT) {
+      return facade::OpStatus::INVALID_INT;
+    }
+    return facade::OpStatus::SYNTAX_ERR;
+  }
+
   return scan_opts;
 }
 
