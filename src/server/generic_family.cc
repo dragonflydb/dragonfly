@@ -169,7 +169,7 @@ class RestoreArgs {
 
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
-  RdbRestoreValue(RdbVersion rdb_version) {
+  explicit RdbRestoreValue(RdbVersion rdb_version) {
     rdb_version_ = rdb_version;
   }
 
@@ -364,7 +364,6 @@ class Renamer {
     bool sticky;
   };
 
- private:
   Transaction* const transaction_;
 
   const std::string_view src_key_;
@@ -672,7 +671,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
   // ScanCb can preempt due to journaling expired entries and we need to make sure that
-  // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
+  // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.GetLatch()->Wait();
 
@@ -1377,6 +1376,7 @@ struct SortEntry
     // Store score only if we need it
     : public std::conditional_t<ALPHA, std::tuple<>, SortEntryScore> {
   std::string key;
+  const std::string* bound_value = nullptr;
 
   bool Parse(std::string&& item) {
     if constexpr (!ALPHA) {
@@ -1400,6 +1400,17 @@ struct SortEntry
     }
     key = absl::StrCat(item);
     return true;
+  }
+
+  void BindValue(const std::string* value) {
+    bound_value = value;
+  }
+
+  std::string_view ResultKey() const {
+    if (bound_value) {
+      return *bound_value;
+    }
+    return key;
   }
 
   static bool less(const SortEntry& l, const SortEntry& r) {
@@ -1480,6 +1491,41 @@ OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_v
   return it->second.ObjType();
 }
 
+// Fetch container elements as strings (for BY pattern support)
+OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const OpArgs& op_args,
+                                                                        std::string_view key) {
+  using namespace container_utils;
+
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (!IsValid(it)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+  if (!IsContainer(it->second)) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  vector<string> elements;
+  elements.reserve(it->second.Size());
+
+  Iterate(it->second, [&elements](const ContainerEntry& entry) {
+    elements.emplace_back(entry.ToString());
+    return true;
+  });
+
+  return std::make_pair(std::move(elements), it->second.ObjType());
+}
+
+// Fetch a string value from a key (for BY pattern lookups)
+// TODO: does not support tiering.
+string OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (!IsValid(it) || it->second.ObjType() != OBJ_STRING) {
+    return {};  // Missing key defaults to empty string
+  }
+
+  return it->second.ToString();
+}
+
 template <typename IteratorBegin, typename IteratorEnd>
 OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, IteratorBegin&& start_it,
                            IteratorEnd&& end_it) {
@@ -1495,7 +1541,7 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
   for (auto it = start_it; it != end_it; ++it) {
-    ql_v2->Push(it->key, where);
+    ql_v2->Push(it->ResultKey(), where);
   }
   len = ql_v2->Size();
 
@@ -1542,12 +1588,16 @@ struct SortVisitor {
   const SortParams& params;
   CompactObjType result_type;
   CommandContext* cmd_cntx;
+  vector<string> raw_elements;
 
   template <typename T> void operator()(T& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
     auto cmp = params.reversed ? &value_t::greater : &value_t::less;
 
     DCHECK(params.to_sort);
+
+    DVLOG(2) << "Sorting " << entries.size() << " elements";
+
     // Sort logic
     if (params.bounds) {
       auto sort_it =
@@ -1560,15 +1610,16 @@ struct SortVisitor {
 
     if (!params.store_key) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-      auto replier = [entries = std::move(entries), bounds = params.bounds,
-                      is_set](RedisReplyBuilder* rb) {
+      auto replier = [entries = std::move(entries), bounds = params.bounds, is_set,
+                      raw_elements = std::move(raw_elements)](RedisReplyBuilder* rb) {
+        DVLOG(2) << "Replying with sorted entries, count: " << entries.size();
         auto [start_it, end_it] = GetSortRange(entries, bounds);
 
         rb->StartCollection(std::distance(start_it, end_it),
                             is_set ? CollectionType::SET : CollectionType::ARRAY);
 
         for (auto it = start_it; it != end_it; ++it) {
-          rb->SendBulkString(it->key);
+          rb->SendBulkString(it->ResultKey());
         }
       };
       cmd_cntx->ReplyWith(std::move(replier));
@@ -1595,6 +1646,53 @@ struct SortVisitor {
     }
   }
 };
+
+// Fetches external keys referenced by a BY pattern and fills the sort entries. We deliberately
+// perform "read uncommitted" lookups across arbitrary shards, so this helper does not preserve the
+// enclosing transaction's isolation guarantees.
+OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
+                                          const vector<string>& raw_elements,
+                                          const DbContext& db_cntx, SortEntryList* sorted_entries) {
+  DCHECK(params.by_pattern);
+
+  vector<vector<pair<size_t, string>>> keys_by_shard(shard_set->size());
+  std::string_view pattern = *params.by_pattern;
+  size_t star_pos = pattern.find('*');
+  DCHECK_NE(star_pos, std::string_view::npos);
+  for (size_t i = 0; i < raw_elements.size(); ++i) {
+    string ext_key =
+        absl::StrCat(pattern.substr(0, star_pos), raw_elements[i], pattern.substr(star_pos + 1));
+    ShardId sid = Shard(ext_key, shard_set->size());
+    keys_by_shard[sid].emplace_back(i, std::move(ext_key));
+  }
+
+  std::visit([&](auto& entries) { entries.resize(raw_elements.size()); }, *sorted_entries);
+  atomic_bool parse_error{false};
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    bool success = std::visit(
+        [&](auto& dest) {
+          for (const auto& [idx, ext_key] : keys_by_shard[sid]) {
+            string external_value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
+            auto& entry = dest[idx];
+            if (!entry.Parse(std::move(external_value)))
+              return false;
+            entry.BindValue(&raw_elements[idx]);
+          }
+          return true;
+        },
+        *sorted_entries);
+    if (!success) {
+      parse_error.store(true, memory_order_relaxed);
+    }
+  });
+
+  if (parse_error.load(memory_order_relaxed)) {
+    return OpStatus::INVALID_NUMERIC_RESULT;
+  }
+
+  return OpStatus::OK;
+}
 
 void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   CmdArgParser parser(args);
@@ -1644,18 +1742,61 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
            << " and store_key parameter: " << bool(params.store_key);
   DCHECK(((is_read_only && !bool(params.store_key)) || !is_read_only));
 
+  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
+  DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
+
+  CompactObjType source_type = OBJ_STRING;  // undefined in this context
+
+  // "BY nosort" or we need to sort by external keys - fetch unsorted first.
+  bool fetch_unsorted = !params.to_sort || params.by_pattern;
   bool single_hop = !bool(params.store_key);
-  CompactObjType source_type = OBJ_STRING;  // OBJ_STRING means undefined in this context.
+  vector<string> raw_elements;
+  ShardId source_sid = Shard(key, shard_set->size());
+
+  // The high level steps are:
+  // 1. Fetch container elements (strings only, no parsing) if no sorting needed.
+  // 2. If sorting needed, prepare SortEntryList and fetch external keys if BY pattern is used.
+  // 3. Perform sorting and generate reply or store result if STORE option is used.
+  // 4. If no sorting needed, reply with fetched raw elements (with LIMIT if any).
+  if (fetch_unsorted) {
+    // Step 1: Fetch container elements (strings only, no parsing)
+    OpResult<pair<vector<string>, CompactObjType>> elem_result;
+
+    auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == source_sid) {
+        elem_result = OpFetchContainerElements(t->GetOpArgs(shard), key);
+      }
+      return OpStatus::OK;
+    };
+
+    cmd_cntx->tx()->Execute(std::move(fetch_cb), single_hop);
+
+    // elem_result->first is empty both for missing/empty containers and for errors;
+    // use elem_result's OpStatus to distinguish actual error cases (e.g. WRONG_TYPE).
+    if (elem_result->first.empty()) {
+      cmd_cntx->tx()->Conclude();
+      if (elem_result == OpStatus::WRONG_TYPE)
+        return cmd_cntx->SendError(elem_result.status());
+      else
+        return cmd_cntx->SendEmptyArray();
+    }
+
+    raw_elements.swap(elem_result->first);
+    source_type = elem_result->second;
+  }
 
   if (params.to_sort) {
-    auto sorted_entries = MakeSortEntryList(params.alpha);  // Always numeric for this path
+    // Step 2 and 3: Prepare SortEntryList, fetch external keys if needed, perform sorting
+
+    auto sorted_entries =
+        MakeSortEntryList(params.alpha);  // Numeric or alpha depending on params.alpha
     OpStatus sort_status = OpStatus::OK;
-    ShardId source_sid = Shard(key, shard_set->size());
 
     // Handle BY pattern with external key lookups
     if (params.by_pattern) {
-      // TBD: Implement BY pattern handling
-      return cmd_cntx->SendError(kSyntaxErr);
+      DCHECK(source_type == OBJ_SET || source_type == OBJ_ZSET || source_type == OBJ_LIST);
+      sort_status =
+          PopulateSortEntriesFromByPattern(params, raw_elements, db_cntx, &sorted_entries);
     } else {  // No BY pattern, sort directly on fetched elements
       OpResult<CompactObjType> fetch_result;
       auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
@@ -1672,6 +1813,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     }
 
     if (sort_status != OpStatus::OK) {
+      DVLOG(2) << "Sorting failed with status " << sort_status;
       cmd_cntx->tx()->Conclude();
       if (sort_status == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(sort_status);
@@ -1680,13 +1822,25 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       return cmd_cntx->SendEmptyArray();
     }
 
-    SortVisitor visitor{params, source_type, cmd_cntx};
+    SortVisitor visitor{params, source_type, cmd_cntx, std::move(raw_elements)};
     std::visit(visitor, sorted_entries);
     return;
   }
 
-  // TBD: unsorted flow.
-  return cmd_cntx->SendError(kSyntaxErr);
+  // No sorting required, just reply with fetched raw elements (with LIMIT if any)
+  DVLOG(1) << "Replying with unsorted " << raw_elements.size() << " elements from key " << key;
+  DCHECK(!raw_elements.empty());
+  auto replier = [raw_elements = std::move(raw_elements), params,
+                  source_type](RedisReplyBuilder* rb) {
+    auto [start_it, end_it] = GetSortRange(raw_elements, params.bounds);
+    bool is_set = (source_type == OBJ_SET || source_type == OBJ_ZSET);
+    rb->StartCollection(std::distance(start_it, end_it),
+                        is_set ? CollectionType::SET : CollectionType::ARRAY);
+    for (auto it = start_it; it != end_it; ++it) {
+      rb->SendBulkString(*it);
+    }
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
 void GenericFamily::Sort(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2173,7 +2327,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
       << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
-      << CI{"SORT", CO::JOURNALED, -2, 1, -1, acl::kSort}.HFUNC(Sort)
+      << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
       << CI{"MOVE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}
              .HFUNC(Move)
