@@ -3181,6 +3181,7 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         if backlog_len > 1:
             await c_replica1.execute_command("SET bar foo")
             await c_replica1.execute_command("SET foo bar")
+        await asyncio.sleep(0.1)
 
     else:
         # Promote first replica to master
@@ -3666,3 +3667,48 @@ async def test_replica_of_self(async_client):
 
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command(f"replicaof 127.0.0.1 {port}")
+
+
+@dfly_args({"replicaof_no_one_start_journal": True})
+async def test_repl_offset(df_factory):
+    master = df_factory.create()
+    replica1 = df_factory.create()
+    replica2 = df_factory.create()
+    replica3 = df_factory.create()
+
+    df_factory.start_all([master, replica1, replica2, replica3])
+    c_master = master.client()
+    c_replica1 = replica1.client()
+    c_replica2 = replica2.client()
+    c_replica3 = replica3.client()
+
+    seeder = DebugPopulateSeeder(key_target=50)
+    await seeder.run(c_master)
+
+    await c_replica1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica1)
+    await c_replica2.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica2)
+    await c_replica3.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica3)
+
+    # traffic
+    seeder = SeederV2(key_target=50)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    # Wait for all journal changes propagate to replicas
+    await check_all_replicas_finished([c_replica1, c_replica2], c_master)
+
+    # Promote first replica to master
+    await c_replica1.execute_command(f"REPLTAKEOVER 5")
+    await asyncio.sleep(0.1)
+    # 4183
+    info = await c_replica2.info("replication")
+    assert info["slave_repl_offset"] > 0
+    assert info["master_link_status"] == "down"
+    assert "OK" == await c_replica2.execute_command("replicaof no one")
+    await c_replica3.execute_command(f"REPLICAOF localhost {replica2.port}")
+    await wait_for_replicas_state(c_replica3)
+
+    info = await c_replica3.info("replication")
+    assert info["slave_repl_offset"] > 0

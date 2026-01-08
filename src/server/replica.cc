@@ -627,6 +627,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
       DVLOG(1) << "Calling Flush on all slots " << this;
 
+      full_sync_completed_ = false;
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
       } else {
@@ -660,6 +661,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     // Check if we woke up due to cancellation.
     if (!exec_st_.IsRunning())
       return exec_st_.GetError();
+
+    full_sync_completed_ = true;
 
     RdbLoader::PerformPostLoad(&service_);
   }
@@ -1279,6 +1282,7 @@ auto Replica::GetSummary() const -> Summary {
     }
     res.psync_successes = psync_successes_;
     res.psync_attempts = psync_attempts_;
+    res.full_sync_completed = full_sync_completed_;
     return res;
   };
 
