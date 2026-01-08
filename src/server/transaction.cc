@@ -1661,6 +1661,16 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
           bonus = args.size() - 1;
         }
       }
+
+      if (name == "SORT") {
+        if (args.size() >= 3) {
+          // SORT key ... STORE destkey
+          string_view opt = ArgS(args, args.size() - 2);
+          if (absl::EqualsIgnoreCase(opt, "STORE")) {
+            bonus = args.size() - 1;
+          }
+        }
+      }
     }
 
     return KeyIndex{start, end, step, bonus};

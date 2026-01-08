@@ -1477,4 +1477,35 @@ TEST_F(GenericFamilyTest, SortNegativeLimit) {
   ASSERT_THAT(resp, ErrArg("value is not an integer"));
 }
 
+TEST_F(GenericFamilyTest, SortBy) {
+  Run({"del", "list-1"});
+  Run({"lpush", "list-1", "1", "2", "3"});
+  Run({"set", "w_1", "30"});
+  Run({"set", "w_2", "20"});
+  Run({"set", "w_3", "10"});
+
+  // standard sort
+  auto resp = Run({"sort", "list-1", "BY", "w_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "2", "1"));
+
+  // desc
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "DESC"}), RespElementsAre("1", "2", "3"));
+
+  // alpha
+  Run({"set", "s_1", "c"});
+  Run({"set", "s_2", "b"});
+  Run({"set", "s_3", "a"});
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "s_*", "ALPHA"}), RespElementsAre("3", "2", "1"));
+
+  // nosort
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "nosort"}),
+              RespElementsAre(
+                  "3", "2",
+                  "1"));  // lpush reverses order, so 3, 2, 1 is insertion order (or close to it)
+
+  // missing keys -> 0
+  Run({"del", "w_1"});
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*"}), RespElementsAre("1", "3", "2"));  // 0, 10, 20
+}
+
 }  // namespace dfly
