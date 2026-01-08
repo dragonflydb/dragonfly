@@ -235,13 +235,13 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args, bool allow_novalues) {
       }
       scan_opts.type_filter = obj_type;
     } else if (parser.Check("BUCKET", &scan_opts.bucket_id)) {
-      continue;
+      // no-op
     } else if (parser.Check("ATTR")) {
       scan_opts.mask =
           parser.MapNext("v", ScanOpts::Mask::Volatile, "p", ScanOpts::Mask::Permanent, "a",
                          ScanOpts::Mask::Accessed, "u", ScanOpts::Mask::Untouched);
     } else if (parser.Check("MINMSZ", &scan_opts.min_malloc_size)) {
-      continue;
+      // no-op
     } else
       return facade::OpStatus::SYNTAX_ERR;
   }  // while
