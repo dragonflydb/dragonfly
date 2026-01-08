@@ -7,6 +7,8 @@
 #include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 #include "acl/acl_commands_def.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"

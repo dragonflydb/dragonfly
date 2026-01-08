@@ -24,13 +24,8 @@ struct CollectionPayload;
 struct SimpleString : public std::string {};  // SendSimpleString
 struct BulkString : public std::string {};    // SendBulkString
 
-using ReplyFunction =
-    fu2::function_base<true /*owns*/, false /*non-copyable*/, fu2::capacity_fixed<16, 8>,
-                       false /* non-throwing*/, true /* strong exceptions guarantees*/,
-                       void(SinkReplyBuilder*)>;
-
 using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
-                             std::unique_ptr<CollectionPayload>, ReplyFunction>;
+                             std::unique_ptr<CollectionPayload>>;
 
 static_assert(sizeof(Payload) == 40);
 

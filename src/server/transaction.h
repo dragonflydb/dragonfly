@@ -194,7 +194,7 @@ class Transaction {
   ShardArgs GetShardArgs(ShardId sid) const;
 
   // Execute transaction hop. If conclude is true, it is removed from the pending queue.
-  void Execute(RunnableType cb, bool conclude);
+  void Execute(RunnableType cb, bool conclude, bool async = false);
 
   // Execute single hop and conclude.
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
@@ -273,6 +273,10 @@ class Transaction {
 
   // Get OpArgs for specific shard
   OpArgs GetOpArgs(EngineShard* shard) const;
+
+  util::fb2::EmbeddedBlockingCounter* Blocker() {
+    return &run_barrier_;
+  }
 
   TxId txid() const {
     return txid_;

@@ -888,7 +888,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 }
 
 // Runs in coordinator thread.
-void Transaction::Execute(RunnableType cb, bool conclude) {
+void Transaction::Execute(RunnableType cb, bool conclude, bool async) {
   if (multi_ && multi_->role == SQUASHED_STUB) {
     local_result_ = RunSquashedMultiCb(cb);
     return;
@@ -909,8 +909,11 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   }
 
   DispatchHop();
-  run_barrier_.Wait();
-  cb_ptr_ = nullptr;
+
+  if (!async) {
+    run_barrier_.Wait();
+    cb_ptr_ = nullptr;
+  }
 
   if (coordinator_state_ & COORD_CONCLUDING)
     coordinator_state_ &= ~COORD_SCHED;

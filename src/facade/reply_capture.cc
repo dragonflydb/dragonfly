@@ -147,9 +147,6 @@ struct CaptureVisitor {
       visit(*this, std::move(pl));
   }
 
-  void operator()(payload::ReplyFunction&& rf) {
-    rf(rb);
-  }
   SinkReplyBuilder* rb;
 };
 
