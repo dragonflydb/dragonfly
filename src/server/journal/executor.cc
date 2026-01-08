@@ -32,7 +32,7 @@ template <typename... Ts> void BuildFromParts(cmn::BackedArguments* dest, Ts... 
 JournalExecutor::JournalExecutor(Service* service)
     : service_{service},
       reply_builder_{new facade::CapturingReplyBuilder{facade::ReplyMode::NONE}},
-      conn_context_{nullptr, nullptr} {
+      conn_context_{nullptr, acl::UserCredentials{}} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
   conn_context_.skip_acl_validation = true;

@@ -42,6 +42,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
   ~SliceSlotMigration() {
     CloseSocket();
+    // it should already be unregistered, this cancel was added to avoid race condition that we
+    // possibly have.
+    bool unregistered = streamer_.Cancel();
+    LOG_IF(DFATAL, unregistered)
+        << "Streamer was not unregistered properly. Check code for race conditions.";
     exec_st_.JoinErrorHandler();
   }
 

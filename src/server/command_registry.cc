@@ -143,12 +143,6 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
   const auto* conn = server_conn_cntx()->conn();
-  auto& conn_state = server_conn_cntx()->conn_state;
-  if (conn_state.squashing_info) {
-    // We run from the squashed transaction.
-    conn = conn_state.squashing_info->owner->conn();
-  }
-
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
       // Use SafeTLocal() to avoid accessing the wrong thread local instance
       ServerState::SafeTLocal()->ShouldLogSlowCmd(execution_time_usec)) {

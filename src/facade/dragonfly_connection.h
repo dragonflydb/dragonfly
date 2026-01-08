@@ -320,9 +320,6 @@ class Connection : public util::Connection {
   // Updates memory stats and pooling, must be called for all used messages
   void RecycleMessage(MessageHandle msg);
 
-  // Create new pipeline request, re-use from pool when possible.
-  PipelineMessagePtr FromArgs(const RespVec& args);
-
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
 
@@ -332,7 +329,7 @@ class Connection : public util::Connection {
   void ShrinkPipelinePool();
 
   // Returns non-null request ptr if pool has vacant entries.
-  PipelineMessagePtr GetFromPipelinePool();
+  PipelineMessagePtr GetFromPoolOrCreate();
 
   void HandleMigrateRequest();
   io::Result<size_t> HandleRecvSocket();

@@ -4,23 +4,19 @@
 
 #pragma once
 
-#include <absl/container/btree_set.h>
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
-
-#include <map>
-#include <memory>
-#include <optional>
-#include <vector>
-
-#include "base/logging.h"
-#include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
-#include "core/search/compressed_sorted_set.h"
+#include "core/search/stateless_allocator.h"
 
 namespace dfly::search {
 
-template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
+using StatelessString =
+    std::basic_string<char, std::char_traits<char>, StatelessSearchAllocator<char>>;
+static_assert(sizeof(StatelessString) == sizeof(std::string));
+
+template <typename T> using StatelessVector = std::vector<T, StatelessSearchAllocator<T>>;
+static_assert(sizeof(StatelessVector<StatelessString>) == sizeof(std::vector<std::string>));
+
+template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
  protected:
   struct ParsedSortValue {
     bool HasValue() const;
@@ -33,8 +29,6 @@ template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
   };
 
  public:
-  SimpleValueSortIndex(PMR_NS::memory_resource* mr);
-
   SortableValue Lookup(DocId doc) const override;
   std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
@@ -47,23 +41,17 @@ template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
  protected:
   virtual ParsedSortValue Get(const DocumentAccessor& doc, std::string_view field_value) = 0;
 
-  PMR_NS::memory_resource* GetMemRes() const;
-
  private:
-  PMR_NS::vector<T> values_;
-  PMR_NS::vector<bool> occupied_;  // instead of optional<T> in values to avoid memory overhead
+  StatelessVector<T> values_;
+  StatelessVector<bool> occupied_;  // instead of optional<T> in values to avoid memory overhead
 };
 
-struct NumericSortIndex : public SimpleValueSortIndex<double> {
-  NumericSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
-
+struct NumericSortIndex : SimpleValueSortIndex<double> {
   ParsedSortValue Get(const DocumentAccessor& doc, std::string_view field) override;
 };
 
 // TODO: Map tags to integers for fast sort
-struct StringSortIndex : public SimpleValueSortIndex<PMR_NS::string> {
-  StringSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
-
+struct StringSortIndex : SimpleValueSortIndex<StatelessString> {
   ParsedSortValue Get(const DocumentAccessor& doc, std::string_view field) override;
 };
 

@@ -68,28 +68,6 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
   acl_db_idx = cred.db;
 }
 
-ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx)
-    : facade::ConnectionContext(nullptr), transaction{tx} {
-  if (owner) {
-    acl_commands = owner->acl_commands;
-    keys = owner->keys;
-    pub_sub = owner->pub_sub;
-    skip_acl_validation = owner->skip_acl_validation;
-    acl_db_idx = owner->acl_db_idx;
-    ns = owner->ns;
-    if (owner->conn()) {
-      has_main_or_memcache_listener = owner->conn()->IsMainOrMemcache();
-    }
-  } else {
-    acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
-  }
-  if (tx) {  // If we have a carrier transaction, this context is used for squashing
-    DCHECK(owner);
-    conn_state.db_index = owner->conn_state.db_index;
-    conn_state.squashing_info = {owner};
-  }
-}
-
 void ConnectionContext::ChangeMonitor(bool start) {
   // This will either remove or register a new connection
   // at the "top level" thread --> ServerState context
@@ -284,6 +262,13 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 
   const bool match = (seq_num_ == (1 + caching_seq_num_));
   return option_ == OPTIN ? match : !match;
+}
+
+void CommandContext::ReuseInternal() {
+  cid = nullptr;
+  tx = nullptr;
+  start_time_ns = 0;
+  exec_body_len = 0;
 }
 
 }  // namespace dfly

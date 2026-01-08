@@ -57,6 +57,7 @@ void ParsedCommand::ResetForReuse() {
     storage_.clear();  // also deallocates the heap.
     offsets_.shrink_to_fit();
   }
+  ReuseInternal();
 }
 
 void ParsedCommand::SendError(std::string_view str, std::string_view type) {

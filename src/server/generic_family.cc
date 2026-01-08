@@ -229,6 +229,10 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
     config.reserve = pending_read_.reserve;
 
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
+      // Handle value_expired gracefully - all fields expired during deserialize
+      if (ec.value() == rdb::errc::value_expired) {
+        return OpStatus::SKIPPED;
+      }
       // we failed - report and exit
       LOG(WARNING) << "error while trying to read data: " << ec;
       return OpStatus::INVALID_VALUE;
@@ -522,8 +526,16 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   auto add_res =
       loader.Add(dest_key_, serialized_value_->value, op_args.db_cntx, restore_args, &db_slice);
 
-  if (!add_res)
+  if (!add_res) {
+    // SKIPPED means all fields expired during deserialize - treat as success
+    if (add_res.status() == OpStatus::SKIPPED) {
+      if (dest_found_ && shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+      }
+      return OpStatus::OK;
+    }
     return add_res.status();
+  }
 
   LOG_IF(DFATAL, !add_res->is_new)
       << "Unexpected override for key " << dest_key_ << " " << dest_found_;
@@ -1845,7 +1857,7 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Only global/non-atomic multi transactions can change dbs safely,
   // locked-ahead transactions acquired keys ahead for a specific dbindex
-  if (auto* tx = cntx->transaction; tx && tx->IsMulti()) {
+  if (auto* tx = cmd_cntx->tx; tx && tx->IsMulti()) {
     if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
