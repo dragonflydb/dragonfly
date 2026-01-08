@@ -132,6 +132,7 @@ class Replica : ProtocolClient {
     uint64_t repl_offset_sum;
     size_t psync_attempts;
     size_t psync_successes;
+    bool full_sync_completed;
   };
 
   Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.
@@ -178,6 +179,8 @@ class Replica : ProtocolClient {
   // ack_offs_ last acknowledged offset.
   size_t repl_offs_ = 0, ack_offs_ = 0;
   unsigned state_mask_ = 0;  // see State enum above.
+
+  bool full_sync_completed_ = false;
 
   bool is_paused_ = false;
   std::string id_;
