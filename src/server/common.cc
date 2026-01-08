@@ -214,64 +214,37 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args, bool allow_novalues) {
   facade::CmdArgParser parser(args);
 
   while (parser.HasNext()) {
+    std::string_view pattern;
+    std::string_view type_str;
+
     if (parser.Check("NOVALUES")) {
       if (!allow_novalues) {
         return facade::OpStatus::SYNTAX_ERR;
       }
       scan_opts.novalues = true;
-      continue;
-    }
-
-    if (parser.Check("COUNT")) {
-      scan_opts.limit = parser.Next<size_t>();
+    } else if (parser.Check("COUNT", &scan_opts.limit)) {
       if (scan_opts.limit == 0)
         scan_opts.limit = 1;
-      continue;
-    }
-
-    if (parser.Check("MATCH")) {
-      std::string_view pattern = parser.Next();
+    } else if (parser.Check("MATCH", &pattern)) {
       if (pattern != "*")
         scan_opts.matcher.reset(new GlobMatcher{pattern, true});
-      continue;
-    }
-
-    if (parser.Check("TYPE")) {
-      CompactObjType obj_type = ObjTypeFromString(parser.Next());
+    } else if (parser.Check("TYPE", &type_str)) {
+      CompactObjType obj_type = ObjTypeFromString(type_str);
       if (obj_type == kInvalidCompactObjType) {
         return facade::OpStatus::SYNTAX_ERR;
       }
       scan_opts.type_filter = obj_type;
+    } else if (parser.Check("BUCKET", &scan_opts.bucket_id)) {
       continue;
-    }
-
-    if (parser.Check("BUCKET")) {
-      scan_opts.bucket_id = parser.Next<unsigned>();
+    } else if (parser.Check("ATTR")) {
+      scan_opts.mask =
+          parser.MapNext("v", ScanOpts::Mask::Volatile, "p", ScanOpts::Mask::Permanent, "a",
+                         ScanOpts::Mask::Accessed, "u", ScanOpts::Mask::Untouched);
+    } else if (parser.Check("MINMSZ", &scan_opts.min_malloc_size)) {
       continue;
-    }
-
-    if (parser.Check("ATTR")) {
-      std::string_view mask = parser.Next();
-      if (mask == "v") {
-        scan_opts.mask = ScanOpts::Mask::Volatile;
-      } else if (mask == "p") {
-        scan_opts.mask = ScanOpts::Mask::Permanent;
-      } else if (mask == "a") {
-        scan_opts.mask = ScanOpts::Mask::Accessed;
-      } else if (mask == "u") {
-        scan_opts.mask = ScanOpts::Mask::Untouched;
-      } else {
-        return facade::OpStatus::SYNTAX_ERR;
-      }
-      continue;
-    }
-
-    if (parser.Check("MINMSZ")) {
-      scan_opts.min_malloc_size = parser.Next<size_t>();
-      continue;
-    }
-    return facade::OpStatus::SYNTAX_ERR;
-  }
+    } else
+      return facade::OpStatus::SYNTAX_ERR;
+  }  // while
 
   // Check for parsing errors (e.g. missing values or invalid integers)
   if (auto err = parser.TakeError()) {
