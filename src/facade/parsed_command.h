@@ -10,6 +10,9 @@
 
 namespace util::fb2 {
 class EmbeddedBlockingCounter;
+namespace detail {
+class Waiter;
+}
 }  // namespace util::fb2
 
 namespace facade {
@@ -108,37 +111,42 @@ class ParsedCommand : public cmn::BackedArguments {
   void SendError(facade::OpStatus status);
   void SendError(const facade::ErrorReply& error);
 
+  // TODO: remove
   void SendSimpleString(std::string_view str);
   void SendOk() {
     SendSimpleString("OK");
   }
-
   void SendNotFound() {  // For MC only.
     SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
   }
-
-  void SendLong(long val);
   void SendNull();
 
-  // If payload exists, sends it to reply builder, resets it and returns true.
-  // Otherwise, returns false.
-  void SendPayload();
-  bool CanReply() const;
+  // Resolve deferred command with error
+  void Resolve(ErrorReply&& error);
 
-  util::fb2::EmbeddedBlockingCounter* task_blocker;
-  std::function<void(facade::SinkReplyBuilder*)> replier;
+  // Resolve deferred command with async task
+  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker,
+               std::function<void(facade::SinkReplyBuilder*)> replier) {
+    reply_ = AsyncTask{blocker, std::move(replier)};
+  }
 
-  payload::Payload reply_payload_;  // captured reply payload for async dispatches
+  bool IsReady() const;  // If deferred is ready
+  bool OnCompletion(util::fb2::detail::Waiter* waiter);
+  void Reply();  // Reply for deferred
 
  private:
-  // whether the command can be dispatched asynchronously.
-  bool allow_async_execution_ = false;
+  struct AsyncTask {
+    util::fb2::EmbeddedBlockingCounter* blocker;
+    std::function<void(facade::SinkReplyBuilder*)> replier;
+  };
+
+  std::variant<payload::Payload, AsyncTask> reply_;
 
   // if false then the reply was sent directly to reply builder,
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
 };
 
-static_assert(sizeof(ParsedCommand) == 264);
+static_assert(sizeof(ParsedCommand) == 232);
 
 }  // namespace facade

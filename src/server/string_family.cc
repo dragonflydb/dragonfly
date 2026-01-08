@@ -733,7 +733,7 @@ void IncrByGeneric(string_view key, int64_t val, CommandContext* cmnd_cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      cmnd_cntx->SendLong(result.value());
+      cmnd_cntx->rb()->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
       cmnd_cntx->SendError(kInvalidIntErr);
@@ -1134,11 +1134,11 @@ void CmdSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
 
   switch (SetGeneric(sparams, key, value, *cmnd_cntx)) {
     case OpStatus::OK:
-      return cmnd_cntx->SendLong(1);  // Successfully set the value
+      return cmnd_cntx->rb()->SendLong(1);  // Successfully set the value
     case OpStatus::OUT_OF_MEMORY:
       return cmnd_cntx->SendError(kOutOfMemory);
     case OpStatus::SKIPPED:
-      return cmnd_cntx->SendLong(0);  // Existed, zero updates performed
+      return cmnd_cntx->rb()->SendLong(0);  // Existed, zero updates performed
     default:
       LOG(FATAL) << "Invalid result";
   }
@@ -1355,6 +1355,7 @@ AsyncHandlerReply MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
   shared_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
+    VLOG(0) << "Mget hop";
     mget_resp[shard->shard_id()] =
         OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_params);
     return OpStatus::OK;
@@ -1491,7 +1492,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmnd_cntx) {
   };
   cmnd_cntx->tx->Execute(std::move(epilog_cb), true);
 
-  cmnd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmnd_cntx->rb()->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
 void CmdStrLen(CmdArgList args, CommandContext* cmnd_cntx) {

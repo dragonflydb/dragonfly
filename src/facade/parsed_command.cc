@@ -5,6 +5,7 @@
 #include "facade/parsed_command.h"
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -47,9 +48,8 @@ string MCRender::RenderDeleted() const {
 }
 
 void ParsedCommand::ResetForReuse() {
-  allow_async_execution_ = false;
   is_deferred_reply_ = false;
-  reply_payload_ = std::monostate{};
+  reply_ = std::monostate{};
 
   offsets_.clear();
   if (HeapMemory() > 1024) {
@@ -62,7 +62,7 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) {
   if (!is_deferred_reply_) {
     rb_->SendError(str, type);
   } else {
-    reply_payload_ = payload::make_error(str, type);
+    reply_ = payload::make_error(str, type);
   }
 }
 
@@ -74,9 +74,9 @@ void ParsedCommand::SendError(facade::OpStatus status) {
       rb_->SendError(StatusToMsg(status));
   } else {
     if (status == OpStatus::OK)
-      reply_payload_ = payload::SimpleString{"OK"};
+      reply_ = payload::SimpleString{"OK"};
     else
-      reply_payload_ = payload::make_error(StatusToMsg(status));
+      reply_ = payload::make_error(StatusToMsg(status));
   }
 }
 
@@ -90,41 +90,50 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
   if (!is_deferred_reply_) {
     rb_->SendSimpleString(str);
   } else {
-    reply_payload_ = payload::make_simple_or_noreply(str);
-  }
-}
-
-void ParsedCommand::SendLong(long val) {
-  if (is_deferred_reply_) {
-    reply_payload_ = long(val);
-  } else {
-    rb_->SendLong(val);
+    reply_ = payload::make_simple_or_noreply(str);
   }
 }
 
 void ParsedCommand::SendNull() {
   if (is_deferred_reply_) {
-    reply_payload_ = payload::Null{};
+    reply_ = payload::Null{};
   } else {
     DCHECK(mc_cmd_ == nullptr);  // RESP only
     static_cast<RedisReplyBuilder*>(rb_)->SendNull();
   }
 }
 
-void ParsedCommand::SendPayload() {
-  if (reply_payload_.index() > 0) {
-    CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
-    reply_payload_ = {};
-  } else {
-    DCHECK(replier);
-    DCHECK(task_blocker->IsCompleted());
-    replier(rb_);
-  }
+void ParsedCommand::Resolve(ErrorReply&& error) {
+  DCHECK(is_deferred_reply_);
+  SendError(error);
 }
 
-bool ParsedCommand::CanReply() const {
-  // DCHECK(is_deferred_reply_);  // sync commands are handled immediately
-  return reply_payload_.index() > 0 || (task_blocker != nullptr && task_blocker->IsCompleted());
+bool ParsedCommand::IsReady() const {
+  dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0; },
+                      [](const AsyncTask& task) { return task.blocker->IsCompleted(); }};
+  return visit(ov, reply_);
+}
+
+bool ParsedCommand::OnCompletion(util::fb2::detail::Waiter* waiter) {
+  dfly::Overloaded ov{[](const payload::Payload& pl) {
+                        DCHECK(pl.index() > 0);
+                        return true;
+                      },
+                      [waiter](const AsyncTask& task) {
+                        task.blocker->OnCompletion(waiter);
+                        return false;
+                      }};
+  return visit(ov, reply_);
+}
+
+void ParsedCommand::Reply() {
+  dfly::Overloaded ov{
+      [this](payload::Payload&& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
+      [this](AsyncTask&& task) {
+        DCHECK(task.blocker->IsCompleted());
+        task.replier(rb_);
+      }};
+  visit(ov, exchange(reply_, monostate{}));
 }
 
 }  // namespace facade

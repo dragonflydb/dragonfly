@@ -1093,7 +1093,7 @@ void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
       cmd_cntx->SendSimpleString(mc_render.RenderNotFound());
     }
   } else {
-    cmd_cntx->SendLong(del_cnt);
+    cmd_cntx->rb()->SendLong(del_cnt);
   }
 }
 

@@ -2057,7 +2057,7 @@ bool Connection::ParseMCBatch() {
 bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
   for (auto*& cmd = parsed_to_execute_; cmd; cmd = cmd->next) {
-    if (cmd->CanReply())  // in case parser error was set immediately
+    if (cmd->IsReady())  // in case parser error was set immediately
       continue;
 
     // If there are pending async commands, we require async
@@ -2066,6 +2066,7 @@ bool Connection::ExecuteMCBatch() {
                               : ServiceInterface::AsyncPreference::REQUIRE_ASYNC;
 
     DispatchResult result = service_->DispatchMC(cmd, async_pref);
+    VLOG(0) << int(result) << " -> " << int(async_pref);
     if (result == DispatchResult::WOULD_BLOCK)
       break;  // handle command next time, TODO: add flag to avoid polling
 
@@ -2091,10 +2092,10 @@ bool Connection::ReplyMCBatch() {
   }
 
   for (auto*& cmd = parsed_head_; cmd != parsed_to_execute_; cmd = cmd->next) {
-    if (!cmd->CanReply())  // can't reply yet, just break
+    if (!cmd->IsReady())  // can't reply yet, just break
       break;
 
-    cmd->SendPayload();
+    cmd->Reply();
     ReleaseParsedCommand(cmd, cmd->next != parsed_to_execute_ /* is_pipelined */);
 
     if (reply_builder_->GetError())
@@ -2345,21 +2346,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
 
-      if (parsed_head_ && parsed_head_ != parsed_to_execute_) {
-        if (parsed_head_->CanReply()) {
-          head_ready = true;
-        } else {
-          DCHECK(parsed_head_->task_blocker) << uint64_t(parsed_head_);
-          parsed_head_->task_blocker->OnCompletion(&head_waiter);
-        }
-      }
+      // Update head state and subscribe to updates if its not ready
+      if (parsed_head_ && parsed_head_ != parsed_to_execute_ && !head_ready)
+        head_ready |= parsed_head_->OnCompletion(&head_waiter);
 
       VLOG(0) << "Rolling in with head_ready: " << head_ready;
 
       io_event_.await(
           [this, &head_ready]() { return io_buf_.InputLen() > 0 || head_ready || io_ec_; });
-
-      head_ready = false;  // reset head_ready state
     }
 
     if (io_ec_) {
@@ -2370,9 +2364,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
-    if (reply_builder_->GetError()) {
+    if (reply_builder_->GetError())  // Abort on error
       return reply_builder_->GetError();
-    }
+
+    if (exchange(head_ready, false))  // Proceed with replies
+      ReplyMCBatch();
 
     if (io_buf_.InputLen() > 0) {
       if (redis_parser_) {
@@ -2382,11 +2378,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         parse_status = ParseMemcache();
       }
     } else {
-      VLOG(0) << "Woken for replies";
       parse_status = NEED_MORE;
-      if (parsed_head_) {
-        ReplyMCBatch();
-      }
     }
 
     if (parse_status == NEED_MORE) {
