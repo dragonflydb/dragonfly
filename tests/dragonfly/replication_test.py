@@ -3181,7 +3181,6 @@ async def test_partial_replication_on_same_source_master(df_factory, use_takeove
         if backlog_len > 1:
             await c_replica1.execute_command("SET bar foo")
             await c_replica1.execute_command("SET foo bar")
-        await asyncio.sleep(0.1)
 
     else:
         # Promote first replica to master
@@ -3700,7 +3699,6 @@ async def test_repl_offset(df_factory):
 
     # Promote first replica to master
     await c_replica1.execute_command(f"REPLTAKEOVER 5")
-    await asyncio.sleep(0.1)
     # 4183
     info = await c_replica2.info("replication")
     assert info["slave_repl_offset"] > 0

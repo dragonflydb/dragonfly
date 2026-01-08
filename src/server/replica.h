@@ -147,7 +147,7 @@ class Replica : ProtocolClient {
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
 
-  // Used *only* in TakeOver flow. There is small data race if
+  // Used *only* in TakeOver flow and replicaof no one. There is small data race if
   // thread_flow_map_ gets written by the MainReplicationFiber thread but
   // the chances for that are extremely rare.
   std::vector<unsigned> GetFlowMapAtIndex(size_t index) const;
