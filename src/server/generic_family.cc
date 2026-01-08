@@ -1514,79 +1514,36 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   return len;
 }
 
-void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
-  std::string_view key = ArgS(args, 0);
+struct SortParams {
   bool alpha = false;
   bool reversed = false;
+  bool is_read_only = false;
+
   std::optional<std::string_view> store_key;
-  std::optional<std::pair<size_t, size_t>> bounds;
 
-  for (size_t i = 1; i < args.size(); i++) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, i));
-    if (arg == "ALPHA") {
-      alpha = true;
-    } else if (arg == "DESC") {
-      reversed = true;
-    } else if (arg == "ASC") {
-      reversed = false;
-    } else if (arg == "LIMIT") {
-      int offset, limit;
-      if (i + 2 >= args.size()) {
-        return cmd_cntx->SendError(kSyntaxErr);
-      }
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &offset) ||
-          !absl::SimpleAtoi(ArgS(args, i + 2), &limit)) {
-        return cmd_cntx->SendError(kInvalidIntErr);
-      }
-      bounds = {offset, limit};
-      i += 2;
-    } else if (!is_read_only && arg == "STORE") {
-      if (i + 1 >= args.size()) {
-        return cmd_cntx->SendError(kSyntaxErr);
-      }
-      store_key = ArgS(args, i + 1);
-      i += 1;
-    } else {
-      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
-      return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
-    }
-  }
+  // first is offset, second is count
+  std::optional<std::pair<uint32_t, uint32_t>> bounds;
 
-  // Asserting that if is_read_only as true, then store_key should not exist.
-  DVLOG(1) << "is_read_only parameter: " << is_read_only
-           << " and store_key parameter: " << bool(store_key);
-  DCHECK((is_read_only && !bool(store_key)) || !is_read_only);
+  // These options are parsed but currently not fully supported or used by the visitor yet.
+  std::optional<std::string_view> by_pattern;
+  std::vector<std::string_view> get_patterns;
+};
 
-  ShardId source_sid = Shard(key, shard_set->size());
-  OpResult<pair<SortEntryList, CompactObjType>> fetch_result;
-  auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
-    // in case of SORT option, we fetch only on the source shard
-    if (shard->shard_id() == source_sid) {
-      fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
-    }
-    return OpStatus::OK;
-  };
+// Visitor to handle the actual sorting and reply generation
+struct SortVisitor {
+  const SortParams& params;
+  CompactObjType result_type;
+  CommandContext* cmd_cntx;
 
-  cmd_cntx->tx->Execute(std::move(fetch_cb), !bool(store_key));
-
-  if (!fetch_result.ok()) {
-    cmd_cntx->tx->Conclude();
-    if (fetch_result == OpStatus::WRONG_TYPE)
-      return cmd_cntx->SendError(fetch_result.status());
-    else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
-      return cmd_cntx->SendError("One or more scores can't be converted into double");
-    else
-      return cmd_cntx->SendEmptyArray();
-  }
-
-  auto result_type = fetch_result->second;
-
-  auto sort_call = [&](auto& entries) {
+  template <typename T> void operator()(T& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
-    auto cmp = reversed ? &value_t::greater : &value_t::less;
-    if (bounds) {
+    auto cmp = params.reversed ? &value_t::greater : &value_t::less;
+
+    // Sort logic
+    if (params.bounds) {
       auto sort_it =
-          std::next(entries.begin(), std::min(bounds->first + bounds->second, entries.size()));
+          entries.begin() +
+          std::min<uint32_t>(params.bounds->first + params.bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
       std::sort(entries.begin(), entries.end(), cmp);
@@ -1596,16 +1553,18 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       auto start_it = entries.begin();
       auto end_it = entries.end();
       if (bounds) {
-        start_it += std::min(bounds->first, entries.size());
-        end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
+        start_it += std::min<uint32_t>(bounds->first, entries.size());
+        end_it =
+            entries.begin() + std::min<uint32_t>(bounds->first + bounds->second, entries.size());
       }
 
       return std::make_pair(start_it, end_it);
     };
 
-    if (!bool(store_key)) {
+    if (!params.store_key) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-      auto replier = [entries = std::move(entries), bounds, is_set](RedisReplyBuilder* rb) {
+      auto replier = [entries = std::move(entries), bounds = params.bounds,
+                      is_set](RedisReplyBuilder* rb) {
         auto [start_it, end_it] = get_iterators(entries, bounds);
 
         rb->StartCollection(std::distance(start_it, end_it),
@@ -1617,28 +1576,100 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       };
       cmd_cntx->ReplyWith(std::move(replier));
     } else {
-      ShardId dest_sid = Shard(store_key.value(), shard_set->size());
+      std::string_view store_key_sv = params.store_key.value();
+      ShardId dest_sid = Shard(store_key_sv, shard_set->size());
       OpResult<uint32_t> store_len;
 
       auto store_callback = [&](Transaction* t, EngineShard* shard) {
         ShardId shard_id = shard->shard_id();
         if (shard_id == dest_sid) {
-          auto [start_it, end_it] = get_iterators(entries, bounds);
-          store_len = OpStore(t->GetOpArgs(shard), store_key.value(), start_it, end_it);
+          auto [start_it, end_it] = get_iterators(entries, params.bounds);
+          store_len = OpStore(t->GetOpArgs(shard), store_key_sv, start_it, end_it);
         }
         return OpStatus::OK;
       };
       cmd_cntx->tx->Execute(std::move(store_callback), true);
 
       if (store_len) {
-        cmd_cntx->SendLong(*store_len);
+        cmd_cntx->SendLong(store_len.value());
       } else {
         cmd_cntx->SendError(store_len.status());
       }
     }
+  }
+};
+
+void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
+  CmdArgParser parser(args);
+  std::string_view key = parser.Next();
+  SortParams params;
+  params.is_read_only = is_read_only;
+
+  bool unsupported_option = false;
+
+  while (parser.HasNext()) {
+    if (parser.Check("ALPHA")) {
+      params.alpha = true;
+    } else if (parser.Check("DESC")) {
+      params.reversed = true;
+    } else if (parser.Check("ASC")) {
+      params.reversed = false;
+    } else if (parser.Check("LIMIT")) {
+      uint32_t offset = parser.Next<uint32_t>();
+      uint32_t limit = parser.Next<uint32_t>();
+      params.bounds = {offset, limit};
+    } else if (!is_read_only && parser.Check("STORE")) {
+      params.store_key = parser.Next();
+    } else if (parser.Check("BY")) {
+      params.by_pattern = parser.Next();
+      unsupported_option = true;
+    } else if (parser.Check("GET")) {
+      params.get_patterns.push_back(parser.Next());
+      unsupported_option = true;
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << parser.Peek();
+      return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
+    }
+  }
+
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+
+  if (unsupported_option) {
+    return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
+  }
+
+  // Asserting that if is_read_only as true, then store_key should not exist.
+  DVLOG(1) << "is_read_only parameter: " << is_read_only
+           << " and store_key parameter: " << bool(params.store_key);
+  DCHECK(((is_read_only && !bool(params.store_key)) || !is_read_only));
+
+  ShardId source_sid = Shard(key, shard_set->size());
+  OpResult<pair<SortEntryList, CompactObjType>> fetch_result;
+  auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+    // in case of SORT option, we fetch only on the source shard
+    if (shard->shard_id() == source_sid) {
+      fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, params.alpha);
+    }
+    return OpStatus::OK;
   };
 
-  std::visit(sort_call, fetch_result->first);
+  cmd_cntx->tx->Execute(std::move(fetch_cb), !bool(params.store_key));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (!fetch_result.ok()) {
+    cmd_cntx->tx->Conclude();
+    if (fetch_result == OpStatus::WRONG_TYPE)
+      return cmd_cntx->SendError(fetch_result.status());
+    else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
+      return cmd_cntx->SendError("One or more scores can't be converted into double");
+    else
+      return rb->SendEmptyArray();
+  }
+
+  CompactObjType result_type = fetch_result->second;
+  SortVisitor visitor{params, result_type, cmd_cntx};
+  std::visit(visitor, fetch_result.value().first);
 }
 
 void GenericFamily::Sort(CmdArgList args, CommandContext* cmd_cntx) {
