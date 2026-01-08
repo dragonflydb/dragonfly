@@ -1461,4 +1461,20 @@ TEST_F(GenericFamilyTest, HashFieldExpiryDuringDeserialize) {
   Run({"RENAME", "src", "dst"});
 }
 
+TEST_F(GenericFamilyTest, SortNegativeLimit) {
+  Run({"lpush", "list-neg", "1", "2", "3", "4", "5"});
+
+  // Negative offset
+  auto resp = Run({"sort", "list-neg", "LIMIT", "-1", "2"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer"));
+
+  // Negative limit
+  resp = Run({"sort", "list-neg", "LIMIT", "0", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer"));
+
+  // Both negative
+  resp = Run({"sort", "list-neg", "LIMIT", "-1", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer"));
+}
+
 }  // namespace dfly
