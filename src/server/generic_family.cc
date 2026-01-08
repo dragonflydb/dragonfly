@@ -1524,7 +1524,7 @@ struct SortParams {
   // first is offset, second is count
   std::optional<std::pair<uint32_t, uint32_t>> bounds;
 
-  // These options are parsed but currently not fully supported or used by the visitor yet.
+  // These options are parsed but currently not fully supported or used by the visitor.
   std::optional<std::string_view> by_pattern;
   std::vector<std::string_view> get_patterns;
 };
@@ -1618,10 +1618,8 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       uint32_t offset = parser.Next<uint32_t>();
       uint32_t limit = parser.Next<uint32_t>();
       params.bounds = {offset, limit};
-    } else if (!is_read_only && parser.Check("STORE")) {
-      params.store_key = parser.Next();
-    } else if (parser.Check("BY")) {
-      params.by_pattern = parser.Next();
+    } else if (!is_read_only && parser.Check("STORE", &params.store_key)) {
+    } else if (parser.Check("BY", &params.by_pattern)) {
       unsupported_option = true;
     } else if (parser.Check("GET")) {
       params.get_patterns.push_back(parser.Next());
