@@ -1131,6 +1131,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
       res.exp_it = ExpIterator(exp_it, StringOrView::FromView(key));
       table_memory_ += (db.expire.mem_usage() - table_before);
     }
+  } else {
+    // we shouldn't have expiration if expire_at_ms is 0.
+    auto fresh_exp_it = db.expire.Find(it->first.AsRef());
+    LOG_IF(DFATAL, IsValid(fresh_exp_it))
+        << "Inconsistent state, entry " << key
+        << " leave stale expiration: " << fresh_exp_it->second.duration_ms();
   }
 
   return op_result;
