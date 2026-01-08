@@ -58,7 +58,7 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
 
-  void DispatchMC(facade::ParsedCommand* parsed_cmd) final;
+  DispatchResult DispatchMC(facade::ParsedCommand* parsed_cmd) final;
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;

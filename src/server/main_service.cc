@@ -1753,110 +1753,100 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
-void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
-  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(parsed_cmd->rb());
+DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
   CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
   const auto& cmd = *parsed_cmd->mc_command();
-  string_view value = cmd.value();
+
   auto* cntx = cmd_ctx->server_conn_cntx();
   DCHECK(cntx->transaction == nullptr);
 
-  char cmd_name[16];
-  char ttl[absl::numbers_internal::kFastToBufferSize];
-  char store_opt[32] = {0};
-  char ttl_op[] = "EXAT";
+  string_view cmd_name, store_opt;
+  char buffer[absl::numbers_internal::kFastToBufferSize];
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
-      strcpy(cmd_name, "SET");
-      strcpy(store_opt, "XX");
+      cmd_name = "SET";
+      store_opt = "XX";
       break;
     case MemcacheParser::SET:
-      strcpy(cmd_name, "SET");
+      cmd_name = "SET";
       if (cntx->conn()->IsIoLoopV2())
         parsed_cmd->AllowAsyncExecution();  // Enable for SET command.
       break;
     case MemcacheParser::ADD:
-      strcpy(cmd_name, "SET");
-      strcpy(store_opt, "NX");
+      cmd_name = "SET";
+      store_opt = "NX";
       break;
     case MemcacheParser::DELETE:
-      strcpy(cmd_name, "DEL");
+      cmd_name = "DEL";
       break;
     case MemcacheParser::INCR:
-      strcpy(cmd_name, "INCRBY");
-      absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
+      cmd_name = "INCRBY";
+      absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
+      store_opt = buffer;
       break;
     case MemcacheParser::DECR:
-      strcpy(cmd_name, "DECRBY");
-      absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
+      cmd_name = "DECRBY";
+      absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
+      store_opt = buffer;
       break;
     case MemcacheParser::APPEND:
-      strcpy(cmd_name, "APPEND");
+      cmd_name = "APPEND";
       break;
     case MemcacheParser::PREPEND:
-      strcpy(cmd_name, "PREPEND");
+      cmd_name = "PREPEND";
       break;
-    case MemcacheParser::GATS:
-      [[fallthrough]];
     case MemcacheParser::GAT:
-      strcpy(cmd_name, "GAT");
+    case MemcacheParser::GATS:
+      cmd_name = "GAT";
       break;
     case MemcacheParser::GET:
-      [[fallthrough]];
     case MemcacheParser::GETS:
-      strcpy(cmd_name, "MGET");
+      cmd_name = "MGET";
       break;
     case MemcacheParser::FLUSHALL:
-      strcpy(cmd_name, "FLUSHDB");
+      cmd_name = "FLUSHDB";
       break;
     case MemcacheParser::QUIT:
-      strcpy(cmd_name, "QUIT");
+      cmd_name = "QUIT";
       break;
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key(), cmd_ctx);
-      return;
+      return DispatchResult::OK;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString("VERSION 1.6.0 DF");
-      return;
+      cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
+      return DispatchResult::OK;
     default:
-      mc_builder->SendClientError("bad command line format");
-      return;
+      // cmd_ctx->SendError("bad command line format");
+      return DispatchResult::ERROR;
   }
 
-  absl::InlinedVector<string_view, 8> args;
-  args.emplace_back(cmd_name, strlen(cmd_name));
-
+  absl::InlinedVector<string_view, 8> args = {cmd_name};
   if (!cmd.backed_args->empty()) {
     args.emplace_back(cmd.key());
   }
 
-  if (MemcacheParser::IsStoreCmd(cmd.type)) {
-    args.emplace_back(value);
+  bool is_store = MemcacheParser::IsStoreCmd(cmd.type);
+  bool is_read = !is_store && cmd.type < MemcacheParser::QUIT;
+  if (is_store || !is_read) {
+    if (!cmd.backed_args->empty())
+      args.emplace_back(cmd.key());
 
-    if (store_opt[0]) {
-      args.emplace_back(store_opt, strlen(store_opt));
-    }
+    if (is_store)
+      args.emplace_back(cmd.value());
+    if (!store_opt.empty())
+      args.emplace_back(store_opt);
 
-    if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
-      char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
-      args.emplace_back(ttl_op, 4);
-      args.emplace_back(ttl, next - ttl);
+    if (cmd.expire_ts && cmd_name == "SET") {
+      args.emplace_back("EXAT");
+      absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, buffer);
+      args.emplace_back(buffer);
     }
-  } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
-    if (cmd.size() > 1) {
-      auto it = cmd.backed_args->begin();
-      ++it;  // skip first key
-      for (auto end = cmd.backed_args->end(); it != end; ++it) {
-        args.emplace_back(*it);
-      }
-    }
-  } else {  // write commands.
-    if (store_opt[0]) {
-      args.emplace_back(store_opt, strlen(store_opt));
-    }
+  } else {
+    args.insert(args.end(), cmd.backed_args->begin(), cmd.backed_args->end());
   }
-  DispatchCommand(ParsedArgs{args}, parsed_cmd);
+
+  return DispatchCommand(ParsedArgs{args}, parsed_cmd);
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {

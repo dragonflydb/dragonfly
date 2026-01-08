@@ -42,7 +42,7 @@ class ServiceInterface {
                                                   unsigned count, SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 
-  virtual void DispatchMC(ParsedCommand* cmd) = 0;
+  virtual DispatchResult DispatchMC(ParsedCommand* cmd) = 0;
 
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
