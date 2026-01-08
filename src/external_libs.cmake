@@ -142,6 +142,17 @@ if (WITH_SEARCH)
     INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
     LIB "none"
   )
+
+ add_third_party(
+    vsag
+    GIT_REPOSITORY https://github.com/antgroup/vsag
+    GIT_TAG main
+    PATCH_COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/vsag/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/vsag/0_openblas_version.patch
+          COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/vsag/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/vsag/1_openblas_no_fortran.patch
+    CMAKE_PASS_FLAGS "-DENABLE_INTEL_MKL:BOOL=OFF -DENABLE_TESTS:BOOL=OFF -DENABLE_EXAMPLES:BOOL=OFF"
+    LIB libvsag_static.a
+  )
+
 endif()
 
 add_third_party(

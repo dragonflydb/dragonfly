@@ -1,0 +1,28 @@
+diff --git a/extern/openblas/openblas.cmake b/extern/openblas/openblas.cmake
+index 3db31ed4..9f249834 100644
+--- a/extern/openblas/openblas.cmake
++++ b/extern/openblas/openblas.cmake
+@@ -5,12 +5,8 @@ set(install_dir ${CMAKE_CURRENT_BINARY_DIR}/${name}/install)
+ 
+ ExternalProject_Add(
+     ${name}
+-    URL https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.23/OpenBLAS-0.3.23.tar.gz
+-        # this url is maintained by the vsag project, if it's broken, please try
+-        #  the latest commit or contact the vsag project
+-        http://vsagcache.oss-rg-china-mainland.aliyuncs.com/openblas/OpenBLAS-0.3.23.tar.gz
+-    URL_HASH MD5=115634b39007de71eb7e75cf7591dfb2
+-    DOWNLOAD_NAME OpenBLAS-v0.3.23.tar.gz
++    URL https://github.com/OpenMathLib/OpenBLAS/releases/download/v0.3.30/OpenBLAS-0.3.30.tar.gz
++    URL_HASH MD5=8db3d57f4d4485c6ae3f21ea465660e7
+     PREFIX ${CMAKE_CURRENT_BINARY_DIR}/${name}
+     TMP_DIR ${BUILD_INFO_DIR}
+     STAMP_DIR ${BUILD_INFO_DIR}
+@@ -22,7 +18,7 @@ ExternalProject_Add(
+         OMP_NUM_THREADS=1
+         PATH=/usr/lib/ccache:$ENV{PATH}
+         LD_LIBRARY_PATH=/opt/alibaba-cloud-compiler/lib64/:$ENV{LD_LIBRARY_PATH}
+-        make USE_THREAD=0 USE_LOCKING=1 DYNAMIC_ARCH=1 -j${NUM_BUILDING_JOBS}
++        make USE_THREAD=0 USE_LOCKING=1 DYNAMIC_ARCH=1 -j${NUM_BUILDING_JOBS} NO_FORTRAN=1
+     INSTALL_COMMAND
+         make DYNAMIC_ARCH=1 PREFIX=${install_dir} install
+     BUILD_IN_SOURCE 1
