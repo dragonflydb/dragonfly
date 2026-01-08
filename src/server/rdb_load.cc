@@ -2885,7 +2885,7 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   for (unsigned i = 0; i < resp_vec.size(); i++) {
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
-  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd);
+  // service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

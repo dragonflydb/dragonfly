@@ -36,8 +36,8 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(facade::ParsedArgs args,
-                                         facade::ParsedCommand* parsed_cmd) final;
+  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
+                                         AsyncPreference async_pref) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
   facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
@@ -45,7 +45,8 @@ class Service : public facade::ServiceInterface {
                                                   facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
-  facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
+  facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx,
+                                   bool async = false);
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
@@ -58,7 +59,8 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
 
-  void DispatchMC(facade::ParsedCommand* parsed_cmd) final;
+  facade::DispatchResult DispatchMC(facade::ParsedCommand* parsed_cmd,
+                                    AsyncPreference async_pref) final;
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
   facade::ParsedCommand* AllocateParsedCommand() final;

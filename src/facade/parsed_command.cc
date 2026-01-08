@@ -111,22 +111,20 @@ void ParsedCommand::SendNull() {
   }
 }
 
-bool ParsedCommand::SendPayload() {
+void ParsedCommand::SendPayload() {
   if (reply_payload_.index() > 0) {
     CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
     reply_payload_ = {};
-    return true;
-  }
-  if (task_blocker != nullptr) {
-    task_blocker->Wait();  // will be removed
+  } else {
+    DCHECK(replier);
+    DCHECK(task_blocker->IsCompleted());
     replier(rb_);
   }
-  return false;
 }
 
 bool ParsedCommand::CanReply() const {
-  return reply_payload_.index() > 0 ||
-         (task_blocker != nullptr && task_blocker->DEBUG_Count() == 0);
+  // DCHECK(is_deferred_reply_);  // sync commands are handled immediately
+  return reply_payload_.index() > 0 || (task_blocker != nullptr && task_blocker->IsCompleted());
 }
 
 }  // namespace facade

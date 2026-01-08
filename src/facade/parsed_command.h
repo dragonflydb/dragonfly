@@ -93,8 +93,9 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   // Marks this command as having reply stored in its payload instead of being sent directly.
-  void SetDeferredReply() {
-    is_deferred_reply_ = true;
+  // TODO: remove deferred reply marker
+  void SetDeferredReply(bool deferred) {
+    is_deferred_reply_ = deferred;
   }
 
   bool IsDeferredReply() const {
@@ -121,7 +122,7 @@ class ParsedCommand : public cmn::BackedArguments {
 
   // If payload exists, sends it to reply builder, resets it and returns true.
   // Otherwise, returns false.
-  bool SendPayload();
+  void SendPayload();
   bool CanReply() const;
 
   util::fb2::EmbeddedBlockingCounter* task_blocker;

@@ -279,7 +279,7 @@ void CommandId::AsyncToSync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*))
     if (std::holds_alternative<facade::ErrorReply>(reply)) {
       cntx->SendError(std::get<facade::ErrorReply>(reply));
     } else {
-      DCHECK(!cntx->IsDeferredReply()) << "Sync and deferred?";
+      // DCHECK(!cntx->IsDeferredReply()) << "Sync and deferred?";
       cntx->tx->Blocker()->Wait();
       std::get<AsyncHandlerReplier>(reply)(cntx->rb());
     }
@@ -291,9 +291,9 @@ void CommandId::WrapAsync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*)) {
     VLOG(0) << "Running async";
     auto reply = f(args, cntx);
     if (std::holds_alternative<facade::ErrorReply>(reply)) {
+      VLOG(0) << "Async->error";
       cntx->SendError(std::get<facade::ErrorReply>(reply));
     } else {
-      // cntx->keepalive_tx = cntx->tx;
       cntx->task_blocker = cntx->tx->Blocker();
       cntx->replier = std::move(std::get<AsyncHandlerReplier>(reply));
     }

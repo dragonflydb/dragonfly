@@ -196,7 +196,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   for (size_t i = 0; i < vec.size(); ++i) {
     cmd_cntx.PushArg(vec[i].AsString().c_str());
   }
-  service->DispatchCommand(facade::ParsedArgs{cmd_cntx}, &cmd_cntx);
+  // service->DispatchCommand(facade::ParsedArgs{cmd_cntx}, &cmd_cntx);
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
   auto response = http::MakeStringResponse();

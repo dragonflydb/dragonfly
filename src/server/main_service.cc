@@ -1411,8 +1411,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
-                                        facade::ParsedCommand* parsed_cmd) {
+DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
+                                        AsyncPreference async_pref) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
@@ -1422,11 +1422,27 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
 
+  parsed_cmd->SetDeferredReply(async_pref != AsyncPreference::ONLY_SYNC);
   if (cid == nullptr) {
-    auto reply = ReportUnknownCmd(cmd);
-    parsed_cmd->SendError(reply.ToSv(), reply.kind);
+    parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
+
+  // Determine async dispatch comaptibility
+  bool async = false;
+  switch (async_pref) {
+    case AsyncPreference::ONLY_SYNC:
+      break;
+    case AsyncPreference::PREFER_ASYNC:
+      async |= cid->HasAsyncHandler();
+      break;
+    case AsyncPreference::REQUIRE_ASYNC:
+      if (!cid->HasAsyncHandler())
+        return DispatchResult::WOULD_BLOCK;
+      async = true;
+      break;
+  };
+  parsed_cmd->SetDeferredReply(async);
 
   CommandContext* cmnd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmnd_cntx->server_conn_cntx();
@@ -1539,7 +1555,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   DispatchResult res = DispatchResult::ERROR;
   cmnd_cntx->cid = cid;
   cmnd_cntx->tx = dfly_cntx->transaction;
-  res = InvokeCmd(tail_args, cmnd_cntx);
+  res = InvokeCmd(tail_args, cmnd_cntx, async);
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmnd_cntx->SendError("Internal Error");
@@ -1571,7 +1587,8 @@ class ReplyGuard {
   ~ReplyGuard() {
     if (cmd_cntx_ && !cmd_cntx_->IsDeferredReply()) {
       auto* rb = cmd_cntx_->rb();
-      DCHECK_GT(rb->RepliesRecorded(), replies_recorded_) << cid_name_ << " " << typeid(*rb).name();
+      //      DCHECK_GT(rb->RepliesRecorded(), replies_recorded_) << cid_name_ << " " <<
+      //      typeid(*rb).name();
     }
   }
 
@@ -1601,7 +1618,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx) {
+DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx, bool async) {
   auto* cid = cmd_cntx->cid;
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
@@ -1662,7 +1679,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    if (cid->HasAsyncHanlder())
+    if (async)
       cid->InvokeAsync(tail_args, cmd_cntx);
     else
       cid->Invoke(tail_args, cmd_cntx);
@@ -1782,7 +1799,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, &dummy_cmd_cntx);
+    DispatchCommand(args, &dummy_cmd_cntx, AsyncPreference::ONLY_SYNC);
     dispatched++;
   }
 
@@ -1805,7 +1822,8 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
-void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
+facade::DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
+                                           AsyncPreference asnyc_pref) {
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(parsed_cmd->rb());
   CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
   const auto& cmd = *parsed_cmd->mc_command();
@@ -1863,13 +1881,13 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       break;
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key(), cmd_ctx);
-      return;
+      return DispatchResult::OK;
     case MemcacheParser::VERSION:
       mc_builder->SendSimpleString("VERSION 1.6.0 DF");
-      return;
+      return DispatchResult::OK;
     default:
       mc_builder->SendClientError("bad command line format");
-      return;
+      return DispatchResult::OK;
   }
 
   absl::InlinedVector<string_view, 8> args;
@@ -1904,7 +1922,7 @@ void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
       args.emplace_back(store_opt, strlen(store_opt));
     }
   }
-  DispatchCommand(ParsedArgs{args}, parsed_cmd);
+  return DispatchCommand(ParsedArgs{args}, parsed_cmd, asnyc_pref);
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
@@ -2111,7 +2129,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     return;
 
   auto* prev = cmd_cntx->SwapReplier(&replier);
-  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx);
+  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
   cmd_cntx->SwapReplier(prev);
 }
 

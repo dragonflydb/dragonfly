@@ -197,7 +197,7 @@ class CommandId : public facade::CommandId {
     return is_alias_;
   }
 
-  bool HasAsyncHanlder() const {
+  bool HasAsyncHandler() const {
     return async_handler_ != nullptr;
   }
 

@@ -588,6 +588,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
 
     size_t size = value.Size();
     resp.value = string_view(next, size);
+    VLOG(0) << "Read \"" << resp.value << "\"";
     next += size;
 
     // Note - correct behavior is to return TTL before it was updated by GAT,
@@ -1155,30 +1156,6 @@ void CmdGet(CmdArgList args, CommandContext* cmnd_cntx) {
   GetReplies{cmnd_cntx->rb()}.Send(cmnd_cntx->tx->ScheduleSingleHopT(cb));
 }
 
-AsyncHandlerReply CmdGet2(CmdArgList args, CommandContext* cmnd_cntx) {
-  string_view key = args[0];
-  if (key == "BAD")
-    return ErrorReply{"Bad key"};
-
-  auto* strres = new OpResult<StringResult>();
-  auto cb = [key, strres](Transaction* tx, EngineShard* es) {
-    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
-    if (!it_res.ok())
-      *strres = it_res.status();
-    else
-      *strres = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
-    return OpStatus::OK;
-  };
-
-  boost::intrusive_ptr<Transaction> keepalive{cmnd_cntx->tx};
-
-  cmnd_cntx->tx->Execute(cb, true, true);
-  return [strres, keepalive = std::move(keepalive)](SinkReplyBuilder* rb) {
-    GetReplies{rb}.Send(std::move(*strres));
-    delete strres;
-  };
-}
-
 void CmdGetDel(CmdArgList args, CommandContext* cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
@@ -1362,8 +1339,8 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
-                 const DbSlice::ExpireParams* gat_params) {
+AsyncHandlerReply MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
+                              const DbSlice::ExpireParams* gat_params) {
   DCHECK_GE(args.size(), 1U);
 
   MemcacheCmdFlags cmd_flags;
@@ -1375,7 +1352,7 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
   fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
   AggregateError tiering_err;          // First tiering error
 
-  unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
+  shared_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     mget_resp[shard->shard_id()] =
@@ -1383,24 +1360,26 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
     return OpStatus::OK;
   };
 
-  OpStatus result = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  CHECK_EQ(OpStatus::OK, result);
+  cmnd_cntx->tx->Execute(std::move(cb), true, true);
+  VLOG(0) << "MGet " << args[0];
 
   // wait for all tiered reads to finish and check for errors
-  tiering_bc->Wait();
-  if (auto err = std::move(tiering_err).Destroy(); err)
-    return cmnd_cntx->SendError(err.message());
+  //  tiering_bc->Wait();
+  // if (auto err = std::move(tiering_err).Destroy(); err)
+  //  return cmnd_cntx->SendError(err.message());
 
   size_t arg_len = args.size();
 
-  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
+  shared_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
   ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmnd_cntx->tx,
                       absl::MakeSpan(mget_results.get(), arg_len));
 
   if (cmnd_cntx->mc_command()) {
     // We can not access `args` inside the lambda below if it runs asynchronously.
     // Access to arguments must be done via cmnd_cntx.
-    auto replier = [mget_results = std::move(mget_results), cmnd_cntx](SinkReplyBuilder* builder) {
+    boost::intrusive_ptr<Transaction> keepalive{cmnd_cntx->tx};
+    auto replier = [mget_results, mget_resp, cmnd_cntx, keepalive](SinkReplyBuilder* builder) {
+      VLOG(0) << "Running replier";
       auto* mc_builder = static_cast<MCReplyBuilder*>(builder);
       facade::MCRender mc_render{cmnd_cntx->mc_command()->cmd_flags};
       for (size_t i = 0; i < cmnd_cntx->size(); ++i) {
@@ -1414,10 +1393,10 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
       }
       mc_builder->SendSimpleString(mc_render.RenderGetEnd());
     };
-    replier(cmnd_cntx->rb());
+    return replier;
   } else {
     // TODO: remove arg_len capture once we store RESP arguments inside cmnd_cntx.
-    auto replier = [arg_len, mget_results = std::move(mget_results),
+    /*auto replier = [arg_len, mget_results = std::move(mget_results),
                     cmnd_cntx](SinkReplyBuilder* builder) {
       auto* redis_builder = static_cast<RedisReplyBuilder*>(builder);
       redis_builder->StartArray(arg_len);
@@ -1430,23 +1409,25 @@ void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
         }
       }
     };
-    replier(cmnd_cntx->rb());
+    return replier;*/
   }
+
+  return facade::ErrorReply{""};
 }
 
-void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
-  MGetGeneric(args, cmnd_cntx, nullptr);
+AsyncHandlerReply CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
+  return MGetGeneric(args, cmnd_cntx, nullptr);
 }
 
 // Implements the memcache GAT command. The expected input is
 // GAT key [keys...]
 // The expiry argument is stored in mc_command()->expire_ts
 void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
-  DCHECK(cmnd_cntx->mc_command());
-  int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
-  const DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  MGetGeneric(args, cmnd_cntx, &expire_params);
+  // DCHECK(cmnd_cntx->mc_command());
+  // int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
+  // const DbSlice::ExpireParams expire_params{
+  //     .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  // MGetGeneric(args, cmnd_cntx, &expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1695,12 +1676,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
-      << CI{"GET2", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(&CmdGet2)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(&CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)

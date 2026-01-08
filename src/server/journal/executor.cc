@@ -68,7 +68,8 @@ void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
 }
 
 facade::DispatchResult JournalExecutor::Execute(CommandContext* cmd_cntx) {
-  return service_->DispatchCommand(facade::ParsedArgs{*cmd_cntx}, cmd_cntx);
+  return service_->DispatchCommand(facade::ParsedArgs{*cmd_cntx}, cmd_cntx,
+                                   Service::AsyncPreference::ONLY_SYNC);
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
