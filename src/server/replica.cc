@@ -761,7 +761,8 @@ error_code Replica::ConsumeRedisStream() {
         }
 
         FillBackedArgs(last_args, &cmnd_ctx);
-        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx);
+        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
+                                 facade::AsyncPreference::ONLY_SYNC);
       }
     }
 
