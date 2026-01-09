@@ -1822,14 +1822,11 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
       return DispatchResult::OK;
     default:
-      // cmd_ctx->SendError("bad command line format");
+      cmd_ctx->SendSimpleString("CLIENT_ERROR bad command line format");
       return DispatchResult::ERROR;
   }
 
   absl::InlinedVector<string_view, 8> args = {cmd_name};
-  if (!cmd.backed_args->empty()) {
-    args.emplace_back(cmd.key());
-  }
 
   bool is_store = MemcacheParser::IsStoreCmd(cmd.type);
   bool is_read = !is_store && cmd.type < MemcacheParser::QUIT;
@@ -1847,7 +1844,7 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, buffer);
       args.emplace_back(buffer);
     }
-  } else {
+  } else {  // is_read
     args.insert(args.end(), cmd.backed_args->begin(), cmd.backed_args->end());
   }
 
