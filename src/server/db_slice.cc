@@ -548,10 +548,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
 
-    {  // This code added for DEBUG purpose to check that exp_it is still valid after
-       // PreUpdateBlocking.
+    if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is still
+                                 // valid after
+                                 // PreUpdateBlocking.
       auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
-      LOG_IF(DFATAL, IsValid(fresh_it) && fresh_it != res->exp_it)
+      LOG_IF(DFATAL, fresh_it != res->exp_it)
           << "Inconsistent state after PreUpdateBlocking for key " << key
           << ", db_index: " << cntx.db_index
           << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
@@ -684,10 +685,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
-      {  // This code added for DEBUG purpose to check that exp_it is still valid after
-         // PreUpdateBlocking.
+      if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is
+                                   // still valid after
+                                   // PreUpdateBlocking.
         auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
-        LOG_IF(DFATAL, IsValid(fresh_it) && fresh_it != res->exp_it)
+        LOG_IF(DFATAL, fresh_it != res->exp_it)
             << "Inconsistent state after PreUpdateBlocking for key " << key
             << ", db_index: " << cntx.db_index
             << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
