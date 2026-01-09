@@ -3668,7 +3668,7 @@ async def test_replica_of_self(async_client):
         await async_client.execute_command(f"replicaof 127.0.0.1 {port}")
 
 
-@dfly_args({"replicaof_no_one_start_journal": True, "proactor_threads": 3})
+@dfly_args({"replicaof_no_one_start_journal": True, "proactor_threads": 2})
 async def test_repl_offset(df_factory):
     master = df_factory.create()
     replica1 = df_factory.create()
@@ -3699,13 +3699,36 @@ async def test_repl_offset(df_factory):
 
     # Promote first replica to master
     await c_replica1.execute_command(f"REPLTAKEOVER 5")
+
     # 4183
-    info = await c_replica2.info("replication")
-    assert info["slave_repl_offset"] > 0
-    assert info["master_link_status"] == "down"
+    async def with_timeout_link_down(client):
+        async with async_timeout.timeout(2):
+            while True:
+                info = await client.info("replication")
+                if info["master_link_status"] == "down":
+                    assert info["slave_repl_offset"] > 0
+                    break
+                await asyncio.sleep(0.1)
+
+    await with_timeout_link_down(c_replica2)
     assert "OK" == await c_replica2.execute_command("replicaof no one")
+
+    # Partial sync here
     await c_replica3.execute_command(f"REPLICAOF localhost {replica2.port}")
-    await wait_for_replicas_state(c_replica3)
+    # Full sync here
+    await c_replica1.execute_command(f"REPLICAOF localhost {replica2.port}")
+
+    await check_all_replicas_finished([c_replica1, c_replica3], c_replica2)
 
     info = await c_replica3.info("replication")
-    assert info["slave_repl_offset"] > 3
+    # 1 repl flow per proactor.
+    proactors = 3
+    # if `replicaof no one` on `c_replica2` does not preserve the journal offsets,
+    # then the assertion below shall fail. On that case, replicas full sync first
+    # and as there are no journal changes the slave offsets are 3 (1 per proactor).
+    assert info["slave_repl_offset"] > proactors
+    info = await c_replica3.info("replication")
+    assert inf["psync_successes"] == 1
+
+    await c_replica1.execute_command(f"REPLTAKEOVER 5")
+    await with_timeout_link_down(c_replica3)

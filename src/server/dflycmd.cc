@@ -80,11 +80,14 @@ bool ToSyncId(string_view str, uint32_t* num) {
 }
 
 bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* replica,
-                              EngineShard* shard) {
+                              EngineShard* shard, bool with_ping = false) {
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
   namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
-  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+
+  if (with_ping) {
+    shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+  }
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
 
@@ -549,7 +552,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
     auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
-      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard, true)) {
         catchup_success.store(false);
       }
     };

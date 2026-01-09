@@ -662,10 +662,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     if (!exec_st_.IsRunning())
       return exec_st_.GetError();
 
-    full_sync_completed_ = true;
-
     RdbLoader::PerformPostLoad(&service_);
   }
+
+  full_sync_completed_ = true;
 
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
@@ -1328,7 +1328,7 @@ std::vector<unsigned> Replica::GetFlowMapAtIndex(size_t index) const {
 size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const {
   size_t total_shard_lsn = 0;
   for (auto index : indexes) {
-    total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
+    total_shard_lsn += shard_flows_[index]->JournalExecutedCount();
   }
   return total_shard_lsn;
 }
