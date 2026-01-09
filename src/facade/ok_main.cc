@@ -28,7 +28,7 @@ struct CmdContext : public facade::ParsedCommand {
 
 class OkService : public ServiceInterface {
  public:
-  DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd) final {
+  DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) final {
     cmd->rb()->SendOk();
     return DispatchResult::OK;
   }
@@ -41,7 +41,7 @@ class OkService : public ServiceInterface {
       ParsedCommand* cmd = AllocateParsedCommand();
       cmd->Init(builder, cntx);
 
-      DispatchCommand(args, cmd);
+      DispatchCommand(args, cmd, AsyncPreference::ONLY_SYNC);
       delete cmd;
     }
     DispatchManyResult result{
@@ -51,8 +51,9 @@ class OkService : public ServiceInterface {
     return result;
   }
 
-  void DispatchMC(ParsedCommand* cmd) final {
+  DispatchResult DispatchMC(ParsedCommand* cmd, AsyncPreference) final {
     cmd->rb()->SendError("");
+    return DispatchResult::OK;
   }
 
   ConnectionContext* CreateContext(Connection* owner) final {

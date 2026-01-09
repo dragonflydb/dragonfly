@@ -904,10 +904,11 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
 
 // Prepare transaction for DispatchCommand
 optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction>* tx,
-                                                const CommandId* cid, ArgSlice tail_args,
-                                                ConnectionContext* dfly_cntx) {
+                                                bool dispatching_in_multi, const CommandId* cid,
+                                                ArgSlice tail_args, ConnectionContext* dfly_cntx) {
   bool init = false;
-  if (dfly_cntx->transaction) {
+  if (dispatching_in_multi) {
+    DCHECK(dfly_cntx->transaction);
     DCHECK(dfly_cntx->transaction->IsMulti());  // dispatching in multi
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
@@ -917,7 +918,6 @@ optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction
     if (cid->IsTransactional()) {
       tx->reset(new Transaction{cid});
       dfly_cntx->transaction = tx->get();
-      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
       init = !tx->get()->IsMulti();  // Multi command initialize themself based on their mode
     } else {
       dfly_cntx->transaction = nullptr;
@@ -929,6 +929,9 @@ optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction
     OpStatus status = tx->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
     if (status != OpStatus::OK)
       return facade::ErrorReply{status};
+
+    if (!dispatching_in_multi)  // update stats
+      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
   }
 
   return nullopt;
@@ -1527,26 +1530,30 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::OK;
   }
 
+  // Reset transation at the end or when returning an error
+  absl::Cleanup clean_tx = [dfly_cntx, dispatching_in_multi] {
+    if (!dispatching_in_multi) {
+      dfly_cntx->transaction = nullptr;
+    }
+  };
+
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
-  if (auto err = PrepareTransaction(&dist_trans, cid, tail_args, dfly_cntx); err) {
+  if (auto err = PrepareTransaction(&dist_trans, dispatching_in_multi, cid, tail_args, dfly_cntx);
+      err) {
     cmnd_cntx->SendError(*err);
     return DispatchResult::ERROR;
   }
 
-  DispatchResult res = DispatchResult::ERROR;
   cmnd_cntx->cid = cid;
   cmnd_cntx->tx = dfly_cntx->transaction;
-  res = InvokeCmd(tail_args, cmnd_cntx);
+  DispatchResult res = InvokeCmd(tail_args, cmnd_cntx);
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmnd_cntx->SendError("Internal Error");
     cmnd_cntx->rb()->CloseConnection();
   }
 
-  if (!dispatching_in_multi) {
-    dfly_cntx->transaction = nullptr;
-  }
   return res;
 }
 
