@@ -222,13 +222,16 @@ string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
 
-string NoGroupError(string_view key, string_view cgroup) {
-  return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
+facade::ErrorReply NoGroupError(string_view key, string_view cgroup) {
+  return facade::ErrorReply(
+      absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'"),
+      kNoGroupErrType);
 }
 
-string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
-  return absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'",
-                      suffix);
+facade::ErrorReply NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
+  return facade::ErrorReply(
+      absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'", suffix),
+      kNoGroupErrType);
 }
 
 string LeqTopIdError(string_view cmd_name) {
@@ -1934,7 +1937,7 @@ void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
     case OpStatus::KEY_EXISTS:
       return cmd_cntx->SendLong(0);
     case OpStatus::SKIPPED:
-      return cmd_cntx->SendError(NoGroupError(key, gname), kNoGroupErrType);
+      return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
@@ -1961,7 +1964,7 @@ void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
     case OpStatus::OK:
       return cmd_cntx->SendLong(*result);
     case OpStatus::SKIPPED:
-      return cmd_cntx->SendError(NoGroupError(key, gname), kNoGroupErrType);
+      return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
@@ -1990,7 +1993,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::SKIPPED:
-      return cmd_cntx->SendError(NoGroupError(key, gname), kNoGroupErrType);
+      return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
     default:
@@ -2478,8 +2481,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     }
     return StreamReplies{rb}.SendStreamRecords(key, *result);
   } else if (result.status() == OpStatus::INVALID_VALUE) {
-    return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists",
-                         kNoGroupErrType);
+    return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
   }
   return rb->SendNullArray();
 }
@@ -3115,7 +3117,7 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
         return;
       }
       if (result.status() == OpStatus::INVALID_VALUE) {
-        return rb->SendError(NoGroupError(stream_name, group_name), kNoGroupErrType);
+        return rb->SendError(NoGroupError(stream_name, group_name));
       }
       return cmd_cntx->SendError(result.status());
     }
@@ -3152,7 +3154,7 @@ void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<PendingResult> op_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
-      return cmd_cntx->SendError(NoGroupError(key, opts.group_name), kNoGroupErrType);
+      return cmd_cntx->SendError(NoGroupError(key, opts.group_name));
     return cmd_cntx->SendError(op_result.status());
   }
   const PendingResult& result = op_result.value();
@@ -3218,8 +3220,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
       return facade::ErrorReply{res_it.status()};
     else if (res_it.status() == OpStatus::KEY_NOTFOUND && opts->read_group)
       return facade::ErrorReply{
-          NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option"),
-          kNoGroupErrType};
+          NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
     return false;
   }
 
@@ -3241,8 +3242,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     group = streamLookupCG(s, WrapSds(opts->group_name));
     if (!group)
       return facade::ErrorReply{
-          NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option"),
-          kNoGroupErrType};
+          NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
     consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
 
@@ -3418,7 +3418,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<ClaimInfo> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
-    rb->SendError(NoGroupOrKey(key, opts.group), kNoGroupErrType);
+    rb->SendError(NoGroupOrKey(key, opts.group));
     return;
   }
 
