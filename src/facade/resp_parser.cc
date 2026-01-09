@@ -64,10 +64,6 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
   }
   switch (obj.GetType()) {
     // because we check type we don't expect As<T> to return nullopt here
-    case RESPObj::Type::STRING: {
-      os << *obj.As<std::string_view>();
-      break;
-    }
     case RESPObj::Type::INTEGER: {
       os << *obj.As<std::int64_t>();
       break;
@@ -76,11 +72,18 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
       os << *obj.As<double>();
       break;
     }
-    case RESPObj::Type::NIL:
-      os << "NIL";
-      break;
     case RESPObj::Type::ARRAY: {
       os << *obj.As<RESPArray>();
+      break;
+    }
+    case RESPObj::Type::STRING:
+      [[fallthrough]];
+    case RESPObj::Type::NIL:
+      [[fallthrough]];
+    case RESPObj::Type::ERROR:
+      [[fallthrough]];
+    case RESPObj::Type::REPLY_STATUS: {
+      os << *obj.As<std::string_view>();
       break;
     }
     default:

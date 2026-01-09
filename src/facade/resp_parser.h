@@ -25,7 +25,9 @@ class RESPObj {
     ARRAY = REDIS_REPLY_ARRAY,
     INTEGER = REDIS_REPLY_INTEGER,
     NIL = REDIS_REPLY_NIL,
+    REPLY_STATUS = REDIS_REPLY_STATUS,
     DOUBLE = REDIS_REPLY_DOUBLE,
+    ERROR = REDIS_REPLY_ERROR,
   };
   RESPObj() = default;
   RESPObj(redisReply* reply, bool needs_to_free) : reply_(reply), needs_to_free_(needs_to_free) {
@@ -167,7 +169,8 @@ template <class T> std::optional<T> RESPObj::As() const {
     return std::nullopt;
   }
   if constexpr (std::is_constructible_v<T, std::string_view>) {
-    if (reply_->type == REDIS_REPLY_STRING) {
+    if (reply_->type == REDIS_REPLY_STRING || reply_->type == REDIS_REPLY_ERROR ||
+        reply_->type == REDIS_REPLY_STATUS || reply_->type == REDIS_REPLY_NIL) {
       return T{std::string_view{reply_->str, reply_->len}};
     }
   } else if constexpr (std::is_integral_v<T>) {

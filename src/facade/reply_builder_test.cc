@@ -6,6 +6,7 @@
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
+#include <mimalloc.h>
 
 #include <random>
 
@@ -13,8 +14,8 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
+#include "facade/resp_parser.h"
 
 using namespace testing;
 using namespace std;
@@ -51,36 +52,19 @@ std::string_view GetErrorType(std::string_view err) {
   return err == kSyntaxErr ? kSyntaxErrType : err;
 }
 
+std::vector<std::string> ToStrVec(const RESPArray& arr) {
+  std::vector<std::string> res;
+  res.reserve(arr.Size());
+  for (size_t i = 0; i < arr.Size(); ++i) {
+    res.push_back(*arr[i].As<std::string>());
+  }
+  return res;
+}
+
 }  // namespace
 
 class RedisReplyBuilderTest : public testing::Test {
  public:
-  struct ParsingResults {
-    RedisParser::Result result = RedisParser::OK;
-    RespExpr::Vec args;
-    std::uint32_t consumed = 0;
-
-    bool Verify(std::uint32_t expected) const {
-      return consumed == expected && result == RedisParser::OK;
-    }
-
-    bool IsError() const {
-      return result != RedisParser::OK || (args.size() == 1 && args[0].type == RespExpr::ERROR);
-    }
-
-    bool IsOk() const {
-      return IsString();
-    }
-
-    bool IsNull() const {
-      return result == RedisParser::OK && args.size() == 1 && args.at(0).type == RespExpr::NIL;
-    }
-
-    bool IsString() const {
-      return args.size() == 1 && result == RedisParser::OK && args[0].type == RespExpr::STRING;
-    }
-  };
-
   void SetUp() {
     sink_.Clear();
     builder_.reset(new RedisReplyBuilder(&sink_));
@@ -89,6 +73,7 @@ class RedisReplyBuilderTest : public testing::Test {
 
   static void SetUpTestSuite() {
     tl_facade_stats = new FacadeStats;
+    init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
  protected:
@@ -132,7 +117,7 @@ class RedisReplyBuilderTest : public testing::Test {
   std::vector<std::string_view> TokenizeMessage() const;
 
   // Call the redis parser with the data in the sink
-  ParsingResults Parse();
+  std::optional<RESPObj> Parse();
 
   io::StringSink sink_;
   std::unique_ptr<RedisReplyBuilder> builder_;
@@ -173,35 +158,16 @@ std::vector<std::string_view> RedisReplyBuilderTest::TokenizeMessage() const {
   return message_tokens;
 }
 
-std::ostream& operator<<(std::ostream& os, const RedisReplyBuilderTest::ParsingResults& res) {
-  os << "result{consumed bytes:" << res.consumed << ", status: " << res.result << " result count "
-     << res.args.size() << ", first entry result: ";
-  if (!res.args.empty()) {
-    if (res.args.size() > 1) {
-      os << "ARRAY: ";
-    }
-
-    for (const auto& e : res.args) {
-      os << e << "\n";
-    }
-  } else {
-    os << "NILL";
-  }
-  return os << "}";
-}
-
-RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
-  ParsingResults result;
+std::optional<RESPObj> RedisReplyBuilderTest::Parse() {
   parser_buffer_.reset(new uint8_t[SinkSize()]);
   auto* ptr = parser_buffer_.get();
   memcpy(ptr, str().data(), SinkSize());
-  RedisParser parser(RedisParser::Mode::CLIENT);
-  result.result =
-      parser.Parse(RedisParser::Buffer{ptr, SinkSize()}, &result.consumed, &result.args);
-  return result;
+  RESPParser parser;
+  auto res = parser.Feed(reinterpret_cast<char*>(ptr), SinkSize());
+  return res;
 }
 
-///////////////////////////////////////////////////////////////////////////////
+// ///////////////////////////////////////////////////////////////////////////////
 
 TEST_F(RedisReplyBuilderTest, MessageSend) {
   // Test each message that is "sent" to the sink
@@ -231,9 +197,8 @@ TEST_F(RedisReplyBuilderTest, SimpleError) {
   ASSERT_EQ(str(), BuildExpectedErrorString(error))
       << " error different from expected - '" << str() << "'";
   auto parsing = Parse();
-  ASSERT_TRUE(parsing.Verify(SinkSize()));
-  ASSERT_TRUE(parsing.IsError()) << " result: " << parsing;
-  EXPECT_THAT(parsing.args, ElementsAre(ErrArg(absl::StrCat("ERR ", error))));
+  ASSERT_EQ(parsing->GetType(), RESPObj::Type::ERROR) << " result: " << *parsing;
+  EXPECT_THAT(parsing->As<std::string_view>(), absl::StrCat("ERR ", error));
 
   sink_.Clear();
   builder_->SendError(OpStatus::OK);  // in this case we should not have an error string
@@ -244,9 +209,9 @@ TEST_F(RedisReplyBuilderTest, SimpleError) {
   ASSERT_EQ(GetError(error), 1);
 
   parsing = Parse();
-  ASSERT_TRUE(parsing.Verify(SinkSize()));
-  ASSERT_TRUE(parsing.IsOk()) << " result: " << parsing;
-  EXPECT_THAT(parsing.args, ElementsAre("OK"));
+
+  ASSERT_EQ(parsing->GetType(), RESPObj::Type::REPLY_STATUS) << " result: " << *parsing;
+  EXPECT_THAT(parsing->As<std::string_view>(), "OK");
 }
 
 TEST_F(RedisReplyBuilderTest, VeryLongError) {
@@ -277,9 +242,7 @@ TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
         << " error different from expected - '" << str() << "'";
 
     auto parsing_output = Parse();
-    ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-        << " verify for the result is invalid for " << err;
-    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << err;
+    ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::ERROR) << " expecting error for " << err;
   }
 }
 
@@ -292,8 +255,7 @@ TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
   ASSERT_EQ(str(), BuildExpectedErrorString(kIndexOutOfRange));
 
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
-  ASSERT_TRUE(parsing_output.IsError());
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::ERROR);
   sink_.Clear();
 
   err = ErrorReply{"e1", "e2"};
@@ -304,8 +266,7 @@ TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
   ASSERT_EQ(str(), BuildExpectedErrorString("e1"));
 
   parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
-  ASSERT_TRUE(parsing_output.IsError());
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::ERROR);
 }
 
 TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
@@ -325,10 +286,8 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
     error_count++;
     ASSERT_EQ(current_error_count, error_count) << " number of error count is invalid for " << err;
     auto parsing_output = Parse();
-    ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-        << " verify for the result is invalid for " << err;
 
-    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << err;
+    ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::ERROR) << " expecting error for " << err;
   }
 }
 
@@ -387,11 +346,10 @@ TEST_F(RedisReplyBuilderTest, StrArray) {
   // ASSERT_EQ(kArrayStart, str().at(0));
   ASSERT_TRUE(absl::StartsWith(str(), absl::StrCat(kArrayStartString, 4)));
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-      << " invalid parsing for the array message by the parser: " << parsing_output;
 
-  ASSERT_EQ(string_vector.size(), parsing_output.args.size());
-  ASSERT_THAT(parsing_output.args,
+  ASSERT_EQ(string_vector.size(), parsing_output->Size());
+  auto args = ToStrVec(*parsing_output->As<RESPArray>());
+  ASSERT_THAT(args,
               ElementsAre(string_vector[0], string_vector[1], string_vector[2], string_vector[3]));
 
   std::vector<std::string_view> message_tokens = TokenizeMessage();
@@ -422,7 +380,8 @@ TEST_F(RedisReplyBuilderTest, SendSimpleStrArr) {
                                           absl::StrCat(kStringStart, kArrayMessage[7])));
 
   auto parsed_message = Parse();
-  ASSERT_THAT(parsed_message.args,
+  auto args = ToStrVec(*parsed_message->As<RESPArray>());
+  ASSERT_THAT(args,
               ElementsAre(kArrayMessage[0], kArrayMessage[1], kArrayMessage[2], kArrayMessage[3],
                           kArrayMessage[4], kArrayMessage[5], kArrayMessage[6], kArrayMessage[7]));
 }
@@ -453,7 +412,8 @@ TEST_F(RedisReplyBuilderTest, SendStringViewArr) {
 
   // Check the parsed message
   auto parsed_message = Parse();
-  ASSERT_THAT(parsed_message.args,
+  auto args = ToStrVec(*parsed_message->As<RESPArray>());
+  ASSERT_THAT(args,
               ElementsAre(kArrayMessage[0], kArrayMessage[1], kArrayMessage[2], kArrayMessage[3],
                           kArrayMessage[4], kArrayMessage[5], kArrayMessage[6], kArrayMessage[7]));
 }
@@ -477,10 +437,10 @@ TEST_F(RedisReplyBuilderTest, SendBulkStringArr) {
                   absl::StrCat(kBulkStringStart, kArrayMessage[2].size()), kArrayMessage[2]));
   // Check the parsed message
   auto parsed_message = Parse();
-  ASSERT_TRUE(parsed_message.Verify(SinkSize()))
-      << "message was not successfully parsed: " << parsed_message;
-  ASSERT_THAT(parsed_message.args,
-              ElementsAre(kArrayMessage[0], kArrayMessage[1], kArrayMessage[2]));
+
+  auto args = ToStrVec(*parsed_message->As<RESPArray>());
+
+  ASSERT_THAT(args, ElementsAre(kArrayMessage[0], kArrayMessage[1], kArrayMessage[2]));
 }
 
 TEST_F(RedisReplyBuilderTest, NullBulkString) {
@@ -489,9 +449,9 @@ TEST_F(RedisReplyBuilderTest, NullBulkString) {
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), kNullBulkString);
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
-  ASSERT_TRUE(parsing_output.IsNull());
-  ASSERT_THAT(parsing_output.args, ElementsAre(ArgType(RespExpr::NIL)));
+
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::NIL);
+  ASSERT_THAT(parsing_output->As<std::string>(), "");
 }
 
 TEST_F(RedisReplyBuilderTest, EmptyBulkString) {
@@ -501,9 +461,9 @@ TEST_F(RedisReplyBuilderTest, EmptyBulkString) {
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), kEmptyBulkString);
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(std::string_view{}));
+
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_THAT(parsing_output->As<std::string>(), "");
 }
 
 TEST_F(RedisReplyBuilderTest, NoAsciiBulkString) {
@@ -521,8 +481,8 @@ TEST_F(RedisReplyBuilderTest, NoAsciiBulkString) {
   ASSERT_THAT(message_tokens,
               ElementsAre(absl::StrCat(kBulkStringStart, data_size), none_ascii_payload));
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(none_ascii_payload));
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_THAT(parsing_output->As<std::string>(), none_ascii_payload);
 }
 
 TEST_F(RedisReplyBuilderTest, BulkStringWithCRLF) {
@@ -535,8 +495,8 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithCRLF) {
       absl::StrCat(kBulkStringStart, crlf_chars.size(), kCRLF, crlf_chars, kCRLF);
   ASSERT_EQ(str(), expected_message);
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(crlf_chars));
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_THAT(parsing_output->As<std::string>(), crlf_chars);
 }
 
 TEST_F(RedisReplyBuilderTest, BulkStringWithStartBulkString) {
@@ -549,8 +509,8 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithStartBulkString) {
   ASSERT_EQ(str(), expected_message);
 
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(message));
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_EQ(parsing_output->As<std::string>(), message);
 }
 
 TEST_F(RedisReplyBuilderTest, BulkStringWithStarString) {
@@ -560,8 +520,8 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithStarString) {
   builder_->SendBulkString(message);
   ASSERT_EQ(str(), expected_message);
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(message));
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_EQ(parsing_output->As<std::string>(), message);
 }
 
 TEST_F(RedisReplyBuilderTest, BulkStringWithErrorString) {
@@ -572,8 +532,8 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithErrorString) {
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), expected_message);
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(message));
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_EQ(parsing_output->As<std::string>(), message);
 }
 
 TEST_F(RedisReplyBuilderTest, Int) {
@@ -589,7 +549,7 @@ TEST_F(RedisReplyBuilderTest, Int) {
   ASSERT_TRUE(absl::SimpleAtoi(expected_payload, &value));
   ASSERT_EQ(value, kPayloadInt);
   auto parsing_output = Parse();
-  ASSERT_THAT(parsing_output.args, ElementsAre(IntArg(kPayloadInt)));
+  ASSERT_EQ(parsing_output->As<long>(), kPayloadInt);
 }
 
 TEST_F(RedisReplyBuilderTest, Double) {
@@ -607,8 +567,8 @@ TEST_F(RedisReplyBuilderTest, Double) {
   ASSERT_THAT(message_tokens,
               ElementsAre(absl::StrCat(kBulkStringStart, kPayloadStr.size()), kPayloadStr));
   auto parsing_output = Parse();
-  ASSERT_TRUE(parsing_output.IsString());
-  ASSERT_THAT(parsing_output.args, ElementsAre(kPayloadStr));
+  ASSERT_EQ(parsing_output->GetType(), RESPObj::Type::STRING);
+  ASSERT_EQ(parsing_output->As<std::string>(), kPayloadStr);
 }
 
 TEST_F(RedisReplyBuilderTest, MixedTypeArray) {
@@ -621,11 +581,10 @@ TEST_F(RedisReplyBuilderTest, MixedTypeArray) {
   // int
   // int
   // simple string
-  // simple string
   // empty bulk string
   // double (bulk string)
   std::string long_string(1024, '-');
-  const unsigned int kArraySize = 9;
+  const unsigned int kArraySize = 6;
   const char random_bytes[] = {0x12, 0x15, 0x2F};
   const std::string_view kFirstBulkString{random_bytes, 3};
   const long kFirstLongValue = 54321;
@@ -659,10 +618,13 @@ TEST_F(RedisReplyBuilderTest, MixedTypeArray) {
 
   // // Now we need to parse it and make sure that its a valid message by the parser as well
   auto parsed_message = Parse();
-  ASSERT_THAT(
-      parsed_message.args,
-      ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::INT64), ArgType(RespExpr::INT64),
-                  ArgType(RespExpr::STRING), ArgType(RespExpr::STRING), ArgType(RespExpr::STRING)));
+  RESPIterator iter(*parsed_message);
+  ASSERT_EQ(iter.Next<std::string_view>(), kFirstBulkString) << *parsed_message;
+  ASSERT_EQ(iter.Next<long>(), kFirstLongValue);
+  ASSERT_EQ(iter.Next<long>(), kSecondLongValue);
+  ASSERT_EQ(iter.Next<std::string_view>(), kLongSimpleString);
+  ASSERT_EQ(iter.Next<std::string_view>(), std::string_view{});
+  ASSERT_EQ(iter.Next<std::string_view>(), kPayloadDoubleStr);
 }
 
 TEST_F(RedisReplyBuilderTest, BatchMode) {
@@ -920,9 +882,9 @@ TEST_F(RedisReplyBuilderTest, Issue3449) {
   }
   builder_->SendBulkStrArr(records);
   ASSERT_TRUE(NoErrors());
-  ParsingResults parse_result = Parse();
-  ASSERT_FALSE(parse_result.IsError());
-  EXPECT_EQ(10000, parse_result.args.size());
+  auto parse_result = Parse();
+  ASSERT_NE(parse_result->GetType(), RESPObj::Type::ERROR);
+  EXPECT_EQ(10000, parse_result->Size());
 }
 
 TEST_F(RedisReplyBuilderTest, Issue4424) {
@@ -934,10 +896,10 @@ TEST_F(RedisReplyBuilderTest, Issue4424) {
   for (unsigned j = 0; j < 2; ++j) {
     builder_->SendBulkStrArr(records);
     ASSERT_TRUE(NoErrors());
-    ParsingResults parse_result = Parse();
-    ASSERT_FALSE(parse_result.IsError()) << int(parse_result.result);
-    ASSERT_TRUE(parse_result.Verify(SinkSize()));
-    EXPECT_EQ(800, parse_result.args.size());
+    auto parse_result = Parse();
+    ASSERT_NE(parse_result->GetType(), RESPObj::Type::ERROR);
+
+    EXPECT_EQ(800, parse_result->Size());
     sink_.Clear();
   }
 }
