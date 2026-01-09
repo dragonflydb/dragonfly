@@ -147,9 +147,9 @@ void OAHEntry::SetExpiry(uint32_t at_sec) {
 // TODO refactor, because it's inefficient
 std::optional<uint32_t> OAHEntry::Find(std::string_view str, uint64_t ext_hash,
                                        uint32_t capacity_log, uint32_t shift_log,
-                                       uint32_t* set_size, size_t* alloc_used_, uint32_t time_now) {
+                                       uint32_t* set_size, size_t* alloc_used, uint32_t time_now) {
   if (IsEntry()) {
-    ExpireIfNeeded(time_now, set_size, alloc_used_);
+    ExpireIfNeeded(time_now, set_size, alloc_used);
     return CheckExtendedHash(ext_hash, capacity_log, shift_log) && Key() == str
                ? 0
                : std::optional<uint32_t>();
@@ -158,7 +158,7 @@ std::optional<uint32_t> OAHEntry::Find(std::string_view str, uint64_t ext_hash,
     auto& vec = AsVector();
     auto raw_arr = vec.Raw();
     for (size_t i = 0, size = vec.Size(); i < size; ++i) {
-      raw_arr[i].ExpireIfNeeded(time_now, set_size, alloc_used_);
+      raw_arr[i].ExpireIfNeeded(time_now, set_size, alloc_used);
       if (raw_arr[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) &&
           raw_arr[i].Key() == str) {
         return i;
@@ -169,10 +169,10 @@ std::optional<uint32_t> OAHEntry::Find(std::string_view str, uint64_t ext_hash,
   return std::nullopt;
 }
 
-void OAHEntry::ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used_) {
+void OAHEntry::ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used) {
   assert(!IsVector());
   if (GetExpiry() <= time_now) {
-    *alloc_used_ -= AllocSize();
+    *alloc_used -= AllocSize();
     Clear();
     --*set_size;
   }
