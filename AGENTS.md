@@ -43,6 +43,7 @@
 - **Summary**: 1-2 sentences explaining *what* changed and *why*.
 - **Changes**: Bullet points for key changes.
 - **Fixes**: Link issues (e.g., "Fixes #123").
+- **Commit messages**: Keep every line (subject and body) <= 100 characters; wrap long descriptions.
 ---
 
 ### GitHub Copilot
