@@ -3722,13 +3722,13 @@ async def test_repl_offset(df_factory):
 
     info = await c_replica3.info("replication")
     # 1 repl flow per proactor.
-    proactors = 3
+    proactors = 2
     # if `replicaof no one` on `c_replica2` does not preserve the journal offsets,
     # then the assertion below shall fail. On that case, replicas full sync first
-    # and as there are no journal changes the slave offsets are 3 (1 per proactor).
+    # and as there are no journal changes the slave offsets are 2 (1 per shard).
     assert info["slave_repl_offset"] > proactors
     info = await c_replica3.info("replication")
-    assert inf["psync_successes"] == 1
+    assert info["psync_successes"] == 1
 
     await c_replica1.execute_command(f"REPLTAKEOVER 5")
     await with_timeout_link_down(c_replica3)
