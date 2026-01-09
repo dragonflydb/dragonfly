@@ -2327,7 +2327,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     // Migration only makes sense if there are distinct shards
-    if (sid.has_value() && real_sid != ss->thread_index()) {
+    if (sid.has_value() && *sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << conn_cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << real_sid;
       conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(real_sid), false);
