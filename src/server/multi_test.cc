@@ -1037,7 +1037,7 @@ return 'OK';
   EXPECT_EQ(Run({"GET", "A"}), a_expect);
 }
 
-// Check that single shard script running with allow-undeclared-keys (i..e global)
+// Check that single shard script running with allow-undeclared-keys (i.e. global)
 // running on a single shard setup can be squashed with "shardlocal" execution
 TEST_F(SingleShardMultiTest, MultiSquashGlobalSingleShard) {
   string_view script = R"(
