@@ -1080,21 +1080,36 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
   return flags;
 }
 
-AsyncHandlerReply DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async_enqueue) {
-  auto result_ptr = make_unique<atomic_uint32_t>(0);
+// Keeps shard callback lambda and value in one struct
+template <typename F, typename V> struct DetachedCallback {
+  template <typename A> DetachedCallback(F&& cb, A&& v) : cb{std::move(cb)}, v{std::forward<A>(v)} {
+  }
 
-  auto cb = [&, res_ptr = result_ptr.get()](const Transaction* t, EngineShard* shard) {
+  Transaction::RunnableResult operator()(const Transaction* t, EngineShard* shard) const {
+    return cb(t, shard, &v);
+  }
+
+  F cb;
+  mutable V v;
+};
+
+template <typename V, typename F, typename A> auto Wrap(F&& f, A&& v) {
+  return make_unique<DetachedCallback<F, V>>(std::forward<F>(f), std::forward<A>(v));
+}
+
+AsyncHandlerReply DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async_enqueue) {
+  auto cb = [async_enqueue](const Transaction* t, EngineShard* shard, atomic_uint32_t* res_ptr) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async_enqueue);
     res_ptr->fetch_add(res.value_or(0), memory_order_relaxed);
     return OpStatus::OK;
   };
-  auto wrapped_cb = make_unique<decltype(cb)>(std::move(cb));
 
+  auto wrapped_cb = Wrap<atomic_uint32_t>(std::move(cb), 0u);
   cmd_cntx->tx->Execute(*wrapped_cb, true, true);
-  auto replier = [cmd_cntx, result_ptr = std::move(result_ptr),
-                  cp_keepalive = std::move(wrapped_cb)](facade::SinkReplyBuilder* rb) {
-    uint32_t del_cnt = result_ptr->load(memory_order_relaxed);
+
+  auto replier = [cmd_cntx, cb = std::move(wrapped_cb)](facade::SinkReplyBuilder* rb) {
+    uint32_t del_cnt = cb->v.load(memory_order_relaxed);
     if (auto* mc_cmd = cmd_cntx->mc_command(); mc_cmd != nullptr) {
       MCRender mc_render{mc_cmd->cmd_flags};
       if (del_cnt) {
