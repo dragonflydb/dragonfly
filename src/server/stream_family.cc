@@ -222,13 +222,16 @@ string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
 
-string NoGroupError(string_view key, string_view cgroup) {
-  return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
+facade::ErrorReply NoGroupError(string_view key, string_view cgroup) {
+  return facade::ErrorReply(
+      absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'"),
+      kNoGroupErrType);
 }
 
-string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
-  return absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'",
-                      suffix);
+facade::ErrorReply NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
+  return facade::ErrorReply(
+      absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'", suffix),
+      kNoGroupErrType);
 }
 
 string LeqTopIdError(string_view cmd_name) {
@@ -2478,7 +2481,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     }
     return StreamReplies{rb}.SendStreamRecords(key, *result);
   } else if (result.status() == OpStatus::INVALID_VALUE) {
-    return rb->SendError("NOGROUP the consumer group this client was blocked on no longer exists");
+    return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
   }
   return rb->SendNullArray();
 }

@@ -279,8 +279,10 @@ StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
   picks.reserve(count);
 
   size_t tries = 0;
-  while (picks.size() < count && tries++ < count * 2)
-    picks.insert(picks.end(), string{*strset->GetRandomMember()});
+  while (picks.size() < count && tries++ < count * 2) {
+    auto member = *strset->GetRandomMember();
+    picks.insert(picks.end(), {member, sdslen(member)});
+  }
 
   if constexpr (is_same_v<StringVec, C>)
     return picks;

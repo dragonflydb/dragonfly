@@ -162,9 +162,9 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
   size_t val_len = 0;
 
   auto per_entry_cb = [&](ContainerEntry entry) {
-    if (entry.value) {
-      val_len += entry.length;
-      hist->entry_len.Add(entry.length);
+    if (entry.IsString()) {
+      val_len += entry.size();
+      hist->entry_len.Add(entry.size());
     } else {
       val_len += 8;  // size of long
     }
@@ -194,7 +194,7 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
     }
   } else if (pv.ObjType() == OBJ_HASH) {
     IterateMap(pv, [&](ContainerEntry key, ContainerEntry value) {
-      hist->entry_len.Add(key.length + value.length);
+      hist->entry_len.Add(key.size() + value.size());
       return true;
     });
     if (pv.Encoding() == kEncodingListPack) {
@@ -315,16 +315,16 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         container_utils::IterateSortedSet(
             it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
               ++steps;
-              if (entry.value) {
-                HIST_add(dest->hist.data(), entry.value, entry.length);
+              if (entry.IsString()) {
+                HIST_add(dest->hist.data(), entry.data(), entry.size());
               }
               return true;
             });
       } else if (type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
         container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
           ++steps;
-          if (entry.value) {
-            HIST_add(dest->hist.data(), entry.value, entry.length);
+          if (entry.IsString()) {
+            HIST_add(dest->hist.data(), entry.data(), entry.size());
           }
           return true;
         });
@@ -332,11 +332,11 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
                                                     container_utils::ContainerEntry value) {
           ++steps;
-          if (key.value) {
-            HIST_add(dest->hist.data(), key.value, key.length);
+          if (key.IsString()) {
+            HIST_add(dest->hist.data(), key.data(), key.size());
           }
-          if (value.value) {
-            HIST_add(dest->hist.data(), value.value, value.length);
+          if (value.IsString()) {
+            HIST_add(dest->hist.data(), value.data(), value.size());
           }
           return true;
         });

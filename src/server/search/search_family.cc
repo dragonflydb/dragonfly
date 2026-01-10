@@ -978,7 +978,7 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
 
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
-                 absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
+                 absl::Span<SearchResult> results, SinkReplyBuilder* builder, bool is_css) {
   size_t total_hits = 0;
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
@@ -1003,9 +1003,15 @@ void SearchReply(const SearchParams& params,
   }
 
   // Apply LIMIT
-  const size_t offset = std::min(params.limit_offset, docs.size());
-  const size_t limit = std::min(docs.size() - offset, params.limit_total);
-  const size_t end = offset + limit;
+  size_t offset = 0;
+  size_t limit = 0;
+  if (is_css) {
+    limit = std::min(docs.size(), params.limit_total + params.limit_offset);
+  } else {
+    offset = std::min(params.limit_offset, docs.size());
+    limit = std::min(docs.size() - offset, params.limit_total);
+  }
+  const size_t end = limit + offset;
 
   // Apply SORTBY if its different from the KNN sort
   if (params.sort_option && !ignore_sort)
@@ -1626,7 +1632,8 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
               std::make_move_iterator(css_docs.end()));
 
-  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder,
+              is_cross_shard);
 }
 
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1701,7 +1708,8 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb);
+    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb,
+                false);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);

@@ -29,22 +29,39 @@ inline bool IsContainer(const PrimeValue& pv) {
 // - A single long long value (longval) when value = nullptr
 // - A single char* (value) when value != nullptr
 struct ContainerEntry {
-  ContainerEntry(const char* value, size_t length) : value{value}, length{length} {
+  ContainerEntry(const char* value, size_t length) : value_{value}, length_{length} {
   }
-  ContainerEntry(long long longval) : value{nullptr}, longval{longval} {
+  ContainerEntry(long long longval) : value_{nullptr}, longval_{longval} {
   }
 
-  std::string ToString() {
-    if (value)
-      return {value, length};
+  std::string ToString() const {
+    if (value_)
+      return {value_, length_};
     else
-      return absl::StrCat(longval);
+      return absl::StrCat(longval_);
   }
 
-  const char* value;
+  bool IsString() const {
+    return value_ != nullptr;
+  }
+
+  const char* data() const {
+    return value_;
+  }
+
+  size_t size() const {
+    return length_;
+  }
+
+  long long as_long() const {
+    return longval_;
+  }
+
+ private:
+  const char* value_;
   union {
-    size_t length;
-    long long longval;
+    size_t length_;
+    long long longval_;
   };
 };
 

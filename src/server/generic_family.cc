@@ -1436,30 +1436,23 @@ SortEntryList MakeSortEntryList(bool alpha) {
 
 // Iterate over container with generic function that accepts strings and ints
 template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
-  auto cb = [&func](container_utils::ContainerEntry ce) {
-    if (ce.value)
-      return func(ce.ToString());
-    else
-      return func(ce.longval);
-  };
-
   switch (pv.ObjType()) {
     case OBJ_LIST:
-      return container_utils::IterateList(pv, cb);
+      return container_utils::IterateList(pv, func);
     case OBJ_SET:
-      return container_utils::IterateSet(pv, cb);
+      return container_utils::IterateSet(pv, func);
     case OBJ_ZSET:
       return container_utils::IterateSortedSet(
           pv.GetRobjWrapper(),
-          [&cb](container_utils::ContainerEntry ce, double) { return cb(ce); });
+          [&](container_utils::ContainerEntry ce, double) { return func(ce); });
     default:
       return false;
   }
 }
 
 // Create a SortEntryList from given key
-OpResult<pair<SortEntryList, CompactObjType>> OpFetchSortEntries(const OpArgs& op_args,
-                                                                 std::string_view key, bool alpha) {
+OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_view key,
+                                            SortEntryList* dest) {
   using namespace container_utils;
 
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
@@ -1470,19 +1463,21 @@ OpResult<pair<SortEntryList, CompactObjType>> OpFetchSortEntries(const OpArgs& o
     return OpStatus::WRONG_TYPE;
   }
 
-  auto result = MakeSortEntryList(alpha);
   bool success = std::visit(
       [&pv = it->second](auto& entries) {
         entries.reserve(pv.Size());
-        return Iterate(pv, [&entries](auto&& val) {
-          return entries.emplace_back().Parse(std::forward<decltype(val)>(val));
+        return Iterate(pv, [&entries](const ContainerEntry& entry) {
+          if (entry.IsString())
+            return entries.emplace_back().Parse(entry.ToString());
+          else
+            return entries.emplace_back().Parse(entry.as_long());
         });
       },
-      result);
+      *dest);
   if (!success)
     return OpStatus::INVALID_NUMERIC_RESULT;
 
-  return std::make_pair(std::move(result), it->second.ObjType());
+  return it->second.ObjType();
 }
 
 template <typename IteratorBegin, typename IteratorEnd>
@@ -1514,99 +1509,60 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   return len;
 }
 
-void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
-  std::string_view key = ArgS(args, 0);
+struct SortParams {
   bool alpha = false;
   bool reversed = false;
-  std::optional<std::string_view> store_key;
-  std::optional<std::pair<size_t, size_t>> bounds;
+  bool is_read_only = false;
+  bool to_sort = true;
 
-  for (size_t i = 1; i < args.size(); i++) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, i));
-    if (arg == "ALPHA") {
-      alpha = true;
-    } else if (arg == "DESC") {
-      reversed = true;
-    } else if (arg == "ASC") {
-      reversed = false;
-    } else if (arg == "LIMIT") {
-      int offset, limit;
-      if (i + 2 >= args.size()) {
-        return cmd_cntx->SendError(kSyntaxErr);
-      }
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &offset) ||
-          !absl::SimpleAtoi(ArgS(args, i + 2), &limit)) {
-        return cmd_cntx->SendError(kInvalidIntErr);
-      }
-      bounds = {offset, limit};
-      i += 2;
-    } else if (!is_read_only && arg == "STORE") {
-      if (i + 1 >= args.size()) {
-        return cmd_cntx->SendError(kSyntaxErr);
-      }
-      store_key = ArgS(args, i + 1);
-      i += 1;
-    } else {
-      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
-      return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
-    }
+  optional<string_view> store_key;
+
+  // first is offset, second is count
+  optional<pair<uint32_t, uint32_t>> bounds;
+
+  // These options are parsed but currently not fully supported or used by the visitor.
+  optional<string_view> by_pattern;
+  vector<string_view> get_patterns;
+};
+
+template <typename C>
+auto GetSortRange(const C& entries, const optional<pair<uint32_t, uint32_t>>& bounds) {
+  auto start_it = entries.begin();
+  auto end_it = entries.end();
+  if (bounds) {
+    start_it += std::min<uint32_t>(bounds->first, entries.size());
+    end_it = entries.begin() + std::min<uint32_t>(bounds->first + bounds->second, entries.size());
   }
 
-  // Asserting that if is_read_only as true, then store_key should not exist.
-  DVLOG(1) << "is_read_only parameter: " << is_read_only
-           << " and store_key parameter: " << bool(store_key);
-  DCHECK((is_read_only && !bool(store_key)) || !is_read_only);
+  return std::make_pair(start_it, end_it);
+};
 
-  ShardId source_sid = Shard(key, shard_set->size());
-  OpResult<pair<SortEntryList, CompactObjType>> fetch_result;
-  auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
-    // in case of SORT option, we fetch only on the source shard
-    if (shard->shard_id() == source_sid) {
-      fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
-    }
-    return OpStatus::OK;
-  };
+// Visitor to handle the actual sorting and reply generation
+struct SortVisitor {
+  const SortParams& params;
+  CompactObjType result_type;
+  CommandContext* cmd_cntx;
 
-  cmd_cntx->tx->Execute(std::move(fetch_cb), !bool(store_key));
-
-  if (!fetch_result.ok()) {
-    cmd_cntx->tx->Conclude();
-    if (fetch_result == OpStatus::WRONG_TYPE)
-      return cmd_cntx->SendError(fetch_result.status());
-    else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
-      return cmd_cntx->SendError("One or more scores can't be converted into double");
-    else
-      return cmd_cntx->SendEmptyArray();
-  }
-
-  auto result_type = fetch_result->second;
-
-  auto sort_call = [&](auto& entries) {
+  template <typename T> void operator()(T& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
-    auto cmp = reversed ? &value_t::greater : &value_t::less;
-    if (bounds) {
+    auto cmp = params.reversed ? &value_t::greater : &value_t::less;
+
+    DCHECK(params.to_sort);
+    // Sort logic
+    if (params.bounds) {
       auto sort_it =
-          std::next(entries.begin(), std::min(bounds->first + bounds->second, entries.size()));
+          entries.begin() +
+          std::min<uint32_t>(params.bounds->first + params.bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
       std::sort(entries.begin(), entries.end(), cmp);
     }
 
-    static auto get_iterators = [](const auto& entries, const auto& bounds) {
-      auto start_it = entries.begin();
-      auto end_it = entries.end();
-      if (bounds) {
-        start_it += std::min(bounds->first, entries.size());
-        end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
-      }
-
-      return std::make_pair(start_it, end_it);
-    };
-
-    if (!bool(store_key)) {
+    if (!params.store_key) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-      auto replier = [entries = std::move(entries), bounds, is_set](RedisReplyBuilder* rb) {
-        auto [start_it, end_it] = get_iterators(entries, bounds);
+      auto replier = [entries = std::move(entries), bounds = params.bounds,
+                      is_set](RedisReplyBuilder* rb) {
+        auto [start_it, end_it] = GetSortRange(entries, bounds);
 
         rb->StartCollection(std::distance(start_it, end_it),
                             is_set ? CollectionType::SET : CollectionType::ARRAY);
@@ -1617,28 +1573,120 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       };
       cmd_cntx->ReplyWith(std::move(replier));
     } else {
-      ShardId dest_sid = Shard(store_key.value(), shard_set->size());
+      std::string_view store_key_sv = params.store_key.value();
+      ShardId dest_sid = Shard(store_key_sv, shard_set->size());
       OpResult<uint32_t> store_len;
 
       auto store_callback = [&](Transaction* t, EngineShard* shard) {
         ShardId shard_id = shard->shard_id();
         if (shard_id == dest_sid) {
-          auto [start_it, end_it] = get_iterators(entries, bounds);
-          store_len = OpStore(t->GetOpArgs(shard), store_key.value(), start_it, end_it);
+          auto [start_it, end_it] = GetSortRange(entries, params.bounds);
+          store_len = OpStore(t->GetOpArgs(shard), store_key_sv, start_it, end_it);
         }
         return OpStatus::OK;
       };
       cmd_cntx->tx->Execute(std::move(store_callback), true);
 
       if (store_len) {
-        cmd_cntx->SendLong(*store_len);
+        cmd_cntx->SendLong(store_len.value());
       } else {
         cmd_cntx->SendError(store_len.status());
       }
     }
-  };
+  }
+};
 
-  std::visit(sort_call, fetch_result->first);
+void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
+  CmdArgParser parser(args);
+  std::string_view key = parser.Next();
+  SortParams params;
+  params.is_read_only = is_read_only;
+
+  while (parser.HasNext()) {
+    if (parser.Check("ALPHA")) {
+      params.alpha = true;
+    } else if (parser.Check("DESC")) {
+      params.reversed = true;
+    } else if (parser.Check("ASC")) {
+      params.reversed = false;
+    } else if (parser.Check("LIMIT")) {
+      uint32_t offset = parser.Next<uint32_t>();
+      uint32_t limit = parser.Next<uint32_t>();
+      params.bounds = {offset, limit};
+    } else if (!is_read_only && parser.Check("STORE", &params.store_key)) {
+    } else if (parser.Check("BY", &params.by_pattern)) {
+    } else if (parser.Check("GET")) {
+      params.get_patterns.push_back(parser.Next());
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << parser.Peek();
+      return cmd_cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+
+  // Validate BY pattern has exactly one '*'
+  if (params.by_pattern) {
+    size_t star_count = std::count(params.by_pattern->begin(), params.by_pattern->end(), '*');
+    if (star_count == 0) {
+      // "nosort" pattern - no '*' means skip sorting, preserve insertion order
+      params.to_sort = false;
+      params.by_pattern.reset();
+    } else if (star_count != 1) {
+      return cmd_cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  // Asserting that if is_read_only as true, then store_key should not exist.
+  DVLOG(1) << "is_read_only parameter: " << is_read_only
+           << " and store_key parameter: " << bool(params.store_key);
+  DCHECK(((is_read_only && !bool(params.store_key)) || !is_read_only));
+
+  bool single_hop = !bool(params.store_key);
+  CompactObjType source_type = OBJ_STRING;  // OBJ_STRING means undefined in this context.
+
+  if (params.to_sort) {
+    auto sorted_entries = MakeSortEntryList(params.alpha);  // Always numeric for this path
+    OpStatus sort_status = OpStatus::OK;
+    ShardId source_sid = Shard(key, shard_set->size());
+
+    // Handle BY pattern with external key lookups
+    if (params.by_pattern) {
+      // TBD: Implement BY pattern handling
+      return cmd_cntx->SendError(kSyntaxErr);
+    } else {  // No BY pattern, sort directly on fetched elements
+      OpResult<CompactObjType> fetch_result;
+      auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+        // in case of SORT option, we fetch only on the source shard
+        if (shard->shard_id() == source_sid) {
+          fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, &sorted_entries);
+        }
+        return OpStatus::OK;
+      };
+
+      cmd_cntx->tx->Execute(std::move(fetch_cb), single_hop);
+      sort_status = fetch_result.status();
+      source_type = *fetch_result;
+    }
+
+    if (sort_status != OpStatus::OK) {
+      cmd_cntx->tx->Conclude();
+      if (sort_status == OpStatus::WRONG_TYPE)
+        return cmd_cntx->SendError(sort_status);
+      if (sort_status == OpStatus::INVALID_NUMERIC_RESULT)
+        return cmd_cntx->SendError("One or more scores can't be converted into double");
+      return cmd_cntx->SendEmptyArray();
+    }
+
+    SortVisitor visitor{params, source_type, cmd_cntx};
+    std::visit(visitor, sorted_entries);
+    return;
+  }
+
+  // TBD: unsorted flow.
+  return cmd_cntx->SendError(kSyntaxErr);
 }
 
 void GenericFamily::Sort(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1945,7 +1993,8 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
       auto replier = [](RedisReplyBuilder* rb) {
         string_view help_arr[] = {
-            "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ <len>]",
+            "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ "
+            "<len>]",
             "    MATCH <glob> - pattern to match keys against",
             "    TYPE <type> - type of values to match",
             "    COUNT <count> - number of keys to return",
