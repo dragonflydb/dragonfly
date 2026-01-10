@@ -1627,6 +1627,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
   ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
   TrackIfNeeded(cmd_cntx);
+  auto* tx = cmd_cntx->tx;
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
@@ -1652,7 +1653,6 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
   }
 
-  auto* tx = cmd_cntx->tx;
   if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
     // Each time we execute a command we need to increase the sequence number in
     // order to properly track clients when OPTIN is used.
