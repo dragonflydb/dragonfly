@@ -888,7 +888,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 }
 
 // Runs in coordinator thread.
-void Transaction::Execute(RunnableType cb, bool conclude) {
+void Transaction::Execute(RunnableType cb, bool conclude, bool async) {
   if (multi_ && multi_->role == SQUASHED_STUB) {
     local_result_ = RunSquashedMultiCb(cb);
     return;
@@ -909,9 +909,13 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   }
 
   DispatchHop();
-  run_barrier_.Wait();
-  cb_ptr_ = nullptr;
 
+  if (!async) {
+    run_barrier_.Wait();
+    cb_ptr_ = nullptr;
+  }
+
+  // TODO: async doesn't respect AVOID_CONCLUDING runs
   if (coordinator_state_ & COORD_CONCLUDING)
     coordinator_state_ &= ~COORD_SCHED;
 }
@@ -981,6 +985,10 @@ void Transaction::Conclude() {
     return;
   auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
   Execute(std::move(cb), true);
+}
+
+util::fb2::EmbeddedBlockingCounter* Transaction::Barrier() {
+  return &run_barrier_;
 }
 
 void Transaction::Refurbish() {

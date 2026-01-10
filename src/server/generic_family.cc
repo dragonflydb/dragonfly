@@ -1080,33 +1080,42 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
   return flags;
 }
 
-void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
-  atomic_uint32_t result{0};
+AsyncHandlerReply DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async_enqueue) {
+  auto result_ptr = make_unique<atomic_uint32_t>(0);
 
-  auto cb = [&](const Transaction* t, EngineShard* shard) {
+  auto cb = [&, res_ptr = result_ptr.get()](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async);
-    result.fetch_add(res.value_or(0), memory_order_relaxed);
-
+    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async_enqueue);
+    res_ptr->fetch_add(res.value_or(0), memory_order_relaxed);
     return OpStatus::OK;
   };
+  auto wrapped_cb = make_unique<decltype(cb)>(std::move(cb));
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  CHECK_EQ(OpStatus::OK, status);
-
-  DVLOG(2) << "Del ts " << cmd_cntx->tx->txid();
-
-  uint32_t del_cnt = result.load(memory_order_relaxed);
-  if (cmd_cntx->mc_command()) {
-    MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
-    if (del_cnt) {
-      cmd_cntx->SendSimpleString(mc_render.RenderDeleted());
+  cmd_cntx->tx->Execute(*wrapped_cb, true, true);
+  auto replier = [cmd_cntx, result_ptr = std::move(result_ptr),
+                  cp_keepalive = std::move(wrapped_cb)](facade::SinkReplyBuilder* rb) {
+    uint32_t del_cnt = result_ptr->load(memory_order_relaxed);
+    if (auto* mc_cmd = cmd_cntx->mc_command(); mc_cmd != nullptr) {
+      MCRender mc_render{mc_cmd->cmd_flags};
+      if (del_cnt) {
+        rb->SendSimpleString(mc_render.RenderDeleted());
+      } else {
+        rb->SendSimpleString(mc_render.RenderNotFound());
+      }
     } else {
-      cmd_cntx->SendSimpleString(mc_render.RenderNotFound());
+      rb->SendLong(del_cnt);
     }
-  } else {
-    cmd_cntx->SendLong(del_cnt);
-  }
+  };
+  return replier;
+}
+
+AsyncHandlerReply CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
+  return DeleteGeneric(args, cmd_cntx, false);
+}
+
+AsyncHandlerReply CmdUnlink(CmdArgList args, CommandContext* cmd_cntx) {
+  bool async_enqueue = absl::GetFlag(FLAGS_unlink_experimental_async);
+  return DeleteGeneric(args, cmd_cntx, async_enqueue);
 }
 
 }  // namespace
@@ -1127,15 +1136,6 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
   }
 
   return res;
-}
-
-void GenericFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
-  DeleteGeneric(args, cmd_cntx, false);
-}
-
-void GenericFamily::Unlink(CmdArgList args, CommandContext* cmd_cntx) {
-  bool async = absl::GetFlag(FLAGS_unlink_experimental_async);
-  DeleteGeneric(args, cmd_cntx, async);
 }
 
 void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2139,7 +2139,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
-      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.HFUNC(Del)
+      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
        * failure detection, and a loading server is considered to be
@@ -2171,7 +2171,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
+      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(CmdUnlink)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::JOURNALED, -2, 1, -1, acl::kSort}.HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)

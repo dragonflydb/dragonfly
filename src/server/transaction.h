@@ -194,7 +194,7 @@ class Transaction {
   ShardArgs GetShardArgs(ShardId sid) const;
 
   // Execute transaction hop. If conclude is true, it is removed from the pending queue.
-  void Execute(RunnableType cb, bool conclude);
+  void Execute(RunnableType cb, bool conclude, bool async = false);
 
   // Execute single hop and conclude.
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
@@ -206,6 +206,9 @@ class Transaction {
 
   // Conclude transaction. Ignored if not scheduled
   void Conclude();
+
+  // Access to hop barrier
+  util::fb2::EmbeddedBlockingCounter* Barrier();
 
   // Called by engine shard to execute a transaction hop.
   // Returns true if the transaction concludes.

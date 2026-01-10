@@ -18,6 +18,7 @@
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/server_state.h"
+#include "server/transaction.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
@@ -159,6 +160,18 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
                                                 conn->RemoteEndpointStr(), execution_time_usec,
                                                 absl::GetCurrentTimeNanos() / 1000);
   }
+}
+
+void CommandId::AsyncToSync(AsyncHandlerRawPtr ptr) {
+  handler_ = [ptr](CmdArgList args, CommandContext* cmnd_cntx) {
+    auto res = ptr(args, cmnd_cntx);
+    if (holds_alternative<facade::ErrorReply>(res)) {
+      cmnd_cntx->SendError(std::get<facade::ErrorReply>(res));
+    } else {
+      cmnd_cntx->tx->Barrier()->Wait();
+      std::get<AsyncReplier>(res)(cmnd_cntx->rb());
+    }
+  };
 }
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,

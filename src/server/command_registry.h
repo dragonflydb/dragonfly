@@ -16,6 +16,10 @@
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
 
+namespace facade {
+class SinkReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 namespace CO {
@@ -93,6 +97,13 @@ template <typename T> class MoveOnly {
   T value_{};
 };
 
+// Replier function returned by async handler in case of successful schedule
+using AsyncReplier = fu2::function_base<true, false, fu2::capacity_default, false, false,
+                                        void(facade::SinkReplyBuilder*)>;
+
+// Async handlers return either an error or an replier to be triggered after the transaction runs
+using AsyncHandlerReply = std::variant<facade::ErrorReply, AsyncReplier>;
+
 class CommandId : public facade::CommandId {
  public:
   using CmdArgList = facade::CmdArgList;
@@ -114,6 +125,7 @@ class CommandId : public facade::CommandId {
 
   using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                      void(CmdArgList, CommandContext*) const>;
+  using AsyncHandlerRawPtr = AsyncHandlerReply (*)(CmdArgList, CommandContext*);
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
@@ -147,6 +159,11 @@ class CommandId : public facade::CommandId {
 
   CommandId&& SetHandler(Handler f) && {
     handler_ = std::move(f);
+    return std::move(*this);
+  }
+
+  CommandId&& SetAsyncHandler(AsyncHandlerRawPtr ptr) {
+    AsyncToSync(ptr);
     return std::move(*this);
   }
 
@@ -190,6 +207,8 @@ class CommandId : public facade::CommandId {
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
  private:
+  void AsyncToSync(AsyncHandlerRawPtr ptr);
+
   std::optional<CO::PubSubKind> kind_pubsub_;
   std::optional<CO::MultiControlKind> kind_multi_ctr_;
 
