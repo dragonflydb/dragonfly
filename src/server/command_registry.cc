@@ -273,29 +273,6 @@ void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
   }
 }
 
-void CommandId::AsyncToSync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*)) {
-  handler_ = [f](CmdArgList args, CommandContext* cntx) {
-    auto reply = f(args, cntx);
-    if (std::holds_alternative<facade::ErrorReply>(reply)) {
-      cntx->SendError(std::get<facade::ErrorReply>(reply));
-    } else {
-      DCHECK(!cntx->IsDeferredReply()) << "Sync and deferred?";
-      cntx->tx->Blocker()->Wait();
-      std::get<AsyncHandlerReplier>(reply)(cntx->rb());
-    }
-  };
-}
-
-void CommandId::WrapAsync(AsyncHandlerReply (*f)(CmdArgList, CommandContext*)) {
-  async_handler_ = [f](CmdArgList args, CommandContext* cntx) {
-    if (auto reply = f(args, cntx); std::holds_alternative<facade::ErrorReply>(reply)) {
-      cntx->Resolve(std::move(std::get<facade::ErrorReply>(reply)));
-    } else {
-      cntx->Resolve(cntx->tx->Blocker(), std::move(std::get<AsyncHandlerReplier>(reply)));
-    }
-  };
-}
-
 CommandRegistry::CommandRegistry() {
   cmd_rename_map_ = ParseCmdlineArgMap(FLAGS_rename_command);
 
@@ -412,6 +389,27 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
     cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.GetLatencyHist()});
   }
   return cmd_latencies;
+}
+
+void CommandId::AsyncToSync(AsyncFunc f) {
+  handler_ = [f](CmdArgList args, CommandContext* cmnd_cntx) {
+    CommandTask task = f(args, cmnd_cntx);
+    if (auto err = task.TakeError(); err)
+      cmnd_cntx->SendError(*err);
+  };
+}
+
+bool CommandTask::TxAwaiter::await_ready() const noexcept {
+  if (!cmnd_cntx->IsDeferredReply()) {  // Sync execution
+    cmnd_cntx->tx->Blocker()->Wait();
+    return true;
+  }
+
+  return false;
+}
+
+void CommandTask::TxAwaiter::await_suspend(std::coroutine_handle<> handle) const noexcept {
+  cmnd_cntx->Resolve(cmnd_cntx->tx->Blocker(), handle);
 }
 
 }  // namespace dfly

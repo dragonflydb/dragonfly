@@ -129,9 +129,10 @@ bool ParsedCommand::OnCompletion(util::fb2::detail::Waiter* waiter) {
 void ParsedCommand::Reply() {
   dfly::Overloaded ov{
       [this](payload::Payload&& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
-      [this](AsyncTask&& task) {
+      [](AsyncTask&& task) {
         DCHECK(task.blocker->IsCompleted());
-        task.replier(rb_);
+        while (!task.replier.done())
+          task.replier.resume();
       }};
   visit(ov, exchange(reply_, monostate{}));
 }

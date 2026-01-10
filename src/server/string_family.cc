@@ -588,7 +588,6 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
 
     size_t size = value.Size();
     resp.value = string_view(next, size);
-    VLOG(0) << "Read \"" << resp.value << "\"";
     next += size;
 
     // Note - correct behavior is to return TTL before it was updated by GAT,
@@ -1339,8 +1338,8 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-AsyncHandlerReply MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
-                              const DbSlice::ExpireParams* gat_params) {
+void MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
+                 const DbSlice::ExpireParams* gat_params) {
   DCHECK_GE(args.size(), 1U);
 
   MemcacheCmdFlags cmd_flags;
@@ -1352,35 +1351,32 @@ AsyncHandlerReply MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
   fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
   AggregateError tiering_err;          // First tiering error
 
-  shared_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
+  unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    VLOG(0) << "Mget hop";
     mget_resp[shard->shard_id()] =
         OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_params);
     return OpStatus::OK;
   };
 
-  cmnd_cntx->tx->Execute(std::move(cb), true, true);
-  VLOG(0) << "MGet " << args[0];
+  OpStatus result = cmnd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, result);
 
   // wait for all tiered reads to finish and check for errors
-  //  tiering_bc->Wait();
-  // if (auto err = std::move(tiering_err).Destroy(); err)
-  //  return cmnd_cntx->SendError(err.message());
+  tiering_bc->Wait();
+  if (auto err = std::move(tiering_err).Destroy(); err)
+    return cmnd_cntx->SendError(err.message());
 
   size_t arg_len = args.size();
 
-  shared_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
+  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
   ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmnd_cntx->tx,
                       absl::MakeSpan(mget_results.get(), arg_len));
 
   if (cmnd_cntx->mc_command()) {
     // We can not access `args` inside the lambda below if it runs asynchronously.
     // Access to arguments must be done via cmnd_cntx.
-    boost::intrusive_ptr<Transaction> keepalive{cmnd_cntx->tx};
-    auto replier = [mget_results, mget_resp, cmnd_cntx, keepalive](SinkReplyBuilder* builder) {
-      VLOG(0) << "Running replier";
+    auto replier = [mget_results = std::move(mget_results), cmnd_cntx](SinkReplyBuilder* builder) {
       auto* mc_builder = static_cast<MCReplyBuilder*>(builder);
       facade::MCRender mc_render{cmnd_cntx->mc_command()->cmd_flags};
       for (size_t i = 0; i < cmnd_cntx->size(); ++i) {
@@ -1394,10 +1390,10 @@ AsyncHandlerReply MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
       }
       mc_builder->SendSimpleString(mc_render.RenderGetEnd());
     };
-    return replier;
+    replier(cmnd_cntx->rb());
   } else {
     // TODO: remove arg_len capture once we store RESP arguments inside cmnd_cntx.
-    /*auto replier = [arg_len, mget_results = std::move(mget_results),
+    auto replier = [arg_len, mget_results = std::move(mget_results),
                     cmnd_cntx](SinkReplyBuilder* builder) {
       auto* redis_builder = static_cast<RedisReplyBuilder*>(builder);
       redis_builder->StartArray(arg_len);
@@ -1410,25 +1406,23 @@ AsyncHandlerReply MGetGeneric(CmdArgList args, CommandContext* cmnd_cntx,
         }
       }
     };
-    return replier;*/
+    replier(cmnd_cntx->rb());
   }
-
-  return facade::ErrorReply{""};
 }
 
-AsyncHandlerReply CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
-  return MGetGeneric(args, cmnd_cntx, nullptr);
+void CmdMGet(CmdArgList args, CommandContext* cmnd_cntx) {
+  MGetGeneric(args, cmnd_cntx, nullptr);
 }
 
 // Implements the memcache GAT command. The expected input is
 // GAT key [keys...]
 // The expiry argument is stored in mc_command()->expire_ts
 void CmdGAT(CmdArgList args, CommandContext* cmnd_cntx) {
-  // DCHECK(cmnd_cntx->mc_command());
-  // int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
-  // const DbSlice::ExpireParams expire_params{
-  //     .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  // MGetGeneric(args, cmnd_cntx, &expire_params);
+  DCHECK(cmnd_cntx->mc_command());
+  int64_t expire_ts = cmnd_cntx->mc_command()->expire_ts;
+  const DbSlice::ExpireParams expire_params{
+      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  MGetGeneric(args, cmnd_cntx, &expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmnd_cntx) {
@@ -1681,7 +1675,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(&CmdMGet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)

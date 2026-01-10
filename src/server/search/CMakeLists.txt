@@ -1,6 +1,7 @@
 if (NOT WITH_SEARCH)
   add_library(dfly_search_server doc_index_fallback.cc)
   target_link_libraries(dfly_search_server dfly_transaction dfly_facade redis_lib jsonpath TRDP::jsoncons)
+  target_compile_options(dfly_search_server PRIVATE "-fcoroutines")
   return()
 endif()
 

@@ -9,6 +9,7 @@
 #include <absl/types/span.h>
 #include <hdr/hdr_histogram.h>
 
+#include <coroutine>
 #include <functional>
 #include <optional>
 
@@ -21,6 +22,8 @@ class SinkReplyBuilder;
 };
 
 namespace dfly {
+
+class Transaction;
 
 namespace CO {
 
@@ -97,11 +100,56 @@ template <typename T> class MoveOnly {
   T value_{};
 };
 
-// Replier function that is invoked after a result is ready
-using AsyncHandlerReplier = std::function<void(facade::SinkReplyBuilder*)>;
+struct CommandTask {
+  struct TxAwaiter {
+    bool await_ready() const noexcept;
 
-// Either error or replier with scheduled tx
-using AsyncHandlerReply = std::variant<facade::ErrorReply, AsyncHandlerReplier>;
+    void await_suspend(std::coroutine_handle<> handle) const noexcept;
+
+    void await_resume() const noexcept {
+    }
+
+    CommandContext* cmnd_cntx;
+  };
+
+  struct Promise {
+    CommandTask get_return_object() {
+      return CommandTask{std::coroutine_handle<Promise>::from_promise(*this)};
+    }
+
+    void unhandled_exception() noexcept {
+    }
+
+    void return_value(facade::ErrorReply&& err) noexcept {
+      error = std::move(err);
+    }
+
+    void return_value(std::nullopt_t) {
+    }
+
+    std::suspend_never initial_suspend() noexcept {
+      return {};
+    }
+
+    std::suspend_always final_suspend() noexcept {
+      return {};  // Suspend to pause for error take
+    }
+
+    std::optional<facade::ErrorReply> error;
+  };
+  using promise_type = Promise;
+
+  std::optional<facade::ErrorReply> TakeError() {
+    auto err = handle_.promise().error;
+    if (err)
+      handle_.resume();  // this was final suspend, destroy
+    return err;
+  }
+
+  std::coroutine_handle<Promise> handle_;
+};
+
+using AsyncFunc = CommandTask (*)(facade::CmdArgList, CommandContext*);
 
 class CommandId : public facade::CommandId {
  public:
@@ -125,18 +173,12 @@ class CommandId : public facade::CommandId {
   using Handler = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                      void(CmdArgList, CommandContext*) const>;
 
-  using AsyncHandler = std::function<AsyncHandlerReply(CmdArgList, CommandContext*)>;
-
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
   // Returns the invoke time in usec.
   void Invoke(CmdArgList args, CommandContext* cmd_cntx) const {
     handler_(args, cmd_cntx);
-  }
-
-  void InvokeAsync(CmdArgList args, CommandContext* cmd_cntx) const {
-    async_handler_(args, cmd_cntx);
   }
 
   // Returns error if validation failed, otherwise nullopt
@@ -167,10 +209,14 @@ class CommandId : public facade::CommandId {
     return std::move(*this);
   }
 
-  template <typename F> CommandId&& SetAsyncHandler(F&& f) && {
+  CommandId&& SetAsyncHandler(AsyncFunc f) && {
     AsyncToSync(f);  // Wrap handler as sync handler
-    WrapAsync(f);    // Wrap async handler
+    supports_async = true;
     return std::move(*this);
+  }
+
+  bool SupportsAsync() const {
+    return supports_async;
   }
 
   CommandId&& SetValidator(ArgValidator f) && {
@@ -197,10 +243,6 @@ class CommandId : public facade::CommandId {
     return is_alias_;
   }
 
-  bool HasAsyncHandler() const {
-    return async_handler_ != nullptr;
-  }
-
   hdr_histogram* GetLatencyHist() const {
     return latency_histogram_;
   }
@@ -217,8 +259,7 @@ class CommandId : public facade::CommandId {
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
  private:
-  void AsyncToSync(AsyncHandlerReply (*)(CmdArgList, CommandContext*));
-  void WrapAsync(AsyncHandlerReply (*)(CmdArgList, CommandContext*));
+  void AsyncToSync(AsyncFunc);
 
   std::optional<CO::PubSubKind> kind_pubsub_;
   std::optional<CO::MultiControlKind> kind_multi_ctr_;
@@ -227,9 +268,10 @@ class CommandId : public facade::CommandId {
   bool implicit_acl_;
   bool is_alias_{false};
   bool can_be_monitored_{true};
+  bool supports_async = false;
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
-  Handler handler_, async_handler_;
+  Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
 };

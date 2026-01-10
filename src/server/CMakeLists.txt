@@ -12,6 +12,7 @@ endif()
 
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
+target_compile_options(dragonfly PRIVATE "-fcoroutines")
 cxx_link(dragonfly base dragonfly_lib)
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -61,7 +62,7 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             tiering/serialized_map.cc tiering/decoders.cc
             acl/acl_log.cc slowlog.cc channel_store.cc)
-
+target_compile_options(dfly_transaction PRIVATE "-fcoroutines")
 
 if (WITH_TIERING)
   SET(DF_LINUX_SRCS tiered_storage.cc)
@@ -90,6 +91,7 @@ add_library(dragonfly_lib
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc
             sharding.cc)
+target_compile_options(dragonfly_lib PRIVATE "-fcoroutines")
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)

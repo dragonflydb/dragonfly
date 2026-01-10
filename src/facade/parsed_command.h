@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <coroutine>
+
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_payload.h"
@@ -125,9 +127,8 @@ class ParsedCommand : public cmn::BackedArguments {
   void Resolve(ErrorReply&& error);
 
   // Resolve deferred command with async task
-  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker,
-               std::function<void(facade::SinkReplyBuilder*)> replier) {
-    reply_ = AsyncTask{blocker, std::move(replier)};
+  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> handle) {
+    reply_ = AsyncTask{blocker, handle};
   }
 
   bool IsReady() const;  // If deferred is ready
@@ -137,7 +138,7 @@ class ParsedCommand : public cmn::BackedArguments {
  private:
   struct AsyncTask {
     util::fb2::EmbeddedBlockingCounter* blocker;
-    std::function<void(facade::SinkReplyBuilder*)> replier;
+    std::coroutine_handle<> replier;
   };
 
   std::variant<payload::Payload, AsyncTask> reply_;

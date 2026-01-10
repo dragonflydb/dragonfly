@@ -5,6 +5,9 @@ add_library(dfly_facade conn_context.cc dragonfly_listener.cc dragonfly_connecti
             memcache_parser.cc reply_builder.cc op_status.cc parsed_command.cc service_interface.cc
             reply_capture.cc cmd_arg_parser.cc tls_helpers.cc socket_utils.cc)
 
+target_compile_options(dfly_facade PRIVATE "-fcoroutines")
+
+
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
   target_compile_definitions(dfly_facade PRIVATE DFLY_USE_SSL)

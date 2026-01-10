@@ -1434,10 +1434,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     case AsyncPreference::ONLY_SYNC:
       break;
     case AsyncPreference::PREFER_ASYNC:
-      async |= cid->HasAsyncHandler();
+      async |= cid->SupportsAsync();
       break;
     case AsyncPreference::REQUIRE_ASYNC:
-      if (!cid->HasAsyncHandler())
+      if (!cid->SupportsAsync())
         return DispatchResult::WOULD_BLOCK;
       async = true;
       break;
@@ -1555,7 +1555,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   DispatchResult res = DispatchResult::ERROR;
   cmnd_cntx->cid = cid;
   cmnd_cntx->tx = dfly_cntx->transaction;
-  res = InvokeCmd(tail_args, cmnd_cntx, async);
+  res = InvokeCmd(tail_args, cmnd_cntx);
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmnd_cntx->SendError("Internal Error");
@@ -1618,7 +1618,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx, bool async) {
+DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx) {
   auto* cid = cmd_cntx->cid;
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
@@ -1679,10 +1679,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    if (async)
-      cid->InvokeAsync(tail_args, cmd_cntx);
-    else
-      cid->Invoke(tail_args, cmd_cntx);
+    cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return DispatchResult::ERROR;
