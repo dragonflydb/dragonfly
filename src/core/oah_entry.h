@@ -112,7 +112,7 @@ template <class T> class PtrVector {
   }
 
   size_t AllocSize() const {
-    return zmalloc_usable_size(Raw());
+    return Size() * sizeof(T);
   }
 
  private:
@@ -262,9 +262,10 @@ class OAHEntry {
   void SetExpiry(uint32_t at_sec);
 
   std::optional<uint32_t> Find(std::string_view str, uint64_t ext_hash, uint32_t capacity_log,
-                               uint32_t shift_log, uint32_t* set_size, uint32_t time_now = 0);
+                               uint32_t shift_log, uint32_t* set_size, size_t* alloc_used,
+                               uint32_t time_now = 0);
 
-  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size);
+  void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used);
 
   // TODO refactor, because it's inefficient
   // Returns additional allocation size of ptrVector

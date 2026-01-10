@@ -96,8 +96,11 @@ TEST_F(OAHSetTest, OAHEntryTest) {
 
   EXPECT_EQ(test.Insert(std::move(first)), 16);
 
+  size_t alloc_size_stub = 1000;
+
   uint32_t set_size = 4;
-  EXPECT_EQ(test.Find("123456789", OAHEntry::CalcExtHash(Hash("123456789"), 4, 4), 4, 4, &set_size),
+  EXPECT_EQ(test.Find("123456789", OAHEntry::CalcExtHash(Hash("123456789"), 4, 4), 4, 4, &set_size,
+                      &alloc_size_stub),
             1);
 
   EXPECT_EQ(test.Insert(OAHEntry("23456789")), 16);
@@ -137,20 +140,21 @@ TEST_F(OAHSetTest, HashCheckTest) {
   }
 
   uint32_t num_expired_fields = 0;
+  size_t alloc_calc_stub = 100000;
 
   EXPECT_TRUE(isl.Find("0123456789", OAHEntry::CalcExtHash(Hash("0123456789"), 3, 4), 3, 4,
-                       &num_expired_fields));
+                       &num_expired_fields, &alloc_calc_stub));
   EXPECT_TRUE(isl.Find("123456789", OAHEntry::CalcExtHash(Hash("123456789"), 3, 4), 3, 4,
-                       &num_expired_fields));
+                       &num_expired_fields, &alloc_calc_stub));
   EXPECT_TRUE(isl.Find("23456789", OAHEntry::CalcExtHash(Hash("23456789"), 3, 4), 3, 4,
-                       &num_expired_fields));
-  EXPECT_TRUE(
-      isl.Find("3456789", OAHEntry::CalcExtHash(Hash("3456789"), 3, 4), 3, 4, &num_expired_fields));
-  EXPECT_TRUE(
-      isl.Find("456789", OAHEntry::CalcExtHash(Hash("456789"), 3, 4), 3, 4, &num_expired_fields));
+                       &num_expired_fields, &alloc_calc_stub));
+  EXPECT_TRUE(isl.Find("3456789", OAHEntry::CalcExtHash(Hash("3456789"), 3, 4), 3, 4,
+                       &num_expired_fields, &alloc_calc_stub));
+  EXPECT_TRUE(isl.Find("456789", OAHEntry::CalcExtHash(Hash("456789"), 3, 4), 3, 4,
+                       &num_expired_fields, &alloc_calc_stub));
 
-  auto idx =
-      isl.Find("456789", OAHEntry::CalcExtHash(Hash("456789"), 3, 4), 3, 4, &num_expired_fields);
+  auto idx = isl.Find("456789", OAHEntry::CalcExtHash(Hash("456789"), 3, 4), 3, 4,
+                      &num_expired_fields, &alloc_calc_stub);
   auto new_pos = isl[*idx].Rehash(7, 3, 4, 4);
   EXPECT_EQ(new_pos, 6);
   EXPECT_FALSE(isl[*idx].GetHash());
