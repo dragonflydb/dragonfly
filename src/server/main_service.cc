@@ -1376,10 +1376,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
     return ErrorReply{"This Redis command is not allowed from script"};
 
   if (under_script) {
-    DCHECK(dfly_cntx.transaction);
+    auto* tx = dfly_cntx.transaction;
+    DCHECK(tx);
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
-    Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
+    Transaction::MultiMode mode = tx->GetMultiMode();
     bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
@@ -2211,12 +2212,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
   return false;
 }
 
-static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode multi_mode,
+// `multi_mode` is the deduced multi mode that is not yet set on the transaction
+static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_mode,
                                    const Transaction& tx) {
-  if (!sid.has_value() || multi_mode != Transaction::LOCK_AHEAD) {
-    return false;
-  }
-
   if (tx.GetMultiMode() != Transaction::NOT_DETERMINED) {
     // We may be running EVAL under MULTI. Currently RunSingleShardMulti() will attempt to lock
     // keys, in which case will be already locked by MULTI. We could optimize this path as well
@@ -2224,7 +2222,11 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode
     return false;
   }
 
-  return true;
+  // If we have only a single shard, we can run a global command without hops
+  if (shard_set->size() == 1 && multi_mode == Transaction::GLOBAL)
+    return true;
+
+  return one_shard && multi_mode == Transaction::LOCK_AHEAD;
 }
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
@@ -2256,8 +2258,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
 
-  optional<ShardId> sid;
-
+  optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
@@ -2288,7 +2289,14 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     sinfo.reset();
   };
 
-  if (CanRunSingleShardMulti(sid, script_mode, *tx)) {
+  if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
+    // It might be that there are no declared keys, but there is only a single shard
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+    DCHECK(sid.has_value() || shard_set->size() == 1);
+    ShardId real_sid = sid.value_or(ShardId(0));
+#pragma GCC diagnostic pop
+
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -2297,10 +2305,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareMultiForScheduleSingleHop(conn_cntx->ns, *sid, conn_cntx->db_index(), args);
+    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys,
+                            script_mode);
+
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
+          new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
@@ -2309,10 +2319,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    if (*sid != ss->thread_index()) {
+    // Migration only makes sense if there are distinct shards
+    if (sid.has_value() && *sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << conn_cntx->conn() << " from "
-              << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
-      conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
+              << ProactorBase::me()->GetPoolIndex() << " to " << real_sid;
+      conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(real_sid), false);
     }
   } else {
     Transaction::MultiMode tx_mode = tx->GetMultiMode();

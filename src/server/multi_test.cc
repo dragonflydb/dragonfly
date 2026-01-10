@@ -17,6 +17,7 @@
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -55,6 +56,16 @@ class MultiTest : public BaseFamilyTest {
   MultiTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
+};
+
+class SingleShardMultiTest : public BaseFamilyTest {
+ protected:
+  SingleShardMultiTest() : BaseFamilyTest() {
+    num_threads_ = 5;
+    absl::SetFlag(&FLAGS_num_shards, 1);
+  }
+
+  absl::FlagSaver saver_;
 };
 
 struct MultiTxTest : public MultiTest {};
@@ -1002,6 +1013,51 @@ TEST_F(MultiTest, ScriptBadCommand) {
 
   resp = Run({"eval", s4, "0"});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(MultiTest, MultiSquash) {
+  string_view script = R"(
+redis.call('APPEND', KEYS[1], ARGV[1]);
+redis.call('GET', KEYS[1]);
+redis.call('APPEND', KEYS[1], ARGV[2])
+return 'OK';
+)";
+
+  auto resp = Run({"EVAL", script, "1", "A", "works", "reliably"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"EVAL", script, "1", "A", "once", "again"});
+  EXPECT_EQ(resp, "OK");
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 2u);
+  // EXPECT_EQ(metrics.shard_stats.tx_ooo_total, 2u);
+
+  auto a_expect = absl::StrCat("works", "reliably", "once", "again");
+  EXPECT_EQ(Run({"GET", "A"}), a_expect);
+}
+
+// Check that single shard script running with allow-undeclared-keys (i.e. global)
+// running on a single shard setup can be squashed with "shardlocal" execution
+TEST_F(SingleShardMultiTest, MultiSquashGlobalSingleShard) {
+  string_view script = R"(
+--!df flags=allow-undeclared-keys
+redis.call('SET', 'first', 'works');
+redis.call('SET', 'second', 'too');
+redis.call('SET', 'third', 'as well');
+return 'OK';
+)";
+
+  auto resp = Run({"EVAL", script, "0"});
+  EXPECT_EQ(resp, "OK");
+
+  // Check call was shardlocal and out of order
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 1u);
+
+  EXPECT_EQ(Run({"GET", "first"}), "works");
+  EXPECT_EQ(Run({"GET", "second"}), "too");
+  EXPECT_EQ(Run({"GET", "third"}), "as well");
 }
 
 TEST_F(MultiTest, MultiEvalModeConflict) {
