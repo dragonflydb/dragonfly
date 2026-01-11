@@ -1942,8 +1942,10 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
                cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
                cmn::HeapSize(reply_builder_);
 
-  DCHECK(parsed_cmd_);
-  mem += UsedMemoryInternal(*parsed_cmd_);
+  // parsed_cmd_ can be null when dispatching a command, or for http connections.
+  if (parsed_cmd_) {
+    mem += UsedMemoryInternal(*parsed_cmd_);
+  }
 
   // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
@@ -2011,15 +2013,8 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
-    unsigned val_len_to_read = memcache_parser_->DEBUG_val_len_to_read();
     MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
-    if (result == MemcacheParser::PARSE_ERROR) {
-      LOG_FIRST_N(WARNING, 5) << "Memcache parse error, cmd_cnt: " << local_stats_.cmds
-                              << " val_len_to_read: " << val_len_to_read
-                              << ", chunk: " << absl::CEscape(io::View(io_buf_.InputBuffer()));
-    }
-
     io_buf_.ConsumeInput(consumed);
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "

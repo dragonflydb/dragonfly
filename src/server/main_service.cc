@@ -81,8 +81,6 @@ ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose aut
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
-ABSL_RETIRED_FLAG(bool, track_exec_frequencies, true,
-                  "DEPRECATED. Whether to track exec frequencies for multi exec");
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
@@ -123,11 +121,9 @@ ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
 
-ABSL_FLAG(uint32_t, uring_wake_mode, 1,
-          "0 - use eventfd, 1 - use io_uring, 2 - use io_uring with immediate flush of the "
-          "notification");
+ABSL_RETIRED_FLAG(uint32_t, uring_wake_mode, 1, "DEPRECATED");
 
-ABSL_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "");
+ABSL_RETIRED_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "DEPRECATED");
 
 ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
 ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
@@ -775,20 +771,6 @@ std::vector<std::string> GetMutableFlagNames() {
                             FLAGS_squash_stats_latency_lower_limit);
 }
 
-void UpdateUringFlagsOnThread() {
-#ifdef __linux__
-  if (auto* pb = ProactorBase::me(); pb->GetKind() == fb2::ProactorBase::IOURING) {
-    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
-    uint32_t mode = absl::GetFlag(FLAGS_uring_wake_mode);
-    uint32_t threshold = absl::GetFlag(FLAGS_uring_submit_threshold);
-
-    up->ConfigureMsgRing(mode > 0);
-    up->ConfigureSubmitWakeup(mode == 2);
-    up->SetSubmitQueueThreshold(threshold);
-  }
-#endif
-}
-
 void UpdateSchedulerFlagsOnThread() {
   using fb2::detail::Scheduler;
   auto* sched = util::fb2::detail::FiberScheduler();
@@ -977,10 +959,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // Register squsher flags
   RegisterMutableFlags(&config_registry, MultiCommandSquasher::GetMutableFlagNames(),
                        []() { MultiCommandSquasher::UpdateFromFlags(); });
-  // Register uring proactor flags
-  RegisterMutableFlags(&config_registry,
-                       base::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
-                       []() { UpdateUringFlagsOnThread(); });
+
   // Register scheduler flags
   RegisterMutableFlags(
       &config_registry,
@@ -1073,7 +1052,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
-    UpdateUringFlagsOnThread();
     UpdateSchedulerFlagsOnThread();
   });
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
