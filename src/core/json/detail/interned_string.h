@@ -73,8 +73,6 @@ class InternedString {
 
   static InternedBlobPool& GetPoolRef();
 
-  static InternedBlobPool pool_;
-
   const InternedBlob* entry_ = nullptr;
 };
 
@@ -84,6 +82,9 @@ InternedString::InternedString(const char* data, size_t size, Alloc /*unused*/)
 }
 
 template <typename It> InternedString::InternedString(It begin, It end) {
+  if (begin == end)
+    return;
+
   const auto size = std::distance(begin, end);
   const auto data_ptr = &*begin;
   entry_ = Intern(std::string_view(data_ptr, size));

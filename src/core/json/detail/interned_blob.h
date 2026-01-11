@@ -53,9 +53,10 @@ struct BlobEq {
   bool operator()(std::string_view a, const InternedBlob& b) const;
 };
 
-// This pool holds blobs and is used by InternString to manage string access. node_hash_set instead
-// of flat to maintain pointer stability, as interned strings hold onto pointers into this pool.
-// Note that the pool itself does not use stateless allocator or mimalloc heap, it probably could.
+// This pool holds blobs and is used by InternedString to manage string access. node_hash_set
+// instead of flat to maintain pointer stability, as interned strings hold onto pointers into this
+// pool. Note that the pool itself does not use stateless allocator or mimalloc heap, it probably
+// could.
 using InternedBlobPool = absl::node_hash_set<InternedBlob, BlobHash, BlobEq>;
 
 }  // namespace dfly::detail

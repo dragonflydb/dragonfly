@@ -12,7 +12,6 @@ InternedString::InternedString(const std::string_view sv) : entry_(Intern(sv)) {
 }
 
 InternedString::InternedString(const InternedString& other) {
-  Release();
   entry_ = other.entry_;
   Acquire();
 }
@@ -22,7 +21,7 @@ InternedString::InternedString(InternedString&& other) noexcept : entry_(other.e
 }
 
 InternedString& InternedString::operator=(const InternedString& other) {
-  if (*this != other) {
+  if (this != &other) {
     Release();
     entry_ = other.entry_;
     Acquire();
@@ -31,7 +30,7 @@ InternedString& InternedString::operator=(const InternedString& other) {
 }
 
 InternedString& InternedString::operator=(InternedString&& other) noexcept {
-  if (*this != other) {
+  if (this != &other) {
     Release();
     entry_ = other.entry_;
     other.entry_ = nullptr;
@@ -48,7 +47,7 @@ InternedString::operator std::string_view() const {
 }
 
 const char* InternedString::data() const {
-  return entry_ ? entry_->Data() : nullptr;
+  return entry_ ? entry_->Data() : "";
 }
 
 const char* InternedString::c_str() const {

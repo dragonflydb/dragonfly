@@ -17,8 +17,8 @@ InternedBlob::InternedBlob(const std::string_view sv) {
   // We need \0 because jsoncons expects c_str() and data() style accessors on keys
   blob_ = alloc.allocate(kHeaderSize + str_len + 1);
 
-  std::memcpy(blob_, &str_len, sizeof(str_len));
-  std::memcpy(blob_ + sizeof(str_len), &ref_count, sizeof(ref_count));
+  std::memcpy(blob_, &str_len, sizeof(uint32_t));
+  std::memcpy(blob_ + sizeof(uint32_t), &ref_count, sizeof(uint32_t));
 
   std::memcpy(blob_ + kHeaderSize, sv.data(), str_len);
 
@@ -28,7 +28,7 @@ InternedBlob::InternedBlob(const std::string_view sv) {
 
 InternedBlob::~InternedBlob() {
   if (blob_) {
-    const size_t to_destroy = kHeaderSize + Size();
+    const size_t to_destroy = kHeaderSize + Size() + 1;
     StatelessAllocator<char>{}.deallocate(blob_, to_destroy);
     blob_ = nullptr;
   }
@@ -51,7 +51,7 @@ uint32_t InternedBlob::RefCount() const {
 
   uint32_t ref_count;
   // Assumes size and refcount are both 4 bytes
-  std::memcpy(&ref_count, blob_ + sizeof(ref_count), sizeof(ref_count));
+  std::memcpy(&ref_count, blob_ + sizeof(uint32_t), sizeof(uint32_t));
   return ref_count;
 }
 
@@ -65,13 +65,13 @@ const char* InternedBlob::Data() const {
 
 void InternedBlob::IncrRefCount() const {
   const uint32_t updated_count = RefCount() + 1;
-  std::memcpy(blob_ + sizeof(updated_count), &updated_count, sizeof(updated_count));
+  std::memcpy(blob_ + sizeof(uint32_t), &updated_count, sizeof(updated_count));
 }
 
 void InternedBlob::DecrRefCount() const {
   // Caller must ensure refcount does not go below 0
   const uint32_t updated_count = RefCount() - 1;
-  std::memcpy(blob_ + sizeof(updated_count), &updated_count, sizeof(updated_count));
+  std::memcpy(blob_ + sizeof(uint32_t), &updated_count, sizeof(updated_count));
 }
 
 size_t BlobHash::operator()(const InternedBlob& b) const {
