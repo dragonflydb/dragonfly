@@ -392,24 +392,6 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
 }
 
 void CommandId::AsyncToSync(AsyncFunc f) {
-  handler_ = [f](CmdArgList args, CommandContext* cmnd_cntx) {
-    CommandTask task = f(args, cmnd_cntx);
-    if (auto err = task.TakeError(); err)
-      cmnd_cntx->SendError(*err);
-  };
+  handler_ = [f](CmdArgList args, CommandContext* cmnd_cntx) { f(args, cmnd_cntx); };
 }
-
-bool CommandTask::TxAwaiter::await_ready() const noexcept {
-  if (!cmnd_cntx->IsDeferredReply()) {  // Sync execution
-    cmnd_cntx->tx->Blocker()->Wait();
-    return true;
-  }
-
-  return false;
-}
-
-void CommandTask::TxAwaiter::await_suspend(std::coroutine_handle<> handle) const noexcept {
-  cmnd_cntx->Resolve(cmnd_cntx->tx->Blocker(), handle);
-}
-
 }  // namespace dfly

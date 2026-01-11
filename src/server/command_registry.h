@@ -16,6 +16,7 @@
 #include "base/function2.hpp"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
+#include "server/async_cmd.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -100,56 +101,7 @@ template <typename T> class MoveOnly {
   T value_{};
 };
 
-struct CommandTask {
-  struct TxAwaiter {
-    bool await_ready() const noexcept;
-
-    void await_suspend(std::coroutine_handle<> handle) const noexcept;
-
-    void await_resume() const noexcept {
-    }
-
-    CommandContext* cmnd_cntx;
-  };
-
-  struct Promise {
-    CommandTask get_return_object() {
-      return CommandTask{std::coroutine_handle<Promise>::from_promise(*this)};
-    }
-
-    void unhandled_exception() noexcept {
-    }
-
-    void return_value(facade::ErrorReply&& err) noexcept {
-      error = std::move(err);
-    }
-
-    void return_value(std::nullopt_t) {
-    }
-
-    std::suspend_never initial_suspend() noexcept {
-      return {};
-    }
-
-    std::suspend_always final_suspend() noexcept {
-      return {};  // Suspend to pause for error take
-    }
-
-    std::optional<facade::ErrorReply> error;
-  };
-  using promise_type = Promise;
-
-  std::optional<facade::ErrorReply> TakeError() {
-    auto err = handle_.promise().error;
-    if (err)
-      handle_.resume();  // this was final suspend, destroy
-    return err;
-  }
-
-  std::coroutine_handle<Promise> handle_;
-};
-
-using AsyncFunc = CommandTask (*)(facade::CmdArgList, CommandContext*);
+using AsyncFunc = cmd::Task (*)(facade::CmdArgList, CommandContext*);
 
 class CommandId : public facade::CommandId {
  public:

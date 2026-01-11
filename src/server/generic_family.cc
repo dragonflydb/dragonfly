@@ -22,6 +22,7 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
+#include "server/cmd_goodies.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -1069,35 +1070,30 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
   return flags;
 }
 
-CommandTask DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
+cmd::Task DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   if (args[0] == "FORBIDDEN")
     co_return facade::ErrorReply{"Forbidden key :(("};
 
   atomic_uint32_t result{0};
-  auto cb = [&](const Transaction* t, EngineShard* shard) {
-    ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async);
+  auto shard_cb = [&](const ShardArgs& args, const OpArgs& op_args) {
+    auto res = GenericFamily::OpDel(op_args, args, false);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
-
     return OpStatus::OK;
   };
+  co_await cmd::single_hop(shard_cb);
 
-  cmd_cntx->tx->Execute(cb, true, true);
-  co_await CommandTask::TxAwaiter(cmd_cntx);
-
-  VLOG(0) << "Awoken coroutine";
+  auto* rb = co_await cmd::direct_reply();
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (cmd_cntx->mc_command()) {
     MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
     if (del_cnt) {
-      cmd_cntx->SendSimpleString(mc_render.RenderDeleted());
+      rb->SendSimpleString(mc_render.RenderDeleted());
     } else {
-      cmd_cntx->SendSimpleString(mc_render.RenderNotFound());
+      rb->SendSimpleString(mc_render.RenderNotFound());
     }
   } else {
-    cmd_cntx->rb()->SendLong(del_cnt);
+    rb->SendLong(del_cnt);
   }
-
   co_return nullopt;
 }
 
@@ -1122,12 +1118,11 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 }
 
 auto CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
-  return DeleteGeneric(args, cmd_cntx, false);
+  return DeleteGeneric(args, cmd_cntx);
 }
 
 auto CmdUnlink(CmdArgList args, CommandContext* cmd_cntx) {
-  bool async = absl::GetFlag(FLAGS_unlink_experimental_async);
-  return DeleteGeneric(args, cmd_cntx, async);
+  return DeleteGeneric(args, cmd_cntx);
 }
 
 void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {

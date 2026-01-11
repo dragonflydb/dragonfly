@@ -378,6 +378,10 @@ class Transaction {
     }
   }
 
+  OpStatus GetLocalResult() const {
+    return local_result_;
+  }
+
   // Remove once BZPOP is stabilized
   std::string DEBUGV18_BlockInfo() {
     return "claimed=" + std::to_string(blocking_barrier_.IsClaimed()) +
