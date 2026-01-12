@@ -53,6 +53,7 @@ std::string StoredCmd::FirstArg() const {
 
 ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)
     : facade::ConnectionContext(owner) {
+  skip_acl_validation = false;
   if (owner) {
     skip_acl_validation = owner->IsPrivileged();
     has_main_or_memcache_listener = owner->IsMainOrMemcache();
