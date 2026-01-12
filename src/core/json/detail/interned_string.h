@@ -57,8 +57,10 @@ class InternedString {
   bool operator!=(const InternedString& other) const;
   bool operator<(const InternedString& other) const;
 
-  void shrink_to_fit() {  // NOLINT
-  }
+  void shrink_to_fit();
+
+  // For tests
+  static void ResetPool();
 
  private:
   // If a string exists in pool, increments its refcount and returns a pointer to it. If not, adds

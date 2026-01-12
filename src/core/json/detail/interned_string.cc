@@ -3,6 +3,8 @@
 
 #include "core/json/detail/interned_string.h"
 
+#include <glog/logging.h>
+
 namespace dfly::detail {
 
 InternedString::InternedString() {
@@ -85,6 +87,13 @@ bool InternedString::operator!=(const InternedString& other) const {
 
 bool InternedString::operator<(const InternedString& other) const {
   return compare(other) < 0;
+}
+void InternedString::shrink_to_fit() {  // NOLINT (must be non-const to align with jsoncons usage)
+  DCHECK(entry_ != nullptr);
+}
+
+void InternedString::ResetPool() {
+  GetPoolRef().clear();
 }
 
 const InternedBlob* InternedString::Intern(const std::string_view sv) {
