@@ -116,12 +116,12 @@ class RedisReplyBuilderTest : public testing::Test {
       switch (obj.GetType()) {
         case RESPObj::Type::INTEGER: {
           expr.type = RespExpr::INT64;
-          expr.u = static_cast<int64_t>(obj.As<int64_t>().value_or(0));
+          expr.u = obj.As<int64_t>().value();
           break;
         }
         case RESPObj::Type::DOUBLE: {
           expr.type = RespExpr::DOUBLE;
-          expr.u = static_cast<double>(obj.As<double>().value_or(0.0));
+          expr.u = obj.As<double>().value();
           break;
         }
         case RESPObj::Type::NIL: {
@@ -143,13 +143,13 @@ class RedisReplyBuilderTest : public testing::Test {
           expr.type = RespExpr::ARRAY;
           auto arr = obj.As<RESPArray>();
           if (arr.has_value()) {
-            auto vec = new RespExpr::Vec();
+            auto vec = std::make_unique<RespExpr::Vec>();
             vec->reserve(arr->Size());
             for (size_t i = 0; i < arr->Size(); ++i) {
               vec->push_back(BuildExpr((*arr)[i]));
             }
-            owned_arrays_.emplace_back(vec);
-            expr.u = vec;
+            expr.u = vec.get();
+            owned_arrays_.emplace_back(std::move(vec));
             expr.has_support = true;
           }
           break;
@@ -285,7 +285,11 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
   memcpy(ptr, str().data(), SinkSize());
   RESPParser parser;
   auto resp_obj = parser.Feed(reinterpret_cast<char*>(ptr), SinkSize());
-  ParsingResults result(std::move(resp_obj), parser.BufferPos());
+  size_t buf_pos = parser.BufferPos();
+  buf_pos =
+      resp_obj && !buf_pos ? SinkSize() : buf_pos;  // after parsing if success buf_pos can be 0
+
+  ParsingResults result(std::move(resp_obj), buf_pos);
   return result;
 }
 
@@ -1024,7 +1028,7 @@ TEST_F(RedisReplyBuilderTest, Issue4424) {
     ASSERT_TRUE(NoErrors());
     ParsingResults parse_result = Parse();
     ASSERT_FALSE(parse_result.IsError()) << int(parse_result.result);
-    EXPECT_EQ(parse_result.consumed, SinkSize());
+    ASSERT_TRUE(parse_result.Verify(SinkSize()));
     EXPECT_EQ(800, parse_result.args.size());
     sink_.Clear();
   }
