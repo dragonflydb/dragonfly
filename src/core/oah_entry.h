@@ -207,7 +207,7 @@ class OAHEntry {
   }
 
   bool IsEntry() const {
-    return (data_ != 0) && !(data_ & kVectorBit);
+    return (data_ != 0) & !(data_ & kVectorBit);
   }
 
   size_t AllocSize() const {
