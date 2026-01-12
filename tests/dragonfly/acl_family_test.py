@@ -222,7 +222,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     while not denied and time.time() - start < 10:
         try:
             await client.execute_command(f"SET x bar")
-            asyncio.sleep(0.1)
+            await asyncio.sleep(0.1)
         except redis.exceptions.NoPermissionError:
             denied = True
         except Exception as e:

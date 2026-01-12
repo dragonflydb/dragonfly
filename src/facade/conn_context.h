@@ -61,9 +61,6 @@ class ConnectionContext {
   // whether it's blocked on blocking commands like BLPOP, needs to be addressable
   bool blocked = false;
 
-  // Skip ACL validation, used by internal commands and commands run on admin port
-  bool skip_acl_validation = false;
-
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;
 
