@@ -1512,6 +1512,8 @@ TEST_F(GenericFamilyTest, SortBy) {
   // Sorted order: 3 (w_3=10), 2 (w_2=20), 1 (w_1=30). LIMIT 1 2 skips first, returns next 2
   ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "LIMIT", "1", "2"}),
               RespElementsAre("2", "1"));
+  // multiple asterisks should result in syntax error
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*_*"}), ErrArg("syntax error"));
 }
 
 }  // namespace dfly

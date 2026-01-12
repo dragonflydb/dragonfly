@@ -671,7 +671,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
   // ScanCb can preempt due to journaling expired entries and we need to make sure that
-  // we enter the callback in a timing when journaling will not cause preemtion. Otherwise,
+  // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.GetLatch()->Wait();
 
