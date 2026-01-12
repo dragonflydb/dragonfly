@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../../lib/libazure_lib.a CMakeFiles/azure_lib.dir/azure.cc.o CMakeFiles/azure_lib.dir/storage.cc.o
-/usr/bin/ranlib ../../../../lib/libazure_lib.a

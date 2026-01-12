@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../lib/libdfly_test_lib.a CMakeFiles/dfly_test_lib.dir/test_utils.cc.o
-/usr/bin/ranlib ../../lib/libdfly_test_lib.a

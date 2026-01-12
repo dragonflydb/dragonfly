@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/libdfly_page_usage.a CMakeFiles/dfly_page_usage.dir/page_usage_stats.cc.o
-/usr/bin/ranlib ../../../lib/libdfly_page_usage.a

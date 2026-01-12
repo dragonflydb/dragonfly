@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/libawsv2_lib.a CMakeFiles/awsv2_lib.dir/aws.cc.o CMakeFiles/awsv2_lib.dir/credentials_provider_chain.cc.o CMakeFiles/awsv2_lib.dir/logger.cc.o CMakeFiles/awsv2_lib.dir/http_client.cc.o CMakeFiles/awsv2_lib.dir/http_client_factory.cc.o CMakeFiles/awsv2_lib.dir/s3_endpoint_provider.cc.o CMakeFiles/awsv2_lib.dir/s3_read_file.cc.o CMakeFiles/awsv2_lib.dir/s3_write_file.cc.o
-/usr/bin/ranlib ../../../lib/libawsv2_lib.a

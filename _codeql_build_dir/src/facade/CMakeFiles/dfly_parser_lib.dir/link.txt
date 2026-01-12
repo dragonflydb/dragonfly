@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../lib/libdfly_parser_lib.a CMakeFiles/dfly_parser_lib.dir/redis_parser.cc.o CMakeFiles/dfly_parser_lib.dir/resp_expr.cc.o CMakeFiles/dfly_parser_lib.dir/resp_parser.cc.o CMakeFiles/dfly_parser_lib.dir/resp_srv_parser.cc.o
-/usr/bin/ranlib ../../lib/libdfly_parser_lib.a

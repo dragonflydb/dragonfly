@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/libhtml_lib.a CMakeFiles/html_lib.dir/sorted_table.cc.o
-/usr/bin/ranlib ../../../lib/libhtml_lib.a

@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../../lib/libgcp_lib.a CMakeFiles/gcp_lib.dir/gcs.cc.o CMakeFiles/gcp_lib.dir/gcs_file.cc.o CMakeFiles/gcp_lib.dir/gcp_utils.cc.o
-/usr/bin/ranlib ../../../../lib/libgcp_lib.a

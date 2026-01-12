@@ -1,2 +1,0 @@
-/usr/bin/ar qc ../../../lib/libhttp_server_lib.a CMakeFiles/http_server_lib.dir/status_page.cc.o CMakeFiles/http_server_lib.dir/profilez_handler.cc.o CMakeFiles/http_server_lib.dir/http_handler.cc.o
-/usr/bin/ranlib ../../../lib/libhttp_server_lib.a
