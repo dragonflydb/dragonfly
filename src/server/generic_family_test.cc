@@ -1509,8 +1509,9 @@ TEST_F(GenericFamilyTest, SortBy) {
 
   // BY pattern with LIMIT - test pagination works correctly
   Run({"set", "w_1", "30"});  // restore w_1
+  // Sorted order: 3 (w_3=10), 2 (w_2=20), 1 (w_1=30). LIMIT 1 2 skips first, returns next 2
   ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "LIMIT", "1", "2"}),
-              RespElementsAre("2", "1"));  // Skip 1st element (3), return next 2 (2, 1)
+              RespElementsAre("2", "1"));
 }
 
 }  // namespace dfly
