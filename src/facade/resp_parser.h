@@ -175,8 +175,10 @@ template <class T> std::optional<T> RESPObj::As() const {
   }
   if constexpr (std::is_constructible_v<T, std::string_view>) {
     if (reply_->type == REDIS_REPLY_STRING || reply_->type == REDIS_REPLY_ERROR ||
-        reply_->type == REDIS_REPLY_STATUS || reply_->type == REDIS_REPLY_NIL) {
+        reply_->type == REDIS_REPLY_STATUS) {
       return T{std::string_view{reply_->str, reply_->len}};
+    } else if (reply_->type == REDIS_REPLY_NIL) {
+      return T{std::string_view("NIL")};
     }
   } else if constexpr (std::is_integral_v<T>) {
     if (reply_->type == REDIS_REPLY_INTEGER) {
