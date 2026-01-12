@@ -1486,7 +1486,7 @@ void Connection::SquashPipeline() {
     stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
   }
   auto it = dispatch_q_.begin();
-  while (it->IsCheckPoint())  // Skip all newly received intrusive messages
+  while (it->IsCheckPoint())  // Skip newly received checkpoint messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit) {

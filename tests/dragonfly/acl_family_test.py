@@ -304,7 +304,7 @@ async def test_acl_with_long_running_script(df_server):
 
     # The script should continue and finish successfully
     # TODO(fix): acl context should be immutable while the script is running. This requires
-    # a "dummy" context so we can allow acl commands to run in parallel but we don't use stabs
+    # a "dummy" context so we can allow acl commands to run in parallel but we don't use stubs
     # anymore. Figure out a good solution for this.
     await eval_task
 
