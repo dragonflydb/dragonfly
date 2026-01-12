@@ -1478,6 +1478,7 @@ TEST_F(GenericFamilyTest, SortNegativeLimit) {
 }
 
 TEST_F(GenericFamilyTest, SortBy) {
+  // Test BY pattern with list
   Run({"del", "list-1"});
   Run({"lpush", "list-1", "1", "2", "3"});
   Run({"set", "w_1", "30"});
@@ -1506,6 +1507,53 @@ TEST_F(GenericFamilyTest, SortBy) {
   // missing keys -> 0
   Run({"del", "w_1"});
   ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*"}), RespElementsAre("1", "3", "2"));  // 0, 10, 20
+
+  // Test BY pattern with set
+  Run({"del", "set-1"});
+  Run({"sadd", "set-1", "1", "2", "3"});
+  Run({"set", "w_1", "30"});
+  Run({"set", "w_2", "20"});
+  Run({"set", "w_3", "10"});
+
+  // standard sort with set
+  resp = Run({"sort", "set-1", "BY", "w_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "2", "1"));
+
+  // desc with set
+  ASSERT_THAT(Run({"sort", "set-1", "BY", "w_*", "DESC"}), RespElementsAre("1", "2", "3"));
+
+  // alpha with set
+  Run({"set", "s_1", "c"});
+  Run({"set", "s_2", "b"});
+  Run({"set", "s_3", "a"});
+  ASSERT_THAT(Run({"sort", "set-1", "BY", "s_*", "ALPHA"}), RespElementsAre("3", "2", "1"));
+
+  // nosort with set - order should be arbitrary but consistent
+  resp = Run({"sort", "set-1", "BY", "nosort"});
+  ASSERT_THAT(resp, ArrLen(3));
+
+  // Test BY pattern with sorted set (zset)
+  Run({"del", "zset-1"});
+  Run({"zadd", "zset-1", "0", "1", "0", "2", "0", "3"});
+  Run({"set", "w_1", "30"});
+  Run({"set", "w_2", "20"});
+  Run({"set", "w_3", "10"});
+
+  // standard sort with zset
+  resp = Run({"sort", "zset-1", "BY", "w_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "2", "1"));
+
+  // desc with zset
+  ASSERT_THAT(Run({"sort", "zset-1", "BY", "w_*", "DESC"}), RespElementsAre("1", "2", "3"));
+
+  // alpha with zset
+  Run({"set", "s_1", "c"});
+  Run({"set", "s_2", "b"});
+  Run({"set", "s_3", "a"});
+  ASSERT_THAT(Run({"sort", "zset-1", "BY", "s_*", "ALPHA"}), RespElementsAre("3", "2", "1"));
+
+  // nosort with zset - should maintain zset's natural order
+  ASSERT_THAT(Run({"sort", "zset-1", "BY", "nosort"}), RespElementsAre("1", "2", "3"));
 }
 
 }  // namespace dfly
