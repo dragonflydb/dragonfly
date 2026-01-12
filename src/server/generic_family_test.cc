@@ -1506,6 +1506,9 @@ TEST_F(GenericFamilyTest, SortBy) {
   // missing keys -> 0
   Run({"del", "w_1"});
   ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*"}), RespElementsAre("1", "3", "2"));  // 0, 10, 20
+
+  // multiple asterisks should result in syntax error
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*_*"}), ErrArg("syntax error"));
 }
 
 }  // namespace dfly
