@@ -1506,6 +1506,11 @@ TEST_F(GenericFamilyTest, SortBy) {
   // missing keys -> 0
   Run({"del", "w_1"});
   ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*"}), RespElementsAre("1", "3", "2"));  // 0, 10, 20
+
+  // BY pattern with LIMIT - test pagination works correctly
+  Run({"set", "w_1", "30"});  // restore w_1
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "LIMIT", "1", "2"}),
+              RespElementsAre("2", "1"));  // Skip 1st element (3), return next 2 (2, 1)
 }
 
 }  // namespace dfly
