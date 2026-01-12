@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/jsoncons_project"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/jsoncons_project.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/jsoncons_project-complete.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-build.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-configure.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-download.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-install.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-mkdir.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-patch.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jsoncons_project-stamp/jsoncons_project-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"jsoncons_project"
+		],
+		"name" : "jsoncons_project"
+	}
+}

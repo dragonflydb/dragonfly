@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libmetrics.a CMakeFiles/metrics.dir/family.cc.o CMakeFiles/metrics.dir/metrics.cc.o
+/usr/bin/ranlib ../../../lib/libmetrics.a

@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libredis_dict.a CMakeFiles/redis_dict.dir/alloc.c.o CMakeFiles/redis_dict.dir/dict.c.o CMakeFiles/redis_dict.dir/sds.c.o
+/usr/bin/ranlib ../../../lib/libredis_dict.a

@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libcloud_lib.a CMakeFiles/cloud_lib.dir/utils.cc.o
+/usr/bin/ranlib ../../../lib/libcloud_lib.a

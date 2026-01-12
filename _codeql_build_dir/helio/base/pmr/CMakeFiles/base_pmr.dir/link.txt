@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libbase_pmr.a CMakeFiles/base_pmr.dir/arena.cc.o
+/usr/bin/ranlib ../../../lib/libbase_pmr.a
