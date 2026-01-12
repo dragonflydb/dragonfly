@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libhttp_client_lib.a CMakeFiles/http_client_lib.dir/http_client.cc.o CMakeFiles/http_client_lib.dir/https_client_pool.cc.o
+/usr/bin/ranlib ../../../lib/libhttp_client_lib.a

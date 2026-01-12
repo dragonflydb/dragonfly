@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/hdr_histogram_project"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/hdr_histogram_project.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/hdr_histogram_project-complete.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-build.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-configure.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-download.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-install.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-mkdir.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-patch.rule"
+		},
+		{
+			"file" : "/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/hdr_histogram_project-stamp/hdr_histogram_project-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"hdr_histogram_project"
+		],
+		"name" : "hdr_histogram_project"
+	}
+}

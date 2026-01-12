@@ -1,0 +1,13 @@
+# Target labels
+ jemalloc_project
+# Source files and their labels
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/CMakeFiles/jemalloc_project
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/CMakeFiles/jemalloc_project.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/CMakeFiles/jemalloc_project-complete.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-build.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-configure.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-download.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-install.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-mkdir.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-patch.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/jemalloc_project-stamp/jemalloc_project-update.rule

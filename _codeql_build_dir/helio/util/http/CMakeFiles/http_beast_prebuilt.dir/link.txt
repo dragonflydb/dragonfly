@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libhttp_beast_prebuilt.a CMakeFiles/http_beast_prebuilt.dir/prebuilt_beast.cc.o
+/usr/bin/ranlib ../../../lib/libhttp_beast_prebuilt.a

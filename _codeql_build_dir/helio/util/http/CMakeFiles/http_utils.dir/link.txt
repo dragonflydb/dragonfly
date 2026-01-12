@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libhttp_utils.a CMakeFiles/http_utils.dir/encoding.cc.o CMakeFiles/http_utils.dir/http_common.cc.o
+/usr/bin/ranlib ../../../lib/libhttp_utils.a

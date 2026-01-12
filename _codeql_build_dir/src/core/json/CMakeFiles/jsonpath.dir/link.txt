@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../../../lib/libjsonpath.a CMakeFiles/jsonpath.dir/lexer_impl.cc.o CMakeFiles/jsonpath.dir/driver.cc.o CMakeFiles/jsonpath.dir/path.cc.o CMakeFiles/jsonpath.dir/__/__/__/genfiles/src/core/json/jsonpath_lexer.cc.o CMakeFiles/jsonpath.dir/__/__/__/genfiles/src/core/json/jsonpath_grammar.cc.o CMakeFiles/jsonpath.dir/json_object.cc.o CMakeFiles/jsonpath.dir/detail/jsoncons_dfs.cc.o CMakeFiles/jsonpath.dir/detail/flat_dfs.cc.o
+/usr/bin/ranlib ../../../lib/libjsonpath.a

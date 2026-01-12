@@ -1,0 +1,13 @@
+# Target labels
+ expected_project
+# Source files and their labels
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/CMakeFiles/expected_project
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/CMakeFiles/expected_project.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/CMakeFiles/expected_project-complete.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-build.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-configure.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-download.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-install.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-mkdir.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-patch.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/expected_project-stamp/expected_project-update.rule

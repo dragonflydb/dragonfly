@@ -1,0 +1,13 @@
+# Target labels
+ lua_project
+# Source files and their labels
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/lua_project
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/lua_project.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/src/CMakeFiles/lua_project-complete.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-build.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-configure.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-download.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-install.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-mkdir.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-patch.rule
+/home/runner/work/dragonfly/dragonfly/_codeql_build_dir/third_party/src/lua_project-stamp/lua_project-update.rule
