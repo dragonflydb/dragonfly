@@ -33,6 +33,7 @@ class RESPObj {
   RESPObj(redisReply* reply, bool needs_to_free) : reply_(reply), needs_to_free_(needs_to_free) {
   }
 
+  // TODO remove copy ctor, because it is not a deep copy
   RESPObj(const RESPObj& other) : reply_(other.reply_), needs_to_free_(false) {
   }
   RESPObj& operator=(const RESPObj& other) = delete;
@@ -87,6 +88,10 @@ class RESPParser {
   }
 
   std::optional<RESPObj> Feed(const char* data, size_t len);
+
+  size_t BufferPos() const {
+    return reader_->pos;
+  }
 
  private:
   redisReader* reader_;
