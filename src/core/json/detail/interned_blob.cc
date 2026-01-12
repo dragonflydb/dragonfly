@@ -27,11 +27,20 @@ InternedBlob::InternedBlob(const std::string_view sv) {
 }
 
 InternedBlob::~InternedBlob() {
-  if (blob_) {
-    const size_t to_destroy = kHeaderSize + Size() + 1;
-    StatelessAllocator<char>{}.deallocate(blob_, to_destroy);
-    blob_ = nullptr;
+  Destroy();
+}
+
+InternedBlob::InternedBlob(InternedBlob&& other) noexcept : blob_(other.blob_) {
+  other.blob_ = nullptr;
+}
+
+InternedBlob& InternedBlob::operator=(InternedBlob&& other) noexcept {
+  if (this != &other) {
+    Destroy();
+    blob_ = other.blob_;
+    other.blob_ = nullptr;
   }
+  return *this;
 }
 
 uint32_t InternedBlob::Size() const {
@@ -72,6 +81,14 @@ void InternedBlob::DecrRefCount() const {
   // Caller must ensure refcount does not go below 0
   const uint32_t updated_count = RefCount() - 1;
   std::memcpy(blob_ + sizeof(uint32_t), &updated_count, sizeof(updated_count));
+}
+
+void InternedBlob::Destroy() {
+  if (blob_) {
+    const size_t to_destroy = kHeaderSize + Size() + 1;
+    StatelessAllocator<char>{}.deallocate(blob_, to_destroy);
+    blob_ = nullptr;
+  }
 }
 
 size_t BlobHash::operator()(const InternedBlob& b) const {

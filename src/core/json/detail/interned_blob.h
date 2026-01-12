@@ -16,6 +16,12 @@ class InternedBlob {
   explicit InternedBlob(std::string_view sv);
   ~InternedBlob();
 
+  InternedBlob(const InternedBlob& other) = delete;
+  InternedBlob& operator=(const InternedBlob& other) = delete;
+
+  InternedBlob(InternedBlob&& other) noexcept;
+  InternedBlob& operator=(InternedBlob&& other) noexcept;
+
   uint32_t Size() const;
 
   uint32_t RefCount() const;
@@ -33,9 +39,11 @@ class InternedBlob {
   void DecrRefCount() const;
 
  private:
+  void Destroy();
+
   // Layout is: 4 bytes size, 4 bytes refcount, char data, followed by nul-char
   // nul-char is required because jsoncons attempts to access c_str/data without a size.
-  char* blob_;
+  char* blob_ = nullptr;
 };
 
 struct BlobHash {
