@@ -627,7 +627,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
       DVLOG(1) << "Calling Flush on all slots " << this;
 
-      full_sync_completed_ = false;
+      passed_full_sync_ = false;
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
       } else {
@@ -665,7 +665,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     RdbLoader::PerformPostLoad(&service_);
   }
 
-  full_sync_completed_ = true;
+  passed_full_sync_ = true;
 
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
@@ -1282,7 +1282,7 @@ auto Replica::GetSummary() const -> Summary {
     }
     res.psync_successes = psync_successes_;
     res.psync_attempts = psync_attempts_;
-    res.full_sync_completed = full_sync_completed_;
+    res.passed_full_sync = passed_full_sync_;
     return res;
   };
 

@@ -132,7 +132,12 @@ class Replica : ProtocolClient {
     uint64_t repl_offset_sum;
     size_t psync_attempts;
     size_t psync_successes;
-    bool full_sync_completed;
+    // We can't rely on full_sync_done or full_sync_in_progress because
+    // on disconnects the replica state mask is cleared. We use this variable
+    // to track if the replica reached full sync. When master disconnects,
+    // we use this variable to print the journal offsets in info command even
+    // when the link is down.
+    bool passed_full_sync;
   };
 
   Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.
@@ -180,7 +185,15 @@ class Replica : ProtocolClient {
   size_t repl_offs_ = 0, ack_offs_ = 0;
   unsigned state_mask_ = 0;  // see State enum above.
 
-  bool full_sync_completed_ = false;
+  // When replica starts full sync it is set to false and true when it completes the full sync.
+  // Disconnects do not reset this, so this variable is still true if the master
+  // is not connected and the state_ is cleared. Furthermore, on reconnects that enter full sync
+  // again this variable is set to false until full sync completes.
+  // Therefore, we have a consistent view of the replica:
+  // 1. True. Replica passed full sync even if master disconnects. In fact, once a
+  // node reached stable, the deltas from journal are the only missing items.
+  // 2. False. Replica has not passed full sync or a isconnect started full sync again.
+  bool passed_full_sync_ = false;
 
   bool is_paused_ = false;
   std::string id_;

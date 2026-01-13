@@ -3727,7 +3727,6 @@ async def test_repl_offset(df_factory):
     # then the assertion below shall fail. On that case, replicas full sync first
     # and as there are no journal changes the slave offsets are 2 (1 per shard).
     assert info["slave_repl_offset"] > proactors
-    info = await c_replica3.info("replication")
     assert info["psync_successes"] == 1
 
     await c_replica1.execute_command(f"REPLTAKEOVER 5")

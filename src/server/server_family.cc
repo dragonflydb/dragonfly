@@ -147,7 +147,7 @@ ABSL_FLAG(string, availability_zone, "",
 
 ABSL_FLAG(bool, keep_legacy_memory_metrics, true, "legacy metrics format");
 ABSL_FLAG(bool, replicaof_no_one_start_journal, false,
-          "starts the journal from the current offset on replica of no one");
+          "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -3261,7 +3261,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
         append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
         append("master_sync_in_progress", rinfo.full_sync_in_progress);
         append("master_replid", rinfo.master_id);
-        if (rinfo.full_sync_done || (rinfo.full_sync_completed && !rinfo.master_link_established))
+        if (rinfo.full_sync_done || (rinfo.passed_full_sync && !rinfo.master_link_established))
           append("slave_repl_offset", rinfo.repl_offset_sum);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
