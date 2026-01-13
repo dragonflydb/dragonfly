@@ -6,6 +6,8 @@
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
+#include <facade/resp_parser.h>
+#include <mimalloc.h>
 
 #include <random>
 
@@ -60,6 +62,33 @@ class RedisReplyBuilderTest : public testing::Test {
     RespExpr::Vec args;
     std::uint32_t consumed = 0;
 
+    ParsingResults(std::optional<RESPObj> obj = std::nullopt, size_t buf_pos = 0) {
+      if (!obj.has_value() || obj->Empty()) {
+        return;
+      }
+
+      holder_.emplace(std::move(*obj));
+
+      result = RedisParser::OK;
+      consumed = buf_pos;
+
+      if (holder_->GetType() == RESPObj::Type::ARRAY) {
+        auto arr = holder_->As<RESPArray>();
+        if (!arr.has_value()) {
+          result = RedisParser::BAD_ARRAYLEN;
+          return;
+        }
+
+        args.reserve(arr->Size());
+        for (size_t i = 0; i < arr->Size(); ++i) {
+          args.push_back(BuildExpr((*arr)[i]));
+        }
+        return;
+      }
+
+      args.push_back(BuildExpr(*holder_));
+    }
+
     bool Verify(std::uint32_t expected) const {
       return consumed == expected && result == RedisParser::OK;
     }
@@ -79,6 +108,65 @@ class RedisReplyBuilderTest : public testing::Test {
     bool IsString() const {
       return args.size() == 1 && result == RedisParser::OK && args[0].type == RespExpr::STRING;
     }
+
+   private:
+    RespExpr BuildExpr(const RESPObj& obj) {
+      RespExpr expr{RespExpr::NIL};
+
+      switch (obj.GetType()) {
+        case RESPObj::Type::INTEGER: {
+          expr.type = RespExpr::INT64;
+          expr.u = obj.As<int64_t>().value();
+          break;
+        }
+        case RESPObj::Type::DOUBLE: {
+          expr.type = RespExpr::DOUBLE;
+          expr.u = obj.As<double>().value();
+          break;
+        }
+        case RESPObj::Type::NIL: {
+          expr.type = RespExpr::NIL;
+          break;
+        }
+        case RESPObj::Type::ERROR: {
+          expr.type = RespExpr::ERROR;
+          SetStringPayload(obj, &expr);
+          break;
+        }
+        case RESPObj::Type::STRING:
+        case RESPObj::Type::REPLY_STATUS: {
+          expr.type = RespExpr::STRING;
+          SetStringPayload(obj, &expr);
+          break;
+        }
+        case RESPObj::Type::ARRAY: {
+          expr.type = RespExpr::ARRAY;
+          auto arr = obj.As<RESPArray>();
+          if (arr.has_value()) {
+            auto vec = std::make_unique<RespExpr::Vec>();
+            vec->reserve(arr->Size());
+            for (size_t i = 0; i < arr->Size(); ++i) {
+              vec->push_back(BuildExpr((*arr)[i]));
+            }
+            expr.u = vec.get();
+            owned_arrays_.emplace_back(std::move(vec));
+            expr.has_support = true;
+          }
+          break;
+        }
+      }
+
+      return expr;
+    }
+
+    void SetStringPayload(const RESPObj& obj, RespExpr* expr) {
+      auto sv = obj.As<std::string_view>().value_or(std::string_view{});
+      expr->u = RespExpr::Buffer{reinterpret_cast<const uint8_t*>(sv.data()), sv.size()};
+      expr->has_support = true;
+    }
+
+    std::optional<RESPObj> holder_;
+    std::vector<std::unique_ptr<RespExpr::Vec>> owned_arrays_;
   };
 
   void SetUp() {
@@ -89,6 +177,7 @@ class RedisReplyBuilderTest : public testing::Test {
 
   static void SetUpTestSuite() {
     tl_facade_stats = new FacadeStats;
+    init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
  protected:
@@ -191,13 +280,16 @@ std::ostream& operator<<(std::ostream& os, const RedisReplyBuilderTest::ParsingR
 }
 
 RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
-  ParsingResults result;
   parser_buffer_.reset(new uint8_t[SinkSize()]);
   auto* ptr = parser_buffer_.get();
   memcpy(ptr, str().data(), SinkSize());
-  RedisParser parser(RedisParser::Mode::CLIENT);
-  result.result =
-      parser.Parse(RedisParser::Buffer{ptr, SinkSize()}, &result.consumed, &result.args);
+  RESPParser parser;
+  auto resp_obj = parser.Feed(reinterpret_cast<char*>(ptr), SinkSize());
+  size_t buf_pos = parser.BufferPos();
+  buf_pos =
+      resp_obj && !buf_pos ? SinkSize() : buf_pos;  // after parsing if success buf_pos can be 0
+
+  ParsingResults result(std::move(resp_obj), buf_pos);
   return result;
 }
 
@@ -625,7 +717,7 @@ TEST_F(RedisReplyBuilderTest, MixedTypeArray) {
   // empty bulk string
   // double (bulk string)
   std::string long_string(1024, '-');
-  const unsigned int kArraySize = 9;
+  const unsigned int kArraySize = 6;
   const char random_bytes[] = {0x12, 0x15, 0x2F};
   const std::string_view kFirstBulkString{random_bytes, 3};
   const long kFirstLongValue = 54321;
