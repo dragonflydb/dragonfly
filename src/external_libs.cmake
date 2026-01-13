@@ -148,9 +148,8 @@ if (WITH_SEARCH)
     GIT_REPOSITORY https://github.com/antgroup/vsag
     GIT_TAG main
     PATCH_COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/vsag/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/vsag/0_openblas_version.patch
-          COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/vsag/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/vsag/1_openblas_no_fortran.patch
-    CMAKE_PASS_FLAGS "-DENABLE_INTEL_MKL:BOOL=OFF -DENABLE_TESTS:BOOL=OFF -DENABLE_EXAMPLES:BOOL=OFF"
-    LIB libvsag_static.a
+    CMAKE_PASS_FLAGS "-DENABLE_INTEL_MKL:BOOL=OFF -DENABLE_TESTS:BOOL=OFF -DENABLE_EXAMPLES:BOOL=OFF -DENABLE_LIBAIO:BOOL=OFF"
+    LIB libvsag.so
   )
 
 endif()

@@ -177,7 +177,7 @@ struct HnswlibAdapter {
         "dim": $1,
         "hnsw": {
             "max_degree": 16,
-            "ef_construction": $3
+            "ef_construction": $2
         }
     }
     )";
@@ -192,9 +192,9 @@ struct HnswlibAdapter {
 
   void Add(const float* data, const GlobalDocId id) {
     auto dataset = vsag::Dataset::Make();
-    auto ids = new int64_t[1];
-    ids[0] = id;
-    dataset->NumElements(1)->Dim(dim_)->Ids(ids)->Float32Vectors(data);
+    std::vector<int64_t> ids{static_cast<int64_t>(id)};
+    dataset->NumElements(1)->Dim(dim_)->Ids(ids.data())->Float32Vectors(data);
+    dataset->Owner(false);
     index_->Add(dataset);
   }
 
@@ -203,6 +203,31 @@ struct HnswlibAdapter {
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+    static auto hnsw_search_parameters = R"(
+    {
+        "hnsw": {
+            "ef_search": $0
+        }
+    }
+    )";
+
+    auto query = vsag::Dataset::Make();
+    query->NumElements(1)->Dim(dim_)->Float32Vectors(target)->Owner(false);
+
+    auto knn_result = index_->KnnSearch(
+        query, k, absl::Substitute(hnsw_search_parameters, ef.value_or(kDefaultEfRuntime)));
+
+    if (knn_result.has_value()) {
+      auto result = knn_result.value();
+      vector<pair<float, GlobalDocId>> out;
+      out.reserve(result->GetDim());
+      for (int64_t i = 0; i < result->GetDim(); ++i) {
+        out.emplace_back(result->GetDistances()[i], result->GetIds()[i]);
+      }
+      return out;
+    } else {
+      return {};
+    }
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
