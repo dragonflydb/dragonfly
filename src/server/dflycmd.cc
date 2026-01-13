@@ -354,7 +354,7 @@ void DflyCmd::Sync(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Start full sync.
   {
-    Transaction::Guard tg{cmd_cntx->tx};
+    Transaction::Guard tg{cmd_cntx->tx()};
     AggregateStatus status;
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
@@ -404,7 +404,7 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   {
-    Transaction::Guard tg{cmd_cntx->tx};
+    Transaction::Guard tg{cmd_cntx->tx()};
     AggregateStatus status;
 
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
@@ -607,7 +607,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
-  cmd_cntx->tx->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
+  cmd_cntx->tx()->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
     t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
     return OpStatus::OK;
   });

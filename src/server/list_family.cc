@@ -645,7 +645,7 @@ void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx, cmd_cntx->rb());
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
@@ -661,7 +661,7 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx, cmd_cntx->server_conn_cntx());
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -694,7 +694,7 @@ void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx, cmd_cntx->server_conn_cntx());
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -802,7 +802,7 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
     return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     return cmd_cntx->SendLong(result.value());
   }
@@ -827,7 +827,7 @@ void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
@@ -864,7 +864,7 @@ void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   auto* cntx = cmd_cntx->server_conn_cntx();
-  Transaction* tx = cmd_cntx->tx;
+  Transaction* tx = cmd_cntx->tx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
       tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
@@ -945,7 +945,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(cb), false /* followed by another hop */);
+  cmd_cntx->tx()->Execute(std::move(cb), false /* followed by another hop */);
 
   // Find the first existing key from command arguments
   optional<string_view> key_to_pop;
@@ -958,7 +958,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
       continue;
 
     const auto& [found_key, is_valid_type] = *found_keys_per_shard[sid];
-    ShardArgs shard_args = cmd_cntx->tx->GetShardArgs(sid);
+    ShardArgs shard_args = cmd_cntx->tx()->GetShardArgs(sid);
 
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it) {
       if (found_key == *it && it.index() < min_index) {
@@ -972,7 +972,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Handle errors and empty cases first
   if (!key_to_pop || found_wrong_type) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     if (found_wrong_type) {
       response_builder->SendError(kWrongTypeErr);
     } else {
@@ -993,7 +993,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(cb_pop), true);
+  cmd_cntx->tx()->Execute(std::move(cb_pop), true);
 
   if (result) {
     response_builder->StartArray(2);
@@ -1033,7 +1033,7 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   ConnectionContext* conn_cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
+      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
       &conn_cntx->paused);
 
   if (popped_key.ok()) {
@@ -1072,7 +1072,7 @@ void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     cmd_cntx->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -1121,7 +1121,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
-  Transaction* trans = cmd_cntx->tx;
+  Transaction* trans = cmd_cntx->tx();
   auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1156,7 +1156,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1182,7 +1182,7 @@ void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 
-  OpResult<int> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     return rb->SendLong(result.value_or(0));
   }
@@ -1204,7 +1204,7 @@ void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  OpStatus st = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus st = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (st == OpStatus::KEY_NOTFOUND)
     st = OpStatus::OK;
   cmd_cntx->SendError(st);
@@ -1226,7 +1226,7 @@ void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  auto res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
     return rb->SendError(res.status());
   }
@@ -1249,7 +1249,7 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendLong(result.value_or(0));
   }
@@ -1270,7 +1270,7 @@ void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<void> result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (result) {
     cmd_cntx->rb()->SendOk();
   } else {
@@ -1295,7 +1295,7 @@ void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx, cmd_cntx->rb());
+  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 }  // namespace

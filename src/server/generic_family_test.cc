@@ -1477,4 +1477,39 @@ TEST_F(GenericFamilyTest, SortNegativeLimit) {
   ASSERT_THAT(resp, ErrArg("value is not an integer"));
 }
 
+TEST_F(GenericFamilyTest, SortBy) {
+  Run({"del", "list-1"});
+  Run({"lpush", "list-1", "1", "2", "3"});
+  Run({"set", "w_1", "30"});
+  Run({"set", "w_2", "20"});
+  Run({"set", "w_3", "10"});
+
+  // standard sort
+  auto resp = Run({"sort", "list-1", "BY", "w_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "2", "1"));
+
+  // desc
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "DESC"}), RespElementsAre("1", "2", "3"));
+
+  // alpha
+  Run({"set", "s_1", "c"});
+  Run({"set", "s_2", "b"});
+  Run({"set", "s_3", "a"});
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "s_*", "ALPHA"}), RespElementsAre("3", "2", "1"));
+
+  // nosort, lpush reverses order, so 3, 2, 1 is insertion order (or close to it)
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "nosort"}), RespElementsAre("3", "2", "1"));
+
+  // missing keys -> 0
+  Run({"del", "w_1"});
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*"}), RespElementsAre("1", "3", "2"));  // 0, 10, 20
+
+  // BY pattern with LIMIT - test pagination works correctly
+  Run({"set", "w_1", "30"});  // restore w_1
+  // Sorted order: 3 (w_3=10), 2 (w_2=20), 1 (w_1=30). LIMIT 1 2 skips first, returns next 2
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "LIMIT", "1", "2"}), RespElementsAre("2", "1"));
+  // multiple asterisks should result in syntax error
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*_*"}), ErrArg("syntax error"));
+}
+
 }  // namespace dfly
