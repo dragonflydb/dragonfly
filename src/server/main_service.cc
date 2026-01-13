@@ -1530,7 +1530,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::OK;
   }
 
-  // Reset transation at the end or when returning an error
+  // Reset transaction at the end or when returning an error
   absl::Cleanup clean_tx = [dfly_cntx, dispatching_in_multi] {
     if (!dispatching_in_multi) {
       dfly_cntx->transaction = nullptr;
