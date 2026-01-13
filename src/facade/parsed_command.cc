@@ -5,6 +5,7 @@
 #include "facade/parsed_command.h"
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -47,11 +48,9 @@ string MCRender::RenderDeleted() const {
 }
 
 void ParsedCommand::ResetForReuse() {
-  allow_async_execution_ = false;
   is_deferred_reply_ = false;
-  reply_payload_ = std::monostate{};
+  reply_ = std::monostate{};
 
-  state_.store(0, std::memory_order_relaxed);
   offsets_.clear();
   if (HeapMemory() > 1024) {
     storage_.clear();  // also deallocates the heap.
@@ -64,8 +63,7 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) {
   if (!is_deferred_reply_) {
     rb_->SendError(str, type);
   } else {
-    reply_payload_ = payload::make_error(str, type);
-    NotifyReplied();
+    reply_ = payload::make_error(str, type);
   }
 }
 
@@ -77,10 +75,9 @@ void ParsedCommand::SendError(facade::OpStatus status) {
       rb_->SendError(StatusToMsg(status));
   } else {
     if (status == OpStatus::OK)
-      reply_payload_ = payload::SimpleString{"OK"};
+      reply_ = payload::SimpleString{"OK"};
     else
-      reply_payload_ = payload::make_error(StatusToMsg(status));
-    NotifyReplied();
+      reply_ = payload::make_error(StatusToMsg(status));
   }
 }
 
@@ -94,15 +91,13 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
   if (!is_deferred_reply_) {
     rb_->SendSimpleString(str);
   } else {
-    reply_payload_ = payload::make_simple_or_noreply(str);
-    NotifyReplied();
+    reply_ = payload::make_simple_or_noreply(str);
   }
 }
 
 void ParsedCommand::SendLong(long val) {
   if (is_deferred_reply_) {
-    reply_payload_ = long(val);
-    NotifyReplied();
+    reply_ = long(val);
   } else {
     rb_->SendLong(val);
   }
@@ -110,8 +105,7 @@ void ParsedCommand::SendLong(long val) {
 
 void ParsedCommand::SendNull() {
   if (is_deferred_reply_) {
-    reply_payload_ = payload::Null{};
-    NotifyReplied();
+    reply_ = payload::Null{};
   } else {
     DCHECK(mc_cmd_ == nullptr);  // RESP only
     static_cast<RedisReplyBuilder*>(rb_)->SendNull();
@@ -120,59 +114,25 @@ void ParsedCommand::SendNull() {
 
 void ParsedCommand::SendEmptyArray() {
   if (is_deferred_reply_) {
-    reply_payload_ = make_unique<payload::CollectionPayload>(0, CollectionType::ARRAY);
-    NotifyReplied();
+    reply_ = make_unique<payload::CollectionPayload>(0, CollectionType::ARRAY);
   } else {
     DCHECK(mc_cmd_ == nullptr);  // RESP only
     static_cast<RedisReplyBuilder*>(rb_)->SendEmptyArray();
   }
 }
 
-bool ParsedCommand::SendPayload() {
-  if (is_deferred_reply_) {
-    CapturingReplyBuilder::Apply(std::move(reply_payload_), rb_);
-    reply_payload_ = {};
-    return true;
-  }
-  return false;
+bool ParsedCommand::CanReply() const {
+  DCHECK(is_deferred_reply_);
+  dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0; },
+                      [](const AsyncTask& task) { return task.blocker->IsCompleted(); }};
+  return std::visit(ov, reply_);
 }
 
-bool ParsedCommand::CheckDoneAndMarkHead() {
-  uint8_t state = state_.load(std::memory_order_acquire);
-
-  while ((state & ASYNC_REPLY_DONE) == 0) {
-    // If we marked it as head already, return false.
-    if (state & HEAD_REPLY) {
-      return false;
-    }
-
-    // Mark it as head. If succeeded (i.e ASYNC_REPLY_DONE is still not set), return false
-    if (state_.compare_exchange_weak(state, state | HEAD_REPLY, std::memory_order_acq_rel)) {
-      return false;
-    }
-    // Otherwise, retry with updated state.
-  }
-
-  // ASYNC_REPLY_DONE is set, return true.
-  return true;
-}
-
-void ParsedCommand::NotifyReplied() {
-  // A synchronization point. We set ASYNC_REPLY_DONE to mark it's safe now to read the payload.
-  uint8_t prev_state = state_.fetch_or(ASYNC_REPLY_DONE, std::memory_order_acq_rel);
-
-  DVLOG(1) << "ParsedCommand::NotifyReplied with state " << unsigned(prev_state);
-
-  if (prev_state & DELETE_INTENT) {
-    delete this;
-    return;
-  }
-  // If it was marked as head already, notify the connection that the head is done.
-  if (prev_state & HEAD_REPLY) {
-    // TODO: this might crash as we currently do not wait for async commands on connection close.
-    DCHECK(conn_cntx_);
-    conn_cntx_->conn()->Notify();
-  }
+void ParsedCommand::SendReply() {
+  dfly::Overloaded ov{
+      [this](payload::Payload& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
+      [this](AsyncTask& task) { return task.replier(rb_); }};
+  return std::visit(ov, reply_);
 }
 
 }  // namespace facade

@@ -2033,69 +2033,27 @@ bool Connection::ParseMCBatch() {
 
 bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
+  for (auto& cmd = parsed_to_execute_; cmd != nullptr; cmd = cmd->next) {
+    bool is_head = cmd == parsed_head_;
 
-  unsigned num_pipelined = 0;
-  while (parsed_to_execute_) {
-    auto* cmd = parsed_to_execute_;
-    bool is_head = (cmd == parsed_head_);
+    if (cmd->IsDeferredReply() && cmd->CanReply())
+      continue;  // some kind of error, continue, optimize later
 
-    bool has_replied = false;
-
-    if (is_head) {
-      // Protocol parse errors create commands with already cached replies.
-      // Try sending payload now in case it's already set.
-      has_replied = cmd->SendPayload();
-      DVLOG(2) << "Maybe replying head: " << has_replied;
-    } else {
-      // We are not the head command, so we can not reply directly.
-      if (cmd->IsDeferredReply()) {
-        has_replied = true;  // The error reply is filled by the parser.
-      } else {
-        cmd->SetDeferredReply();
-      }
-    }
-
-    if (!has_replied) {
-      DCHECK(cmd->conn_cntx() == cc_.get());
-      service_->DispatchMC(cmd, AsyncPreference::ONLY_SYNC);
-
-      // If the reply was not deferred, then DispatchMC has surely replied.
-      has_replied = !cmd->IsDeferredReply();
-      DVLOG(2) << "Executed command, has_replied: " << has_replied;
-    }
-
-    if (has_replied) {
-      if (num_pipelined > 0) {
-        stats_->pipeline_dispatch_commands += num_pipelined;
-        stats_->pipeline_dispatch_calls++;
-        num_pipelined = 0;
-      }
-    } else {
-      num_pipelined++;
-    }
-
-    parsed_to_execute_ = cmd->next;
-
-    // Only if commands have deferred replies we need to keep them in the parsed queue
-    // until they complete.
-    if (is_head && has_replied) {
-      // This is head and it replied to the client socket, so we can remove it from the parsed
-      // queue right away.
-      // This optimization makes the ReplyMCBatch call a no-op unless we actually run asynchronous
-      // commands with deferred replies.
-      parsed_head_ = parsed_to_execute_;
-      ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
-    }
-
-    if (reply_builder_->GetError()) {
-      return false;
-    }
-  }
-
-  if (num_pipelined > 0) {
-    stats_->pipeline_dispatch_commands += num_pipelined;
+    // TODO: determine if sync/async possible
+    service_->DispatchMC(cmd);
     stats_->pipeline_dispatch_calls++;
+
+    if (!cmd->IsDeferredReply()) {
+      DCHECK(is_head);
+
+      parsed_head_ = cmd->next;
+      ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+
+      if (reply_builder_->GetError())
+        return false;
+    }
   }
+
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
   return true;
@@ -2107,21 +2065,16 @@ bool Connection::ReplyMCBatch() {
     return true;
   }
 
+  // Loop over finished command and break on first blocked
   reply_builder_->SetBatchMode(true);
-  while (parsed_head_ != parsed_to_execute_) {
-    auto* cmd = parsed_head_;
-    if (!cmd->PollHeadForCompletion())
+  for (auto& cmd = parsed_head_; cmd != parsed_to_execute_; cmd = cmd->next) {
+    if (!cmd->CanReply())
       break;
 
-    // This command finished processing and can be replied.
-    auto* next = cmd->next;
-
-    cmd->SendPayload();
-    ReleaseParsedCommand(cmd, next != parsed_to_execute_ /* is_pipelined */);
-    parsed_head_ = next;
-    if (reply_builder_->GetError()) {
+    cmd->SendReply();
+    ReleaseParsedCommand(cmd, cmd->next != parsed_to_execute_ /* is_pipelined */);
+    if (reply_builder_->GetError())
       return false;
-    }
   }
 
   if (parsed_head_ == nullptr)
@@ -2191,11 +2144,6 @@ void Connection::DestroyParsedQueue() {
     auto* cmd = parsed_head_;
     stats_->dispatch_queue_bytes -= cmd->UsedMemory();
     parsed_head_ = cmd->next;
-
-    if (cmd->MarkForDestruction()) {  // whether async operation finished or not started
-      DVLOG(2) << "Deleting parsed command " << cmd;
-      delete cmd;
-    }
   }
   parsed_tail_ = nullptr;
   parsed_cmd_q_len_ = 0;
@@ -2353,8 +2301,19 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
+  auto ioevent_cb = [this]() { io_event_.notify(); };
+  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
+  ParsedCommand* last_registrer = nullptr;  // breaks with pool?
+
   do {
     HandleMigrateRequest();
+
+    // For non-ready command that we have't registered on-completion, do it
+    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_) {
+      if (!cmd->CanReply() && cmd != last_registrer) {
+        cmd->Blocker()->OnCompletion(&ioevent_waiter);
+      }
+    }
 
     if (io_buf_.InputLen() == 0) {
       // Poll again for readiness. The event handler registered above is edge triggered
@@ -2366,8 +2325,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
       io_event_.await([this]() {
-        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
-               io_ec_;
+        bool cmd_ready =
+            parsed_head_ && parsed_head_ != parsed_to_execute_ && parsed_head_->CanReply();
+        return io_buf_.InputLen() > 0 || cmd_ready || io_ec_;
       });
     }
 

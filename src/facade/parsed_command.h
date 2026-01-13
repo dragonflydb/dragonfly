@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <variant>
+
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_payload.h"
+#include "util/fibers/synchronization.h"
 
 namespace facade {
 
@@ -60,6 +63,8 @@ class ParsedCommand : public cmn::BackedArguments {
   using first_arg_t = typename ArgumentExtractor<decltype(&std::decay_t<F>::operator())>::type;
 
  public:
+  using ReplyFunc = std::function<void(SinkReplyBuilder*)>;
+
   virtual ~ParsedCommand() = default;
 
   virtual size_t GetSize() const {
@@ -104,15 +109,6 @@ class ParsedCommand : public cmn::BackedArguments {
     return sz;
   }
 
-  // Allows the possibility for asynchronous execution of this command.
-  void AllowAsyncExecution() {
-    allow_async_execution_ = true;
-  }
-
-  bool AsyncExecutionAllowed() const {
-    return allow_async_execution_;
-  }
-
   // Marks this command as having reply stored in its payload instead of being sent directly.
   void SetDeferredReply() {
     is_deferred_reply_ = true;
@@ -137,77 +133,61 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
   }
 
+  // TODO: remove
   void SendLong(long val);
   void SendNull();
   void SendEmptyArray();
 
+  // TODO: remove
   template <typename F> void ReplyWith(F&& func) {
     if (is_deferred_reply_) {
-      reply_payload_ = [func = std::forward<F>(func)](SinkReplyBuilder* builder) {
+      reply_ = [func = std::forward<F>(func)](SinkReplyBuilder* builder) {
         auto* rb = static_cast<first_arg_t<F>>(builder);
         func(rb);
       };
-      NotifyReplied();
     } else {
       auto* rb = static_cast<first_arg_t<F>>(rb_);
       func(rb);
     }
   }
 
-  // If payload exists, sends it to reply builder, resets it and returns true.
-  // Otherwise, returns false.
-  bool SendPayload();
+  // Precondition: deferred. Retruns true if reply is ready
+  bool CanReply() const;
 
-  // Polls whether the command can be finalized for execution.
-  // If it was executed synchronously, returns true.
-  // If it was dispatched asynchronously, marks it as head command and returns
-  // true if it finished executing and its reply is ready, false otherwise.
-  bool PollHeadForCompletion() {
-    if (!is_deferred_reply_)
-      return true;  // assert(holds_alternative<monostate>(cmd->TakeReplyPayload()));
+  // Precondition: deferred & CanReply
+  void SendReply();
 
-    return CheckDoneAndMarkHead();
+  // Async API:
+
+  void Resolve(const facade::ErrorReply& error) {
+    SendError(error);
   }
 
-  // Returns true if the caller can destroy this ParsedCommand.
-  // false, if the command will be destroyed by its asynchronous callback.
-  bool MarkForDestruction() {
-    if (!is_deferred_reply_)
-      return true;
-    uint8_t prev_state = state_.fetch_or(DELETE_INTENT, std::memory_order_acq_rel);
+  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, ReplyFunc replier) {
+    reply_ = AsyncTask{blocker, std::move(replier)};
+  }
 
-    // If the reply is already done, we can destroy it now.
-    return (prev_state & ASYNC_REPLY_DONE) != 0;
+  util::fb2::EmbeddedBlockingCounter* Blocker() const {
+    return std::get<AsyncTask>(reply_).blocker;
   }
 
  protected:
   virtual void ReuseInternal() = 0;
 
  private:
-  bool CheckDoneAndMarkHead();
-  void NotifyReplied();
-
-  // Synchronization state bits. The reply callback in a shard thread sets ASYNC_REPLY_DONE
-  // when payload is filled. It also notifies the connection if the command is marked as HEAD_REPLY.
-  // The connection fiber checks for ASYNC_REPLY_DONE and sets HEAD_REPLY via
-  // CheckDoneAndMarkHead().
-  enum StateBits : uint8_t {
-    ASYNC_REPLY_DONE = 1 << 0,
-    HEAD_REPLY = 1 << 1,  // it's the first command in the reply chain.
-    DELETE_INTENT = 1 << 2,
+  // Pending async task
+  struct AsyncTask {
+    util::fb2::EmbeddedBlockingCounter* blocker;
+    ReplyFunc replier;
   };
-  std::atomic_uint8_t state_{0};
-
-  // whether the command can be dispatched asynchronously.
-  bool allow_async_execution_ = false;
 
   // if false then the reply was sent directly to reply builder,
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
 
-  payload::Payload reply_payload_;  // captured reply payload for async dispatches
+  std::variant<payload::Payload, AsyncTask> reply_;
 };
 
-static_assert(sizeof(ParsedCommand) == 224);
+static_assert(sizeof(ParsedCommand) == 232);
 
 }  // namespace facade
