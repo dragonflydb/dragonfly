@@ -210,43 +210,43 @@ ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
 
 namespace reply_generic {
 
-template <typename I> void Send(I begin, I end, CommandContext* cmnd_cntx);
+template <typename I> void Send(I begin, I end, CommandContext* cmd_cntx);
 
-inline RedisReplyBuilder* RB(CommandContext* cmnd_cntx) {
-  return static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
+inline RedisReplyBuilder* RB(CommandContext* cmd_cntx) {
+  return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 }
 
-void Send(bool value, CommandContext* cmnd_cntx) {
-  RB(cmnd_cntx)->SendBulkString(value ? "true"sv : "false"sv);
+void Send(bool value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendBulkString(value ? "true"sv : "false"sv);
 }
 
-void Send(long value, CommandContext* cmnd_cntx) {
-  RB(cmnd_cntx)->SendLong(value);
+void Send(long value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendLong(value);
 }
 
-void Send(size_t value, CommandContext* cmnd_cntx) {
-  RB(cmnd_cntx)->SendLong(value);
+void Send(size_t value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendLong(value);
 }
 
-void Send(double value, CommandContext* cmnd_cntx) {
-  RB(cmnd_cntx)->SendDouble(value);
+void Send(double value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendDouble(value);
 }
 
-void Send(const std::string& value, CommandContext* cmnd_cntx) {
-  RB(cmnd_cntx)->SendBulkString(value);
+void Send(const std::string& value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendBulkString(value);
 }
 
-void Send(const std::vector<std::string>& vec, CommandContext* cmnd_cntx) {
-  Send(vec.begin(), vec.end(), cmnd_cntx);
+void Send(const std::vector<std::string>& vec, CommandContext* cmd_cntx) {
+  Send(vec.begin(), vec.end(), cmd_cntx);
 }
 
 template <typename Allocator>
-void Send(const JsonWithAllocator<Allocator>& value, CommandContext* cmnd_cntx) {
-  auto* rb = RB(cmnd_cntx);
+void Send(const JsonWithAllocator<Allocator>& value, CommandContext* cmd_cntx) {
+  auto* rb = RB(cmd_cntx);
   if (value.is_double()) {
-    Send(value.as_double(), cmnd_cntx);
+    Send(value.as_double(), cmd_cntx);
   } else if (value.is_number()) {
-    Send(value.template as_integer<long>(), cmnd_cntx);
+    Send(value.template as_integer<long>(), cmd_cntx);
   } else if (value.is_bool()) {
     rb->SendSimpleString(value.as_bool() ? "true" : "false");
   } else if (value.is_null()) {
@@ -259,34 +259,34 @@ void Send(const JsonWithAllocator<Allocator>& value, CommandContext* cmnd_cntx) 
     for (const auto& item : value.object_range()) {
       rb->StartArray(2);
       rb->SendBulkString(item.key());
-      Send(item.value(), cmnd_cntx);
+      Send(item.value(), cmd_cntx);
     }
   } else if (value.is_array()) {
     if (rb->IsResp3()) {
       rb->StartArray(value.size());
       for (const auto& item : value.array_range()) {
-        Send(item, cmnd_cntx);
+        Send(item, cmd_cntx);
       }
     } else {
       rb->StartArray(value.size() + 1);
       rb->SendSimpleString("[");
       for (const auto& item : value.array_range()) {
-        Send(item, cmnd_cntx);
+        Send(item, cmd_cntx);
       }
     }
   }
 }
 
-template <typename T> void Send(const std::optional<T>& opt, CommandContext* cmnd_cntx) {
+template <typename T> void Send(const std::optional<T>& opt, CommandContext* cmd_cntx) {
   if (opt.has_value()) {
-    Send(opt.value(), cmnd_cntx);
+    Send(opt.value(), cmd_cntx);
   } else {
-    RB(cmnd_cntx)->SendNull();
+    RB(cmd_cntx)->SendNull();
   }
 }
 
-template <typename I> void Send(I begin, I end, CommandContext* cmnd_cntx) {
-  RedisReplyBuilder* rb = RB(cmnd_cntx);
+template <typename I> void Send(I begin, I end, CommandContext* cmd_cntx) {
+  RedisReplyBuilder* rb = RB(cmd_cntx);
   RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
@@ -296,18 +296,18 @@ template <typename I> void Send(I begin, I end, CommandContext* cmnd_cntx) {
     } else {
       rb->StartArray(end - begin);
       for (auto i = begin; i != end; ++i) {
-        Send(*i, cmnd_cntx);
+        Send(*i, cmd_cntx);
       }
     }
   }
 }
 
-template <typename T> void Send(const JsonCallbackResult<T>& result, CommandContext* cmnd_cntx) {
-  RedisReplyBuilder* rb = RB(cmnd_cntx);
+template <typename T> void Send(const JsonCallbackResult<T>& result, CommandContext* cmd_cntx) {
+  RedisReplyBuilder* rb = RB(cmd_cntx);
   if (result.ShouldSendNil())
     return rb->SendNull();
   if (result.ShouldSendWrongType())
-    return cmnd_cntx->SendError(OpStatus::WRONG_JSON_TYPE);
+    return cmd_cntx->SendError(OpStatus::WRONG_JSON_TYPE);
 
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
@@ -315,7 +315,7 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, CommandCont
     if (rb->IsResp3()) {
       rb->StartArray(1);
     }
-    Send(result.AsV1(), cmnd_cntx);
+    Send(result.AsV1(), cmd_cntx);
   } else {
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
@@ -327,37 +327,37 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, CommandCont
         if constexpr (std::is_same_v<T, std::string>) {
           rb->StartArray(1);
         }
-        Send(item, cmnd_cntx);
+        Send(item, cmd_cntx);
       }
     } else {
-      Send(arr.begin(), arr.end(), cmnd_cntx);
+      Send(arr.begin(), arr.end(), cmd_cntx);
     }
   }
 }
 
-template <typename T> void Send(const OpResult<T>& result, CommandContext* cmnd_cntx) {
+template <typename T> void Send(const OpResult<T>& result, CommandContext* cmd_cntx) {
   if (result) {
-    RedisReplyBuilder::ReplyScope scope{cmnd_cntx->rb()};
-    Send(result.value(), cmnd_cntx);
+    RedisReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
+    Send(result.value(), cmd_cntx);
   } else {
-    cmnd_cntx->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void SendJsonString(const OpResult<string>& result, CommandContext* cmnd_cntx) {
+void SendJsonString(const OpResult<string>& result, CommandContext* cmd_cntx) {
   if (result) {
-    RedisReplyBuilder::ReplyScope scope{cmnd_cntx->rb()};
-    RedisReplyBuilder* rb = RB(cmnd_cntx);
+    RedisReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
+    RedisReplyBuilder* rb = RB(cmd_cntx);
     const string& json_str = result.value();
     if (rb->IsResp3()) {
       if (const std::optional<TmpJson> parsed_json = JsonFromString(json_str)) {
-        Send(parsed_json.value(), cmnd_cntx);
+        Send(parsed_json.value(), cmd_cntx);
         return;
       }
     }
-    Send(json_str, cmnd_cntx);
+    Send(json_str, cmd_cntx);
   } else {
-    cmnd_cntx->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
@@ -1002,7 +1002,7 @@ auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, CommandCon
     return OpToggle<T>(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1678,7 +1678,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
                  is_xx_condition);
   };
 
-  OpResult<bool> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<bool> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     if (*result) {
@@ -1709,7 +1709,7 @@ void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(cb);
+  cmd_cntx->tx()->ScheduleSingleHop(cb);
 
   if (*status != OpStatus::OK)
     return cmd_cntx->SendError(*status);
@@ -1731,7 +1731,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
     return OpMerge(t->GetOpArgs(shard), key, path, json_path, value);
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (status == OpStatus::OK)
     return builder->SendOk();
   cmd_cntx->SendError(status);
@@ -1749,7 +1749,7 @@ void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
     return OpResp(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1833,16 +1833,16 @@ void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
   std::vector<std::optional<std::string>> results(args.size() - 1);
   for (ShardId sid = 0; sid < shard_count; ++sid) {
-    if (!cmd_cntx->tx->IsActive(sid))
+    if (!cmd_cntx->tx()->IsActive(sid))
       continue;
 
     std::vector<std::optional<std::string>>& res = mget_resp[sid];
-    ShardArgs shard_args = cmd_cntx->tx->GetShardArgs(sid);
+    ShardArgs shard_args = cmd_cntx->tx()->GetShardArgs(sid);
     unsigned src_index = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_index) {
       if (!res[src_index])
@@ -1888,7 +1888,7 @@ void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
     return OpArrIndex(t->GetOpArgs(shard), key, json_path, search_value, start_index, end_index);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1915,7 +1915,7 @@ void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
     return OpArrInsert(t->GetOpArgs(shard), key, json_path, index, new_values);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1935,7 +1935,7 @@ void CmdArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
     return OpArrAppend(t->GetOpArgs(shard), key, json_path, append_values);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1964,7 +1964,7 @@ void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
     return OpArrTrim(t->GetOpArgs(shard), key, json_path, start_index, stop_index);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1983,7 +1983,7 @@ void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
     return OpArrPop(t->GetOpArgs(shard), key, json_path, index);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -1999,7 +1999,7 @@ void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
     return OpClear(t->GetOpArgs(shard), key, json_path);
   };
 
-  OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2022,7 +2022,7 @@ void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStrAppend(t->GetOpArgs(shard), key, json_path, json_string);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2038,7 +2038,7 @@ void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
     return OpObjKeys(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2054,7 +2054,7 @@ void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
     return OpDel(t->GetOpArgs(shard), key, path, json_path);
   };
 
-  OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2070,7 +2070,7 @@ void CmdNumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
   };
 
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::SendJsonString(result, cmd_cntx);
 }
 
@@ -2086,7 +2086,7 @@ void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
   };
 
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::SendJsonString(result, cmd_cntx);
 }
 
@@ -2117,7 +2117,7 @@ void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
     return OpType(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2133,7 +2133,7 @@ void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
     return OpArrLen(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2149,7 +2149,7 @@ void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
     return OpObjLen(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2165,7 +2165,7 @@ void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStrLen(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   reply_generic::Send(result, cmd_cntx);
 }
 
@@ -2187,7 +2187,7 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
     return OpJsonGet(t->GetOpArgs(shard), key, params.value());
   };
 
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
   if (result == OpStatus::KEY_NOTFOUND) {
