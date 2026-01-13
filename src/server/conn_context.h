@@ -336,9 +336,11 @@ class ConnectionContext : public facade::ConnectionContext {
   // Username
   std::string authed_username{"default"};
 
-  // Each list entry is a bitfield for a command family. Each bit in the bitfield maps to
-  // a single command from that family. The whole table encodes the full access list of commands
-  // for the user. For more info, see acl_commands_def.h and CommandRegistry::operator<<
+// Each entry in the list is a bitfield representing a specific command family, 
+// where each bit corresponds to an individual command within that family. 
+// Together, these entries encode the user's full ACL to commands. 
+// The index 'i' in 'acl_commands[i]' refers to the command family based on 
+// its registration order at runtime. For more details, see acl_commands_def.h.
   std::vector<uint64_t> acl_commands;
 
   // Keyspace. Each key referenced in a command must match (any) of the rules (globs).
