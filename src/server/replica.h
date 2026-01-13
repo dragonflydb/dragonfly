@@ -192,7 +192,7 @@ class Replica : ProtocolClient {
   // Therefore, we have a consistent view of the replica:
   // 1. True. Replica passed full sync even if master disconnects. In fact, once a
   // node reached stable, the deltas from journal are the only missing items.
-  // 2. False. Replica has not passed full sync or a isconnect started full sync again.
+  // 2. False. Replica has not passed full sync or a disconnect started full sync again.
   bool passed_full_sync_ = false;
 
   bool is_paused_ = false;
