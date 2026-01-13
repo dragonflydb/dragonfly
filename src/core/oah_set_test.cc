@@ -704,7 +704,7 @@ void BM_Add(benchmark::State& state) {
   state.counters["Memory_Used"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_Add)
-    ->ArgNames({"elements", "Key Size"})
+    ->ArgNames({"elements", "KeySize"})
     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_AddMany(benchmark::State& state) {
@@ -735,7 +735,7 @@ void BM_AddMany(benchmark::State& state) {
   state.counters["Memory_Used"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_AddMany)
-    ->ArgNames({"elements", "Key Size"})
+    ->ArgNames({"elements", "KeySize"})
     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_Erase(benchmark::State& state) {
@@ -765,7 +765,7 @@ void BM_Erase(benchmark::State& state) {
   state.counters["Memory_After_Erase"] = mem_used / state.iterations();
 }
 BENCHMARK(BM_Erase)
-    ->ArgNames({"elements", "Key Size"})
+    ->ArgNames({"elements", "KeySize"})
     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_Get(benchmark::State& state) {
@@ -786,7 +786,7 @@ void BM_Get(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_Get)
-    ->ArgNames({"elements", "Key Size"})
+    ->ArgNames({"elements", "KeySize"})
     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
 
 void BM_Grow(benchmark::State& state) {
