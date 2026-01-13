@@ -1010,7 +1010,7 @@ void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx)
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
-  OpResult<uint64_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
@@ -1034,7 +1034,7 @@ void TtlGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpTtl(t, shard, key); };
-  OpResult<uint64_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
@@ -1091,10 +1091,10 @@ void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
     return OpStatus::OK;
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  DVLOG(2) << "Del ts " << cmd_cntx->tx->txid();
+  DVLOG(2) << "Del ts " << cmd_cntx->tx()->txid();
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (cmd_cntx->mc_command()) {
@@ -1183,7 +1183,7 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
   return cmd_cntx->SendLong(result.load(memory_order_acquire));
@@ -1194,7 +1194,7 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
@@ -1224,7 +1224,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
@@ -1248,7 +1248,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
@@ -1301,7 +1301,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
@@ -1335,7 +1335,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
@@ -1344,7 +1344,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
-  Transaction* transaction = cmd_cntx->tx;
+  Transaction* transaction = cmd_cntx->tx();
   VLOG(1) << "Stick " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
@@ -1585,7 +1585,7 @@ struct SortVisitor {
         }
         return OpStatus::OK;
       };
-      cmd_cntx->tx->Execute(std::move(store_callback), true);
+      cmd_cntx->tx()->Execute(std::move(store_callback), true);
 
       if (store_len) {
         cmd_cntx->SendLong(store_len.value());
@@ -1666,13 +1666,13 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
         return OpStatus::OK;
       };
 
-      cmd_cntx->tx->Execute(std::move(fetch_cb), single_hop);
+      cmd_cntx->tx()->Execute(std::move(fetch_cb), single_hop);
       sort_status = fetch_result.status();
       source_type = *fetch_result;
     }
 
     if (sort_status != OpStatus::OK) {
-      cmd_cntx->tx->Conclude();
+      cmd_cntx->tx()->Conclude();
       if (sort_status == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(sort_status);
       if (sort_status == OpStatus::INVALID_NUMERIC_RESULT)
@@ -1721,7 +1721,7 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
                      rdb_version.value());
   };
 
-  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   switch (result) {
     case OpStatus::OK:
@@ -1749,7 +1749,7 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
 
-  OpResult<vector<long>> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     auto replier = [vec = std::move(result.value())](RedisReplyBuilder* rb) {
@@ -1769,7 +1769,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
 
-  OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cmd_cntx->SendLong(*result);
@@ -1791,7 +1791,7 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
 
-  if (target_db == cmd_cntx->tx->GetDbIndex()) {
+  if (target_db == cmd_cntx->tx()->GetDbIndex()) {
     return cmd_cntx->SendError("source and destination objects are the same");
   }
 
@@ -1811,19 +1811,19 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
   cmd_cntx->SendLong(res == OpStatus::OK);
 }
 
 void GenericFamily::Rename(CmdArgList args, CommandContext* cmd_cntx) {
-  auto reply = RenameGeneric(args, false, cmd_cntx->tx);
+  auto reply = RenameGeneric(args, false, cmd_cntx->tx());
   cmd_cntx->SendError(reply);
 }
 
 void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
-  auto reply = RenameGeneric(args, true, cmd_cntx->tx);
+  auto reply = RenameGeneric(args, true, cmd_cntx->tx());
   if (!reply.status) {
     return cmd_cntx->SendError(reply.ToSv(), reply.kind);
   }
@@ -1850,7 +1850,7 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("source and destination objects are the same");
   }
 
-  Renamer renamer(cmd_cntx->tx, k1, k2, shard_set->size(), true);
+  Renamer renamer(cmd_cntx->tx(), k1, k2, shard_set->size(), true);
   auto reply = renamer.Rename(!replace);
 
   if (!reply.status) {
@@ -1905,7 +1905,7 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Only global/non-atomic multi transactions can change dbs safely,
   // locked-ahead transactions acquired keys ahead for a specific dbindex
-  if (auto* tx = cmd_cntx->tx; tx && tx->IsMulti()) {
+  if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
     if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
@@ -1929,10 +1929,10 @@ void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    DVLOG(1) << "Dump " << cmd_cntx->tx->DebugId() << ": " << key << ", dump size "
+    DVLOG(1) << "Dump " << cmd_cntx->tx()->DebugId() << ": " << key << ", dump size "
              << result.value().size();
     auto reply = [data = std::move(*result)](RedisReplyBuilder* rb) { rb->SendBulkString(data); };
     cmd_cntx->ReplyWith(std::move(reply));
@@ -1953,7 +1953,7 @@ void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
       return OpStatus::KEY_NOTFOUND;
     }
   };
-  OpResult<CompactObjType> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<CompactObjType> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!result) {
     cmd_cntx->SendSimpleString("none");
   } else {
@@ -1963,8 +1963,8 @@ void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
 
 void GenericFamily::Time(CmdArgList args, CommandContext* cmd_cntx) {
   uint64_t now_usec;
-  if (cmd_cntx->tx) {
-    now_usec = cmd_cntx->tx->GetDbContext().time_now_ms * 1000;
+  if (cmd_cntx->tx()) {
+    now_usec = cmd_cntx->tx()->GetDbContext().time_now_ms * 1000;
   } else {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }

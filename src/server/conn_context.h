@@ -344,8 +344,13 @@ class CommandContext : public facade::ParsedCommand {
 
   CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* rb,
                  ConnectionContext* cntx)
-      : cid(_cid), tx(_tx) {
+      : cid(_cid), tx_(_tx) {
     Init(rb, cntx);
+  }
+
+  void SetupTx(const CommandId* _cid, Transaction* tx) {
+    cid = _cid;
+    tx_ = tx;
   }
 
   virtual size_t GetSize() const override {
@@ -353,7 +358,6 @@ class CommandContext : public facade::ParsedCommand {
   }
 
   const CommandId* cid = nullptr;
-  Transaction* tx = nullptr;
 
   uint64_t start_time_ns = 0;
 
@@ -374,8 +378,13 @@ class CommandContext : public facade::ParsedCommand {
     return std::exchange(rb_, new_rb);
   }
 
+  Transaction* tx() const {
+    return tx_;
+  }
+
  protected:
   void ReuseInternal() final;
+  Transaction* tx_ = nullptr;
 };
 
 }  // namespace dfly

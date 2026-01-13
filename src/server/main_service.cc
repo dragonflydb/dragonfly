@@ -870,15 +870,15 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-void TrackIfNeeded(CommandContext* cmnd_cntx) {
-  auto* cntx = cmnd_cntx->server_conn_cntx();
+void TrackIfNeeded(CommandContext* cmd_cntx) {
+  auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.tracking_info_;
-  if (auto* tx = cmnd_cntx->tx; tx) {
+  if (auto* tx = cmd_cntx->tx(); tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
     // we reset it.
     tx->SetTrackingCallback({});
-    if (cmnd_cntx->cid->IsReadOnly() && info.ShouldTrackKeys()) {
+    if (cmd_cntx->cid->IsReadOnly() && info.ShouldTrackKeys()) {
       auto conn = cntx->conn()->Borrow();
       tx->SetTrackingCallback([conn](Transaction* trans) {
         auto* shard = EngineShard::tlocal();
@@ -1422,8 +1422,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
     return DispatchResult::ERROR;
   }
 
-  CommandContext* cmnd_cntx = static_cast<CommandContext*>(parsed_cmd);
-  ConnectionContext* dfly_cntx = cmnd_cntx->server_conn_cntx();
+  CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
+  ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
@@ -1431,8 +1431,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   CmdArgVec tmp_vec;
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
 
-  if (cmnd_cntx->conn()) {  // no owner in replica context.
-    auto* conn = cmnd_cntx->conn();
+  if (cmd_cntx->conn()) {  // no owner in replica context.
+    auto* conn = cmd_cntx->conn();
 
     if (VLOG_IS_ON(2)) {
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
@@ -1470,7 +1470,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
       }
     }
     DCHECK(!err->status);
-    cmnd_cntx->SendError(err->ToSv(), err->kind);
+    cmd_cntx->SendError(err->ToSv(), err->kind);
     return DispatchResult::ERROR;
   }
 
@@ -1488,7 +1488,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
     if (cid->IsJournaled()) {
       exec_info.is_write = true;
     }
-    cmnd_cntx->SendSimpleString("QUEUED");
+    cmd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
 
@@ -1503,7 +1503,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
           dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
 
       if (status != OpStatus::OK) {
-        cmnd_cntx->SendError(status);
+        cmd_cntx->SendError(status);
         return DispatchResult::ERROR;
       }
     }
@@ -1518,7 +1518,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
         if (auto st =
                 dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
             st != OpStatus::OK) {
-          cmnd_cntx->SendError(StatusToMsg(st));
+          cmd_cntx->SendError(StatusToMsg(st));
           return DispatchResult::ERROR;
         }
       }
@@ -1531,13 +1531,13 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   }
 
   DispatchResult res = DispatchResult::ERROR;
-  cmnd_cntx->cid = cid;
-  cmnd_cntx->tx = dfly_cntx->transaction;
-  res = InvokeCmd(tail_args, cmnd_cntx);
+  cmd_cntx->SetupTx(cid, dfly_cntx->transaction);
+
+  res = InvokeCmd(tail_args, cmd_cntx);
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
-    cmnd_cntx->SendError("Internal Error");
-    cmnd_cntx->rb()->CloseConnection();
+    cmd_cntx->SendError("Internal Error");
+    cmd_cntx->rb()->CloseConnection();
   }
 
   if (!dispatching_in_multi) {
@@ -1606,7 +1606,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
   ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
   TrackIfNeeded(cmd_cntx);
-  auto* tx = cmd_cntx->tx;
+  auto* tx = cmd_cntx->tx();
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
@@ -1978,7 +1978,7 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
     keys_existed.fetch_add(res.value_or(0), memory_order_relaxed);
     return OpStatus::OK;
   };
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
@@ -2025,7 +2025,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 }
 
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
-  auto* tx = cmd_cntx->tx;
+  auto* tx = cmd_cntx->tx();
   DCHECK(tx);
   DVLOG(2) << "CallFromScript " << ca.args[0];
 
@@ -2076,7 +2076,7 @@ void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   }
 
   auto* cntx = cmd_cntx->server_conn_cntx();
-  BorrowedInterpreter interpreter{cmd_cntx->tx, &cntx->conn_state};
+  BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return cmd_cntx->SendError(res.error().Format(), facade::kScriptErrType);
@@ -2093,7 +2093,7 @@ void Service::EvalRo(CmdArgList args, CommandContext* cmd_cntx) {
 void Service::EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
   auto* cntx = cmd_cntx->server_conn_cntx();
-  BorrowedInterpreter interpreter{cmd_cntx->tx, &cntx->conn_state};
+  BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
   CallSHA(args, sha, interpreter, read_only, cmd_cntx);
 }
 
@@ -2234,7 +2234,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   }
 
   sinfo->async_cmds_heap_limit = GetFlag(FLAGS_multi_eval_squash_buffer);
-  Transaction* tx = cmd_cntx->tx;
+  Transaction* tx = cmd_cntx->tx();
   CHECK(tx != nullptr);
 
   Interpreter::RunResult result;
@@ -2464,7 +2464,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
   if (state != ExecScriptUse::NONE) {
     exec_info.preborrowed_interpreter =
-        BorrowedInterpreter(cmd_cntx->tx, &cntx->conn_state).Release();
+        BorrowedInterpreter(cmd_cntx->tx(), &cntx->conn_state).Release();
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
@@ -2479,7 +2479,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() &&
       !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
-    cmd_cntx->tx->UnlockMulti();
+    cmd_cntx->tx()->UnlockMulti();
     return rb->SendNull();
   }
 
@@ -2492,7 +2492,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    string descr = CreateExecDescriptor(exec_info.body, cmd_cntx->tx->GetUniqueShardCnt());
+    string descr = CreateExecDescriptor(exec_info.body, cmd_cntx->tx()->GetUniqueShardCnt());
     ServerState::tlocal()->exec_freq_count[descr]++;
 
     if (GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
@@ -2508,8 +2508,8 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
         CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
-          cmd_cntx->tx->MultiSwitchCmd(scmd.Cid());
-          OpStatus st = cmd_cntx->tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
+          cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
+          OpStatus st = cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
             cmd_cntx->SendError(st);
             break;
@@ -2530,7 +2530,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (scheduled) {
     VLOG(2) << "Exec unlocking " << exec_info.body.size() << " commands";
-    cmd_cntx->tx->UnlockMulti();
+    cmd_cntx->tx()->UnlockMulti();
   }
 
   // Dispatch at the end manually to have (MULTI, cmds..., EXEC) order
