@@ -1781,9 +1781,13 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_opt = "XX";
       break;
     case MemcacheParser::SET:
+<<<<<<< HEAD
       cmd_name = "SET";
       if (cntx->conn()->IsIoLoopV2())
         parsed_cmd->AllowAsyncExecution();  // Enable for SET command.
+=======
+      strcpy(cmd_name, "SET");
+>>>>>>> 777d8625 (more)
       break;
     case MemcacheParser::ADD:
       cmd_name = "SET";

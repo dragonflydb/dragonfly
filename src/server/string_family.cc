@@ -1057,13 +1057,16 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  if (/*cmnd_cntx->AsyncExecutionAllowed()*/ true) {
-    // Temporary manual usage of new async interface
-    boost::intrusive_ptr<Transaction> tx_keepalive(cmd_cntx->tx());  // keepalive tx
+  if (cmnd_cntx->IsDeferredReply()) {
+    // Temporary code
+    boost::intrusive_ptr<Transaction> tr_ptr(cmnd_cntx->tx());
+    auto blocker = BlockingCounter{1};
     auto result = make_shared<OpStatus>();
-    auto cb = [cmd_cntx, sparams, result](Transaction* t, EngineShard* shard) -> OpStatus {
-      bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-      SetCmd set_cmd(OpArgs{shard, nullptr, t->GetDbContext()}, explicit_journal);
+
+    auto cb = [cmnd_cntx, sparams, tr_ptr, result, blocker]() mutable {
+      EngineShard* shard = EngineShard::tlocal();
+      bool explicit_journal = cmnd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+      SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
 
       // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
       // So we can use mc_command data.
@@ -1074,11 +1077,13 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       std::string_view value = cmd_cntx->mc_command()->value();
 
       *result = set_cmd.Set(sparams, key, value);
-      return OpStatus::OK;
+      blocker->Dec();
     };
-    auto wrapped_cb = make_shared<decltype(cb)>(std::move(cb));
 
-    auto replier = [cmd_cntx, wrapped_cb, result, tx_keepalive](SinkReplyBuilder* rb) {
+    ShardId shard_id = cmd_cntx->tx->GetUniqueShard();
+    shard_set->Add(shard_id, cb);
+
+    auto replier = [cmd_cntx, blocker, result](SinkReplyBuilder* rb) {
       auto status = *result;
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.
@@ -1089,10 +1094,10 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       if (status == OpStatus::OUT_OF_MEMORY) {
         return rb->SendError(kOutOfMemory);
       }
+      LOG(FATAL) << "TBD " << status;
     };
+    cmnd_cntx->Resolve(blocker.operator->(), std::move(replier));
 
-    cmd_cntx->tx()->Execute(*wrapped_cb, true);
-    // cmnd_cntx->Resolve()
     return;
   }
 

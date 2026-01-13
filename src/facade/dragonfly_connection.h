@@ -252,10 +252,6 @@ class Connection : public util::Connection {
 
   bool IsSending() const;
 
-  bool IsIoLoopV2() const {
-    return ioloop_v2_;
-  }
-
   void Notify() {
     io_event_.notify();
   }

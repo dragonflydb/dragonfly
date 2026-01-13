@@ -2308,10 +2308,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   do {
     HandleMigrateRequest();
 
-    // For non-ready command that we have't registered on-completion, do it
+    // Register completion for current head if its pending and seen for the first time
     if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_) {
       if (!cmd->CanReply() && cmd != last_registrer) {
         cmd->Blocker()->OnCompletion(&ioevent_waiter);
+        last_registrer = cmd;
       }
     }
 
