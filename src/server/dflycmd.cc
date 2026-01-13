@@ -470,6 +470,9 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
     lsn_vec.push_back(value);
   }
 
+  DCHECK(flow_id < lsn_vec.size());
+  LOG_IF(ERROR, flow_id < lsn_vec.size()) << "Corrupted state detected";
+
   return {lsn_vec[flow_id]};
 }
 

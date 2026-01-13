@@ -3666,3 +3666,45 @@ async def test_replica_of_self(async_client):
 
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command(f"replicaof 127.0.0.1 {port}")
+
+
+async def test_partial_sync_with_different_shard_sizes(df_factory):
+    master = df_factory.create(proactor_threads=3)
+    replica1 = df_factory.create(proactor_threads=4)
+    replica2 = df_factory.create(proactor_threads=5)
+    replica3 = df_factory.create(proactor_threads=6)
+
+    df_factory.start_all([replica1, replica2, replica3, master])
+
+    c_replica1 = replica1.client()
+    c_replica2 = replica2.client()
+    c_replica3 = replica3.client()
+
+    c_master = master.client()
+    c_master
+
+    await c_master.execute_command("debug populate 5000")
+
+    await c_replica1.execute_command(f"replicaof localhost {master.port}")
+    await c_replica2.execute_command(f"replicaof localhost {master.port}")
+    await c_replica3.execute_command(f"replicaof localhost {master.port}")
+
+    seeder = SeederV2(key_target=100)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    await check_all_replicas_finished([c_replica1, c_replica2], c_master)
+
+    await c_replica1.execute_command("repltakeover 5")
+    await c_replica2.execute_command(f"replicaof localhost {replica1.port}")
+    await c_replica3.execute_command(f"replicaof localhost {replica1.port}")
+
+    await check_all_replicas_finished([c_replica2], c_replica1)
+
+    replica1.stop()
+    replica2.stop()
+    replica3.stop()
+
+    lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
+    assert len(lines) == 0
+    lines = replica3.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
+    assert len(lines) == 0

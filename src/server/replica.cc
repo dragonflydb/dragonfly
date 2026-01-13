@@ -579,6 +579,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   {
     unsigned num_df_flows = shard_flows_.size();
+    if (last_master_sync_data && num_df_flows != last_master_sync_data->last_journal_LSNs.size()) {
+      last_master_sync_data = std::nullopt;
+      LOG(WARNING) << "last master has different flow size than current";
+    }
+
     // Going out of the way to avoid using std::vector<bool>...
     auto is_full_sync = std::make_unique<bool[]>(num_df_flows);
     // The elements of this bool array are not always initialized but we call std::accumulate below
@@ -1325,6 +1330,10 @@ size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes
   size_t total_shard_lsn = 0;
   for (auto index : indexes) {
     total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
+  }
+  if (total_shard_lsn == 0) {
+    // Journal always starts at pos 1
+    return 1;
   }
   return total_shard_lsn;
 }
