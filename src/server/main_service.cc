@@ -1772,13 +1772,13 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
   auto* cntx = cmd_ctx->server_conn_cntx();
   DCHECK(cntx->transaction == nullptr);
 
-  string_view cmd_name, store_opt;
+  string_view cmd_name, cmd_opt;
   char buffer[absl::numbers_internal::kFastToBufferSize];
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
       cmd_name = "SET";
-      store_opt = "XX";
+      cmd_opt = "XX";
       break;
     case MemcacheParser::SET:
       cmd_name = "SET";
@@ -1787,7 +1787,7 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       break;
     case MemcacheParser::ADD:
       cmd_name = "SET";
-      store_opt = "NX";
+      cmd_opt = "NX";
       break;
     case MemcacheParser::DELETE:
       cmd_name = "DEL";
@@ -1795,12 +1795,12 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
     case MemcacheParser::INCR:
       cmd_name = "INCRBY";
       absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
-      store_opt = buffer;
+      cmd_opt = buffer;
       break;
     case MemcacheParser::DECR:
       cmd_name = "DECRBY";
       absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
-      store_opt = buffer;
+      cmd_opt = buffer;
       break;
     case MemcacheParser::APPEND:
       cmd_name = "APPEND";
@@ -1837,14 +1837,14 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
 
   bool is_store = MemcacheParser::IsStoreCmd(cmd.type);
   bool is_read = !is_store && cmd.type < MemcacheParser::QUIT;
-  if (is_store || !is_read) {
+  if (!is_read) {
     if (!cmd.backed_args->empty())
       args.emplace_back(cmd.key());
 
     if (is_store)
       args.emplace_back(cmd.value());
-    if (!store_opt.empty())
-      args.emplace_back(store_opt);
+    if (!cmd_opt.empty())
+      args.emplace_back(cmd_opt);
 
     if (cmd.expire_ts && cmd_name == "SET") {
       args.emplace_back("EXAT");
