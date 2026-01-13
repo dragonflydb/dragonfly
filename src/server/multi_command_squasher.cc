@@ -157,7 +157,6 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
   if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(*cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
-      rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
@@ -168,7 +167,6 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
     auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
-      rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
