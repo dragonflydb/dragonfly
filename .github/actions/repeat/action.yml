@@ -15,11 +15,13 @@ inputs:
     required: false
     type: string
   aws-access-key-id:
-    required: true
+    required: false
     type: string
+    description: "AWS access key ID (optional if using OIDC - credentials set by workflow)"
   aws-secret-access-key:
-    required: true
+    required: false
     type: string
+    description: "AWS secret access key (optional if using OIDC - credentials set by workflow)"
   s3-bucket:
     required: true
     type: string
@@ -81,6 +83,7 @@ runs:
         fi
       env:
         # Add environment variables to enable the S3 snapshot test.
+        # AWS credentials: if inputs provided, use them; otherwise let AWS SDK use OIDC credentials automatically
         DRAGONFLY_S3_BUCKET: ${{ inputs.s3-bucket }}
         AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
