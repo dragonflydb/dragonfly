@@ -712,7 +712,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmd_cntx) {
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
 OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
                     const CommandContext& ctx) {
-  bool explicit_journal = ctx.cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  bool explicit_journal = ctx.cid()->opt_mask() & CO::NO_AUTOJOURNAL;
   return ctx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   });
@@ -1080,7 +1080,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     boost::intrusive_ptr<Transaction> tr_ptr(cmd_cntx->tx());
     auto cb = [cmd_cntx, sparams, tr_ptr]() {
       EngineShard* shard = EngineShard::tlocal();
-      bool explicit_journal = cmd_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+      bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
       SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
 
       // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
@@ -1150,7 +1150,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 
 /// (P)SETEX key seconds (milliseconds) value
 void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view cmd_name = cmd_cntx->cid->name();
+  string_view cmd_name = cmd_cntx->cid()->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
