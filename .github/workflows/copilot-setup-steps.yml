@@ -32,7 +32,7 @@ steps:
     description: Execute specific test suites
     examples:
       - cd build-dbg && ./string_family_test --gtest_filter="StringFamilyTest.Digest"
-      - cd build-dbg && ./generic_family_test --gtest_filter="GenericFamilyTest.Delex"
+      - cd build-dbg && ./generic_family_test --gtest_filter="GenericFamilyTest.Del"
 
   - name: Code formatting
     description: Run pre-commit hooks for code formatting
