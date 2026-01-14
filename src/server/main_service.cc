@@ -888,6 +888,63 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
+// Check CLIENT PAUSE state and block if needed
+void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid) {
+  auto& etl = *ServerState::tlocal();
+  if (etl.IsPaused() && !conn->IsPrivileged()) {
+    bool is_write = cid->IsJournaled();
+    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
+    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+
+    dfly_cntx->paused = true;
+    etl.AwaitPauseState(is_write);
+    dfly_cntx->paused = false;
+  }
+}
+
+// Prepare transaction for DispatchCommand
+optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction>* tx,
+                                                bool dispatching_in_multi, const CommandId* cid,
+                                                ArgSlice tail_args, ConnectionContext* dfly_cntx) {
+  bool init = false;
+  if (dispatching_in_multi) {
+    DCHECK(dfly_cntx->transaction);
+    DCHECK(dfly_cntx->transaction->IsMulti());  // dispatching in multi
+    if (cid->IsTransactional()) {
+      dfly_cntx->transaction->MultiSwitchCmd(cid);
+      init = true;
+    }
+  } else {
+    if (cid->IsTransactional()) {
+      tx->reset(new Transaction{cid});
+      dfly_cntx->transaction = tx->get();
+      init = !tx->get()->IsMulti();  // Multi command initialize themself based on their mode
+    } else {
+      dfly_cntx->transaction = nullptr;
+    }
+  }
+
+  if (init) {
+    auto* tx = dfly_cntx->transaction;
+    OpStatus status = tx->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
+    if (status != OpStatus::OK)
+      return facade::ErrorReply{status};
+
+    if (!dispatching_in_multi)  // update stats
+      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
+  }
+
+  return nullopt;
+}
+
+void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSlice tail_args) {
+  // TODO: protect against aggregating huge transactions.
+  auto& exec_info = dfly_cntx->conn_state.exec_info;
+  const size_t old_size = exec_info.GetStoredCmdBytes();
+  exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
+  ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1405,19 +1462,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
-                                        facade::ParsedCommand* parsed_cmd) {
+DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
+                                        facade::AsyncPreference async_pref) {
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
-  ServerState& etl = *ServerState::tlocal();
-
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
-
   if (cid == nullptr) {
-    auto reply = ReportUnknownCmd(cmd);
-    parsed_cmd->SendError(reply.ToSv(), reply.kind);
+    parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
 
@@ -1430,26 +1483,17 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   CmdArgVec tmp_vec;
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
 
-  if (cmd_cntx->conn()) {  // no owner in replica context.
-    auto* conn = cmd_cntx->conn();
-
+  // Block on CLIENT PAUSE if needed
+  if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
                 << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
     }
-
-    // Don't interrupt running multi commands or admin connections.
-    if (etl.IsPaused() && !dispatching_in_multi && !conn->IsPrivileged()) {
-      bool is_write = cid->IsJournaled();
-      is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
-      is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
-
-      dfly_cntx->paused = true;
-      etl.AwaitPauseState(is_write);
-      dfly_cntx->paused = false;
-    }
+    if (!dispatching_in_multi)  // Don't interrupt parts of multi command
+      CheckPauseState(conn, dfly_cntx, cid);
   }
 
+  // Verify command state
   if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
@@ -1469,7 +1513,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
       }
     }
     DCHECK(!err->status);
-    cmd_cntx->SendError(err->ToSv(), err->kind);
+    cmd_cntx->SendError(*err);
     return DispatchResult::ERROR;
   }
 
@@ -1477,56 +1521,27 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
       << "Executing dangerous command " << cid->name() << " "
       << ConnectionLogContext(dfly_cntx->conn());
 
+  // If inside MULTI block, store command
   bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
-    // TODO: protect against aggregating huge transactions.
-    auto& exec_info = dfly_cntx->conn_state.exec_info;
-    const size_t old_size = exec_info.GetStoredCmdBytes();
-    exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
-    etl.stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
-    if (cid->IsJournaled()) {
-      exec_info.is_write = true;
-    }
+    StoreInMultiBlock(dfly_cntx, cid, tail_args);
     cmd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
 
-  // Create command transaction
-  intrusive_ptr<Transaction> dist_trans;
-
-  if (dispatching_in_multi) {
-    DCHECK(dfly_cntx->transaction);
-    if (cid->IsTransactional()) {
-      dfly_cntx->transaction->MultiSwitchCmd(cid);
-      OpStatus status = dfly_cntx->transaction->InitByArgs(
-          dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
-
-      if (status != OpStatus::OK) {
-        cmd_cntx->SendError(status);
-        return DispatchResult::ERROR;
-      }
-    }
-  } else {
-    DCHECK(dfly_cntx->transaction == nullptr);
-
-    if (cid->IsTransactional()) {
-      dist_trans.reset(new Transaction{cid});
-
-      if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
-        CHECK(dfly_cntx->ns != nullptr);
-        if (auto st =
-                dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
-            st != OpStatus::OK) {
-          cmd_cntx->SendError(StatusToMsg(st));
-          return DispatchResult::ERROR;
-        }
-      }
-
-      dfly_cntx->transaction = dist_trans.get();
-      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
-    } else {
+  // Reset transaction at the end or when returning an error
+  absl::Cleanup clean_tx = [dfly_cntx, dispatching_in_multi] {
+    if (!dispatching_in_multi) {
       dfly_cntx->transaction = nullptr;
     }
+  };
+
+  // Create command transaction
+  intrusive_ptr<Transaction> dist_trans;
+  if (auto err = PrepareTransaction(&dist_trans, dispatching_in_multi, cid, tail_args, dfly_cntx);
+      err) {
+    cmd_cntx->SendError(*err);
+    return DispatchResult::ERROR;
   }
 
   DispatchResult res = DispatchResult::ERROR;
@@ -1539,9 +1554,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
     cmd_cntx->rb()->CloseConnection();
   }
 
-  if (!dispatching_in_multi) {
-    dfly_cntx->transaction = nullptr;
-  }
   return res;
 }
 
@@ -1729,7 +1741,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, &dummy_cmd_cntx);
+    DispatchCommand(args, &dummy_cmd_cntx, AsyncPreference::ONLY_SYNC);
     dispatched++;
   }
 
@@ -1752,110 +1764,98 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
   return {.processed = dispatched, .account_in_stats = account_in_stats};
 }
 
-void Service::DispatchMC(facade::ParsedCommand* parsed_cmd) {
-  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(parsed_cmd->rb());
+DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
+                                   facade::AsyncPreference apref) {
   CommandContext* cmd_ctx = static_cast<CommandContext*>(parsed_cmd);
   const auto& cmd = *parsed_cmd->mc_command();
-  string_view value = cmd.value();
+
   auto* cntx = cmd_ctx->server_conn_cntx();
   DCHECK(cntx->transaction == nullptr);
 
-  char cmd_name[16];
-  char ttl[absl::numbers_internal::kFastToBufferSize];
-  char store_opt[32] = {0};
-  char ttl_op[] = "EXAT";
+  string_view cmd_name, cmd_opt;
+  char buffer[absl::numbers_internal::kFastToBufferSize];
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
-      strcpy(cmd_name, "SET");
-      strcpy(store_opt, "XX");
+      cmd_name = "SET";
+      cmd_opt = "XX";
       break;
     case MemcacheParser::SET:
-      strcpy(cmd_name, "SET");
+      cmd_name = "SET";
       if (cntx->conn()->IsIoLoopV2())
         parsed_cmd->AllowAsyncExecution();  // Enable for SET command.
       break;
     case MemcacheParser::ADD:
-      strcpy(cmd_name, "SET");
-      strcpy(store_opt, "NX");
+      cmd_name = "SET";
+      cmd_opt = "NX";
       break;
     case MemcacheParser::DELETE:
-      strcpy(cmd_name, "DEL");
+      cmd_name = "DEL";
       break;
     case MemcacheParser::INCR:
-      strcpy(cmd_name, "INCRBY");
-      absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
+      cmd_name = "INCRBY";
+      absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
+      cmd_opt = buffer;
       break;
     case MemcacheParser::DECR:
-      strcpy(cmd_name, "DECRBY");
-      absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
+      cmd_name = "DECRBY";
+      absl::numbers_internal::FastIntToBuffer(cmd.delta, buffer);
+      cmd_opt = buffer;
       break;
     case MemcacheParser::APPEND:
-      strcpy(cmd_name, "APPEND");
+      cmd_name = "APPEND";
       break;
     case MemcacheParser::PREPEND:
-      strcpy(cmd_name, "PREPEND");
+      cmd_name = "PREPEND";
       break;
-    case MemcacheParser::GATS:
-      [[fallthrough]];
     case MemcacheParser::GAT:
-      strcpy(cmd_name, "GAT");
+    case MemcacheParser::GATS:
+      cmd_name = "GAT";
       break;
     case MemcacheParser::GET:
-      [[fallthrough]];
     case MemcacheParser::GETS:
-      strcpy(cmd_name, "MGET");
+      cmd_name = "MGET";
       break;
     case MemcacheParser::FLUSHALL:
-      strcpy(cmd_name, "FLUSHDB");
+      cmd_name = "FLUSHDB";
       break;
     case MemcacheParser::QUIT:
-      strcpy(cmd_name, "QUIT");
+      cmd_name = "QUIT";
       break;
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key(), cmd_ctx);
-      return;
+      return DispatchResult::OK;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString("VERSION 1.6.0 DF");
-      return;
+      cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
+      return DispatchResult::OK;
     default:
-      mc_builder->SendClientError("bad command line format");
-      return;
+      cmd_ctx->SendSimpleString("CLIENT_ERROR bad command line format");
+      return DispatchResult::ERROR;
   }
 
-  absl::InlinedVector<string_view, 8> args;
-  args.emplace_back(cmd_name, strlen(cmd_name));
+  absl::InlinedVector<string_view, 8> args = {cmd_name};
 
-  if (!cmd.backed_args->empty()) {
-    args.emplace_back(cmd.key());
+  bool is_store = MemcacheParser::IsStoreCmd(cmd.type);
+  bool is_read = !is_store && cmd.type < MemcacheParser::QUIT;
+  if (!is_read) {
+    if (!cmd.backed_args->empty())
+      args.emplace_back(cmd.key());
+
+    if (is_store)
+      args.emplace_back(cmd.value());
+    if (!cmd_opt.empty())
+      args.emplace_back(cmd_opt);
+
+    if (cmd.expire_ts && cmd_name == "SET") {
+      args.emplace_back("EXAT");
+      absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, buffer);
+      args.emplace_back(buffer);
+    }
+  } else {  // is_read
+    args.insert(args.end(), cmd.backed_args->begin(), cmd.backed_args->end());
   }
 
-  if (MemcacheParser::IsStoreCmd(cmd.type)) {
-    args.emplace_back(value);
-
-    if (store_opt[0]) {
-      args.emplace_back(store_opt, strlen(store_opt));
-    }
-
-    if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
-      char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
-      args.emplace_back(ttl_op, 4);
-      args.emplace_back(ttl, next - ttl);
-    }
-  } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
-    if (cmd.size() > 1) {
-      auto it = cmd.backed_args->begin();
-      ++it;  // skip first key
-      for (auto end = cmd.backed_args->end(); it != end; ++it) {
-        args.emplace_back(*it);
-      }
-    }
-  } else {  // write commands.
-    if (store_opt[0]) {
-      args.emplace_back(store_opt, strlen(store_opt));
-    }
-  }
-  DispatchCommand(ParsedArgs{args}, parsed_cmd);
+  return DispatchCommand(ParsedArgs{args}, parsed_cmd, apref);
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
@@ -2062,7 +2062,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     return;
 
   auto* prev = cmd_cntx->SwapReplier(&replier);
-  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx);
+  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
   cmd_cntx->SwapReplier(prev);
 }
 

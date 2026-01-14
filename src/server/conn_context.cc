@@ -146,6 +146,7 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
 void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
   body.emplace_back(cid, args);
   stored_cmd_bytes += body.back().UsedMemory();
+  is_write |= cid->IsJournaled();
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {

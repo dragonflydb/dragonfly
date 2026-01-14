@@ -21,7 +21,19 @@ class Connection;
 class SinkReplyBuilder;
 class MCReplyBuilder;
 
-enum class DispatchResult : uint8_t { OK, OOM, ERROR };
+// Controls asynchronicity of command dispatch
+enum class AsyncPreference : uint8_t {
+  ONLY_SYNC,     // Caller supports only synchronous dispatch
+  PREFER_ASYNC,  // Prefer async if available
+  ONLY_ASYNC,    // Only async execution is possible (command is dispatched in pipeline)
+};
+
+enum class DispatchResult : uint8_t {
+  OK,
+  OOM,
+  ERROR,
+  WOULD_BLOCK  // Returned if ONLY_ASYNC was set, but only synchronous execution is possible
+};
 
 struct DispatchManyResult {
   uint32_t processed;  // how many commands out of passed were actually processed
@@ -36,13 +48,13 @@ class ServiceInterface {
   virtual ~ServiceInterface() {
   }
 
-  virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd) = 0;
+  virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
 
   virtual DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen,
                                                   unsigned count, SinkReplyBuilder* builder,
                                                   ConnectionContext* cntx) = 0;
 
-  virtual void DispatchMC(ParsedCommand* cmd) = 0;
+  virtual DispatchResult DispatchMC(ParsedCommand* cmd, AsyncPreference) = 0;
 
   virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
