@@ -328,6 +328,33 @@ class ConnectionContext : public facade::ConnectionContext {
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;
 
+  // ACLs.
+  // The following variables represent the ACL rules of the context.
+  // Each command, before run, is authorized against those rules by
+  // IsUserAllowedToInvokeCmd(and variants) in validator.cc
+
+  // Username
+  std::string authed_username{"default"};
+
+  // Each entry in the list is a bitfield representing a specific command family,
+  // where each bit corresponds to an individual command within that family.
+  // Together, these entries encode the user's full ACL to commands.
+  // The index 'i' in 'acl_commands[i]' refers to the command family based on
+  // its registration order at runtime. For more details, see acl_commands_def.h.
+  std::vector<uint64_t> acl_commands;
+
+  // Keyspace. Each key referenced in a command must match (any) of the rules (globs).
+  dfly::acl::AclKeys keys;
+
+  // Pub/sub channels. Each channel referenced in a command must match (any) of the rules (globs).
+  dfly::acl::AclPubSub pub_sub;
+
+  // db index, std::numeric_limits<size_t>::max for ALL db's. Dragonfly specific extension.
+  size_t acl_db_idx = std::numeric_limits<size_t>::max();
+
+  // Skip ACL validation, used by internal commands and commands run on admin port
+  bool skip_acl_validation = false;
+
  private:
   void EnableMonitoring(bool enable) {
     subscriptions++;  // required to support the monitoring

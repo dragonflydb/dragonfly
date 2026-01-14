@@ -80,7 +80,7 @@ static vector<string> SplitLines(const std::string& src) {
 TestConnection::TestConnection(facade::ServiceInterface* si, Protocol protocol)
     : facade::Connection(protocol, nullptr, nullptr, si) {
   cc_.reset(new dfly::ConnectionContext(this, {}));
-  cc_->skip_acl_validation = true;
+  static_cast<dfly::ConnectionContext*>(cc_.get())->skip_acl_validation = true;
   SetSocket(ProactorBase::me()->CreateSocket());
   OnConnectionStart();
 }
