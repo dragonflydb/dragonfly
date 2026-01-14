@@ -153,31 +153,34 @@ class ParsedCommand : public cmn::BackedArguments {
     }
   }
 
-  // Precondition: deferred. Retruns true if reply is ready
+  // Below are main commands for the async api and all assume that the command defers replies
+
+  // Whether SendReply() can be called. If not, it must be waited via Blocker()
   bool CanReply() const;
 
-  // Precondition: deferred & CanReply
+  // Reaching zero on blocker means CanReply() turns true
+  util::fb2::EmbeddedBlockingCounter* Blocker() const {
+    return std::get<AsyncTask>(reply_).blocker;
+  }
+
+  // Assumes CanReply() is true. Sends reply
   void SendReply();
 
-  // Async API:
-
+  // Resolve deferred command with reply
   void Resolve(const facade::ErrorReply& error) {
     SendError(error);
   }
 
+  // Resolve deferred command with async task
   void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, ReplyFunc replier) {
     reply_ = AsyncTask{blocker, std::move(replier)};
-  }
-
-  util::fb2::EmbeddedBlockingCounter* Blocker() const {
-    return std::get<AsyncTask>(reply_).blocker;
   }
 
  protected:
   virtual void ReuseInternal() = 0;
 
  private:
-  // Pending async task
+  // Pending async command. Once blocker is ready, replier can be called
   struct AsyncTask {
     util::fb2::EmbeddedBlockingCounter* blocker;
     ReplyFunc replier;

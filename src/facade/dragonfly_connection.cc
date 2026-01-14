@@ -2038,9 +2038,12 @@ bool Connection::ExecuteMCBatch() {
       continue;  // some kind of error, continue, optimize later
 
     bool is_head = cmd == parsed_head_;
+    auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
 
-    // TODO: determine if sync/async possible
-    service_->DispatchMC(cmd);
+    if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK) {
+      break;
+    }
+
     stats_->pipeline_dispatch_calls++;
 
     auto* prev = exchange(cmd, cmd->next);
@@ -2301,19 +2304,25 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
+  // TODO: restructure due to bad OnCompletion interface
+  struct WaitEvent {
+    explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w)
+        : key(cmd->Blocker()->OnCompletion(w)) {
+    }
+    std::optional<util::fb2::EventCount::Key> key;
+  };
+
   auto ioevent_cb = [this]() { io_event_.notify(); };
   util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
-  ParsedCommand* last_registrer = nullptr;  // breaks with pool?
+  std::optional<WaitEvent> current_wait;
 
   do {
     HandleMigrateRequest();
 
     // Register completion for current head if its pending and seen for the first time
     if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_) {
-      if (!cmd->CanReply() && cmd != last_registrer) {
-        cmd->Blocker()->OnCompletion(&ioevent_waiter);
-        last_registrer = cmd;
-      }
+      if (!cmd->CanReply() && !current_wait.has_value())
+        current_wait.emplace(cmd, &ioevent_waiter);
     }
 
     if (io_buf_.InputLen() == 0) {
@@ -2327,7 +2336,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
       io_event_.await([this]() {
         bool cmd_ready =
-            parsed_head_ && parsed_head_ != parsed_to_execute_ && parsed_head_->CanReply();
+            (parsed_head_ && parsed_head_ == parsed_to_execute_) ||
+            (parsed_head_ && parsed_head_ != parsed_to_execute_ && parsed_head_->CanReply());
         return io_buf_.InputLen() > 0 || cmd_ready || io_ec_;
       });
     }
@@ -2349,7 +2359,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
+      current_wait.reset();
       if (parsed_head_) {
+        if (parsed_head_ == parsed_to_execute_)
+          ExecuteMCBatch();
         ReplyMCBatch();
       }
     }
