@@ -1,0 +1,60 @@
+# Self-contained multi-stage build for Dragonfly with CMS optimizations
+FROM ubuntu:22.04 AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    cmake \
+    ninja-build \
+    g++ \
+    libssl-dev \
+    libunwind-dev \
+    libboost-fiber-dev \
+    libboost-context-dev \
+    autoconf \
+    libtool \
+    libxml2-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy full source tree
+COPY . .
+
+# Initialize submodules and build release (minimal config for speed)
+RUN git config --global --add safe.directory /build && \
+    git config --global --add safe.directory /build/helio && \
+    git submodule update --init --recursive
+
+RUN ./helio/blaze.sh -release \
+    -DWITH_SEARCH=OFF \
+    -DWITH_AWS=OFF \
+    -DWITH_GCP=OFF \
+    -DWITH_TIERING=OFF
+
+RUN cd build-opt && ninja dragonfly
+
+# Runtime stage
+FROM ubuntu:22.04
+
+RUN apt-get update && \
+    apt-get install -q -y --no-install-recommends \
+        netcat-openbsd ca-certificates redis-tools net-tools tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -r -g 999 dfly && \
+    useradd -r -g dfly -u 999 dfly && \
+    mkdir /data && chown dfly:dfly /data
+
+COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
+COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+
+VOLUME /data
+WORKDIR /data
+
+HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
+ENTRYPOINT ["/usr/bin/tini", "--", "entrypoint.sh"]
+EXPOSE 6379
+CMD ["dragonfly", "--logtostderr"]

@@ -3024,6 +3024,7 @@ void Service::RegisterCommands() {
   RegisterHllFamily(&registry_);
   RegisterBloomFamily(&registry_);
   RegisterJsonFamily(&registry_);
+  RegisterCmsFamily(&registry_);
 #endif
 
 #ifdef WITH_SEARCH

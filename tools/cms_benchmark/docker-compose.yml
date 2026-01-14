@@ -1,0 +1,44 @@
+services:
+  dragonfly:
+    image: dragonfly:cms-opt
+    container_name: cms-bench-dragonfly
+    ports:
+      - "6380:6379"
+    ulimits:
+      memlock: -1
+    command: >
+      --proactor_threads=4
+      --cache_mode=false
+    networks:
+      - cms-bench
+
+  redis-stack:
+    image: redis/redis-stack-server:latest
+    container_name: cms-bench-redis
+    ports:
+      - "6381:6379"
+    networks:
+      - cms-bench
+
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile.benchmark
+    container_name: cms-bench-runner
+    depends_on:
+      - dragonfly
+      - redis-stack
+    command: >
+      --dragonfly-host dragonfly
+      --dragonfly-port 6379
+      --redis-host redis-stack
+      --redis-port 6379
+      --iterations 1000
+    networks:
+      - cms-bench
+    profiles:
+      - bench
+
+networks:
+  cms-bench:
+    driver: bridge

@@ -26,6 +26,7 @@ constexpr unsigned kEncodingJsonCons = 0;
 constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
+class CMS;
 class PageUsage;
 
 using cmn::StringOrView;
@@ -125,6 +126,7 @@ class CompactObj {
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
     SBF_TAG = 22,
+    CMS_TAG = 23,
   };
 
   // String encoding types.
@@ -314,6 +316,12 @@ class CompactObj {
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
 
+  void SetCMS(CMS* cms) {
+    SetMeta(CMS_TAG);
+    u_.cms = cms;
+  }
+  CMS* GetCMS() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -497,6 +505,7 @@ class CompactObj {
     // using 'packed' to reduce alignement of U to 1.
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
+    CMS* cms __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 

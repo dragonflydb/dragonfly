@@ -44,7 +44,8 @@ enum AclCat {
   BLOOM = 1ULL << 28,
   FT_SEARCH = 1ULL << 29,
   THROTTLE = 1ULL << 30,
-  JSON = 1ULL << 31
+  JSON = 1ULL << 31,
+  CMS = 1ULL << 32
 };
 
 constexpr uint64_t ALL_COMMANDS = std::numeric_limits<uint64_t>::max();

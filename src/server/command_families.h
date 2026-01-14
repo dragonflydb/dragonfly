@@ -17,5 +17,6 @@ void RegisterGeoFamily(CommandRegistry*);
 void RegisterHllFamily(CommandRegistry*);
 void RegisterBloomFamily(CommandRegistry*);
 void RegisterJsonFamily(CommandRegistry*);
+void RegisterCmsFamily(CommandRegistry*);
 
 }  // namespace dfly

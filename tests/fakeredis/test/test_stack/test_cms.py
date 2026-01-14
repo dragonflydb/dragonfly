@@ -6,11 +6,6 @@ from test import testtools
 json_tests = pytest.importorskip("probables")
 
 pytestmark = []
-pytestmark.extend(
-    [
-        pytest.mark.unsupported_server_types("dragonfly"),
-    ]
-)
 
 
 def test_cms_create(r: redis.Redis):

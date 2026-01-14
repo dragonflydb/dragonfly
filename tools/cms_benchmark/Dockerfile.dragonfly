@@ -1,0 +1,28 @@
+# Dockerfile to build Dragonfly with CMS support from local source
+FROM ghcr.io/dragonflydb/dragonfly-builder:ubuntu24-latest AS builder
+
+WORKDIR /src
+
+# Copy the source code
+COPY . .
+
+# Initialize submodules and build
+RUN git submodule update --init --recursive || true
+RUN ./helio/blaze.sh -release -DWITH_SEARCH=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF
+RUN cd build-opt && ninja dragonfly
+
+# Runtime stage
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 \
+    libunwind8 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /src/build-opt/dragonfly /app/dragonfly
+
+EXPOSE 6379
+
+ENTRYPOINT ["/app/dragonfly"]
+CMD ["--logtostderr"]
