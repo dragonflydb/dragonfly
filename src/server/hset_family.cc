@@ -549,7 +549,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   OpSetParams op_sp;
 
   const auto option_already_set = [&cmd_cntx] {
-    return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid->name()));
+    return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   };
 
   while (true) {
@@ -582,7 +582,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgList fields = parser.Tail();
 
   if (fields.size() % 2 != 0) {
-    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid->name()), kSyntaxErrType);
+    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -849,7 +849,7 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  string_view cmd{cmd_cntx->cid->name()};
+  string_view cmd{cmd_cntx->cid()->name()};
   auto* rb = cmd_cntx->rb();
   if (args.size() % 2 != 1) {
     return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);

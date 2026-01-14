@@ -878,7 +878,7 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
     // we will end up triggerring the callback on the following commands. To avoid this
     // we reset it.
     tx->SetTrackingCallback({});
-    if (cmd_cntx->cid->IsReadOnly() && info.ShouldTrackKeys()) {
+    if (cmd_cntx->cid()->IsReadOnly() && info.ShouldTrackKeys()) {
       auto conn = cntx->conn()->Borrow();
       tx->SetTrackingCallback([conn](Transaction* trans) {
         auto* shard = EngineShard::tlocal();
@@ -1281,7 +1281,7 @@ bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_cntx,
                                                      CmdArgList tail_args) {
   DCHECK_NE(cmd_cntx.start_time_ns, 0u);
-  if (ShouldDenyOnOOM(cmd_cntx.cid, cmd_cntx.start_time_ns)) {
+  if (ShouldDenyOnOOM(cmd_cntx.cid(), cmd_cntx.start_time_ns)) {
     return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
@@ -1549,7 +1549,7 @@ class ReplyGuard {
  public:
   ReplyGuard(const CommandContext& cmd_cntx) {
     const bool is_script = bool(cmd_cntx.server_conn_cntx()->conn_state.script_info);
-    cid_name_ = cmd_cntx.cid->name();
+    cid_name_ = cmd_cntx.cid()->name();
     const bool is_one_of = (cid_name_ == "REPLCONF" || cid_name_ == "DFLY");
     bool is_mcache = cmd_cntx.mc_command() != nullptr;
     const bool is_no_reply_memcache =
@@ -1575,7 +1575,7 @@ class ReplyGuard {
 };
 
 DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx) {
-  auto* cid = cmd_cntx->cid;
+  auto* cid = cmd_cntx->cid();
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -2501,7 +2501,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this, opts);
     } else {
       CmdArgVec arg_vec;
-      DCHECK_EQ(cmd_cntx->cid, exec_cid_);
+      DCHECK_EQ(cmd_cntx->cid(), exec_cid_);
 
       for (const auto& scmd : exec_info.body) {
         CmdArgList args = scmd.ArgList(&arg_vec);
@@ -2517,13 +2517,13 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
         // TODO: we will have to create a CommandContext per command if we want to support async
         // execution inside exec.
-        cmd_cntx->cid = scmd.Cid();
+        cmd_cntx->UpdateCid(scmd.Cid());
         auto invoke_res = InvokeCmd(args, cmd_cntx);
         if ((invoke_res != DispatchResult::OK) ||
             rb->GetError())  // checks for i/o error, not logical error.
           break;
       }
-      cmd_cntx->cid = exec_cid_;
+      cmd_cntx->UpdateCid(exec_cid_);
     }
   }
 
@@ -2542,7 +2542,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
-  bool sharded = cmd_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx->cid()->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
     return cmd_cntx->SendError("PUBLISH is not supported in cluster mode yet");
 
@@ -2554,7 +2554,7 @@ void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
-  bool sharded = cmd_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx->cid()->PubSubKind() == CO::PubSubKind::SHARDED;
   if (!sharded && IsClusterEnabled())
     return cmd_cntx->SendError("SUBSCRIBE is not supported in cluster mode yet");
 
@@ -2564,7 +2564,7 @@ void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void Service::Unsubscribe(CmdArgList args, CommandContext* cmd_cntx) {
-  bool sharded = cmd_cntx->cid->PubSubKind() == CO::PubSubKind::SHARDED;
+  bool sharded = cmd_cntx->cid()->PubSubKind() == CO::PubSubKind::SHARDED;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
   if (!sharded && IsClusterEnabled())
@@ -2644,7 +2644,7 @@ void Service::Pubsub(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() < 1) {
-    rb->SendError(WrongNumArgsError(cmd_cntx->cid->name()));
+    rb->SendError(WrongNumArgsError(cmd_cntx->cid()->name()));
     return;
   }
 
