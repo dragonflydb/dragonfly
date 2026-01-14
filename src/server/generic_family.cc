@@ -1594,6 +1594,64 @@ auto GetSortRange(const C& entries, const optional<pair<uint32_t, uint32_t>>& bo
   return std::make_pair(start_it, end_it);
 };
 
+// Generic GET pattern fetcher that abstracts element access and result storage.
+// Handles pattern expansion, shard distribution, and parallel fetching.
+// Special pattern "#" returns the element value itself.
+// Uses "read uncommitted" isolation - fetches values across shards without transaction guarantees.
+//
+// Template parameters:
+//   ElementContainer: Container type holding elements (e.g., vector<string>, vector<SortEntry>)
+//   ElementAccessor: Callable that returns string_view for element at index: (size_t) ->
+//   string_view ResultSetter: Callable that stores fetched value: (size_t elem_idx, size_t
+//   pattern_idx, string value) -> void
+template <typename ElementContainer, typename ElementAccessor, typename ResultSetter>
+void FetchGetPatternValues(const SortParams& params, const DbContext& db_cntx,
+                           const ElementContainer& elements, ElementAccessor get_element_key,
+                           ResultSetter set_result) {
+  if (params.get_patterns.empty())
+    return;
+
+  // Build a list of all external keys to fetch, organized by shard
+  // Structure: keys_by_shard[shard_id] = [(elem_idx, pattern_idx, ext_key), ...]
+  vector<vector<tuple<size_t, size_t, string>>> keys_by_shard(shard_set->size());
+
+  // Build external keys for each element and pattern
+  for (size_t elem_idx = 0; elem_idx < elements.size(); ++elem_idx) {
+    for (size_t pattern_idx = 0; pattern_idx < params.get_patterns.size(); ++pattern_idx) {
+      std::string_view pattern = params.get_patterns[pattern_idx];
+
+      if (pattern == "#") {
+        // Special pattern - return the element itself, no external fetch needed
+        set_result(elem_idx, pattern_idx, string(get_element_key(elem_idx)));
+        continue;
+      }
+
+      // Build external key by replacing '*' with the actual element value
+      size_t star_pos = pattern.find('*');
+      string ext_key;
+      if (star_pos == std::string_view::npos) {
+        // No asterisk - use pattern as literal key
+        ext_key = string(pattern);
+      } else {
+        ext_key = absl::StrCat(pattern.substr(0, star_pos), get_element_key(elem_idx),
+                               pattern.substr(star_pos + 1));
+      }
+
+      ShardId sid = Shard(ext_key, shard_set->size());
+      keys_by_shard[sid].emplace_back(elem_idx, pattern_idx, std::move(ext_key));
+    }
+  }
+
+  // Fetch all external keys in parallel across shards
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    for (const auto& [elem_idx, pattern_idx, ext_key] : keys_by_shard[sid]) {
+      string value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
+      set_result(elem_idx, pattern_idx, std::move(value));
+    }
+  });
+}
+
 // Fetches external keys referenced by GET patterns and fills the get_values in sort entries.
 // For each entry, fetches values for all GET patterns. Special pattern "#" returns the element
 // itself. Uses "read uncommitted" isolation - fetches values across shards without transaction
@@ -1603,55 +1661,18 @@ OpStatus PopulateGetPatternValues(const SortParams& params, const DbContext& db_
                                   std::vector<SortEntry<ALPHA>>* entries) {
   DCHECK(!params.get_patterns.empty());
 
-  // Build a list of all external keys to fetch, organized by shard
-  // Structure: keys_by_shard[shard_id] = [(entry_idx, pattern_idx, ext_key), ...]
-  vector<vector<tuple<size_t, size_t, string>>> keys_by_shard(shard_set->size());
-
-  for (size_t entry_idx = 0; entry_idx < entries->size(); ++entry_idx) {
-    auto& entry = (*entries)[entry_idx];
+  // Pre-allocate get_values for each entry
+  for (auto& entry : *entries) {
     entry.get_values.resize(params.get_patterns.size());
-
-    for (size_t pattern_idx = 0; pattern_idx < params.get_patterns.size(); ++pattern_idx) {
-      std::string_view pattern = params.get_patterns[pattern_idx];
-
-      if (pattern == "#") {
-        // Special pattern - will be handled separately (no fetch needed)
-        continue;
-      }
-
-      // Build external key by replacing '*' with the actual entry value (ResultKey)
-      size_t star_pos = pattern.find('*');
-      string ext_key;
-      if (star_pos == std::string_view::npos) {
-        // No asterisk - use pattern as literal key
-        ext_key = string(pattern);
-      } else {
-        ext_key = absl::StrCat(pattern.substr(0, star_pos), entry.ResultKey(),
-                               pattern.substr(star_pos + 1));
-      }
-
-      ShardId sid = Shard(ext_key, shard_set->size());
-      keys_by_shard[sid].emplace_back(entry_idx, pattern_idx, std::move(ext_key));
-    }
   }
 
-  // Fetch all external keys in parallel across shards
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-    for (const auto& [entry_idx, pattern_idx, ext_key] : keys_by_shard[sid]) {
-      string external_value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
-      (*entries)[entry_idx].get_values[pattern_idx] = std::move(external_value);
-    }
-  });
-
-  // Fill in "#" patterns (element itself)
-  for (size_t pattern_idx = 0; pattern_idx < params.get_patterns.size(); ++pattern_idx) {
-    if (params.get_patterns[pattern_idx] == "#") {
-      for (size_t entry_idx = 0; entry_idx < entries->size(); ++entry_idx) {
-        (*entries)[entry_idx].get_values[pattern_idx] = string((*entries)[entry_idx].ResultKey());
-      }
-    }
-  }
+  // Use generic fetcher with lambdas to access ResultKey() and store in entry.get_values
+  FetchGetPatternValues(
+      params, db_cntx, *entries,
+      [&](size_t idx) -> std::string_view { return (*entries)[idx].ResultKey(); },
+      [&](size_t entry_idx, size_t pattern_idx, string value) {
+        (*entries)[entry_idx].get_values[pattern_idx] = std::move(value);
+      });
 
   return OpStatus::OK;
 }
@@ -1941,51 +1962,16 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   // Fetch GET pattern values if needed (for unsorted path)
   vector<vector<string>> get_values_per_element;
   if (!params.get_patterns.empty()) {
-    get_values_per_element.resize(raw_elements.size());
-    vector<vector<tuple<size_t, string>>> keys_by_shard(shard_set->size());
+    // Pre-allocate storage for GET pattern values
+    get_values_per_element.resize(raw_elements.size(), vector<string>(params.get_patterns.size()));
 
-    // Build external keys for each GET pattern and element, using combined index
-    for (size_t elem_idx = 0; elem_idx < raw_elements.size(); ++elem_idx) {
-      get_values_per_element[elem_idx].resize(params.get_patterns.size());
-      for (size_t pattern_idx = 0; pattern_idx < params.get_patterns.size(); ++pattern_idx) {
-        std::string_view pattern = params.get_patterns[pattern_idx];
-        if (pattern == "#") {
-          continue;  // Handle separately below
-        }
-        size_t star_pos = pattern.find('*');
-        string ext_key;
-        if (star_pos == std::string_view::npos) {
-          ext_key = string(pattern);
-        } else {
-          ext_key = absl::StrCat(pattern.substr(0, star_pos), raw_elements[elem_idx],
-                                 pattern.substr(star_pos + 1));
-        }
-        ShardId sid = Shard(ext_key, shard_set->size());
-        // Use combined index to track both elem_idx and pattern_idx
-        keys_by_shard[sid].emplace_back(elem_idx * params.get_patterns.size() + pattern_idx,
-                                        std::move(ext_key));
-      }
-    }
-
-    // Fetch external keys in parallel with proper indexing
-    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-      ShardId sid = shard->shard_id();
-      for (const auto& [combined_idx, ext_key] : keys_by_shard[sid]) {
-        size_t elem_idx = combined_idx / params.get_patterns.size();
-        size_t pattern_idx = combined_idx % params.get_patterns.size();
-        string value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
-        get_values_per_element[elem_idx][pattern_idx] = std::move(value);
-      }
-    });
-
-    // Fill in "#" patterns (return element itself)
-    for (size_t pattern_idx = 0; pattern_idx < params.get_patterns.size(); ++pattern_idx) {
-      if (params.get_patterns[pattern_idx] == "#") {
-        for (size_t elem_idx = 0; elem_idx < raw_elements.size(); ++elem_idx) {
-          get_values_per_element[elem_idx][pattern_idx] = raw_elements[elem_idx];
-        }
-      }
-    }
+    // Use generic fetcher with lambdas to access raw_elements and store in get_values_per_element
+    FetchGetPatternValues(
+        params, db_cntx, raw_elements,
+        [&](size_t idx) -> std::string_view { return raw_elements[idx]; },
+        [&](size_t elem_idx, size_t pattern_idx, string value) {
+          get_values_per_element[elem_idx][pattern_idx] = std::move(value);
+        });
   }
 
   auto replier = [raw_elements = std::move(raw_elements), params, source_type,
