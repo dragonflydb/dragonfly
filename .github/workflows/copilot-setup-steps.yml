@@ -31,7 +31,7 @@ steps:
   - name: Run tests
     description: Execute specific test suites
     examples:
-      - cd build-dbg && ./string_family_test --gtest_filter="StringFamilyTest.Digest"
+      - cd build-dbg && ./string_family_test --gtest_filter="StringFamilyTest.SetGet"
       - cd build-dbg && ./generic_family_test --gtest_filter="GenericFamilyTest.Del"
 
   - name: Code formatting
