@@ -3730,7 +3730,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
   facade::RedisReplyBuilder rb(&sink);
   const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
-  CommandContext cmd_cntx{nullptr, nullptr, &rb, nullptr};
+  CommandContext cmd_cntx{&rb, nullptr};
   if (use_replica_of_v2) {
     ReplicaOfInternalV2(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
     return;
