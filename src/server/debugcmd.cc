@@ -1588,8 +1588,8 @@ void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
-  boost::intrusive_ptr<Transaction> local_tx =
-      new Transaction{sf_.service().mutable_registry()->Find("EXEC")};
+  auto* exec_cid = sf_.service().mutable_registry()->Find("EXEC");
+  boost::intrusive_ptr<Transaction> local_tx = new Transaction{exec_cid};
   local_tx->StartMultiNonAtomic();
   boost::intrusive_ptr<Transaction> stub_tx =
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
@@ -1597,6 +1597,8 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   absl::InsecureBitGen gen;
+  CommandContext cmd_cntx{&crb, cntx_};
+  cmd_cntx.SetupTx(exec_cid, stub_tx.get());
 
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
@@ -1629,8 +1631,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       stub_tx->MultiSwitchCmd(cid);
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
-
-      CommandContext cmd_cntx{cid, stub_tx.get(), &crb, cntx_};
+      cmd_cntx.UpdateCid(cid);
       sf_.service().InvokeCmd(args_span, &cmd_cntx);
     }
 
@@ -1651,7 +1652,7 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
       crb.SetReplyMode(ReplyMode::NONE);
       stub_tx->MultiSwitchCmd(cid);
       stub_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args_span);
-      CommandContext cmd_cntx{cid, stub_tx.get(), &crb, cntx_};
+      cmd_cntx.UpdateCid(cid);
       sf_.service().InvokeCmd(args_span, &cmd_cntx);
     }
   }
