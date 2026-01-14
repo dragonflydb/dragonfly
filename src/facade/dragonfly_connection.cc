@@ -2033,21 +2033,21 @@ bool Connection::ParseMCBatch() {
 
 bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
-  for (auto& cmd = parsed_to_execute_; cmd != nullptr; cmd = cmd->next) {
-    bool is_head = cmd == parsed_head_;
-
+  for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
     if (cmd->IsDeferredReply() && cmd->CanReply())
       continue;  // some kind of error, continue, optimize later
+
+    bool is_head = cmd == parsed_head_;
 
     // TODO: determine if sync/async possible
     service_->DispatchMC(cmd);
     stats_->pipeline_dispatch_calls++;
 
-    if (!cmd->IsDeferredReply()) {
+    auto* prev = exchange(cmd, cmd->next);
+    if (!prev->IsDeferredReply()) {
       DCHECK(is_head);
-
-      parsed_head_ = cmd->next;
-      ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+      parsed_head_ = cmd;
+      ReleaseParsedCommand(prev, cmd != nullptr /* is_pipelined */);
 
       if (reply_builder_->GetError())
         return false;

@@ -1474,8 +1474,16 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::ERROR;
   }
 
+<<<<<<< HEAD
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
+=======
+  if (cid->name() == "SET")
+    parsed_cmd->SetDeferredReply();
+
+  CommandContext* cmnd_cntx = static_cast<CommandContext*>(parsed_cmd);
+  ConnectionContext* dfly_cntx = cmnd_cntx->server_conn_cntx();
+>>>>>>> a4f11a04 (fixes)
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;

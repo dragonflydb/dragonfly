@@ -1057,13 +1057,20 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  // Experimental async path
   if (cmnd_cntx->IsDeferredReply()) {
+<<<<<<< HEAD
     // Temporary code
     boost::intrusive_ptr<Transaction> tr_ptr(cmnd_cntx->tx());
     auto blocker = BlockingCounter{1};
     auto result = make_shared<OpStatus>();
+=======
+    boost::intrusive_ptr<Transaction> tr_ptr(cmnd_cntx->tx);
+    BlockingCounter blocker{1};  // temporary, we'll use the transaction's one
+    auto result = make_unique<OpStatus>();
+>>>>>>> a4f11a04 (fixes)
 
-    auto cb = [cmnd_cntx, sparams, tr_ptr, result, blocker]() mutable {
+    auto cb = [cmnd_cntx, sparams, tr_ptr, result = result.get(), blocker]() mutable {
       EngineShard* shard = EngineShard::tlocal();
       bool explicit_journal = cmnd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
       SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
@@ -1080,10 +1087,17 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       blocker->Dec();
     };
 
+<<<<<<< HEAD
     ShardId shard_id = cmd_cntx->tx->GetUniqueShard();
     shard_set->Add(shard_id, cb);
 
     auto replier = [cmd_cntx, blocker, result](SinkReplyBuilder* rb) {
+=======
+    ShardId shard_id = cmnd_cntx->tx->GetUniqueShard();
+    shard_set->Add(shard_id, cb);  // cb is copied here
+
+    auto replier = [cmnd_cntx, blocker, result = std::move(result)](SinkReplyBuilder* rb) {
+>>>>>>> a4f11a04 (fixes)
       auto status = *result;
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.

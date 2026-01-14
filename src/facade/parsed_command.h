@@ -6,6 +6,7 @@
 
 #include <variant>
 
+#include "base/function2.hpp"
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_payload.h"
@@ -63,7 +64,8 @@ class ParsedCommand : public cmn::BackedArguments {
   using first_arg_t = typename ArgumentExtractor<decltype(&std::decay_t<F>::operator())>::type;
 
  public:
-  using ReplyFunc = std::function<void(SinkReplyBuilder*)>;
+  using ReplyFunc =
+      fu2::function_base<true, false, fu2::capacity_default, false, false, void(SinkReplyBuilder*)>;
 
   virtual ~ParsedCommand() = default;
 
@@ -188,6 +190,7 @@ class ParsedCommand : public cmn::BackedArguments {
   std::variant<payload::Payload, AsyncTask> reply_;
 };
 
-static_assert(sizeof(ParsedCommand) == 232);
+// fu2::function alignment - fix it!
+static_assert(sizeof(ParsedCommand) == 256);
 
 }  // namespace facade
