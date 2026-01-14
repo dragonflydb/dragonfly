@@ -6,10 +6,10 @@ name: Dragonfly Development Build Setup
 
 steps:
   - name: Install required system dependencies
-    description: Install Boost and other essential libraries
+    description: Install Boost context and other essential libraries
     commands:
       - sudo apt-get update
-      - sudo apt-get install -y libboost-all-dev libunwind-dev
+      - sudo apt-get install -y libboost-context-dev libunwind-dev
 
   - name: Initialize git submodules
     description: Clone helio and other required submodules
