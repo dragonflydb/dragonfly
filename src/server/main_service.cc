@@ -1485,7 +1485,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
 
   // Block on CLIENT PAUSE if needed
-  if (auto* conn = cmnd_cntx->conn(); conn /* replica context doesn't have an owner */) {
+  if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
                 << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
@@ -1514,7 +1514,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
       }
     }
     DCHECK(!err->status);
-    cmnd_cntx->SendError(*err);
+    cmd_cntx->SendError(*err);
     return DispatchResult::ERROR;
   }
 
@@ -1526,7 +1526,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   bool is_trans_cmd = cid->MultiControlKind() == CO::MultiControlKind::EXEC;
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
     StoreInMultiBlock(dfly_cntx, cid, tail_args);
-    cmnd_cntx->SendSimpleString("QUEUED");
+    cmd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
 
@@ -1541,7 +1541,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   intrusive_ptr<Transaction> dist_trans;
   if (auto err = PrepareTransaction(&dist_trans, dispatching_in_multi, cid, tail_args, dfly_cntx);
       err) {
-    cmnd_cntx->SendError(*err);
+    cmd_cntx->SendError(*err);
     return DispatchResult::ERROR;
   }
 
