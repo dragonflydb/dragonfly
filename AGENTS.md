@@ -1,96 +1,106 @@
-# AI Coding Agents Guide for Dragonfly
+# Dragonfly Development Guide
 
-> **Comprehensive reference for AI coding assistants working with the Dragonfly codebase**
-> This document is designed to help AI agents (GitHub Copilot, Claude Code, Cursor, Antigravity, etc.) work efficiently with Dragonfly's architecture, build system, testing infrastructure, and development workflows.
+> **Essential reference for working with the Dragonfly codebase**
+> Architecture, build system, testing infrastructure, and development workflows.
 
 ---
-
 
 ## Table of Contents
 
-1. [Agent-Specific Guidelines](#agent-specific-guidelines)
-2. [Project Overview](#project-overview)
-3. [Repository Structure](#repository-structure)
-4. [Build Instructions](#build-instructions)
-5. [Testing](#testing)
-6. [CI/CD Pipeline](#cicd-pipeline)
-7. [Code Style & Pre-commit Hooks](#code-style--pre-commit-hooks)
-8. [Third-Party Dependencies](#third-party-dependencies)
-9. [Platform Support](#platform-support)
-10. [CMake Build Options](#cmake-build-options)
-11. [Key Files Reference](#key-files-reference)
-12. [Common Pitfalls](#common-pitfalls)
-13. [Debugging Tips](#debugging-tips)
-14. [Validation Checklist](#validation-checklist)
+1. [Critical Workflow Rules](#critical-workflow-rules)
+2. [Quick Command Reference](#quick-command-reference)
+3. [Project Overview](#project-overview)
+4. [Repository Structure](#repository-structure)
+5. [Build Instructions](#build-instructions)
+6. [Testing](#testing)
+7. [CI/CD Pipeline](#cicd-pipeline)
+8. [Code Style & Pre-commit Hooks](#code-style--pre-commit-hooks)
+9. [Third-Party Dependencies](#third-party-dependencies)
+10. [Platform Support](#platform-support)
+11. [CMake Build Options](#cmake-build-options)
+12. [Key Files Reference](#key-files-reference)
+13. [Common Pitfalls](#common-pitfalls)
+14. [Debugging Tips](#debugging-tips)
+15. [Validation Checklist](#validation-checklist)
 
 ---
-## Agent-Specific Guidelines
 
-### Universal Best Practices (All Agents)
+## Critical Workflow Rules
 
-1. **Read Before Edit** - Always read files before modifying
-2. **Test After Changes** - Run tests immediately: `ctest -V -L DFLY` / `pytest dragonfly/`
-3. **Init Submodules** - `git submodule update --init --recursive`
-4. **Format Code** - `pre-commit run --files <files>`
-5. **Follow Architecture** - See [Universal Patterns](#universal-architecture-patterns) below
+**MANDATORY - Always Follow This Order:**
 
----
+1. ✅ **Read Before Edit** - Always read files before modifying
+2. ✅ **Use Correct Build Commands** - See [Quick Command Reference](#quick-command-reference) below
+3. ✅ **Test After Changes** - Run tests immediately: `ctest -V -L DFLY`
+4. ✅ **Format Code** - `pre-commit run --files <files>`
+5. ✅ **Follow Architecture** - See [Architecture Patterns](#architecture-patterns) below
 
 ### Pull Request Guidelines
 
 **Conciseness is Key**: PR descriptions should be short, focused, and easy to scan.
-- **Title**: Imperative, descriptive (e.g., "Fix fiber stack overflow in test_reply_guard_oom").
-- **Summary**: 1-2 sentences explaining *what* changed and *why*.
-- **Changes**: Bullet points for key changes.
-- **Fixes**: Link issues (e.g., "Fixes #123").
-- **Commit messages**: Keep every line (subject and body) <= 100 characters; wrap long descriptions.
----
-
-### GitHub Copilot
-
-> **Access**: Auto-referenced via `.github/copilot-instructions.md`
-
-**Commands**: `@workspace` (context), `@workspace /AGENTS.md` (this file)
-
-**CRITICAL**: Review suggestions for fiber-aware primitives (`util::fb2::Mutex` not `std::mutex`), shared-nothing patterns (no global state)
+- **Title**: Imperative, descriptive (e.g., "Fix fiber stack overflow in test_reply_guard_oom")
+- **Summary**: 1-2 sentences explaining *what* changed and *why*
+- **Changes**: Bullet points for key changes
+- **Fixes**: Link issues (e.g., "Fixes #123")
+- **Commit messages**: Keep every line (subject and body) <= 100 characters; wrap long descriptions
 
 ---
 
-### Claude Code (Claude via CLI/API)
+## Quick Command Reference
 
-> **Access**: Auto-referenced via `CLAUDE.md`
+**CRITICAL: Read the full sections below for context. These are shortcuts only.**
 
-**Workflow**: Read → TodoWrite → Implement → Test → Complete
+### Building (see [Build Instructions](#build-instructions) for details)
 
-**CRITICAL Rules**:
-- Always Read before Edit
-- Use TodoWrite for multi-step tasks
-- Run tests after changes: `ctest -V -L DFLY` / `pytest dragonfly/`
-- Never skip testing
+```bash
+# Debug build (for development)
+./helio/blaze.sh
+cd build-dbg && ninja dragonfly              # Build main binary
+cd build-dbg && ninja generic_family_test    # Build specific test
+
+# Release build (for production/benchmarking)
+./helio/blaze.sh -release
+cd build-opt && ninja dragonfly
+```
+
+### Testing (see [Testing](#testing) for details)
+
+```bash
+# C++ Unit Tests
+cd build-dbg
+ctest -V -L DFLY                                    # Run all tests
+./generic_family_test                               # Run specific test binary
+./generic_family_test --gtest_filter="Set.*"        # Run specific test case
+```
+
+### Code Formatting
+
+```bash
+# Setup (once)
+pipx install pre-commit clang-format black
+pre-commit install
+
+# Format code
+pre-commit run --files <files>              # Format specific files
+pre-commit run --all-files                  # Format all files
+```
+
+### Common Operations
+
+```bash
+# Check git status
+git status
+
+# Check current branch
+git branch
+
+# View recent commits
+git log --oneline -10
+```
 
 ---
 
-### Cursor
-
-> **Access**: Auto-referenced via `.cursorrules`
-
-**Commands**: `@codebase` (search), `@files <path>` (context)
-
-**CRITICAL**: Per-shard ops only (no global state), use `util::fb2::Mutex` (not `std::mutex`)
-
----
-
-### Antigravity
-
-> **Access**: Auto-referenced via `.agent/rules/ANTIGRAVITY_INSTRUCTIONS.md`
-
-**Commands**: `task_boundary` (mark progress), `notify_user` (request review)
-
-**Workflow**: Research → Design (notify_user) → Implement (task_boundary) → Test (task_boundary) → Validate (notify_user)
-
----
-
-### Universal Architecture Patterns
+## Architecture Patterns
 
 **Code Style**: [.clang-format](.clang-format) - snake_case vars, PascalCase functions, kPascalCase constants
 
@@ -106,6 +116,8 @@
 - Global mutable state
 - Edit without reading
 - Skip tests
+- Use `./tools/docker/build.sh` for local development (use `ninja` instead)
+- Use `make` for incremental builds (use `ninja` instead)
 
 ---
 
@@ -205,7 +217,7 @@ dragonfly/
 - **Command dispatch**: `src/server/main_service.cc`
 - **Data storage**: `src/server/db_slice.cc`
 - **Networking**: `src/facade/dragonfly_connection.cc`
-- **Helio submodule**: `helio/` (must be initialized!)
+- **Helio library**: `helio/` (I/O and threading library)
 
 ---
 
@@ -214,11 +226,6 @@ dragonfly/
 **For complete build instructions, see [docs/build-from-source.md](docs/build-from-source.md)**
 
 ### Quick Start
-
-**CRITICAL**: Initialize submodules first:
-```bash
-git submodule update --init --recursive
-```
 
 **Debug build** (for development):
 ```bash
@@ -260,32 +267,9 @@ The [Makefile](Makefile) builds production releases with:
 ```bash
 cd build-dbg
 ctest -V -L DFLY                                    # Run all tests
-./generic_family_test                                # Run specific test binary
-./generic_family_test --gtest_filter="Set.*"         # Run specific test case
+./generic_family_test                               # Run specific test binary
+./generic_family_test --gtest_filter="Set.*"        # Run specific test case
 ```
-
-**Python Integration Tests**:
-```bash
-cd tests
-pip3 install -r dragonfly/requirements.txt           # Setup (once)
-export DRAGONFLY_PATH="../build-dbg/dragonfly"
-pytest dragonfly/ -v                                 # Run all tests
-pytest dragonfly/snapshot_test.py::test_name -v      # Run specific test
-```
-
-**Important pytest fixtures** (defined in `tests/dragonfly/conftest.py`):
-- `df_server` - Default dragonfly instance
-- `client` / `async_client` - Redis clients
-- `pool` / `async_pool` - Connection pools
-- Use `@dfly_args` decorator to customize instance arguments
-
-**Useful pytest options**:
-- `--gdb` - Start instances in gdb
-- `--df arg=val` - Pass custom flags to dragonfly
-- `-m "not slow"` - Skip slow tests
-- `--repeat N` - Run test N times
-
-See [tests/README.md](tests/README.md) for complete details on fixtures, markers, and integration tests
 
 ---
 
@@ -314,13 +298,12 @@ The CI workflow runs on all PRs and includes:
 ```bash
 pipx install pre-commit clang-format black
 pre-commit install
-pre-commit run --all-files                           # Run all formatters
+pre-commit run --all-files                          # Run all formatters
 ```
 
 ---
-## Third-Party Dependencies
 
-**CRITICAL**: `helio/` is a git submodule. Init with: `git submodule update --init --recursive`
+## Third-Party Dependencies
 
 **Key Libraries**: Abseil (strings/flags), Boost 1.71+ (context/intrusive), mimalloc (allocator), jsoncons (JSON), OpenSSL (TLS), libunwind (traces)
 
@@ -424,15 +407,13 @@ Quick reference to the most important files in the codebase.
 
 ## Common Pitfalls
 
-1. **Submodule not initialized**: `git submodule update --init --recursive`
-2. **Pre-commit not installed**: `pipx install pre-commit clang-format black && pre-commit install`
-3. **Wrong binary**: Debug: `build-dbg/dragonfly`, Release: `build-opt/dragonfly`
+1. **Pre-commit not installed**: `pipx install pre-commit clang-format black && pre-commit install`
+2. **Wrong binary**: Debug: `build-dbg/dragonfly`, Release: `build-opt/dragonfly`
+3. **Wrong build command**: Use `cd build-dbg && ninja <target>`, NOT `./tools/docker/build.sh`
 4. **Test timeouts**: `timeout 20m ctest -V -L DFLY`
 5. **ASAN leaks**: Check CI, suppress in `helio/util/asan_suppressions.txt`
-6. **Python imports**: `pip3 install -r tests/dragonfly/requirements.txt && export DRAGONFLY_PATH=...`
-7. **Helio modifications**: DON'T edit `helio/` (it's a submodule)
-8. **io_uring/epoll**: Test both: `pytest --df proactor_type=epoll`
-9. **CodeQL checks**: DON'T run codeql_checker when testing changes - it's slow and unnecessary for development
+6. **Helio modifications**: DON'T edit `helio/` (it's a git submodule - changes go upstream)
+7. **CodeQL checks**: DON'T run codeql_checker when testing changes - it's slow and unnecessary for development
 
 ---
 
@@ -441,8 +422,6 @@ Quick reference to the most important files in the codebase.
 **Logging**: `--alsologtostderr --v=1 --vmodule=module=2`
 
 **ASAN**: `ASAN_OPTIONS=detect_leaks=1:symbolize=1`, suppressions: `helio/util/asan_suppressions.txt`
-
-**Python tests**: `pytest --gdb` or `--existing-port 6379`
 
 **CI reproduction**: See [.github/workflows/ci.yml](.github/workflows/ci.yml)
 
@@ -464,7 +443,6 @@ Before claiming a task is complete, verify:
 ### Testing
 
 - [ ] All existing C++ unit tests pass: `ctest -V -L DFLY`
-- [ ] All Python integration tests pass: `pytest dragonfly/`
 - [ ] New feature has corresponding test coverage
 - [ ] Tests pass in both Debug and Release builds
 - [ ] Tests pass with ASAN/UBSAN enabled (if applicable)
