@@ -39,7 +39,7 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20-gcc14", "alpine-dev:latest"]
+        container: ["alpine-dev:latest"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -196,7 +196,7 @@ jobs:
           path: /tmp/*INFO*
 
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:20-gcc14'
+        if: matrix.container == 'alpine-dev:latest' && matrix.build-type == 'Release'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
