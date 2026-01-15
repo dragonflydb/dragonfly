@@ -124,11 +124,11 @@ git log --oneline -10
 
 ## Project Overview
 
-**Dragonfly** is a high-performance, Redis and Memcached compatible in-memory data store written in C++17. It delivers significantly higher throughput than traditional single-threaded Redis implementations through innovative architectural choices.
+**Dragonfly** is a high-performance, Redis and Memcached compatible in-memory data store written in C++20. It delivers significantly higher throughput than traditional single-threaded Redis implementations through innovative architectural choices.
 
 ### Key Characteristics
 
-- **Language**: C++17 (Google C++ Style Guide 2020 version)
+- **Language**: C++20 (Google C++ Style Guide 2020 version)
 - **Architecture**: Shared-nothing multi-threaded design (via `helio` library)
 - **Performance**: Uses io_uring (Linux 5.11+) for high-performance async I/O, with epoll fallback
 - **Threading Model**: Fiber-based cooperative multitasking with lock-free data structures
