@@ -31,7 +31,8 @@
 
 1. ✅ **Read Before Edit** - Always read files before modifying
 2. ✅ **Use Correct Build Commands** - See [Quick Command Reference](#quick-command-reference) below
-3. ✅ **Test After Changes** - Run tests immediately: `ctest -V -L DFLY`
+3. ✅ **Test After Changes** - Build and run a relevant unit test -
+   `ninja <unit_test> && ./unit_test`
 4. ✅ **Format Code** - `pre-commit run --files <files>`
 5. ✅ **Follow Architecture** - See [Architecture Patterns](#architecture-patterns) below
 
