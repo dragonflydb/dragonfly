@@ -905,15 +905,15 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
 // Prepare transaction for DispatchCommand.
 //
 // Return value:
-//   first  - dispatched_tx: newly created top-level transaction (or nullptr if none).
+//   first  - newly created top-level transaction (or nullptr if none).
 //   second - result: overall status of preparation.
-std::pair<intrusive_ptr<Transaction>, DispatchResult> PrepareTransaction(const CommandId* cid,
-                                                                         ArgSlice tail_args,
-                                                                         CommandContext* cmd_ctx) {
+pair<intrusive_ptr<Transaction>, DispatchResult> PrepareTransaction(const CommandId* cid,
+                                                                    ArgSlice tail_args,
+                                                                    CommandContext* cmd_ctx) {
   auto* dfly_cntx = cmd_ctx->server_conn_cntx();
   bool init = false;
   intrusive_ptr<Transaction> res;
-  if (dfly_cntx->transaction) {                 // Parent transaction exists
+  if (dfly_cntx->transaction) {  // Existing transaction context (e.g., MULTI/EXEC or script)
     DCHECK(dfly_cntx->transaction->IsMulti());  // dispatching in multi
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
@@ -1499,7 +1499,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
                 << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
     }
 
-    // Check pause state only if we are not inside of multi/eval commands.
+    // Check pause state only if it is a top level transaction.
     if (dfly_cntx->transaction == nullptr)
       CheckPauseState(conn, dfly_cntx, cid);
   }
