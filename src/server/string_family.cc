@@ -1059,14 +1059,14 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Experimental async path
   if (cmd_cntx->IsDeferredReply()) {
-    boost::intrusive_ptr<Transaction> tr_ptr(cmd_cntx->tx());
-    BlockingCounter blocker{1};  // temporary, we'll use the transaction's one
-    auto result = make_unique<OpStatus>();
+    auto* tx = cmd_cntx->tx();
+    auto* blocker = tx->Blocker();
+    blocker->Add(1);
 
-    auto cb = [cmd_cntx, sparams, tr_ptr, result = result.get(), blocker]() mutable {
+    auto cb = [cmd_cntx, sparams, tx]() mutable {
       EngineShard* shard = EngineShard::tlocal();
       bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-      SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
+      SetCmd set_cmd(OpArgs{shard, nullptr, tx->GetDbContext()}, explicit_journal);
 
       // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
       // So we can use mc_command data.
@@ -1076,15 +1076,16 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       std::string_view key = cmd_cntx->mc_command()->key();
       std::string_view value = cmd_cntx->mc_command()->value();
 
-      *result = set_cmd.Set(sparams, key, value);
-      blocker->Dec();
+      // This is what a hop finishes with, but inside transacion code
+      *tx->LocalResultPtr() = set_cmd.Set(sparams, key, value);
+      tx->Blocker()->Dec();
     };
 
     ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
     shard_set->Add(shard_id, cb);  // cb is copied here
 
-    auto replier = [cmd_cntx, blocker, result = std::move(result)](SinkReplyBuilder* rb) {
-      auto status = *result;
+    auto replier = [cmd_cntx, tx = boost::intrusive_ptr<Transaction>(tx)](SinkReplyBuilder* rb) {
+      auto status = *tx->LocalResultPtr();
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.
         MCRender render(cmd_cntx->mc_command()->cmd_flags);
@@ -1096,7 +1097,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       }
       LOG(FATAL) << "TBD " << status;
     };
-    cmd_cntx->Resolve(blocker.operator->(), std::move(replier));
+    cmd_cntx->Resolve(blocker, std::move(replier));
 
     return;
   }

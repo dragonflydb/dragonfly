@@ -2034,21 +2034,27 @@ bool Connection::ParseMCBatch() {
 bool Connection::ExecuteMCBatch() {
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
-    if (cmd->IsDeferredReply() && cmd->CanReply())
-      continue;  // some kind of error, continue, optimize later
+    // parser errors are stored as deferred replies
+    if (cmd->IsDeferredReply() && cmd->CanReply()) {
+      cmd = cmd->next;
+      continue;  // enqueue as async for simplicity
+    }
 
+    // We must continue with async execution is we already have executing commands
     bool is_head = cmd == parsed_head_;
     auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
 
-    if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK) {
-      break;
-    }
+    if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK)
+      break;  // Sync command. Wait for current async commands to finish
 
-    stats_->pipeline_dispatch_calls++;
+    stats_->pipeline_dispatch_commands++;
+    if (is_head)
+      stats_->pipeline_dispatch_calls++;
 
+    // Advance the head if we executed the current head synchronously
     auto* prev = exchange(cmd, cmd->next);
     if (!prev->IsDeferredReply()) {
-      DCHECK(is_head);
+      DCHECK(is_head);  // only head can execute sync
       parsed_head_ = cmd;
       ReleaseParsedCommand(prev, cmd != nullptr /* is_pipelined */);
 
@@ -2147,6 +2153,7 @@ void Connection::DestroyParsedQueue() {
     auto* cmd = parsed_head_;
     stats_->dispatch_queue_bytes -= cmd->UsedMemory();
     parsed_head_ = cmd->next;
+    delete cmd;
   }
   parsed_tail_ = nullptr;
   parsed_cmd_q_len_ = 0;

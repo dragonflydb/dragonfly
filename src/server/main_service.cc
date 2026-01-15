@@ -1470,7 +1470,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
   if (cid == nullptr) {
-    DCHECK(async_pref == AsyncPreference::ONLY_SYNC);  // Error will be missed
+    DCHECK(async_pref == AsyncPreference::ONLY_SYNC);  // Error will be missed, temporary
     parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }

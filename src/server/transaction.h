@@ -306,6 +306,15 @@ class Transaction {
     return multi_->mode;
   }
 
+  util::fb2::EmbeddedBlockingCounter* Blocker() {
+    return &run_barrier_;
+  }
+
+  // Temporary
+  OpStatus* LocalResultPtr() {
+    return &local_result_;
+  }
+
   // Whether the transaction is multi and runs in an atomic mode.
   // This, instead of just IsMulti(), should be used to check for the possibility of
   // different optimizations, because they can safely be applied to non-atomic multi

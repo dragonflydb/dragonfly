@@ -64,8 +64,8 @@ class ParsedCommand : public cmn::BackedArguments {
   using first_arg_t = typename ArgumentExtractor<decltype(&std::decay_t<F>::operator())>::type;
 
  public:
-  using ReplyFunc =
-      fu2::function_base<true, false, fu2::capacity_default, false, false, void(SinkReplyBuilder*)>;
+  using ReplyFunc = fu2::function_base<true, false, fu2::capacity_fixed<16, 8>, false, false,
+                                       void(SinkReplyBuilder*)>;
 
   virtual ~ParsedCommand() = default;
 
@@ -193,7 +193,6 @@ class ParsedCommand : public cmn::BackedArguments {
   std::variant<payload::Payload, AsyncTask> reply_;
 };
 
-// fu2::function alignment - fix it!
-static_assert(sizeof(ParsedCommand) == 256);
+static_assert(sizeof(ParsedCommand) == 232);
 
 }  // namespace facade

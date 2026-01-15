@@ -123,7 +123,7 @@ void ParsedCommand::SendEmptyArray() {
 
 bool ParsedCommand::CanReply() const {
   DCHECK(is_deferred_reply_);
-  dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0; },
+  dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0 /* not monostate */; },
                       [](const AsyncTask& task) { return task.blocker->IsCompleted(); }};
   return std::visit(ov, reply_);
 }
