@@ -902,7 +902,11 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
   }
 }
 
-// Prepare transaction for DispatchCommand
+// Prepare transaction for DispatchCommand.
+//
+// Return value:
+//   first  - dispatched_tx: newly created top-level transaction (or nullptr if none).
+//   second - result: overall status of preparation.
 std::pair<intrusive_ptr<Transaction>, DispatchResult> PrepareTransaction(const CommandId* cid,
                                                                          ArgSlice tail_args,
                                                                          CommandContext* cmd_ctx) {
