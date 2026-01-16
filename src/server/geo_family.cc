@@ -282,7 +282,7 @@ void CmdGeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
 
     members.emplace_back(bits, member);
   }
-  DCHECK(cmd_cntx->tx);
+  DCHECK(cmd_cntx->tx());
 
   absl::Span memb_sp{members.data(), members.size()};
   ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx);
@@ -291,7 +291,7 @@ void CmdGeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdGeoHash(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
@@ -311,7 +311,7 @@ void CmdGeoHash(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdGeoPos(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() != OpStatus::OK) {
     return rb->SendError(result.status());
@@ -345,7 +345,7 @@ void CmdGeoDist(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() != OpStatus::OK) {
     return rb->SendError(result.status());
@@ -693,7 +693,7 @@ void CmdGeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx->tx, builder, shape, key, member, geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, member, geo_ops);
 }
 
 void GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
@@ -781,7 +781,7 @@ void GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cntx, bool re
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx->tx, builder, shape, key, member, geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, member, geo_ops);
 }
 
 void GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
@@ -871,7 +871,7 @@ void GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only)
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx->tx, builder, shape, key, "", geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, "", geo_ops);
 }
 
 void CmdGeoRadiusByMember(CmdArgList args, CommandContext* cmd_cntx) {

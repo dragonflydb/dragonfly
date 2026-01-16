@@ -230,6 +230,9 @@ class Transaction {
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
+  // Prepare transaction to do a single ScheduleSingleHop() for squashing
+  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys, MultiMode mode);
+
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(Namespace* ns, DbIndex dbid);
 
@@ -334,11 +337,6 @@ class Transaction {
   // Return debug information about a transaction, include shard local info if passed
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
-  // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
-  // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
-  // to it must not block.
-  void PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args);
-
   // Write a journal entry to a shard journal with the given payload.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
                          uint32_t shard_cnt) const;
@@ -351,6 +349,10 @@ class Transaction {
 
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::pair<ShardId, LockFp>>& GetMultiFps() const;
+
+  bool IsSquashedStub() const {
+    return multi_ && multi_->role == SQUASHED_STUB;
+  }
 
   uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;

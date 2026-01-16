@@ -249,6 +249,42 @@ TEST_F(HSetFamilyTest, HScan) {
   // See https://redis.io/commands/scan/ --> "The COUNT option", for why this cannot be exact
   EXPECT_GE(vec.size(), 40);  // This should be larger than (20 * 2) and less than about 50
   EXPECT_LT(vec.size(), 60);
+
+  // Test NOVALUES option on 'myhash' (which has 10 items)
+  resp = Run({"hscan", "myhash", "0", "NOVALUES"});
+  EXPECT_THAT(resp, ArrLen(2));
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 10);
+  EXPECT_THAT(vec, Each(StartsWith("Field")));  // Should contain "Field-X", but never "Value-X"
+}
+
+// Verifies that the NOVALUES flag functions correctly when combined with other arguments
+// like MATCH and COUNT, ensuring values are suppressed even during filtered or limited scans.
+TEST_F(HSetFamilyTest, HScan_NoValuesCombinations) {
+  Run({"HSET", "h_combos", "user:1", "v1", "user:2", "v2", "admin:1", "v3"});
+
+  // case 1: MATCH + NOVALUES
+  // We want only keys starting with "user*", and NO values.
+  auto resp = Run({"HSCAN", "h_combos", "0", "MATCH", "user:*", "NOVALUES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  auto vec = StrArray(resp.GetVec()[1]);
+
+  // Should find: "user:1", "user:2" (2 items)
+  // Should NOT find: "admin:1" (filtered out)
+  // Should NOT find: "v1", "v2" (values suppressed)
+  EXPECT_EQ(vec.size(), 2);
+  EXPECT_THAT(vec, UnorderedElementsAre("user:1", "user:2"));
+
+  // case 2: COUNT + NOVALUES
+  // Populate a larger hash to force scanning behavior, verify no values and only key present
+  for (int i = 0; i < 50; ++i) {
+    Run({"HSET", "h_large", absl::StrCat("k", i), "v"});
+  }
+  resp = Run({"HSCAN", "h_large", "0", "COUNT", "10", "NOVALUES"});
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_GT(vec.size(), 0);
+  EXPECT_THAT(vec, Not(Contains("v")));
+  EXPECT_THAT(vec, Each(StartsWith("k")));
 }
 
 TEST_F(HSetFamilyTest, HScanLpMatchBug) {

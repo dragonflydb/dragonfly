@@ -28,6 +28,11 @@
 #include <absl/strings/numbers.h>
 #include "base/logging.h"
 
+// GCC 13+ yields spurious warnings about uninitialized variant members in bison-generated code
+#if !defined(__clang__) && __GNUC__ >= 13
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 #define yylex driver->lexer()->Lex
 
 using namespace std;

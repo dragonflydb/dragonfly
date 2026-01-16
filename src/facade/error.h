@@ -49,5 +49,6 @@ inline constexpr char kConfigErrType[] = "config_error";
 inline constexpr char kSearchErrType[] = "search_error";
 inline constexpr char kWrongTypeErrType[] = "wrong_type";
 inline constexpr char kRestrictDenied[] = "restrict_denied";
+inline constexpr char kNoGroupErrType[] = "no_group_error";
 
 }  // namespace facade

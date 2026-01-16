@@ -57,6 +57,7 @@ void ParsedCommand::ResetForReuse() {
     storage_.clear();  // also deallocates the heap.
     offsets_.shrink_to_fit();
   }
+  ReuseInternal();
 }
 
 void ParsedCommand::SendError(std::string_view str, std::string_view type) {
@@ -114,6 +115,16 @@ void ParsedCommand::SendNull() {
   } else {
     DCHECK(mc_cmd_ == nullptr);  // RESP only
     static_cast<RedisReplyBuilder*>(rb_)->SendNull();
+  }
+}
+
+void ParsedCommand::SendEmptyArray() {
+  if (is_deferred_reply_) {
+    reply_payload_ = make_unique<payload::CollectionPayload>(0, CollectionType::ARRAY);
+    NotifyReplied();
+  } else {
+    DCHECK(mc_cmd_ == nullptr);  // RESP only
+    static_cast<RedisReplyBuilder*>(rb_)->SendEmptyArray();
   }
 }
 

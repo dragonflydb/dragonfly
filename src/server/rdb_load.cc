@@ -2841,8 +2841,9 @@ namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
                               string_view error_context) {
-  facade::CapturingReplyBuilder crb{};
-  ConnectionContext cntx{nullptr, nullptr};
+  facade::CapturingReplyBuilder crb;
+
+  ConnectionContext cntx{nullptr, acl::UserCredentials{}};
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
@@ -2885,7 +2886,8 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   for (unsigned i = 0; i < resp_vec.size(); i++) {
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
-  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd);
+  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
+                           facade::AsyncPreference::ONLY_SYNC);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

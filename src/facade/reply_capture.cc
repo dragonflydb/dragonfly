@@ -67,7 +67,6 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   CHECK(stack_.empty());
   Payload pl = std::move(current_);
   current_ = monostate{};
-  ConsumeLastError();
   return pl;
 }
 
@@ -161,8 +160,6 @@ void CapturingReplyBuilder::Apply(Payload&& pl, SinkReplyBuilder* rb) {
 
   CaptureVisitor cv{rb};
   visit(cv, std::move(pl));
-  // Consumed and printed by InvokeCmd. We just send the actual error here
-  rb->ConsumeLastError();
 }
 
 void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {

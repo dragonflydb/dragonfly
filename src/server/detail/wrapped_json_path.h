@@ -271,16 +271,16 @@ OpResult<JsonCallbackResult<std::optional<T>>> WrappedJsonPath::ExecuteMutateCal
     custom_functions<JsonType> funcs = custom_functions<JsonType>();
 
     std::error_code ec;
-    static_resources<ValueType, Reference> static_resources(funcs);
+    static_resources static_res(funcs);
     Evaluator e;
 
-    JsonSelector expr = e.compile(static_resources, path_.view(), ec);
+    JsonSelector expr = e.compile(static_res, path_.view(), ec);
     if (ec) {
       VLOG(1) << "Failed to mutate json with error: " << ec.message();
       return OpStatus::SYNTAX_ERR;
     }
 
-    dynamic_resources<ValueType, Reference> resources;
+    eval_context<ValueType, Reference> resources;
 
     auto f = [&mutate_callback](const basic_path_node<char>& path, JsonType& val) {
       mutate_callback(to_string(path), &val);

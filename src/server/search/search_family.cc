@@ -978,7 +978,7 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
 
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
-                 absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
+                 absl::Span<SearchResult> results, SinkReplyBuilder* builder, bool is_css) {
   size_t total_hits = 0;
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
@@ -1003,9 +1003,15 @@ void SearchReply(const SearchParams& params,
   }
 
   // Apply LIMIT
-  const size_t offset = std::min(params.limit_offset, docs.size());
-  const size_t limit = std::min(docs.size() - offset, params.limit_total);
-  const size_t end = offset + limit;
+  size_t offset = 0;
+  size_t limit = 0;
+  if (is_css) {
+    limit = std::min(docs.size(), params.limit_total + params.limit_offset);
+  } else {
+    offset = std::min(params.limit_offset, docs.size());
+    limit = std::min(docs.size() - offset, params.limit_total);
+  }
+  const size_t end = limit + offset;
 
   // Apply SORTBY if its different from the KNN sort
   if (params.sort_option && !ignore_sort)
@@ -1148,7 +1154,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
   std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
 
   // Fetch all docs from shards
-  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
 
     // No index found or no docs on this shard
@@ -1228,7 +1234,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Check if index already exists
   atomic_uint exists_cnt = 0;
-  cmd_cntx->tx->Execute(
+  cmd_cntx->tx()->Execute(
       [idx_name, &exists_cnt](auto* tx, auto* es) {
         if (es->search_indices()->GetIndex(idx_name) != nullptr)
           exists_cnt.fetch_add(1, std::memory_order_relaxed);
@@ -1239,7 +1245,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK(exists_cnt == 0u || exists_cnt == shard_set->size());
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     return builder->SendError("Index already exists");
   }
 
@@ -1262,13 +1268,13 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
       const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
       if (vparams.use_hnsw &&
           !GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name, vparams)) {
-        cmd_cntx->tx->Conclude();
+        cmd_cntx->tx()->Conclude();
         return builder->SendError("Index already exists");
       }
     }
   }
 
-  cmd_cntx->tx->Execute(
+  cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
         if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
@@ -1299,10 +1305,10 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
       index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
     return OpStatus::OK;
   };
-  cmd_cntx->tx->Execute(idx_cb, false);
+  cmd_cntx->tx()->Execute(idx_cb, false);
 
   if (!index_info) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     return cmd_cntx->SendError("Index not found");
   }
 
@@ -1311,7 +1317,7 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
   new_index.type = index_info->type;
   auto parse_result = ParseSchema(&parser, &new_index);
   if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     return;
   }
 
@@ -1333,7 +1339,7 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
   };
-  cmd_cntx->tx->Execute(upd_cb, true);
+  cmd_cntx->tx()->Execute(upd_cb, true);
 
   builder->SendOk();
 }
@@ -1380,7 +1386,7 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(cb, true);
+  cmd_cntx->tx()->Execute(cb, true);
 
   if (index_info) {
     for (const auto& [field_ident, field_info] : index_info->schema.fields) {
@@ -1403,7 +1409,7 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<DocIndexInfo> infos(shard_set->size());
 
-  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
     if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
@@ -1487,7 +1493,7 @@ void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
-  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     // Using `first` to assign `names` only once without a race
     if (first.fetch_add(1) == 0)
       names = es->search_indices()->GetIndexNames();
@@ -1596,7 +1602,7 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // If the query does not contain knn component, or it is a hybrid query
   if (!knn || (knn && knn->HasPreFilter())) {
-    cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
         docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
       else
@@ -1626,7 +1632,8 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
               std::make_move_iterator(css_docs.end()));
 
-  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder);
+  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder,
+              is_cross_shard);
 }
 
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1662,7 +1669,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
-  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
@@ -1701,7 +1708,8 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb);
+    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb,
+                false);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);
@@ -1772,7 +1780,7 @@ void CmdFtTagVals(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
-  cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
@@ -1828,7 +1836,7 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     vector<ResultContainer> query_results(shard_set->size());
 
-    cmd_cntx->tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(params->index); index) {
         query_results[es->shard_id()] =
             index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
@@ -1885,7 +1893,7 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     using JoinDataVector = join::Vector<join::OwnedEntry>;
     std::vector<std::vector<JoinDataVector>> preaggregated_shard_data(
         shard_set->size(), std::vector<JoinDataVector>(indexes_count));
-    cmd_cntx->tx->Execute(
+    cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
           auto& shard_data = preaggregated_shard_data[es->shard_id()];
           for (size_t i = 0; i < indexes_count; ++i) {
@@ -1916,7 +1924,7 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     // Load fields for keys that were joined
     std::vector<std::vector<ShardDocIndex::FieldsValuesPerDocId>> shard_keys_data_per_index(
         shard_set->size(), std::vector<ShardDocIndex::FieldsValuesPerDocId>(indexes_count));
-    cmd_cntx->tx->Execute(
+    cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
           const ShardId shard_id = es->shard_id();
           auto& shard_keys_data = shard_keys_data_per_index[shard_id];
@@ -1984,7 +1992,7 @@ void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
       shard_set->size());
 
   // Collect synonym data from all shards
-  cmd_cntx->tx->Execute(
+  cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
         auto* index = es->search_indices()->GetIndex(index_name);
         if (!index)
@@ -2154,7 +2162,7 @@ void CmdFtSynUpdate(CmdArgList args, CommandContext* cmd_cntx) {
   std::atomic_bool index_not_found{true};
 
   // Update synonym groups in all shards
-  cmd_cntx->tx->Execute(
+  cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
         auto* index = es->search_indices()->GetIndex(index_name);
         if (!index)

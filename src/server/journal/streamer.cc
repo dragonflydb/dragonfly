@@ -155,14 +155,19 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
   StartStalledDataWriterFiber();
 }
 
-void JournalStreamer::Cancel() {
+bool JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel " << cntx_->IsCancelled();
   waker_.notifyAll();
+  bool res = false;
   if (journal_cb_id_) {
-    journal_->UnregisterOnChange(journal_cb_id_);
+    auto cb_id = journal_cb_id_;
+    journal_cb_id_ = 0;  // Reset to prevent double unregistration in another fiber
+    journal_->UnregisterOnChange(cb_id);
+    res = true;
   }
   StopStalledDataWriterFiber();
   WaitForInflightToComplete();
+  return res;
 }
 
 size_t JournalStreamer::UsedBytes() const {
@@ -522,14 +527,18 @@ void RestoreStreamer::SendFinalize(long attempt) {
 RestoreStreamer::~RestoreStreamer() {
 }
 
-void RestoreStreamer::Cancel() {
+bool RestoreStreamer::Cancel() {
   auto sver = snapshot_version_;
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
   cntx_->Cancel();
   if (sver != 0) {
     db_slice_->UnregisterOnChange(sver);
-    JournalStreamer::Cancel();
   }
+  bool res = JournalStreamer::Cancel();
+  LOG_IF(WARNING, res != (sver != 0)) << "Journal and DBSlice unregister state mismatch in "
+                                         "RestoreStreamer Cancel. DBSlice unregister state: "
+                                      << (sver != 0) << ", Journal unregister state: " << res;
+  return res && (sver != 0);
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalChangeItem& item) const {

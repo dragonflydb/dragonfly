@@ -103,7 +103,7 @@ void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
     return OpReserve(params, t->GetOpArgs(shard), key);
   };
 
-  OpStatus res = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (res == OpStatus::KEY_EXISTS) {
     return rb->SendError("item exists");
   }
@@ -118,7 +118,7 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   OpStatus status = res.status();
   if (res) {
     if (res->front())
@@ -137,7 +137,7 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   return cmd_cntx->SendLong(res ? res->front() : 0);
 }
 
@@ -150,7 +150,7 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
     return rb->SendError(res.status());
   }
@@ -174,7 +174,7 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RedisReplyBuilder::ArrayScope scope{rb, args.size()};

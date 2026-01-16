@@ -222,13 +222,16 @@ string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
 
-string NoGroupError(string_view key, string_view cgroup) {
-  return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
+facade::ErrorReply NoGroupError(string_view key, string_view cgroup) {
+  return facade::ErrorReply(
+      absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'"),
+      kNoGroupErrType);
 }
 
-string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
-  return absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'",
-                      suffix);
+facade::ErrorReply NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
+  return facade::ErrorReply(
+      absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'", suffix),
+      kNoGroupErrType);
 }
 
 string LeqTopIdError(string_view cmd_name) {
@@ -1880,7 +1883,7 @@ void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
   };
 
-  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
@@ -1901,7 +1904,7 @@ void DestroyGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
-  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::OK:
       return cmd_cntx->SendLong(1);
@@ -1926,7 +1929,7 @@ void CreateConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
                                                                   EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1955,7 +1958,7 @@ void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1987,7 +1990,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
 
-  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::SKIPPED:
       return cmd_cntx->SendError(NoGroupError(key, gname));
@@ -2353,7 +2356,7 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
     return OpRange(t->GetOpArgs(shard), key, range_opts);
   };
 
-  OpResult<RecordVec> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<RecordVec> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(rb);
@@ -2478,7 +2481,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     }
     return StreamReplies{rb}.SendStreamRecords(key, *result);
   } else if (result.status() == OpStatus::INVALID_VALUE) {
-    return rb->SendError("NOGROUP the consumer group this client was blocked on no longer exists");
+    return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
   }
   return rb->SendNullArray();
 }
@@ -2491,7 +2494,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
   // Determine if streams have entries or any error occured
   AggregateValue<optional<facade::ErrorReply>> err;
   atomic_bool have_entries = false;
-  auto* tx = cmd_cntx->tx;
+  auto* tx = cmd_cntx->tx();
   // With a single shard we can call OpRead in a single hop, falling back to
   // avoid concluding if no entries are available.
   bool try_fastread = tx->GetUniqueShardCnt() == 1;
@@ -2696,7 +2699,7 @@ void CmdXAdd(CmdArgList args, CommandContext* cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), fields, journaler);
   };
 
-  OpResult<streamID> add_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<streamID> add_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
 
   if (add_result) {
     rb->SendBulkString(StreamIdRepr(*add_result));
@@ -2803,7 +2806,7 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   if (!ParseXclaimOptions(args, opts, cmd_cntx))
     return;
 
-  uint64_t now = cmd_cntx->tx->GetDbContext().time_now_ms;
+  uint64_t now = cmd_cntx->tx()->GetDbContext().time_now_ms;
   DCHECK_GT(now, 0u);
 
   if (opts.delivery_time < 0 || static_cast<uint64_t>(opts.delivery_time) > now)
@@ -2812,7 +2815,7 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
-  OpResult<ClaimInfo> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!result) {
     if (result.status() == OpStatus::SKIPPED) {
       // Return empty result when operation is skipped
@@ -2845,7 +2848,7 @@ void CmdXDel(CmdArgList args, CommandContext* cmd_cntx) {
     return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendLong(*result);
   }
@@ -3126,7 +3129,7 @@ void CmdXLen(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendLong(*result);
   }
@@ -3148,7 +3151,7 @@ void CmdXPending(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPending(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<PendingResult> op_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<PendingResult> op_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
       return cmd_cntx->SendError(NoGroupError(key, opts.group_name));
@@ -3293,7 +3296,7 @@ void CmdXSetId(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (reply.status == OpStatus::STREAM_ID_SMALL) {
     return cmd_cntx->SendError(LeqTopIdError("XSETID"));
   }
@@ -3318,14 +3321,14 @@ void CmdXTrim(CmdArgList args, CommandContext* cmd_cntx) {
   // We can auto-journal if we are not trimming approximately or by maxlen
   const bool enable_auto_journaling = !JournalAsMinId(trim_opts);
   if (enable_auto_journaling) {
-    cmd_cntx->tx->ReviveAutoJournal();
+    cmd_cntx->tx()->ReviveAutoJournal();
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, trim_opts, !enable_auto_journaling);
   };
 
-  OpResult<int64_t> trim_result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<int64_t> trim_result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (trim_result) {
     rb->SendLong(*trim_result);
   } else {
@@ -3352,7 +3355,7 @@ void CmdXAck(CmdArgList args, CommandContext* cmd_cntx) {
     return OpAck(t->GetOpArgs(shard), key, group, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendLong(*result);
   }
@@ -3412,7 +3415,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAutoClaim(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<ClaimInfo> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendError(NoGroupOrKey(key, opts.group));

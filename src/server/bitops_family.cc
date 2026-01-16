@@ -552,7 +552,7 @@ void BitPos(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return FindFirstBitWithValue(t->GetOpArgs(shard), key, value, start, end, as_bit);
   };
-  OpResult<int64_t> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, builder);
 }
 
@@ -579,7 +579,7 @@ void BitCount(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
   };
-  OpResult<std::size_t> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<std::size_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, cmd_cntx->rb());
 }
 
@@ -1131,11 +1131,11 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
 }
 
 void BitField(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, false, cmd_cntx->tx, cmd_cntx->rb());
+  BitFieldGeneric(args, false, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 void BitFieldRo(CmdArgList args, CommandContext* cmd_cntx) {
-  BitFieldGeneric(args, true, cmd_cntx->tx, cmd_cntx->rb());
+  BitFieldGeneric(args, true, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 #ifndef __clang__
@@ -1175,12 +1175,12 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(shard_bitop), false);  // we still have more work to do
+  cmd_cntx->tx()->Execute(std::move(shard_bitop), false);  // we still have more work to do
   // All result from each shard
   const auto joined_results = CombineResultOp(result_set, op);
   // Second phase - save to target key if successful
   if (!joined_results) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     cmd_cntx->SendError(joined_results.status());
     return;
   } else {
@@ -1211,7 +1211,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
       return OpStatus::OK;
     };
 
-    cmd_cntx->tx->Execute(std::move(store_cb), true);
+    cmd_cntx->tx()->Execute(std::move(store_cb), true);
     builder->SendLong(op_result.size());
   }
 }
@@ -1229,7 +1229,7 @@ void GetBit(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return ReadValueBitsetAt(t->GetOpArgs(shard), key, offset);
   };
-  OpResult<bool> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, cmd_cntx->rb());
 }
 
@@ -1248,7 +1248,7 @@ void SetBit(CmdArgList args, CommandContext* cmd_cntx) {
     return BitNewValue(t->GetOpArgs(shard), key, offset, value != 0);
   };
 
-  OpResult<bool> res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, cmd_cntx->rb());
 }
 

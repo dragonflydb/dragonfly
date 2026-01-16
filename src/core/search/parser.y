@@ -81,7 +81,7 @@ double toDouble(string_view src);
 
 %token <std::string> DOUBLE "double"
 %token <std::string> UINT32 "uint32"
-%nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr bracket_filter_expr
+%nterm <AstExpr> final_query filter star_expr search_expr search_unary_expr search_or_expr search_and_expr bracket_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 %nterm <AstTagsNode::TagValueProxy> tag_list_element
 
@@ -129,7 +129,11 @@ opt_ef_runtime:
 
 filter:
   search_expr               { $$ = std::move($1); }
-  | STAR                    { $$ = AstStarNode(); }
+  | star_expr               { $$ = std::move($1); }
+
+star_expr:
+  STAR                      { $$ = AstStarNode(); }
+  | LPAREN star_expr RPAREN { $$ = std::move($2); }
 
 search_expr:
   search_unary_expr         { $$ = std::move($1); }

@@ -278,6 +278,7 @@ jobs:
     - name: checkout
       uses: actions/checkout@v6
       with:
+        token: ${{ secrets.DRAGONFLY_TOKEN }}  # PAT to push to main
         fetch-depth: 0
 
     - name: Install helm
@@ -319,11 +320,10 @@ jobs:
         helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
 
     - name: GitHub Push
-      uses: CasperWA/push-protected@v2
       if: env.IS_PRERELEASE != 'true'
-      with:
-        token: ${{ secrets.DRAGONFLY_TOKEN }}
-        branch: main
+      run: |
+        # Push directly using the authenticated origin
+        git push origin main
 
     - name: Discord notification
       env:

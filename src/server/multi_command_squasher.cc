@@ -36,13 +36,6 @@ namespace {
 thread_local uint64_t max_busy_squash_cycles_cached = 1ULL << 32;
 thread_local uint32_t log_squash_threshold_cached = 1ULL << 31;
 
-void CheckConnStateClean(const ConnectionState& state) {
-  DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
-  DCHECK(state.exec_info.body.empty());
-  DCHECK(!state.script_info);
-  DCHECK(!state.subscribe_info);
-}
-
 size_t Size(const CapturingReplyBuilder::Payload& payload) {
   size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
   return payload_size +
@@ -164,7 +157,6 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
   if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(*cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
-      rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
@@ -175,11 +167,11 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
     auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
-      rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
-  CommandContext cmd_cntx{cmd->Cid(), tx, rb, cntx_};
+  CommandContext cmd_cntx{rb, cntx_};
+  cmd_cntx.SetupTx(cmd->Cid(), tx);
   service_->InvokeCmd(args, &cmd_cntx);
   return true;
 }
@@ -190,12 +182,9 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   auto* local_tx = sinfo.local_tx.get();
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
-  ConnectionContext local_cntx{cntx_, local_tx};
-  if (cntx_->conn()) {
-    local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
-  }
-
   CmdArgVec arg_vec;
+  CommandContext cmd_cntx{&crb, cntx_};
+  cmd_cntx.SetupTx(nullptr, local_tx);
 
   auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
                              CapturingReplyBuilder::Payload* dst) {
@@ -219,19 +208,14 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     crb.SetReplyMode(dispatched.cmd->ReplyMode());
 
     local_tx->MultiSwitchCmd(dispatched.cmd->Cid());
-    auto status = local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
+    auto status = local_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       crb.SendError(status);
     } else {
-      CommandContext cmd_cntx{dispatched.cmd->Cid(), local_cntx.transaction, &crb, &local_cntx};
+      cmd_cntx.UpdateCid(dispatched.cmd->Cid());
       service_->InvokeCmd(args, &cmd_cntx);
     }
     move_reply(crb.Take(), &dispatched.reply);
-
-    // Assert commands made no persistent state changes to stub context state
-    const auto& local_state = local_cntx.conn_state;
-    DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
-    CheckConnStateClean(local_state);
   }
 
   return OpStatus::OK;

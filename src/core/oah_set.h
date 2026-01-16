@@ -30,8 +30,6 @@ class OAHSet {  // Open Addressing Hash Set
 
     iterator(OAHSet* owner, uint32_t bucket_id, uint32_t pos_in_bucket)
         : owner_(owner), bucket_(bucket_id), pos_(pos_in_bucket) {
-      // TODO rewrite, it's inefficient
-      SetEntryIt();
     }
 
     void SetExpiryTime(uint32_t ttl_sec) {
@@ -75,11 +73,14 @@ class OAHSet {  // Open Addressing Hash Set
       return owner_->entries_[bucket_][pos_].GetExpiry();
     }
 
+    uint32_t bucket_id() const {
+      return bucket_;
+    }
+
     operator bool() const {
       return owner_;
     }
 
-   private:
     // find valid entry_ iterator starting from buckets_it_ and set it
     void SetEntryIt() {
       if (!owner_)
@@ -96,13 +97,15 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
    private:
-    OAHSet* owner_;
-    uint32_t bucket_;
-    uint32_t pos_;
+    OAHSet* owner_ = nullptr;
+    uint32_t bucket_ = 0;
+    uint32_t pos_ = 0;
   };
 
   iterator begin() {
-    return iterator(this, 0, 0);
+    iterator res(this, 0, 0);
+    res.SetEntryIt();
+    return res;
   }
 
   iterator end() {
@@ -245,7 +248,7 @@ class OAHSet {  // Open Addressing Hash Set
         obj_alloc_used_ -= res.AllocSize();
         if (bucket.IsVector()) {
           if (bucket.AsVector().Empty()) {
-            ptr_vectors_alloc_used_ -= bucket.AllocSize();
+            ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
             bucket = OAHEntry();
           }
         }
@@ -266,10 +269,11 @@ class OAHSet {  // Open Addressing Hash Set
       --size_;
       obj_alloc_used_ -= item->AllocSize();
       *item = OAHEntry();
-      if (entries_[bucket_id].IsVector()) {
-        if (entries_[bucket_id].AsVector().Empty()) {
-          ptr_vectors_alloc_used_ -= entries_[bucket_id].AllocSize();
-          entries_[bucket_id] = OAHEntry();
+      uint32_t erase_bucket = item.bucket_id();
+      if (entries_[erase_bucket].IsVector()) {
+        if (entries_[erase_bucket].AsVector().Empty()) {
+          ptr_vectors_alloc_used_ -= entries_[erase_bucket].AsVector().AllocSize();
+          entries_[erase_bucket] = OAHEntry();
         }
       }
       return true;
@@ -283,6 +287,21 @@ class OAHSet {  // Open Addressing Hash Set
 
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash, capacity_log_);
+
+    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    const uint32_t capacity_mask = Capacity() - 1;
+
+    // fast check
+    for (uint32_t i = 0; i < kDisplacementSize; i++) {
+      const uint32_t bid = (bucket_id + i) & capacity_mask;
+      if ((entries_[bid].GetHash() == ext_hash) && entries_[bid].IsEntry()) {
+        if (entries_[bid].Key() == member) {
+          entries_[bid].ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+          return !entries_[bid].Empty() ? iterator{this, bid, 0} : end();
+        }
+      }
+    }
+
     auto res = FindInternal(bucket_id, member, hash);
     return res;
   }
@@ -368,8 +387,8 @@ class OAHSet {  // Open Addressing Hash Set
           ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
-      if (bucket.Empty())
-        ptr_vectors_alloc_used_ -= bucket.AllocSize();
+      if (bucket.IsVector())
+        ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
     }
 
     for (size_t bucket_id = 0; bucket_id < max_element; ++bucket_id) {
@@ -388,8 +407,8 @@ class OAHSet {  // Open Addressing Hash Set
           ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
         }
       }
-      if (bucket.Empty())
-        ptr_vectors_alloc_used_ -= bucket.AllocSize();
+      if (bucket.IsVector())
+        ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
     }
   }
 
@@ -418,8 +437,8 @@ class OAHSet {  // Open Addressing Hash Set
         }
       }
       if (!res) {
-        auto pos =
-            entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
+        auto pos = entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_,
+                                          &obj_alloc_used_, time_now_);
         if (pos) {
           return true;
         }
@@ -433,7 +452,7 @@ class OAHSet {  // Open Addressing Hash Set
   template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
   bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
     if (!entry.IsVector()) {
-      entry.ExpireIfNeeded(time_now_, &size_);
+      entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
       if (entry.CheckBucketAffiliation(bucket_id, capacity_log_, kShiftLog)) {
         cb(entry.Key());
         return true;
@@ -442,7 +461,7 @@ class OAHSet {  // Open Addressing Hash Set
       auto& arr = entry.AsVector();
       bool result = false;
       for (auto& el : arr) {
-        el.ExpireIfNeeded(time_now_, &size_);
+        el.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
         if (el.CheckBucketAffiliation(bucket_id, capacity_log_, kShiftLog)) {
           cb(el.Key());
           result = true;
@@ -478,8 +497,8 @@ class OAHSet {  // Open Addressing Hash Set
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = (bid + i) & capacity_mask;
-      auto pos =
-          entries_[bucket_id].Find(str, ext_hash, capacity_log_, kShiftLog, &size_, time_now_);
+      auto pos = entries_[bucket_id].Find(str, ext_hash, capacity_log_, kShiftLog, &size_,
+                                          &obj_alloc_used_, time_now_);
       if (pos) {
         return iterator{this, bucket_id, *pos};
       }

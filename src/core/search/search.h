@@ -145,7 +145,7 @@ class FieldIndices {
 
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
-  void CreateSortIndices(PMR_NS::memory_resource* mr);
+  void CreateSortIndices();
 
   const Schema& schema_;
   const IndicesOptions& options_;

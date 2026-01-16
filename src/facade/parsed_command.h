@@ -48,6 +48,17 @@ class ParsedCommand : public cmn::BackedArguments {
 
   ParsedCommand() = default;
 
+  template <typename T> struct ArgumentExtractor;
+
+  // limited to lambdas with one argument as this is what we need here
+  template <typename C, typename Arg> struct ArgumentExtractor<void (C::*)(Arg) const> {
+    using type = Arg;
+  };
+
+  // extracts the type of the first argument of a callable lambda F
+  template <typename F>
+  using first_arg_t = typename ArgumentExtractor<decltype(&std::decay_t<F>::operator())>::type;
+
  public:
   virtual ~ParsedCommand() = default;
 
@@ -64,9 +75,14 @@ class ParsedCommand : public cmn::BackedArguments {
     conn_cntx_ = conn_cntx;
   }
 
-  void CreateMemcacheCommand() {
-    mc_cmd_ = std::make_unique<MemcacheParser::Command>();
-    mc_cmd_->backed_args = this;
+  // If true, creates mc specific fields, false - destroys them.
+  void ConfigureMCExtension(bool is_mc) {
+    if (is_mc && !mc_cmd_) {
+      mc_cmd_ = std::make_unique<MemcacheParser::Command>();
+      mc_cmd_->backed_args = this;
+    } else if (!is_mc) {
+      mc_cmd_.reset();
+    }
   }
 
   SinkReplyBuilder* rb() const {
@@ -123,13 +139,18 @@ class ParsedCommand : public cmn::BackedArguments {
 
   void SendLong(long val);
   void SendNull();
+  void SendEmptyArray();
 
   template <typename F> void ReplyWith(F&& func) {
     if (is_deferred_reply_) {
-      reply_payload_ = std::forward<F>(func);
+      reply_payload_ = [func = std::forward<F>(func)](SinkReplyBuilder* builder) {
+        auto* rb = static_cast<first_arg_t<F>>(builder);
+        func(rb);
+      };
       NotifyReplied();
     } else {
-      func(rb_);
+      auto* rb = static_cast<first_arg_t<F>>(rb_);
+      func(rb);
     }
   }
 
@@ -158,6 +179,9 @@ class ParsedCommand : public cmn::BackedArguments {
     // If the reply is already done, we can destroy it now.
     return (prev_state & ASYNC_REPLY_DONE) != 0;
   }
+
+ protected:
+  virtual void ReuseInternal() = 0;
 
  private:
   bool CheckDoneAndMarkHead();
