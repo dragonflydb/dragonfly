@@ -82,9 +82,8 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
 // without stopping.
-bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSortedFunc& func,
-                      int32_t start = 0, int32_t end = -1, bool reverse = false,
-                      bool use_score = false);
+bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, int32_t start = 0,
+                      int32_t end = -1, bool reverse = false, bool use_score = false);
 
 bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func);
 

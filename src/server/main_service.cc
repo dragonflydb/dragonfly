@@ -902,13 +902,18 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
   }
 }
 
-// Prepare transaction for DispatchCommand
-optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction>* tx,
-                                                bool dispatching_in_multi, const CommandId* cid,
-                                                ArgSlice tail_args, ConnectionContext* dfly_cntx) {
+// Prepare transaction for DispatchCommand.
+//
+// Return value:
+//   first  - newly created top-level transaction (or nullptr if none).
+//   second - result: overall status of preparation.
+pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* cid,
+                                                              ArgSlice tail_args,
+                                                              CommandContext* cmd_ctx) {
+  auto* dfly_cntx = cmd_ctx->server_conn_cntx();
   bool init = false;
-  if (dispatching_in_multi) {
-    DCHECK(dfly_cntx->transaction);
+  intrusive_ptr<Transaction> res;
+  if (dfly_cntx->transaction) {  // Existing transaction context (e.g., MULTI/EXEC or script)
     DCHECK(dfly_cntx->transaction->IsMulti());  // dispatching in multi
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
@@ -916,25 +921,30 @@ optional<facade::ErrorReply> PrepareTransaction(boost::intrusive_ptr<Transaction
     }
   } else {
     if (cid->IsTransactional()) {
-      tx->reset(new Transaction{cid});
-      dfly_cntx->transaction = tx->get();
-      init = !tx->get()->IsMulti();  // Multi command initialize themself based on their mode
-    } else {
-      dfly_cntx->transaction = nullptr;
+      res.reset(new Transaction{cid});
+      init = !res->IsMulti();  // Multi command initialize themselves based on their mode
     }
+    dfly_cntx->transaction = res.get();
   }
+
+  cmd_ctx->SetupTx(cid, dfly_cntx->transaction);
 
   if (init) {
-    auto* tx = dfly_cntx->transaction;
-    OpStatus status = tx->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
-    if (status != OpStatus::OK)
-      return facade::ErrorReply{status};
+    DCHECK(cmd_ctx->tx());
+    if (auto st =
+            cmd_ctx->tx()->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
+        st != OpStatus::OK) {
+      if (res) {
+        dfly_cntx->transaction = nullptr;
+      }
+      return {nullptr, st};
+    }
 
-    if (!dispatching_in_multi)  // update stats
-      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
+    if (res)  // new transaction
+      dfly_cntx->last_command_debug.shards_count = cmd_ctx->tx()->GetUniqueShardCnt();
   }
 
-  return nullopt;
+  return {std::move(res), OpStatus::OK};
 }
 
 void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSlice tail_args) {
@@ -1476,9 +1486,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
-  bool under_script = bool(dfly_cntx->conn_state.script_info);
-  bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
-  bool dispatching_in_multi = under_script || under_exec;
 
   CmdArgVec tmp_vec;
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
@@ -1486,10 +1493,13 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
+      bool under_script = bool(dfly_cntx->conn_state.script_info);
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
                 << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;
     }
-    if (!dispatching_in_multi)  // Don't interrupt parts of multi command
+
+    // Check pause state only if it is a top level transaction.
+    if (dfly_cntx->transaction == nullptr)
       CheckPauseState(conn, dfly_cntx, cid);
   }
 
@@ -1529,25 +1539,18 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::OK;
   }
 
-  // Reset transaction at the end or when returning an error
-  absl::Cleanup clean_tx = [dfly_cntx, dispatching_in_multi] {
-    if (!dispatching_in_multi) {
-      dfly_cntx->transaction = nullptr;
-    }
-  };
-
-  // Create command transaction
-  intrusive_ptr<Transaction> dist_trans;
-  if (auto err = PrepareTransaction(&dist_trans, dispatching_in_multi, cid, tail_args, dfly_cntx);
-      err) {
-    cmd_cntx->SendError(*err);
+  auto [dispatched_tx, status] = PrepareTransaction(cid, tail_args, cmd_cntx);
+  if (status != OpStatus::OK) {
+    DCHECK(!dispatched_tx);
+    cmd_cntx->SendError(StatusToMsg(status));
     return DispatchResult::ERROR;
   }
 
-  DispatchResult res = DispatchResult::ERROR;
-  cmd_cntx->SetupTx(cid, dfly_cntx->transaction);
-
-  res = InvokeCmd(tail_args, cmd_cntx);
+  DispatchResult res = InvokeCmd(tail_args, cmd_cntx);
+  if (dispatched_tx) {
+    DCHECK(dfly_cntx->transaction == dispatched_tx.get());
+    dfly_cntx->transaction = nullptr;
+  }
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmd_cntx->SendError("Internal Error");
@@ -1559,7 +1562,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
 class ReplyGuard {
  public:
-  ReplyGuard(const CommandContext& cmd_cntx) {
+  explicit ReplyGuard(const CommandContext& cmd_cntx) {
     const bool is_script = bool(cmd_cntx.server_conn_cntx()->conn_state.script_info);
     cid_name_ = cmd_cntx.cid()->name();
     const bool is_one_of = (cid_name_ == "REPLCONF" || cid_name_ == "DFLY");
@@ -2148,6 +2151,7 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
 bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
   Transaction* tx = cntx->transaction;
+  DCHECK(tx);
   Namespace* ns = cntx->ns;
   const DbIndex dbid = cntx->db_index();
 

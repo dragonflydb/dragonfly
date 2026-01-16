@@ -510,7 +510,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  CommandContext cmd_cntx{nullptr, nullptr, conn->builder(), conn->cmd_cntx()};
+  CommandContext cmd_cntx{conn->builder(), conn->cmd_cntx()};
   cmd_cntx.ConfigureMCExtension(true);
   auto& cmd = *cmd_cntx.mc_command();
   cmd.type = cmd_type;
@@ -556,7 +556,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  CommandContext cmd_cntx{nullptr, nullptr, conn->builder(), conn->cmd_cntx()};
+  CommandContext cmd_cntx{conn->builder(), conn->cmd_cntx()};
   cmd_cntx.ConfigureMCExtension(true);
   auto& cmd = *cmd_cntx.mc_command();
   cmd.type = cmd_type;
