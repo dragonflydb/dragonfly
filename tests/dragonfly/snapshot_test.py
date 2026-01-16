@@ -432,6 +432,99 @@ async def test_s3_save_local_dir(async_client, tmp_dir):
         )
 
 
+# If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
+# configured.
+# Note: The default S3 bucket is specified via the environment variable
+# os.environ["DRAGONFLY_S3_BUCKET"]. For GitHub Actions tests, this is configured
+# in the workflow files (.github/workflows/*.yml). For local testing, set this
+# environment variable to your test S3 bucket.
+@pytest.mark.skipif(
+    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
+    reason="AWS S3 snapshots bucket is not configured",
+)
+@pytest.mark.parametrize(
+    "dbfilename_pattern, expected_pattern",
+    [
+        # Test {Y} (year) pattern
+        ("snapshot-{Y}", "snapshot-20"),  # year starts with 20xx
+        # Test {m} (month) pattern
+        ("snapshot-{m}", "snapshot-"),  # month is 01-12
+        # Test {d} (day) pattern
+        ("snapshot-{d}", "snapshot-"),  # day is 01-31
+        # Test {timestamp} pattern
+        ("snapshot-{timestamp}", "snapshot-"),  # timestamp is unix epoch
+        # Test combination of patterns
+        ("snapshot-{Y}-{m}-{d}", "snapshot-20"),  # combined date
+        ("snapshot-{Y}{m}{d}-{timestamp}", "snapshot-20"),  # all patterns
+    ],
+)
+async def test_s3_snapshot_filename_patterns(
+    df_factory, tmp_dir, dbfilename_pattern: str, expected_pattern: str
+):
+    """
+    Test that snapshot filenames correctly substitute date/time patterns.
+    This test covers the {Y}, {m}, {d}, and {timestamp} patterns in snapshot names.
+    
+    The patterns are substituted as follows:
+    - {Y}: 4-digit year (e.g., 2024)
+    - {m}: 2-digit month (e.g., 01-12)
+    - {d}: 2-digit day (e.g., 01-31)
+    - {timestamp}: Unix timestamp in seconds
+    """
+    df_args = {
+        **BASIC_ARGS,
+        "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}",
+        "dbfilename": dbfilename_pattern,
+    }
+
+    df_server = df_factory.create(**df_args)
+    df_server.start()
+    async_client = df_server.client()
+
+    seeder = DebugPopulateSeeder(key_target=1_000)
+    await seeder.run(async_client)
+
+    start_capture = await DebugPopulateSeeder.capture(async_client)
+
+    try:
+        # Save the snapshot - the filename pattern will be expanded
+        await async_client.execute_command("SAVE", "DF")
+
+        # List objects in S3 to verify the pattern was correctly substituted
+        s3_client = boto3.client("s3")
+        bucket = os.environ["DRAGONFLY_S3_BUCKET"]
+        prefix = str(tmp_dir)[1:] + "/"
+
+        response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        assert "Contents" in response, f"No files found in S3 bucket {bucket} with prefix {prefix}"
+
+        # Find the summary file that matches our expected pattern
+        summary_files = [
+            obj["Key"] for obj in response["Contents"] if obj["Key"].endswith("-summary.dfs")
+        ]
+        assert len(summary_files) > 0, f"No summary file found matching pattern {dbfilename_pattern}"
+
+        # Verify the filename starts with the expected pattern
+        summary_file = summary_files[0]
+        filename = os.path.basename(summary_file)
+        assert filename.startswith(
+            expected_pattern.split("{")[0]
+        ), f"Filename {filename} doesn't match expected pattern {expected_pattern}"
+
+        # Test loading the snapshot back
+        await async_client.flushall()
+        await async_client.execute_command("DFLY", "LOAD", bucket + summary_file)
+
+        # Verify data integrity
+        assert await DebugPopulateSeeder.capture(async_client) == start_capture
+
+    finally:
+        # Cleanup S3 objects
+        delete_s3_objects(bucket, prefix)
+        await async_client.connection_pool.disconnect()
+        df_server.stop()
+
+
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown"})
 class TestDflySnapshotOnShutdown:
     SEEDER_ARGS = dict(key_target=10_000)
