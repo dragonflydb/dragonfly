@@ -785,6 +785,7 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   DCHECK(&o != this);
 
   SetMeta(o.taglen_, o.mask_);  // frees own previous resources
+  encoding_ = o.encoding_;
   memcpy(&u_, &o.u_, sizeof(u_));
 
   o.taglen_ = 0;  // forget all data
@@ -1710,7 +1711,8 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
       detail::ascii_unpack(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
       break;
     case HUFFMAN_ENC: {
-      const auto& decoder = tl.GetHuffmanDecoder(is_key_);
+      auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
+      const auto& decoder = tl.GetHuffmanDecoder(domain);
       decoder.Decode(blob.substr(1), decoded_len, dest);
       break;
     }

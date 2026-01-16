@@ -414,7 +414,7 @@ class CompactObj {
   std::array<std::string_view, 2> GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
-    return StrEncoding{encoding_, bool(is_key_)};
+    return StrEncoding{encoding_, is_key_};
   }
 
   bool HasAllocated() const;
@@ -528,7 +528,7 @@ class CompactObj {
   };
 
   // TODO: use c++20 bitfield initializers
-  const uint8_t is_key_ : 1;
+  const bool is_key_ : 1;
   uint8_t taglen_ : 5;    // Either length of inline string or tag of type
   uint8_t encoding_ : 2;  // Encoding of string values
 };
@@ -553,6 +553,7 @@ struct CompactKey : public CompactObj {
   CompactKey AsRef() const {
     CompactKey res;
     memcpy(&res.u_, &u_, sizeof(u_));
+    res.encoding_ = encoding_;
     res.taglen_ = taglen_;
     res.mask_ = mask_;
     res.mask_bits_.ref = 1;
