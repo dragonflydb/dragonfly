@@ -988,9 +988,6 @@ void Transaction::Refurbish() {
   coordinator_state_ = 0;
   cb_ptr_ = nullptr;
 
-  kv_fp_.clear();
-  shard_data_.clear();
-
   if (multi_)
     multi_ = make_unique<MultiData>();
 }
