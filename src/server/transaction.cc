@@ -455,7 +455,6 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
 
 void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   CHECK(multi_);
-  CHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = GLOBAL;
   InitBase(ns, dbid, {});
@@ -469,7 +468,6 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
                                         bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
   DCHECK(multi_);
-  DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = LOCK_AHEAD;
   multi_->lock_mode = LockMode();
