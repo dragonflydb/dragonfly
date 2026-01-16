@@ -5,7 +5,6 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
-#include <xxhash.h>
 
 #include <algorithm>
 #include <array>
@@ -52,11 +51,6 @@ using CI = CommandId;
 enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-
-// Convert XXH3 hash to 16-character hex string
-inline string HashToHexString(uint64_t hash) {
-  return absl::StrCat(absl::Hex(hash, absl::kZeroPad16));
-}
 
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
@@ -1233,12 +1227,10 @@ void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
 
 void CmdDigest(CmdArgList args, CommandContext* cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<optional<string>> {
+  auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok()) {
-      if (it_res.status() == OpStatus::KEY_NOTFOUND)
-        return optional<string>{};  // Return empty optional for non-existent key
-      return it_res.status();       // Return error for other cases
+      return it_res.status();  // Return error for other cases
     }
 
     // Read string value (handles tiered storage if needed)
@@ -1254,19 +1246,16 @@ void CmdDigest(CmdArgList args, CommandContext* cmnd_cntx) {
     }
 
     // Compute XXH3 hash and return as 16-char hex string
-    uint64_t hash = XXH3_64bits(value.data(), value.size());
-    return optional<string>{HashToHexString(hash)};
+    return XXH3_Digest(value);
   };
 
-  OpResult<optional<string>> result = cmnd_cntx->tx()->ScheduleSingleHopT(cb);
+  OpResult<string> result = cmnd_cntx->tx()->ScheduleSingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
 
   if (result) {
-    if (*result) {
-      rb->SendBulkString(**result);
-    } else {
-      rb->SendNull();
-    }
+    rb->SendBulkString(*result);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    rb->SendNull();
   } else {
     cmnd_cntx->SendError(result.status());
   }

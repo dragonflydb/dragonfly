@@ -1,5 +1,8 @@
 #include "server/family_utils.h"
 
+#include <absl/strings/str_cat.h>
+#include <xxhash.h>
+
 #include "base/logging.h"
 
 extern "C" {
@@ -10,6 +13,11 @@ extern "C" {
 namespace dfly {
 
 using namespace std;
+
+string XXH3_Digest(std::string_view s) {
+  uint64_t hash = XXH3_64bits(s.data(), s.size());
+  return absl::StrCat(absl::Hex(hash, absl::kZeroPad16));
+}
 
 sds WrapSds(std::string_view s) {
   static thread_local sds tmp_sds = sdsempty();

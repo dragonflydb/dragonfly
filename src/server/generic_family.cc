@@ -5,7 +5,6 @@
 #include "server/generic_family.h"
 
 #include <absl/strings/str_cat.h>
-#include <xxhash.h>
 
 #include <boost/operators.hpp>
 #include <optional>
@@ -52,11 +51,6 @@ using namespace std;
 using namespace facade;
 
 namespace {
-
-// Convert XXH3 hash to 16-character hex string
-inline string HashToHexString(uint64_t hash) {
-  return absl::StrCat(absl::Hex(hash, absl::kZeroPad16));
-}
 
 constexpr uint32_t kMaxTtl = (1UL << 26);
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
@@ -1148,7 +1142,13 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
   Condition cond = Condition::NONE;
   string_view compare_value;
 
-  if (args.size() == 3) {
+  if (args.size() == 1) {
+    // DELEX key - no condition, behaves like DEL
+    cond = Condition::NONE;
+  } else if (args.size() == 2) {
+    // DELEX key <something> - invalid, needs both condition and value
+    return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+  } else if (args.size() == 3) {
     string_view opt = ArgS(args, 1);
     compare_value = ArgS(args, 2);
 
@@ -1163,7 +1163,8 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
     } else {
       return cmd_cntx->SendError(facade::UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
     }
-  } else if (args.size() > 3) {
+  } else {
+    // args.size() > 3
     return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
   }
 
@@ -1206,8 +1207,7 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
       should_delete = (value != compare_value);
     } else if (cond == Condition::IFDEQ || cond == Condition::IFDNE) {
       // Compute digest of stored value and compare
-      uint64_t hash = XXH3_64bits(value.data(), value.size());
-      string digest = HashToHexString(hash);
+      string digest = XXH3_Digest(value);
 
       if (cond == Condition::IFDEQ) {
         should_delete = (digest == compare_value);

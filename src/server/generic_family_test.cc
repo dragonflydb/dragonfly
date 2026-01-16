@@ -1661,6 +1661,15 @@ TEST_F(GenericFamilyTest, Delex) {
 
   // DELEX with too many arguments returns error
   EXPECT_THAT(Run({"delex", "key", "IFEQ", "val", "extra"}), ErrArg("wrong number of arguments"));
+
+  // DELEX with exactly 2 arguments (key + one arg) should return error
+  // This is the bug fix: previously would delete unconditionally
+  EXPECT_THAT(Run({"delex", "key11", "randomarg"}), ErrArg("wrong number of arguments"));
+
+  EXPECT_THAT(Run({"delex", "key12", "IFEQ"}), ErrArg("wrong number of arguments"));
+
+  // DELEX with 2 args, various invalid cases
+  EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
 }
 
 }  // namespace dfly
