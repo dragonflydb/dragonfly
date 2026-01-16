@@ -1598,4 +1598,69 @@ TEST_F(GenericFamilyTest, SortGet) {
   ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
 }
 
+TEST_F(GenericFamilyTest, Delex) {
+  // DELEX without condition behaves like DEL
+  Run({"set", "key1", "value1"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key1"}));
+  EXPECT_THAT(Run({"get", "key1"}), ArgType(RespExpr::NIL));
+
+  // DELEX on non-existent key returns 0
+  EXPECT_EQ(0, CheckedInt({"delex", "nonexistent"}));
+
+  // DELEX IFEQ deletes when values match
+  Run({"set", "key2", "value2"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key2", "IFEQ", "value2"}));
+  EXPECT_THAT(Run({"get", "key2"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFEQ does not delete when values differ
+  Run({"set", "key3", "value3"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key3", "IFEQ", "wrongvalue"}));
+  EXPECT_EQ(Run({"get", "key3"}), "value3");
+
+  // DELEX IFNE deletes when values differ
+  Run({"set", "key4", "value4"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key4", "IFNE", "differentvalue"}));
+  EXPECT_THAT(Run({"get", "key4"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFNE does not delete when values match
+  Run({"set", "key5", "value5"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key5", "IFNE", "value5"}));
+  EXPECT_EQ(Run({"get", "key5"}), "value5");
+
+  // DELEX IFDEQ tests - get digest first and use it
+  Run({"set", "key6", "value6"});
+  auto digest = Run({"digest", "key6"});
+  string_view digest_str = ToSV(digest.GetBuf());
+  EXPECT_EQ(1, CheckedInt({"delex", "key6", "IFDEQ", string(digest_str)}));
+  EXPECT_THAT(Run({"get", "key6"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFDEQ does not delete when digests differ
+  Run({"set", "key7", "value7"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key7", "IFDEQ", "0000000000000000"}));
+  EXPECT_EQ(Run({"get", "key7"}), "value7");
+
+  // DELEX IFDNE deletes when digests differ
+  Run({"set", "key8", "value8"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key8", "IFDNE", "0000000000000000"}));
+  EXPECT_THAT(Run({"get", "key8"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFDNE does not delete when digests match
+  Run({"set", "key9", "value9"});
+  auto digest9 = Run({"digest", "key9"});
+  string_view digest9_str = ToSV(digest9.GetBuf());
+  EXPECT_EQ(0, CheckedInt({"delex", "key9", "IFDNE", string(digest9_str)}));
+  EXPECT_EQ(Run({"get", "key9"}), "value9");
+
+  // DELEX with condition on non-string type returns WRONGTYPE error
+  Run({"lpush", "list1", "item"});
+  EXPECT_THAT(Run({"delex", "list1", "IFEQ", "item"}), ErrArg("WRONGTYPE"));
+
+  // DELEX with invalid option returns syntax error
+  Run({"set", "key10", "value10"});
+  EXPECT_THAT(Run({"delex", "key10", "INVALID", "value"}), ErrArg("Unknown subcommand"));
+
+  // DELEX with too many arguments returns error
+  EXPECT_THAT(Run({"delex", "key", "IFEQ", "val", "extra"}), ErrArg("wrong number of arguments"));
+}
+
 }  // namespace dfly

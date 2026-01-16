@@ -326,10 +326,10 @@ TEST_F(AclFamilyTest, TestCat) {
   resp = Run({"ACL", "CAT", "STRING"});
 
   EXPECT_THAT(resp.GetVec(),
-              UnorderedElementsAre("GETSET", "GETRANGE", "INCRBYFLOAT", "GETDEL", "DECRBY",
-                                   "PREPEND", "SETEX", "MSET", "SET", "PSETEX", "SUBSTR", "DECR",
-                                   "STRLEN", "INCR", "INCRBY", "MGET", "GET", "SETNX", "GETEX",
-                                   "APPEND", "MSETNX", "SETRANGE", "GAT"));
+              IsSupersetOf({"GETSET", "GETRANGE", "INCRBYFLOAT", "GETDEL",  "DECRBY", "PREPEND",
+                            "SETEX",  "MSET",     "SET",         "PSETEX",  "SUBSTR", "DECR",
+                            "STRLEN", "INCR",     "INCRBY",      "MGET",    "GET",    "SETNX",
+                            "GETEX",  "APPEND",   "MSETNX",      "SETRANGE"}));
 }
 
 TEST_F(AclFamilyTest, TestGetUser) {

@@ -5,6 +5,7 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <xxhash.h>
 
 #include <algorithm>
 #include <array>
@@ -51,6 +52,11 @@ using CI = CommandId;
 enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
+
+// Convert XXH3 hash to 16-character hex string
+inline string HashToHexString(uint64_t hash) {
+  return absl::StrCat(absl::Hex(hash, absl::kZeroPad16));
+}
 
 // Either immediately available value or tiering future + result
 template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
@@ -1225,6 +1231,47 @@ void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
+void CmdDigest(CmdArgList args, CommandContext* cmnd_cntx) {
+  string_view key = ArgS(args, 0);
+  auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<optional<string>> {
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok()) {
+      if (it_res.status() == OpStatus::KEY_NOTFOUND)
+        return optional<string>{};  // Return empty optional for non-existent key
+      return it_res.status();       // Return error for other cases
+    }
+
+    // Read string value (handles tiered storage if needed)
+    StringResult str_result = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
+
+    // Handle both immediate value and tiered storage future
+    string value;
+    if (holds_alternative<string>(str_result)) {
+      value = std::move(get<string>(str_result));
+    } else {
+      auto& future = get<TieredStorage::TResult<string>>(str_result);
+      value = std::move(future).Get().value();
+    }
+
+    // Compute XXH3 hash and return as 16-char hex string
+    uint64_t hash = XXH3_64bits(value.data(), value.size());
+    return optional<string>{HashToHexString(hash)};
+  };
+
+  OpResult<optional<string>> result = cmnd_cntx->tx()->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
+
+  if (result) {
+    if (*result) {
+      rb->SendBulkString(**result);
+    } else {
+      rb->SendNull();
+    }
+  } else {
+    cmnd_cntx->SendError(result.status());
+  }
+}
+
 void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
@@ -1727,6 +1774,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
+      << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
