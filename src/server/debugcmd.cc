@@ -180,8 +180,7 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
       val_len = ql->MallocUsed(true);
     }
   } else if (pv.ObjType() == OBJ_ZSET) {
-    IterateSortedSet(pv.GetRobjWrapper(),
-                     [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
+    IterateSortedSet(pv, [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
     val_len = 0;  // reset - will be calculated below.
     if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
       hist->listpack.Add(pv.MallocUsed());
@@ -313,7 +312,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
         }
       } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
         container_utils::IterateSortedSet(
-            it->second.GetRobjWrapper(), [&](container_utils::ContainerEntry entry, double) {
+            it->second, [&](container_utils::ContainerEntry entry, double) {
               ++steps;
               if (entry.IsString()) {
                 HIST_add(dest->hist.data(), entry.data(), entry.size());

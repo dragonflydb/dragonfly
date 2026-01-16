@@ -468,9 +468,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
   DCHECK_EQ(OBJ_ZSET, pv.ObjType());
-  const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
   if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    auto* zs = static_cast<detail::SortedMap*>(pv.RObjPtr());
 
     RETURN_ON_ERR(SaveLen(zs->Size()));
     std::error_code ec;
@@ -498,7 +497,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
     });
   } else {
     CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK));
-    uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
     size_t lp_bytes = lpBytes(lp);
 
     RETURN_ON_ERR(SaveString((uint8_t*)lp, lp_bytes));
