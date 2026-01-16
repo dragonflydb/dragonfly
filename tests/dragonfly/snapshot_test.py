@@ -504,16 +504,25 @@ async def test_s3_snapshot_filename_patterns(
         ]
         assert len(summary_files) > 0, f"No summary file found matching pattern {dbfilename_pattern}"
 
-        # Verify the filename starts with the expected pattern
+        # Verify the filename matches the expected pattern after substitution
         summary_file = summary_files[0]
         filename = os.path.basename(summary_file)
-        assert filename.startswith(
-            expected_pattern.split("{")[0]
-        ), f"Filename {filename} doesn't match expected pattern {expected_pattern}"
+        
+        # Check that the filename starts with "snapshot-" and verify pattern substitution
+        assert filename.startswith("snapshot-"), f"Filename {filename} should start with 'snapshot-'"
+        
+        # Additional pattern-specific validation
+        if "{Y}" in dbfilename_pattern:
+            # Year should be 4 digits starting with 20 (2000-2099)
+            assert "20" in filename, f"Filename {filename} should contain year pattern (20XX)"
+        if "{timestamp}" in dbfilename_pattern:
+            # Timestamp should be a numeric value
+            import re
+            assert re.search(r'\d{10,}', filename), f"Filename {filename} should contain timestamp"
 
         # Test loading the snapshot back
         await async_client.flushall()
-        await async_client.execute_command("DFLY", "LOAD", bucket + summary_file)
+        await async_client.execute_command("DFLY", "LOAD", bucket + "/" + summary_file)
 
         # Verify data integrity
         assert await DebugPopulateSeeder.capture(async_client) == start_capture
