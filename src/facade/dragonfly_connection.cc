@@ -2032,17 +2032,35 @@ bool Connection::ParseMCBatch() {
 }
 
 bool Connection::ExecuteMCBatch() {
+  auto advance_head = [this]() -> ParsedCommand* {
+    auto* cmd = parsed_head_;
+    parsed_head_ = cmd->next;
+    ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+    return parsed_head_;
+  };
+
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
+    if (reply_builder_->GetError())
+      return false;
+    bool is_head = cmd == parsed_head_;
+
     // parser errors are stored as deferred replies
     if (cmd->IsDeferredReply() && cmd->CanReply()) {
-      cmd = cmd->next;
-      continue;  // enqueue as async for simplicity
+      if (is_head) {
+        cmd->SendReply();
+        cmd = advance_head();
+      } else {
+        cmd = cmd->next;
+      }
+      continue;
     }
 
     // We must continue with async execution is we already have executing commands
-    bool is_head = cmd == parsed_head_;
     auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
+
+    if (!ioloop_v2_)  // only v2 loop supports any async commands so far
+      mode = AsyncPreference::ONLY_SYNC;
 
     if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
@@ -2052,14 +2070,11 @@ bool Connection::ExecuteMCBatch() {
       stats_->pipeline_dispatch_calls++;
 
     // Advance the head if we executed the current head synchronously
-    auto* prev = exchange(cmd, cmd->next);
-    if (!prev->IsDeferredReply()) {
+    if (!cmd->IsDeferredReply()) {
       DCHECK(is_head);  // only head can execute sync
-      parsed_head_ = cmd;
-      ReleaseParsedCommand(prev, cmd != nullptr /* is_pipelined */);
-
-      if (reply_builder_->GetError())
-        return false;
+      cmd = advance_head();
+    } else {
+      cmd = cmd->next;
     }
   }
 
