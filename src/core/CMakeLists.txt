@@ -23,7 +23,7 @@ endif()
 add_subdirectory(json)
 add_subdirectory(page_usage)
 
-add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set.cc
+add_library(dfly_core allocation_tracker.cc bloom.cc cms.cc topk.cc compact_object.cc dense_set.cc
     dragonfly_core.cc extent_tree.cc huff_coder.cc
     interpreter.cc glob_matcher.cc mi_memory_resource.cc qlist.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc task_queue.cc

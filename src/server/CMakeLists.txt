@@ -49,7 +49,7 @@ endif()
 
 # Optionally compile extension commands
 if (WITH_EXTENSION_CMDS)
-  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc json_family.cc)
+  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc cms_family.cc topk_family.cc json_family.cc)
   add_definitions(-DWITH_EXTENSION_CMDS)
 endif()
 
@@ -147,6 +147,8 @@ helio_cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(cms_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(topk_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
