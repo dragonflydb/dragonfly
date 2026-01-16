@@ -873,6 +873,11 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 void TrackIfNeeded(CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.tracking_info_;
+
+  if (!info.IsTrackingOn()) {
+    return;
+  }
+
   if (auto* tx = cmd_cntx->tx(); tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
@@ -1587,15 +1592,10 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   DCHECK(cntx);
 
   if (auto err = VerifyCommandExecution(*cmd_cntx, tail_args); err) {
-    // We need to skip this because ACK's should not be replied to
-    // Bonus points because this allows to continue replication with ACL users who got
-    // their access revoked and reinstated
-    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
-      return DispatchResult::OK;
-    }
     cmd_cntx->SendError(*err);
 
-    return err->status == OpStatus::OUT_OF_MEMORY ? DispatchResult::OOM : DispatchResult::OK;
+    DCHECK(err->status == OpStatus::OUT_OF_MEMORY);
+    return DispatchResult::OOM;
   }
 
   bool has_monitors = !ServerState::tlocal()->Monitors().Empty();
@@ -1631,13 +1631,15 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
   }
 
-  if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
-    // Each time we execute a command we need to increase the sequence number in
-    // order to properly track clients when OPTIN is used.
-    // We don't do this for `multi/exec` because it would break the
-    // semantics, i.e, CACHING should stick for all commands following
-    // the CLIENT CACHING ON within a multi/exec block
-    cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+  if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
+    if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
+      // Each time we execute a command we need to increase the sequence number in
+      // order to properly track clients when OPTIN is used.
+      // We don't do this for `multi/exec` because it would break the
+      // semantics, i.e, CACHING should stick for all commands following
+      // the CLIENT CACHING ON within a multi/exec block
+      cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+    }
   }
 
   cmd_cntx->RecordLatency(tail_args);

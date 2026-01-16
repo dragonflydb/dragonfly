@@ -377,11 +377,10 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
 
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
-# @pytest.mark.skipif(
-#    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-#    reason="AWS S3 snapshots bucket is not configured",
-# )
-@pytest.mark.skip("Fails on CI")
+@pytest.mark.skipif(
+    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
+    reason="AWS S3 snapshots bucket is not configured",
+)
 @dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
 async def test_s3_snapshot(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)
@@ -411,11 +410,10 @@ async def test_s3_snapshot(async_client, tmp_dir):
 
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
-# @pytest.mark.skipif(
-#    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-#    reason="AWS S3 snapshots bucket is not configured",
-# )
-@pytest.mark.skip("Fails on CI")
+@pytest.mark.skipif(
+    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
+    reason="AWS S3 snapshots bucket is not configured",
+)
 @dfly_args({**BASIC_ARGS})
 async def test_s3_save_local_dir(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)

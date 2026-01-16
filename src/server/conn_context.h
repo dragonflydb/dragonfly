@@ -265,7 +265,7 @@ struct ConnectionState {
     Options option_ = NONE;
     // sequence number
     size_t seq_num_ = 0;
-    size_t caching_seq_num_ = 0;
+    size_t caching_seq_num_ = 1;
   };
 
  public:
