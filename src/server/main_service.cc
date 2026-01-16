@@ -907,9 +907,9 @@ void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, con
 // Return value:
 //   first  - newly created top-level transaction (or nullptr if none).
 //   second - result: overall status of preparation.
-pair<intrusive_ptr<Transaction>, DispatchResult> PrepareTransaction(const CommandId* cid,
-                                                                    ArgSlice tail_args,
-                                                                    CommandContext* cmd_ctx) {
+pair<intrusive_ptr<Transaction>, OpStatus> PrepareTransaction(const CommandId* cid,
+                                                              ArgSlice tail_args,
+                                                              CommandContext* cmd_ctx) {
   auto* dfly_cntx = cmd_ctx->server_conn_cntx();
   bool init = false;
   intrusive_ptr<Transaction> res;
@@ -922,7 +922,7 @@ pair<intrusive_ptr<Transaction>, DispatchResult> PrepareTransaction(const Comman
   } else {
     if (cid->IsTransactional()) {
       res.reset(new Transaction{cid});
-      init = !res->IsMulti();  // Multi command initialize themself based on their mode
+      init = !res->IsMulti();  // Multi command initialize themselves based on their mode
     }
     dfly_cntx->transaction = res.get();
   }
@@ -934,18 +934,17 @@ pair<intrusive_ptr<Transaction>, DispatchResult> PrepareTransaction(const Comman
     if (auto st =
             cmd_ctx->tx()->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
         st != OpStatus::OK) {
-      cmd_ctx->SendError(StatusToMsg(st));
       if (res) {
         dfly_cntx->transaction = nullptr;
       }
-      return {{}, DispatchResult::ERROR};
+      return {nullptr, st};
     }
 
     if (res)  // new transaction
       dfly_cntx->last_command_debug.shards_count = cmd_ctx->tx()->GetUniqueShardCnt();
   }
 
-  return {std::move(res), DispatchResult::OK};
+  return {std::move(res), OpStatus::OK};
 }
 
 void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSlice tail_args) {
@@ -1540,13 +1539,14 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::OK;
   }
 
-  auto [dispatched_tx, res] = PrepareTransaction(cid, tail_args, cmd_cntx);
-  if (res != DispatchResult::OK) {
+  auto [dispatched_tx, status] = PrepareTransaction(cid, tail_args, cmd_cntx);
+  if (status != OpStatus::OK) {
     DCHECK(!dispatched_tx);
-    return res;
+    cmd_cntx->SendError(StatusToMsg(status));
+    return DispatchResult::ERROR;
   }
 
-  res = InvokeCmd(tail_args, cmd_cntx);
+  DispatchResult res = InvokeCmd(tail_args, cmd_cntx);
   if (dispatched_tx) {
     DCHECK(dfly_cntx->transaction == dispatched_tx.get());
     dfly_cntx->transaction = nullptr;
@@ -1562,7 +1562,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
 class ReplyGuard {
  public:
-  ReplyGuard(const CommandContext& cmd_cntx) {
+  explicit ReplyGuard(const CommandContext& cmd_cntx) {
     const bool is_script = bool(cmd_cntx.server_conn_cntx()->conn_state.script_info);
     cid_name_ = cmd_cntx.cid()->name();
     const bool is_one_of = (cid_name_ == "REPLCONF" || cid_name_ == "DFLY");
