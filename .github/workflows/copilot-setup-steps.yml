@@ -2,47 +2,45 @@
 # This file contains steps to configure the Dragonfly build environment
 # with AWS, GCP, GPERF, and UNWIND disabled for faster development builds
 
-name: Dragonfly Development Build Setup
+name: Copilot setup steps
 
-steps:
-  - name: Install required system dependencies
-    description: Install Boost context and other essential libraries
-    commands:
-      - sudo apt-get update
-      - sudo apt-get install -y libboost-context-dev libunwind-dev
+# Automatically run the setup steps when they are changed to allow for easy validation, and
+# allow manual testing through the repository's "Actions" tab
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
 
-  - name: Initialize git submodules
-    description: Clone helio and other required submodules
-    commands:
-      - git submodule update --init --recursive
+jobs:
+  # The job MUST be called `copilot-setup-steps` or it will not be picked up by Copilot.
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
-  - name: Configure CMake build (Debug, no AWS/GCP)
-    description: Configure debug build with AWS, GCP, GPERF, and UNWIND disabled
-    commands:
-      - ./helio/blaze.sh -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_GPERF=OFF
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-  - name: Build specific test targets
-    description: Build only the test targets you need
-    examples:
-      - cd build-dbg && ninja string_family_test
-      - cd build-dbg && ninja generic_family_test
-      - cd build-dbg && ninja <target_name>
+      - name: Install required system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-context-dev libunwind-dev
 
-  - name: Run tests
-    description: Execute specific test suites
-    examples:
-      - cd build-dbg && ./string_family_test --gtest_filter="StringFamilyTest.SetGet"
-      - cd build-dbg && ./generic_family_test --gtest_filter="GenericFamilyTest.Del"
+      - name: Configure CMake build (Debug, no AWS/GCP)
+        run: ./helio/blaze.sh -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_GPERF=OFF
 
-  - name: Code formatting
-    description: Run pre-commit hooks for code formatting
-    commands:
-      - pip3 install pre-commit
-      - pre-commit run --files <modified_files>
+      - name: Install pre-commit
+        run: pip3 install pre-commit
 
-notes:
-  - The build directory will be created at build-dbg/
-  - Disabling AWS/GCP significantly speeds up compilation
-  - WITH_GPERF=OFF disables Google Performance Tools
-  - libunwind-dev is required for stack traces
-  - Use ninja for faster parallel builds
+# Notes:
+# - The build directory will be created at build-dbg/
+# - Disabling AWS/GCP significantly speeds up compilation
+# - WITH_GPERF=OFF disables Google Performance Tools
+# - libunwind-dev is required for stack traces
+# - Use ninja for faster parallel builds
