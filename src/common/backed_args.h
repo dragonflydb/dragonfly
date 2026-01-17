@@ -21,59 +21,6 @@ class BackedArguments {
   BackedArguments() {
   }
 
-  class iterator {
-   public:
-    using iterator_category = std::random_access_iterator_tag;
-    using value_type = std::string_view;
-    using difference_type = std::ptrdiff_t;
-    using pointer = const std::string_view*;
-    using reference = std::string_view;
-
-    iterator(const BackedArguments* ba, size_t index) : ba_(ba), index_(index) {
-    }
-
-    iterator& operator++() {
-      ++index_;
-      return *this;
-    }
-
-    iterator& operator--() {
-      --index_;
-      return *this;
-    }
-
-    iterator& operator+=(int delta) {
-      index_ += delta;
-      return *this;
-    }
-
-    iterator operator+(int delta) const {
-      iterator res(*this);
-      res += delta;
-      return res;
-    }
-
-    ptrdiff_t operator-(iterator other) const {
-      return ptrdiff_t(index_) - ptrdiff_t(other.index_);
-    }
-
-    bool operator==(const iterator& other) const {
-      return index_ == other.index_ && ba_ == other.ba_;
-    }
-
-    bool operator!=(const iterator& other) const {
-      return !(*this == other);
-    }
-
-    std::string_view operator*() const {
-      return ba_->at(index_);
-    }
-
-   private:
-    const BackedArguments* ba_;
-    size_t index_;
-  };
-
   // Construct the arguments from iterator range.
   // TODO: In general we could get away without the len argument,
   // but that would require fixing base::it::CompoundIterator to support subtraction.
@@ -103,10 +50,6 @@ class BackedArguments {
   // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
   using StorageType = absl::InlinedVector<char, kStorageCap>;
 
-  std::string_view Front() const {
-    return std::string_view{storage_.data(), elem_len(0)};
-  }
-
   size_t size() const {
     return offsets_.size();
   }
@@ -117,11 +60,6 @@ class BackedArguments {
 
   size_t elem_len(size_t i) const {
     return elem_capacity(i) - 1;
-  }
-
-  size_t elem_capacity(size_t i) const {
-    uint32_t next_offs = i + 1 >= offsets_.size() ? storage_.size() : offsets_[i + 1];
-    return next_offs - offsets_[i];
   }
 
   std::string_view at(uint32_t index) const {
@@ -138,12 +76,17 @@ class BackedArguments {
     return at(index);
   }
 
-  iterator begin() const {
-    return {this, 0};
+  auto view() const {
+    return std::views::iota(size_t{0}, size()) |
+           std::views::transform([this](size_t i) { return at(i); });
   }
 
-  iterator end() const {
-    return {this, offsets_.size()};
+  auto begin() const {
+    return view().begin();
+  }
+
+  auto end() const {
+    return view().end();
   }
 
   void clear() {
@@ -155,6 +98,11 @@ class BackedArguments {
   std::string_view back() const {
     assert(size() > 0);
     return at(size() - 1);
+  }
+
+  std::string_view front() const {
+    assert(size() > 0);
+    return at(0);
   }
 
   // Reserves space for additional argument of given length at the end.
@@ -179,6 +127,11 @@ class BackedArguments {
   }
 
  protected:
+  size_t elem_capacity(size_t i) const {
+    uint32_t next_offs = i + 1 >= offsets_.size() ? storage_.size() : offsets_[i + 1];
+    return next_offs - offsets_[i];
+  }
+
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
   StorageType storage_;
 };

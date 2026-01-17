@@ -73,7 +73,7 @@ bool TransactionData::IsGlobalCmd() const {
     return false;
   }
 
-  string_view front = command.Front();
+  string_view front = command.front();
 
   if (absl::EqualsIgnoreCase(front, "FLUSHDB"sv) || absl::EqualsIgnoreCase(front, "FLUSHALL"sv))
     return true;

@@ -9,8 +9,6 @@
 #include <string_view>
 #include <variant>
 
-#include "base/iterator.h"
-
 namespace cmn {
 
 using ArgSlice = absl::Span<const std::string_view>;
@@ -31,10 +29,8 @@ constexpr auto kToSV = [](auto&& v) { return ToSV(std::forward<decltype(v)>(v));
 struct ArgRange {
   ArgRange(ArgRange&&) = default;
   ArgRange(const ArgRange&) = default;
-  ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
-  }
 
-  template <typename T, std::enable_if_t<!std::is_same_v<ArgRange, T>, bool> = true>
+  template <typename T, std::enable_if_t<!std::is_same_v<std::decay_t<T>, ArgRange>, bool> = true>
   ArgRange(T&& span) : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
   }
 
@@ -43,15 +39,16 @@ struct ArgRange {
   }
 
   auto Range() const {
-    return base::it::Wrap(kToSV, span);
+    return std::views::iota(size_t{0}, Size()) |
+           std::views::transform([this](size_t i) { return (*this)[i]; });
   }
 
   auto begin() const {
-    return Range().first;
+    return Range().begin();
   }
 
   auto end() const {
-    return Range().second;
+    return Range().end();
   }
 
   std::string_view operator[](size_t idx) const {
