@@ -3666,3 +3666,58 @@ async def test_replica_of_self(async_client):
 
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command(f"replicaof 127.0.0.1 {port}")
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_takeover_with_stuck_connections(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    master.start()
+
+    async_client = master.client()
+    await async_client.execute_command("debug populate 2000")
+
+    reader, writer = await asyncio.open_connection("127.0.0.1", master.port)
+    writer.write(f"client setname writer_test\n".encode())
+    await writer.drain()
+    assert "OK" in (await reader.readline()).decode()
+    size = 1024 * 1024
+    writer.write(f"SET a {'v'*size}\n".encode())
+    await writer.drain()
+
+    replica = df_factory.create()
+    replica.start()
+
+    replica_cl = replica.client()
+
+    res = await replica_cl.execute_command(f"replicaof localhost {master.port}")
+    assert res == "OK"
+
+    # Wait for all replicas to transition into stable sync
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(replica_cl)
+
+    async def get_task():
+        while True:
+            writer.write(f"GET a\n".encode())
+            await writer.drain()
+            await asyncio.sleep(0.1)
+
+    get = asyncio.create_task(get_task())
+
+    @assert_eventually(times=600)
+    async def wait_for_stuck_on_send():
+        clients = await async_client.client_list()
+        logging.info("wait_for_stuck_on_send clients: %s", clients)
+        phase = next(
+            (client["phase"] for client in clients if client["name"] == "writer_test"), None
+        )
+        assert phase == "send"
+
+    await wait_for_stuck_on_send()
+
+    #   with pytest.raises(redis.exceptions.ResponseError) as e:
+    try:
+        res = await replica_cl.execute_command("REPLTAKEOVER 2")
+        assert res != "OK"
+    except redis.exceptions.ResponseError as e:
+        pass
