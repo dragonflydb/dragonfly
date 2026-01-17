@@ -27,38 +27,30 @@
 
 namespace cmn {
 
-namespace heap_size_detail {
-
-template <class, class = void> struct has_marked_stackonly : std::false_type {};
-
-template <class T>
-struct has_marked_stackonly<T, std::void_t<typename T::is_stackonly>> : std::true_type {};
-
-template <typename T> constexpr bool StackOnlyType() {
-  return std::is_trivial_v<T> || std::is_same_v<T, std::string_view> ||
-         has_marked_stackonly<T>::value;
-}
-
-template <typename T, typename = void> struct has_used_mem : std::false_type {};
+namespace detail {
 
 template <typename T>
-struct has_used_mem<T, std::void_t<decltype(&T::UsedMemory)>> : std::true_type {};
+concept StackOnly = std::is_trivial_v<T> || std::is_same_v<T, std::string_view> || requires {
+  typename T::is_stackonly;
+};
 
 template <typename Container> size_t AccumulateContainer(const Container& c);
-}  // namespace heap_size_detail
+}  // namespace detail
 
 inline size_t HeapSize(const std::string& s) {
   constexpr size_t kSmallStringOptSize = 15;
   return s.capacity() > kSmallStringOptSize ? s.capacity() : 0UL;
 }
 
-template <typename T, std::enable_if_t<heap_size_detail::has_used_mem<T>::value, bool> = true>
+template <typename T>
+requires requires(T t) {
+  { t.UsedMemory() } -> std::convertible_to<size_t>;
+}
 size_t HeapSize(const T& t) {
   return t.UsedMemory();
 }
 
-template <typename T, std::enable_if_t<heap_size_detail::StackOnlyType<T>(), bool> = true>
-size_t HeapSize(const T& t) {
+template <typename T> size_t HeapSize(const T& t) {
   return 0;
 }
 
@@ -84,11 +76,11 @@ template <typename T> size_t HeapSize(const std::unique_ptr<T>& t) {
 }
 
 template <typename T> size_t HeapSize(const std::vector<T>& v) {
-  return (v.capacity() * sizeof(T)) + heap_size_detail::AccumulateContainer(v);
+  return (v.capacity() * sizeof(T)) + detail::AccumulateContainer(v);
 }
 
 template <typename T> size_t HeapSize(const std::deque<T>& d) {
-  return (d.size() * sizeof(T)) + heap_size_detail::AccumulateContainer(d);
+  return (d.size() * sizeof(T)) + detail::AccumulateContainer(d);
 }
 
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p) {
@@ -100,14 +92,14 @@ template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>&
   if (v.capacity() > N) {
     size += v.capacity() * sizeof(T);
   }
-  size += heap_size_detail::AccumulateContainer(v);
+  size += detail::AccumulateContainer(v);
   return size;
 }
 
 template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V>& m) {
   size_t size = m.capacity() * sizeof(typename absl::flat_hash_map<K, V>::value_type);
 
-  if constexpr (!heap_size_detail::StackOnlyType<K>() || !heap_size_detail::StackOnlyType<V>()) {
+  if constexpr (!detail::StackOnly<K> || !detail::StackOnly<V>) {
     for (const auto& kv : m) {
       size += HeapSize(kv);
     }
@@ -119,7 +111,7 @@ template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V
 template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s) {
   size_t size = s.capacity() * sizeof(typename absl::flat_hash_set<K>::value_type);
 
-  if constexpr (!heap_size_detail::StackOnlyType<K>()) {
+  if constexpr (!detail::StackOnly<K>) {
     for (const auto& k : s) {
       size += HeapSize(k);
     }
@@ -132,7 +124,7 @@ namespace heap_size_detail {
 template <typename Container> size_t AccumulateContainer(const Container& c) {
   size_t size = 0;
 
-  if constexpr (!heap_size_detail::StackOnlyType<typename Container::value_type>()) {
+  if constexpr (!detail::StackOnly<typename Container::value_type>) {
     for (const auto& e : c) {
       size += HeapSize(e);
     }
