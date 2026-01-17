@@ -783,6 +783,7 @@ CompactObj::~CompactObj() {
 
 CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   DCHECK(&o != this);
+  DCHECK_EQ(is_key_, o.is_key_);
 
   SetMeta(o.taglen_, o.mask_);  // frees own previous resources
   encoding_ = o.encoding_;
@@ -795,47 +796,37 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
 }
 
 size_t CompactObj::Size() const {
-  size_t raw_size = 0;
-  uint8_t first_byte = 0;
-  if (IsInline()) {
-    raw_size = taglen_;
-    first_byte = u_.inline_str[0];
-  } else {
-    switch (taglen_) {
-      case SMALL_TAG:
-        raw_size = u_.small_str.size();
-        first_byte = u_.small_str.first_byte();
-        break;
-      case INT_TAG: {
-        absl::AlphaNum an(u_.ival);
-        raw_size = an.size();
-        break;
-      }
-      case EXTERNAL_TAG:
-        raw_size = u_.ext_ptr.serialized_size;
-        first_byte = GetFirstByte();
-        break;
-      case ROBJ_TAG:
-        raw_size = u_.r_obj.Size();
-        first_byte = *(uint8_t*)u_.r_obj.inner_obj();
-        break;
-      case JSON_TAG:
-        DCHECK_EQ(encoding_, NONE_ENC);
-        if (JsonEnconding() == kEncodingJsonFlat) {
-          raw_size = u_.json_obj.flat.json_len;
-        } else {
-          raw_size = u_.json_obj.cons.json_ptr->size();
-        }
-        break;
-      case SBF_TAG:
-        DCHECK_EQ(encoding_, NONE_ENC);
-        raw_size = u_.sbf->current_size();
-        break;
-      default:
-        LOG(DFATAL) << "Should not reach " << int(taglen_);
-    }
+  auto decoded_str_size = [this](size_t raw_size, uint8_t first_byte) {
+    DCHECK_EQ(ObjType(), OBJ_STRING);
+    return GetStrEncoding().DecodedSize(raw_size, first_byte);
+  };
+
+  if (IsInline())
+    return decoded_str_size(taglen_, u_.inline_str[0]);
+
+  switch (taglen_) {
+    case SMALL_TAG:
+      return decoded_str_size(u_.small_str.size(), u_.small_str.first_byte());
+    case EXTERNAL_TAG:
+      return decoded_str_size(u_.ext_ptr.serialized_size, GetFirstByte());
+    case ROBJ_TAG:
+      if (size_t size = u_.r_obj.Size(); u_.r_obj.type() != OBJ_STRING)
+        return size;
+      else
+        return decoded_str_size(size, *(uint8_t*)u_.r_obj.inner_obj());
+    case INT_TAG:
+      return absl::AlphaNum(u_.ival).size();
+    case JSON_TAG:
+      if (JsonEnconding() == kEncodingJsonFlat)
+        return u_.json_obj.flat.json_len;
+      else
+        return u_.json_obj.cons.json_ptr->size();
+    case SBF_TAG:
+      return u_.sbf->current_size();
+    default:
+      LOG(DFATAL) << "Should not reach " << int(taglen_);
+      return 0;
   }
-  return GetStrEncoding().DecodedSize(raw_size, first_byte);
 }
 
 uint64_t CompactObj::HashCode() const {
@@ -1220,7 +1211,7 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
 
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
                          detail::TieredColdRecord* record) {
-  // We copy the mask of the "cooled" referenced object because it contains the encoding info.
+  encoding_ = record->value.encoding_;
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
   u_.ext_ptr.is_cool = 1;

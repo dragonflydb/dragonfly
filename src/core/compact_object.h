@@ -336,6 +336,7 @@ class CompactObj {
   // Switches to empty, non-external string.
   // Preserves all the attributes.
   void RemoveExternal() {
+    encoding_ = NONE_ENC;
     SetMeta(0, mask_);
   }
 
