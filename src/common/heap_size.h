@@ -28,13 +28,8 @@
 namespace cmn {
 
 namespace detail {
-
-template <typename T>
-concept StackOnly = std::is_trivial_v<T> || std::is_same_v<T, std::string_view> || requires {
-  typename T::is_stackonly;
-};
-
-template <typename Container> size_t AccumulateContainer(const Container& c);
+template <typename Container>
+size_t AccumulateContainer(const Container& c);  // defined below to use HeapSize()
 }  // namespace detail
 
 inline size_t HeapSize(const std::string& s) {
@@ -42,6 +37,7 @@ inline size_t HeapSize(const std::string& s) {
   return s.capacity() > kSmallStringOptSize ? s.capacity() : 0UL;
 }
 
+// Overload for types that have defined UsedMemory
 template <typename T>
 requires requires(T t) {
   { t.UsedMemory() } -> std::convertible_to<size_t>;
@@ -50,17 +46,24 @@ size_t HeapSize(const T& t) {
   return t.UsedMemory();
 }
 
-template <typename T> size_t HeapSize(const T& t) {
+// Overload for types that should be explicitly excluded from calculations
+template <typename T>
+requires requires {
+  typename T::is_stackonly;
+}
+size_t HeapSize(const T& t) {
   return 0;
 }
 
-template <typename T> size_t HeapSize(absl::Span<T>) {
+// Overload for trivial types we don't have to account for
+template <typename T> size_t HeapSize(const T& t) {
+  static_assert(std::is_trivial_v<T> || std::is_same_v<std::string_view, T>);
   return 0;
 }
 
 // Declare first, so that we can use these "recursively"
-template <typename T> size_t HeapSize(const std::vector<T>& v);
 template <typename T> size_t HeapSize(const std::unique_ptr<T>& t);
+template <typename T> size_t HeapSize(const std::vector<T>& v);
 template <typename T> size_t HeapSize(const std::deque<T>& d);
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p);
 template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>& v);
@@ -98,40 +101,21 @@ template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>&
 
 template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V>& m) {
   size_t size = m.capacity() * sizeof(typename absl::flat_hash_map<K, V>::value_type);
-
-  if constexpr (!detail::StackOnly<K> || !detail::StackOnly<V>) {
-    for (const auto& kv : m) {
-      size += HeapSize(kv);
-    }
-  }
-
-  return size;
+  return size + detail::AccumulateContainer(m);
 }
 
 template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s) {
   size_t size = s.capacity() * sizeof(typename absl::flat_hash_set<K>::value_type);
-
-  if constexpr (!detail::StackOnly<K>) {
-    for (const auto& k : s) {
-      size += HeapSize(k);
-    }
-  }
-
-  return size;
+  return size + detail::AccumulateContainer(s);
 }
 
-namespace heap_size_detail {
+namespace detail {
 template <typename Container> size_t AccumulateContainer(const Container& c) {
   size_t size = 0;
-
-  if constexpr (!detail::StackOnly<typename Container::value_type>) {
-    for (const auto& e : c) {
-      size += HeapSize(e);
-    }
-  }
-
+  for (const auto& e : c)
+    size += HeapSize(e);
   return size;
 }
-}  // namespace heap_size_detail
+}  // namespace detail
 
 }  // namespace cmn
