@@ -150,6 +150,7 @@ helio_cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(security_vulnerability_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
@@ -157,4 +158,4 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  redis_parser_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
-                 json_family_memory_test)
+                 security_vulnerability_test json_family_memory_test)

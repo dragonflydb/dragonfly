@@ -88,7 +88,13 @@ ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed com
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without "
-          "authorization needed.");
+          "authorization needed. DEPRECATED: This flag is insecure and should not be used in "
+          "production. It will be removed in a future version.");
+
+ABSL_FLAG(bool, uds_skip_acl, false,
+          "SECURITY: If set, Unix Domain Socket connections skip ACL validation. "
+          "This is a security risk and should only be enabled in trusted environments. "
+          "Default: false (secure). Use with extreme caution.");
 
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
@@ -1873,7 +1879,14 @@ ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
 }
 
 bool RequirePrivilegedAuth() {
-  return !GetFlag(FLAGS_admin_nopass);
+  bool nopass = GetFlag(FLAGS_admin_nopass);
+  if (nopass) {
+    LOG(WARNING) << "SECURITY WARNING: --admin_nopass is enabled. This completely disables "
+                 << "authentication on the admin port and is highly insecure. "
+                 << "This flag is DEPRECATED and will be removed in a future version. "
+                 << "Please use proper authentication instead.";
+  }
+  return !nopass;
 }
 
 facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
@@ -1882,8 +1895,18 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   res->ns = &namespaces->GetOrInsert("");
 
   if (owner->socket()->IsUDS()) {
-    res->req_auth = false;
-    res->skip_acl_validation = true;
+    // SECURITY FIX: Unix Domain Socket connections should respect ACL by default
+    // Only skip ACL validation if explicitly enabled via --uds_skip_acl flag
+    bool skip_acl = GetFlag(FLAGS_uds_skip_acl);
+    
+    if (skip_acl) {
+      LOG(WARNING) << "SECURITY WARNING: UDS connection with ACL validation disabled. "
+                   << "This is insecure and should only be used in trusted environments.";
+    }
+    
+    res->skip_acl_validation = skip_acl;
+    // UDS connections still need to authenticate unless explicitly configured
+    res->req_auth = !user_registry_.AuthUser("default", "");
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
@@ -2034,6 +2057,20 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
   auto* cntx = cmd_cntx->server_conn_cntx();
+  
+  // SECURITY FIX: Enforce ACL validation for Lua scripts from user connections
+  // Lua scripts should not bypass ACL checks unless the connection itself is privileged
+  // (e.g., internal commands, replication, or UDS with explicit skip_acl flag)
+  bool saved_skip_acl = cntx->skip_acl_validation;
+  bool is_user_script = cntx->conn() != nullptr && !cntx->conn()->IsPrivileged();
+  
+  if (is_user_script && saved_skip_acl) {
+    // This is a user-originated script that somehow has skip_acl set
+    // Force ACL validation to prevent privilege escalation
+    VLOG(1) << "SECURITY: Enforcing ACL validation for user Lua script";
+    cntx->skip_acl_validation = false;
+  }
+  
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
@@ -2051,6 +2088,8 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
     CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
+    // Restore ACL state before returning
+    cntx->skip_acl_validation = saved_skip_acl;
     return;
   }
 
@@ -2061,12 +2100,18 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     cmd_cntx->SwapReplier(prev);
   }
 
-  if (ca.async)
+  if (ca.async) {
+    // Restore ACL state before returning
+    cntx->skip_acl_validation = saved_skip_acl;
     return;
+  }
 
   auto* prev = cmd_cntx->SwapReplier(&replier);
   DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
   cmd_cntx->SwapReplier(prev);
+  
+  // SECURITY: Restore original skip_acl_validation state
+  cntx->skip_acl_validation = saved_skip_acl;
 }
 
 void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
