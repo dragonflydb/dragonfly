@@ -463,7 +463,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   ListWrapper lw = CreateOrGet(op_args, key, res.is_new, &res.it->second);
 
   QList::Where where = ToWhere(dir);
-  for (string_view v : vals) {
+  for (string_view v : vals.view()) {
     lw.Push(v, where);
   }
   lw.Launder(&res.it->second);
@@ -473,7 +473,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
     vector<string_view> mapped(vals.Size() + 1);
     mapped[0] = key;
-    std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
+    std::ranges::copy(vals.view(), mapped.begin() + 1);
     RecordJournal(op_args, command, mapped, 2);
   }
 

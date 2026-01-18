@@ -1888,7 +1888,8 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       args.emplace_back(buffer);
     }
   } else {  // is_read
-    args.insert(args.end(), cmd.backed_args->begin(), cmd.backed_args->end());
+    auto view = cmd.backed_args->view();
+    args.insert(args.end(), view.begin(), view.end());
   }
 
   return DispatchCommand(ParsedArgs{args}, parsed_cmd, apref);

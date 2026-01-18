@@ -38,17 +38,9 @@ struct ArgRange {
     return std::visit([](const auto& span) { return span.size(); }, span);
   }
 
-  auto Range() const {
+  auto view() const {
     return std::views::iota(size_t{0}, Size()) |
            std::views::transform([this](size_t i) { return (*this)[i]; });
-  }
-
-  auto begin() const {
-    return Range().begin();
-  }
-
-  auto end() const {
-    return Range().end();
   }
 
   std::string_view operator[](size_t idx) const {

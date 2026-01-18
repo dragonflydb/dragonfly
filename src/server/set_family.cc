@@ -114,7 +114,7 @@ struct StringSetWrapper {
 
   pair<unsigned, bool> Remove(const facade::ArgRange& entries) const {
     unsigned removed = 0;
-    for (string_view member : entries)
+    for (string_view member : entries.view())
       removed += ss->Erase(member);
     return {removed, ss->Empty()};
   }
@@ -167,7 +167,7 @@ pair<unsigned, bool> RemoveSet(const DbContext& db_context, const facade::ArgRan
     long long llval;
 
     unsigned removed = 0;
-    for (string_view val : vals) {
+    for (string_view val : vals.view()) {
       if (!string2ll(val.data(), val.size(), &llval)) {
         continue;
       }
@@ -617,7 +617,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const facade::A
   if (removed && journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.Size() + 1);
     mapped[0] = key;
-    std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
+    std::ranges::copy(vals.view(), mapped.begin() + 1);
     RecordJournal(op_args, "SREM"sv, mapped);
   }
 

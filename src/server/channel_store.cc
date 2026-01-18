@@ -23,8 +23,9 @@ namespace {
 // Build functor for sending messages to connection
 auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = false,
                  bool unsubscribe = false) {
-  absl::FixedArray<string_view, 1> views(messages.Size());
-  size_t messages_size = accumulate(messages.begin(), messages.end(), 0,
+  auto view = messages.view();
+  absl::FixedArray<string_view, 1> views(view.size());
+  size_t messages_size = accumulate(view.begin(), view.end(), 0,
                                     [](int sum, string_view str) { return sum + str.size(); });
   auto buf = shared_ptr<char[]>{new char[channel.size() + messages_size]};
   {
@@ -32,7 +33,7 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = 
     char* ptr = buf.get() + channel.size();
 
     size_t i = 0;
-    for (string_view message : messages) {
+    for (string_view message : view) {
       memcpy(ptr, message.data(), message.size());
       views[i++] = {ptr, message.size()};
       ptr += message.size();

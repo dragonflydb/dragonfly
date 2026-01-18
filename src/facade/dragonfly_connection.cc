@@ -272,7 +272,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     return;
 
   // part_len, ...
-  for (auto part : args) {
+  for (auto part : args.view()) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
@@ -289,7 +289,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
   }
 
-  for (auto part : args) {
+  for (auto part : args.view()) {
     if (auto blob_len = part.size(); blob_len > 0) {
       blobs[index++] = iovec{.iov_base = const_cast<char*>(part.data()), .iov_len = blob_len};
 
