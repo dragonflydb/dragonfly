@@ -4,6 +4,8 @@
 
 #include "server/journal/types.h"
 
+#include <absl/strings/str_join.h>
+
 namespace dfly::journal {
 
 using namespace std;
@@ -26,7 +28,7 @@ string Entry::ToString() const {
   if (HasPayload()) {
     AppendPrefix(payload.cmd, &rv);
     for (string_view arg : base::it::Wrap(cmn::kToSV, payload.args))
-      absl::StrAppend(&rv, "'", cmn::ToSV(arg), "',");
+      absl::StrAppend(&rv, "'", arg, "',");
     AppendSuffix(&rv);
   } else {
     absl::StrAppend(&rv, ", empty");
@@ -37,13 +39,8 @@ string Entry::ToString() const {
 }
 
 string ParsedEntry::ToString() const {
-  string rv = absl::StrCat("{op=", opcode, ", dbid=", dbid, ", cmd='");
-  for (string_view arg : cmd) {
-    absl::StrAppend(&rv, arg, " ");
-  }
-  rv.pop_back();
-  rv += "'}";
-  return rv;
+  return absl::StrCat("{op=", opcode, ", dbid=", dbid, ", cmd='") + absl::StrJoin(cmd.view(), " ") +
+         "'}";
 }
 
 }  // namespace dfly::journal

@@ -47,9 +47,6 @@ class BackedArguments {
     storage_.swap(other.storage_);
   }
 
-  // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
-  using StorageType = absl::InlinedVector<char, kStorageCap>;
-
   size_t size() const {
     return offsets_.size();
   }
@@ -79,14 +76,6 @@ class BackedArguments {
   auto view() const {
     return std::views::iota(size_t{0}, size()) |
            std::views::transform([this](size_t i) { return at(i); });
-  }
-
-  auto begin() const {
-    return view().begin();
-  }
-
-  auto end() const {
-    return view().end();
   }
 
   void clear() {
@@ -133,6 +122,9 @@ class BackedArguments {
   }
 
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
+
+  // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
+  using StorageType = absl::InlinedVector<char, kStorageCap>;
   StorageType storage_;
 };
 
