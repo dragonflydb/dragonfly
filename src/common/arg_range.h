@@ -30,8 +30,9 @@ struct ArgRange {
   ArgRange(ArgRange&&) = default;
   ArgRange(const ArgRange&) = default;
 
-  template <typename T, std::enable_if_t<!std::is_same_v<std::decay_t<T>, ArgRange>, bool> = true>
-  ArgRange(T&& span) : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
+  template <typename T>
+  requires(!std::is_same_v<std::remove_cvref_t<T>, ArgRange>) explicit(false) ArgRange(T&& span)
+      : span(std::forward<T>(span)) {
   }
 
   size_t Size() const {
