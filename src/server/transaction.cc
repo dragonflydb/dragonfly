@@ -337,7 +337,8 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     StoreKeysInArgs(key_index);
 
     unique_shard_cnt_ = 1;
-    string_view akey = *key_index.Range(full_args_).begin();
+    string_view akey = full_args_[*key_index];
+
     if (is_stub)  // stub transactions don't migrate
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     else {
