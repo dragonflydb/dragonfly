@@ -5,6 +5,7 @@
 
 #include "facade/dragonfly_connection.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
@@ -2331,6 +2332,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w)
         : key(cmd->Blocker()->OnCompletion(w)) {
     }
+
     std::optional<util::fb2::EventCount::Key> key;
   };
 
@@ -2339,11 +2341,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   std::optional<WaitEvent> current_wait;
 
   do {
+    bool async_cmd_ready = false;
     HandleMigrateRequest();
 
     // Register completion for current head if its pending and seen for the first time
     if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_) {
-      if (!cmd->CanReply() && !current_wait.has_value())
+      if (cmd->CanReply())
+        async_cmd_ready = true;
+      else if (!current_wait.has_value())
         current_wait.emplace(cmd, &ioevent_waiter);
     }
 
@@ -2356,10 +2361,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // The exception is when we use io_uring with multishot recv enabled, in which case
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-      io_event_.await([this]() {
-        bool cmd_ready =
-            (parsed_head_ && parsed_head_ == parsed_to_execute_) ||
-            (parsed_head_ && parsed_head_ != parsed_to_execute_ && parsed_head_->CanReply());
+      io_event_.await([this, &async_cmd_ready]() {
+        async_cmd_ready |=
+            parsed_head_ && parsed_head_ != parsed_to_execute_ && parsed_head_->CanReply();
+        bool cmd_ready = async_cmd_ready || (parsed_head_ && parsed_head_ == parsed_to_execute_);
         return io_buf_.InputLen() > 0 || cmd_ready || io_ec_;
       });
     }
@@ -2381,7 +2386,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
-      current_wait.reset();
+      if (async_cmd_ready)
+        current_wait.reset();
+
       if (parsed_head_) {
         if (parsed_head_ == parsed_to_execute_)
           ExecuteMCBatch();
