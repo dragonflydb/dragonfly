@@ -30,7 +30,7 @@ jobs:
       - name: Install required system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libboost-context-dev libunwind-dev
+          sudo apt-get install -y libboost-context-dev
 
       - name: Configure CMake build (Debug, no AWS/GCP)
         run: ./helio/blaze.sh -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_GPERF=OFF
@@ -42,5 +42,4 @@ jobs:
 # - The build directory will be created at build-dbg/
 # - Disabling AWS/GCP significantly speeds up compilation
 # - WITH_GPERF=OFF disables Google Performance Tools
-# - libunwind-dev is required for stack traces
 # - Use ninja for faster parallel builds
