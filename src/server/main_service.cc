@@ -2085,14 +2085,14 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
 
       tx->MultiSwitchCmd(registry_.Find("EVAL"));  // just to change command id
       tx->Refurbish();
-      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args, AsyncPreference::ONLY_SYNC);
+      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
       return;
     case CT::ACALL:
     case CT::APCALL:  // was handled above
       return;
     default:  // regular call
       auto* prev = cmd_cntx->SwapReplier(&replier);
-      DispatchCommand(ParsedArgs{ca.args}, cmd_cntx);
+      DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
       cmd_cntx->SwapReplier(prev);
   };
 }
