@@ -1362,7 +1362,8 @@ bool CompactObj::operator==(const CompactObj& o) const {
 
   uint8_t m1 = encoding_;
   uint8_t m2 = o.encoding_;
-  if (m1 != m2)  // TODO: Dangerous with dynamic encoding rules
+  // TODO: Dangerous with dynamic encoding rules as equal values can have different encodings
+  if (m1 != m2)
     return false;
 
   if (taglen_ != o.taglen_)
