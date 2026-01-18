@@ -808,7 +808,10 @@ size_t CompactObj::Size() const {
     case SMALL_TAG:
       return decoded_str_size(u_.small_str.size(), u_.small_str.first_byte());
     case EXTERNAL_TAG:
-      return decoded_str_size(u_.ext_ptr.serialized_size, GetFirstByte());
+      if (ObjType() == OBJ_STRING)
+        return decoded_str_size(u_.ext_ptr.serialized_size, GetFirstByte());
+      else
+        return u_.ext_ptr.serialized_size;
     case ROBJ_TAG:
       if (size_t size = u_.r_obj.Size(); u_.r_obj.type() != OBJ_STRING)
         return size;
