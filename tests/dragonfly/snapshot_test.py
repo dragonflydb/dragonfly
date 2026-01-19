@@ -430,9 +430,8 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
         async_client = instance.client()
         seeder = DebugPopulateSeeder(key_target=10_000)
         await seeder.run(async_client)
-
-
         start_capture = await DebugPopulateSeeder.capture(async_client)
+        # instance stop generates snapshot on exit
         instance.stop()
 
         new_instance = df_factory.create()
