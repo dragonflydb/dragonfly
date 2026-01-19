@@ -116,12 +116,19 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   return out;
 }
 
-std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
-    std::string_view active_field) const {
+std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(std::string_view active_field,
+                                                                size_t dim) const {
   auto strings_list = GetStrings(active_field);
   if (strings_list) {
-    return !strings_list->empty() ? search::BytesToFtVectorSafe(strings_list->front())
-                                  : VectorInfo{};
+    if (!strings_list->empty()) {
+      auto value = strings_list->front();
+      if ((value.size() % sizeof(float)) || (value.size() / sizeof(float) != dim)) {
+        return std::nullopt;
+      }
+      return value.data();
+    } else {
+      return nullptr;
+    }
   }
   return std::nullopt;
 }
@@ -272,7 +279,8 @@ std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(std::string_vie
   return out;
 }
 
-std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view active_field) const {
+std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view active_field,
+                                                                size_t dim) const {
   auto* path = GetPath(active_field);
   if (!path)
     return VectorInfo{};
@@ -285,6 +293,10 @@ std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view acti
     return std::nullopt;
 
   size_t size = res[0].size();
+
+  if (size != dim)
+    return std::nullopt;
+
   auto ptr = make_unique<float[]>(size);
 
   size_t i = 0;
@@ -295,7 +307,7 @@ std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view acti
     ptr[i++] = v.as<float>();
   }
 
-  return BaseAccessor::VectorInfo{std::move(ptr), size};
+  return search::OwnedFtVector{std::move(ptr), size};
 }
 
 std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view active_field) const {

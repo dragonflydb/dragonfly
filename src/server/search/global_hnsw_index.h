@@ -24,7 +24,7 @@ class GlobalHnswIndexRegistry {
   static GlobalHnswIndexRegistry& Instance();
 
   bool Create(std::string_view index_name, std::string_view field_name,
-              const search::SchemaField::VectorParams& params);
+              const search::SchemaField::VectorParams& params, DocIndex::DataType data_type);
 
   bool Remove(std::string_view index_name, std::string_view field_name);
 

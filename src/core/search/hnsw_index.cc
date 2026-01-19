@@ -61,18 +61,18 @@ struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
 
-  explicit HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{params.dim, params.sim},
-        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/} {
+  explicit HnswlibAdapter(const SchemaField::VectorParams& params, bool copy_vector)
+      : space_{params.dim, params.sim}, world_{&space_,       params.capacity,
+                                               params.hnsw_m, params.hnsw_ef_construction,
+                                               100 /* seed*/, copy_vector} {
   }
 
-  void Add(const float* data, GlobalDocId id) {
+  void Add(const void* data, GlobalDocId id) {
     while (true) {
       try {
         MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
         absl::ReaderMutexLock resize_lock(&resize_mutex_);
-        world_.addPoint(data, id);
+        world_.addPoint(data ? data : world_.null_vector, id);
         return;
       } catch (const std::exception& e) {
         std::string error_msg = e.what();
@@ -160,8 +160,11 @@ struct HnswlibAdapter {
   mutable MRMWMutex mrmw_mutex_;
 };
 
-HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
-    : dim_{params.dim}, sim_{params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
+HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,
+                                 PMR_NS::memory_resource*)
+    : dim_{params.dim},
+      sim_{params.sim},
+      adapter_{make_unique<HnswlibAdapter>(params, copy_vector)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
 }
@@ -170,20 +173,18 @@ HnswVectorIndex::~HnswVectorIndex() {
 }
 
 bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field);
+  auto vector_ptr = doc.GetVector(field, dim_);
 
-  if (!vector) {
+  if (!vector_ptr) {
     return false;
   }
 
-  auto& [ptr, size] = vector.value();
-
-  if (ptr && size != dim_) {
-    return false;
-  }
-
-  if (ptr) {
-    adapter_->Add(ptr.get(), id);
+  if (std::holds_alternative<OwnedFtVector>(*vector_ptr)) {
+    const auto& owned_vector = std::get<OwnedFtVector>(*vector_ptr);
+    adapter_->Add(owned_vector.first.get(), id);
+  } else {
+    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
+    adapter_->Add(borrowed_vector, id);
   }
 
   return true;

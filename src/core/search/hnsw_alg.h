@@ -3,6 +3,8 @@
 #include <hnswlib/hnswalg.h>
 #include <hnswlib/visited_list_pool.h>
 
+#include <cstddef>
+
 #pragma once
 
 namespace dfly::search {
@@ -49,6 +51,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   size_t offsetData_{0}, offsetLevel0_{0}, label_offset_{0};
 
   char* data_level0_memory_{nullptr};
+  char* data_vector_memory_{nullptr};
   char** linkLists_{nullptr};
   std::vector<int> element_levels_;  // keeps level of each element
 
@@ -66,11 +69,15 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   mutable std::atomic<long> metric_distance_computations{0};
   mutable std::atomic<long> metric_hops{0};
 
+  bool copy_vector_ = false;
+
   bool allow_replace_deleted_ =
       false;  // flag to replace deleted elements (marked as deleted) during insertions
 
   std::mutex deleted_elements_lock;               // lock for deleted_elements
   std::unordered_set<tableint> deleted_elements;  // contains internal ids of deleted elements
+
+  char* null_vector{nullptr};
 
   HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s) {
   }
@@ -82,11 +89,12 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s, size_t max_elements, size_t M = 16,
-                  size_t ef_construction = 200, size_t random_seed = 100,
+                  size_t ef_construction = 200, size_t random_seed = 100, bool copy_vector = false,
                   bool allow_replace_deleted = false)
       : label_op_locks_(MAX_LABEL_OPERATION_LOCKS),
         link_list_locks_(max_elements),
         element_levels_(max_elements),
+        copy_vector_(copy_vector),
         allow_replace_deleted_(allow_replace_deleted) {
     max_elements_ = max_elements;
     num_deleted_ = 0;
@@ -110,15 +118,29 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     level_generator_.seed(random_seed);
     update_probability_generator_.seed(random_seed + 1);
 
+    // If we copy vector we don't use pointer information
+    size_t vector_ptr_size = copy_vector_ ? 0 : sizeof(char*);
     size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
-    size_data_per_element_ = size_links_level0_ + data_size_ + sizeof(labeltype);
+    size_data_per_element_ = size_links_level0_ + vector_ptr_size + sizeof(labeltype);
     offsetData_ = size_links_level0_;
-    label_offset_ = size_links_level0_ + data_size_;
+    label_offset_ = size_links_level0_ + vector_ptr_size;
     offsetLevel0_ = 0;
 
     data_level0_memory_ = (char*)malloc(max_elements_ * size_data_per_element_);
     if (data_level0_memory_ == nullptr)
       throw std::runtime_error("Not enough memory");
+
+    if (copy_vector) {
+      data_vector_memory_ = (char*)malloc(max_elements_ * data_size_);
+      if (data_vector_memory_ == nullptr)
+        throw std::runtime_error("Not enough memory");
+    } else {
+      // If null vector pointer is provided we can use this for all null vectors
+      null_vector = (char*)malloc(data_size_);
+      memset(null_vector, 0, data_size_);
+      if (null_vector == nullptr)
+        throw std::runtime_error("Not enough memory");
+    }
 
     cur_element_count = 0;
 
@@ -147,6 +169,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       if (element_levels_[i] > 0)
         free(linkLists_[i]);
     }
+    free(data_vector_memory_);
+    free(null_vector);
     free(linkLists_);
     linkLists_ = nullptr;
     cur_element_count = 0;
@@ -187,8 +211,17 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     return (labeltype*)(data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
   }
 
-  inline char* getDataByInternalId(tableint internal_id) const {
+  inline char* getDataPtrByInternalId(tableint internal_id) const {
     return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
+  }
+
+  inline char* getDataByInternalId(tableint internal_id) const {
+    if (copy_vector_) {
+      return (data_vector_memory_ + internal_id * data_size_);
+    } else {
+      auto data_ptr = (char**)(getDataPtrByInternalId(internal_id));
+      return *data_ptr;
+    }
   }
 
   int getRandomLevel(double reverse_size) {
@@ -267,8 +300,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         tableint candidate_id = *(datal + j);
 //                    if (candidate_id == 0) continue;
 #ifdef USE_SSE
-        _mm_prefetch((char*)(visited_array + *(datal + j + 1)), _MM_HINT_T0);
-        _mm_prefetch(getDataByInternalId(*(datal + j + 1)), _MM_HINT_T0);
+        if (j + 1 < size) {
+          _mm_prefetch((char*)(visited_array + *(datal + j + 1)), _MM_HINT_T0);
+          _mm_prefetch(getDataByInternalId(*(datal + j + 1)), _MM_HINT_T0);
+        }
 #endif
         if (visited_array[candidate_id] == visited_array_tag)
           continue;
@@ -375,9 +410,12 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         int candidate_id = *(data + j);
 //                    if (candidate_id == 0) continue;
 #ifdef USE_SSE
-        _mm_prefetch((char*)(visited_array + *(data + j + 1)), _MM_HINT_T0);
-        _mm_prefetch(data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
-                     _MM_HINT_T0);  ////////////
+        if (j + 1 < size) {
+          _mm_prefetch((char*)(visited_array + *(data + j + 1)), _MM_HINT_T0);
+          _mm_prefetch(
+              data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
+              _MM_HINT_T0);  ////////////
+        }
 #endif
         if (!(visited_array[candidate_id] == visited_array_tag)) {
           visited_array[candidate_id] = visited_array_tag;
@@ -644,6 +682,15 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       throw std::runtime_error("Not enough memory: resizeIndex failed to allocate base layer");
     data_level0_memory_ = data_level0_memory_new;
 
+    // Reallocate vector data memory
+    if (copy_vector_) {
+      char* data_vector_memory_new =
+          (char*)realloc(data_vector_memory_, new_max_elements * data_size_);
+      if (data_vector_memory_new == nullptr)
+        throw std::runtime_error("Not enough memory: resizeIndex failed to allocate vector memory");
+      data_vector_memory_ = data_vector_memory_new;
+    }
+
     // Reallocate all other layers
     char** linkLists_new = (char**)realloc(linkLists_, sizeof(void*) * new_max_elements);
     if (linkLists_new == nullptr)
@@ -700,8 +747,13 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         writeBinaryPOD(output, M_);
         writeBinaryPOD(output, mult_);
         writeBinaryPOD(output, ef_construction_);
+        writeBinaryPOD(output, copy_vector_);
 
         output.write(data_level0_memory_, cur_element_count * size_data_per_element_);
+
+        if(copy_vector_) {
+          output.write(data_vector_memory_, cur_element_count * data_size_);
+        }
 
         for (size_t i = 0; i < cur_element_count; i++) {
             unsigned int linkListSize = element_levels_[i] > 0 ? size_links_per_element_ * element_levels_[i] : 0;
@@ -747,6 +799,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         readBinaryPOD(input, mult_);
         readBinaryPOD(input, ef_construction_);
 
+        readBinaryPOD(input, copy_vector_);
+
         data_size_ = s->get_data_size();
         fstdistfunc_ = s->get_dist_func();
         dist_func_param_ = s->get_dist_func_param();
@@ -780,6 +834,17 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         if (data_level0_memory_ == nullptr)
             throw std::runtime_error("Not enough memory: loadIndex failed to allocate level0");
         input.read(data_level0_memory_, cur_element_count * size_data_per_element_);
+
+        if(copy_vector_) {
+          data_vector_memory_ = (char *) malloc(max_elements * data_size_);
+          if (data_vector_memory_ == nullptr)
+              throw std::runtime_error("Not enough memory: loadIndex failed to allocate vector memory");
+          input.read(data_vector_memory_, cur_element_count * data_size_);
+        }
+
+        null_vector = (char*)malloc(data_size_);
+        if (null_vector == nullptr)
+            throw std::runtime_error("Not enough memory: loadIndex failed to allocate null vector");
 
         size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
 
@@ -984,8 +1049,13 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   void updatePoint(const void* dataPoint, tableint internalId, float updateNeighborProbability) {
-    // update the feature vector associated with existing point with new vector
-    memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
+    if (copy_vector_) {
+      auto data_ptr = (const char**)(getDataPtrByInternalId(internalId));
+      *data_ptr = static_cast<const char*>(dataPoint);
+    } else {
+      char* data_ptr = getDataByInternalId(internalId);
+      memcpy(data_ptr, dataPoint, data_size_);
+    }
 
     int maxLevelCopy = maxlevel_;
     tableint entryPointCopy = enterpoint_node_;
@@ -1199,9 +1269,20 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     memset(data_level0_memory_ + cur_c * size_data_per_element_ + offsetLevel0_, 0,
            size_data_per_element_);
 
+    if (copy_vector_) {
+      memset(data_vector_memory_ + cur_c * data_size_, 0, data_size_);
+    }
+
     // Initialisation of the data and label
     memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
-    memcpy(getDataByInternalId(cur_c), data_point, data_size_);
+
+    if (copy_vector_) {
+      char* data_ptr = getDataByInternalId(cur_c);
+      memcpy(data_ptr, data_point, data_size_);
+    } else {
+      auto data_ptr = (const char**)(getDataPtrByInternalId(cur_c));
+      *data_ptr = static_cast<const char*>(data_point);
+    }
 
     if (curlevel) {
       linkLists_[cur_c] = (char*)malloc(size_links_per_element_ * curlevel + 1);
