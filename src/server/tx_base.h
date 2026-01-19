@@ -60,7 +60,7 @@ struct KeyIndex {
   }
 
   auto Range(const cmn::ArgSlice& args) const {
-    return base::it::Transform([&args](unsigned idx) { return args[idx]; }, Range());
+    return base::it::Transform([args](unsigned idx) { return args[idx]; }, Range());
   }
 
  public:
