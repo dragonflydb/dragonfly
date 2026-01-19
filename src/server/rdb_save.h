@@ -266,6 +266,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamObject(const PrimeValue& obj);
   std::error_code SaveJsonObject(const PrimeValue& pv);
   std::error_code SaveSBFObject(const PrimeValue& pv);
+  std::error_code SaveCMSObject(const PrimeValue& pv);
 
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);

@@ -1609,8 +1609,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       return OpStatus::SYNTAX_ERR;
     }
 
-    if (absl::EndsWith(name, "STORE"))
-      bonus = 0;  // Z<xxx>STORE <key> commands
+    if (absl::EndsWith(name, "STORE") || name == "CMS.MERGE")
+      bonus = 0;  // Z<xxx>STORE and CMS.MERGE <dest> commands
 
     unsigned num_keys_index;
     if (absl::StartsWith(name, "EVAL") || name == "BLMPOP" || name == "BZMPOP")

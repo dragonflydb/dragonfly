@@ -23,6 +23,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cms.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
 #include "core/size_tracking_channel.h"
@@ -203,6 +204,8 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       return RDB_TYPE_JSON;
     case OBJ_SBF:
       return absl::GetFlag(FLAGS_rdb_sbf_chunked) ? RDB_TYPE_SBF2 : RDB_TYPE_SBF;
+    case OBJ_CMS:
+      return RDB_TYPE_CMS;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -352,6 +355,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_SBF) {
     return SaveSBFObject(pv);
+  }
+
+  if (obj_type == OBJ_CMS) {
+    return SaveCMSObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -657,6 +664,21 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
       flush_state = FlushState::kFlushEndEntry;
     FlushIfNeeded(flush_state);
   }
+
+  return {};
+}
+
+std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
+  CMS* cms = pv.GetCMS();
+
+  RETURN_ON_ERR(SaveLen(cms->Width()));
+  RETURN_ON_ERR(SaveLen(cms->Depth()));
+  RETURN_ON_ERR(SaveLen(cms->Count()));
+
+  // Save counter data
+  size_t counter_bytes = cms->CounterBytes();
+  string_view counter_data(reinterpret_cast<const char*>(cms->Data()), counter_bytes);
+  RETURN_ON_ERR(SaveString(counter_data));
 
   return {};
 }
