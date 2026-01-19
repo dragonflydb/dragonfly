@@ -131,7 +131,10 @@ bool ParsedCommand::CanReply() const {
 void ParsedCommand::SendReply() {
   dfly::Overloaded ov{
       [this](payload::Payload& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
-      [this](AsyncTask& task) { return task.replier(rb_); }};
+      [this](AsyncTask& task) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return task.replier(rb_);
+      }};
   return std::visit(ov, reply_);
 }
 

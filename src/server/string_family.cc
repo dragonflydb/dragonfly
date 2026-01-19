@@ -1059,7 +1059,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Experimental async path
   if (cmd_cntx->IsDeferredReply()) {
-    auto* tx = cmd_cntx->tx();
+    boost::intrusive_ptr<Transaction> tx(cmd_cntx->tx());
     auto* blocker = tx->Blocker();
     blocker->Add(1);
 
@@ -1084,7 +1084,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
     shard_set->Add(shard_id, cb);  // cb is copied here
 
-    auto replier = [cmd_cntx, tx = boost::intrusive_ptr<Transaction>(tx)](SinkReplyBuilder* rb) {
+    auto replier = [cmd_cntx, tx](SinkReplyBuilder* rb) {
       auto status = *tx->LocalResultPtr();
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.

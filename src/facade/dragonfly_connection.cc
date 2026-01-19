@@ -2096,6 +2096,7 @@ bool Connection::ReplyMCBatch() {
     if (!cmd->CanReply())
       break;
 
+    current_wait_.reset();
     cmd->SendReply();
     ReleaseParsedCommand(cmd, cmd->next != parsed_to_execute_ /* is_pipelined */);
     if (reply_builder_->GetError())
@@ -2328,17 +2329,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   ParserStatus parse_status = OK;
 
   // TODO: restructure due to bad OnCompletion interface
-  struct WaitEvent {
-    explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w)
-        : key(cmd->Blocker()->OnCompletion(w)) {
-    }
-
-    std::optional<util::fb2::EventCount::Key> key;
-  };
-
   auto ioevent_cb = [this]() { io_event_.notify(); };
   util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
-  std::optional<WaitEvent> current_wait;
 
   do {
     bool async_cmd_ready = false;
@@ -2348,8 +2340,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_) {
       if (cmd->CanReply())
         async_cmd_ready = true;
-      else if (!current_wait.has_value())
-        current_wait.emplace(cmd, &ioevent_waiter);
+      else if (!current_wait_.has_value())
+        current_wait_.emplace(cmd, &ioevent_waiter);
     }
 
     if (io_buf_.InputLen() == 0) {
@@ -2386,8 +2378,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
-      if (async_cmd_ready)
-        current_wait.reset();
 
       if (parsed_head_) {
         if (parsed_head_ == parsed_to_execute_)
@@ -2441,6 +2431,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   } while (peer->IsOpen());
 
   return parse_status;
+}
+
+Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w)
+    : key(cmd->Blocker()->OnCompletion(w)) {
 }
 
 void ResetStats() {
