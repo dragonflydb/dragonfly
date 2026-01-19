@@ -3700,7 +3700,7 @@ async def test_repl_offset(df_factory):
     # Promote first replica to master
     await c_replica1.execute_command(f"REPLTAKEOVER 5")
 
-    # 4183
+    # issue 4183
     async def with_timeout_link_down(client):
         async with async_timeout.timeout(2):
             while True:
