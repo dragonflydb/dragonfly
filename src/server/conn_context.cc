@@ -168,7 +168,9 @@ size_t ConnectionState::UsedMemory() const {
 }
 
 size_t ConnectionContext::UsedMemory() const {
-  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state);
+  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state) +
+         HeapSize(authed_username) + HeapSize(acl_commands) + HeapSize(keys.key_globs) +
+         HeapSize(pub_sub.globs);
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {
@@ -266,7 +268,7 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 
 void CommandContext::ReuseInternal() {
   cid = nullptr;
-  tx = nullptr;
+  tx_ = nullptr;
   start_time_ns = 0;
   exec_body_len = 0;
 }

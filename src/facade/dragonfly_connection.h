@@ -14,11 +14,9 @@
 #include <variant>
 
 #include "common/backed_args.h"
-#include "facade/acl_commands_def.h"
 #include "facade/connection_ref.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
-#include "facade/resp_expr.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
@@ -45,9 +43,9 @@ constexpr size_t kReqStorageSize = 120;
 namespace facade {
 
 class ConnectionContext;
-class RedisParser;
 class ServiceInterface;
 class SinkReplyBuilder;
+class RespSrvParser;
 
 // Connection represents an active connection for a client.
 //
@@ -85,15 +83,6 @@ class Connection : public util::Connection {
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
 
-  // ACL Update message, contains ACL updates to be applied to the connection.
-  struct AclUpdateMessage {
-    std::string username;
-    std::vector<uint64_t> commands;
-    dfly::acl::AclKeys keys;
-    dfly::acl::AclPubSub pub_sub;
-    size_t db_indx;
-  };
-
   // Migration request message, the async fiber stops to give way for thread migration.
   struct MigrationRequestMessage {};
 
@@ -111,17 +100,14 @@ class Connection : public util::Connection {
   using PipelineMessagePtr = std::unique_ptr<ParsedCommand>;
   using PubMessagePtr = std::unique_ptr<PubMessage>;
 
-  using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
-
   // Variant wrapper around different message types
   struct MessageHandle {
     size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
-    // Control messages put themselves at the front of the queue, but only after all other
-    // control ones. Used for management messages.
-    bool IsControl() const {
-      return std::holds_alternative<AclUpdateMessagePtr>(handle) ||
-             std::holds_alternative<CheckpointMessage>(handle);
+    // Checkpoint messages put themselves at the front of the queue, but only in relative
+    // order to the rest of the messages in the queue.
+    bool IsCheckPoint() const {
+      return std::holds_alternative<CheckpointMessage>(handle);
     }
 
     bool IsPipelineMsg() const {
@@ -138,8 +124,8 @@ class Connection : public util::Connection {
 
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
-                 MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MigrationRequestMessage,
+                 CheckpointMessage, InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -160,9 +146,6 @@ class Connection : public util::Connection {
 
   // Add monitor message to dispatch queue.
   void SendMonitorMessageAsync(std::string);
-
-  // Add acl update to dispatch queue.
-  void SendAclUpdateAsync(AclUpdateMessage msg);
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
   // decrement it once finished.
@@ -398,7 +381,7 @@ class Connection : public util::Connection {
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
   io::IoBuf io_buf_;  // used in io loop and parsers
-  std::unique_ptr<RedisParser> redis_parser_;
+  std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
 
@@ -452,10 +435,6 @@ class Connection : public util::Connection {
   unsigned parser_error_ = 0;
 
   BreakerCb breaker_cb_;
-
-  // Used by redis parser to avoid allocations
-  RespVec tmp_parse_args_;
-  CmdArgVec tmp_cmd_vec_;
 
   // Used to keep track of borrowed references. Does not really own itself
   std::shared_ptr<Connection> self_;

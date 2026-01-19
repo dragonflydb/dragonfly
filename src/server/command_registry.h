@@ -141,6 +141,8 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::BLOCKING;
   }
 
+  // See deduction logic for details. We don't monitor ADMIN commands
+  // and log the final `EXEC` command manually at the end.
   bool CanBeMonitored() const {
     return can_be_monitored_;
   }

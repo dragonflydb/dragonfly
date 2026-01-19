@@ -344,8 +344,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 }
 
 OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts& scan_op) {
-  constexpr size_t HASH_TABLE_ENTRIES_FACTOR = 2;  // return key/value
-
   /* We set the max number of iterations to ten times the specified
    * COUNT, so if the hash table is in a pathological state (very
    * sparsely populated) we avoid to block too much time at the cost
@@ -353,14 +351,17 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   constexpr size_t INTERATION_FACTOR = 10;
 
   StringVec res;
-  uint32_t count = scan_op.limit * HASH_TABLE_ENTRIES_FACTOR;
+  // If NOVALUES, we expect 1 element per match (key). Otherwise, 2 elements (key + value).
+  uint32_t count = scan_op.limit * (scan_op.novalues ? 1 : 2);
 
   if (auto lw = hw.Get<detail::ListpackWrap>(); lw) {
     // TODO: Optimize unnecessary value reads from iterator
     for (const auto [key, value] : *lw) {
       if (scan_op.Matches(key)) {
         res.emplace_back(key);
-        res.emplace_back(value);
+        if (!scan_op.novalues) {
+          res.emplace_back(value);
+        }
       }
     }
     *cursor = 0;
@@ -375,8 +376,10 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
       size_t len = sdslen(val);
       if (scan_op.Matches(string_view(val, len))) {
         res.emplace_back(val, len);
-        val = StringMap::GetValue(val);
-        res.emplace_back(val, sdslen(val));
+        if (!scan_op.novalues) {
+          val = StringMap::GetValue(val);
+          res.emplace_back(val, sdslen(val));
+        }
       }
     };
 
@@ -515,7 +518,7 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx)
     return res;
   };
 
-  OpResult<vector<string>> result = ExecuteRO(cmd_cntx->tx, cb);
+  OpResult<vector<string>> result = ExecuteRO(cmd_cntx->tx(), cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
@@ -586,7 +589,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendLong(*result);
   } else {
@@ -615,7 +618,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx->ScheduleSingleHopT(WrapW(cb)));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb)));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -650,7 +653,7 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
   };
-  OpResult<vector<long>> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -669,7 +672,7 @@ void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::KEY_NOTFOUND;
   };
 
-  OpResult<string> result = ExecuteRO(cmd_cntx->tx, cb);
+  OpResult<string> result = ExecuteRO(cmd_cntx->tx(), cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
@@ -685,7 +688,7 @@ void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto fields = args.subspan(1);
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
-  OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx, cb);
+  OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx(), cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
@@ -709,19 +712,19 @@ void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
 void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
 void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
 void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
@@ -740,7 +743,7 @@ void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
     cmd_cntx->SendLong(get<int64_t>(param));
@@ -775,7 +778,7 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -812,13 +815,13 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("invalid cursor");
   }
 
-  // HSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 6) {
+  // HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
+  if (args.size() > 7) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
     return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2), true);
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return cmd_cntx->SendError(ops.status());
@@ -827,7 +830,7 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   const ScanOpts& scan_op = ops.value();
   auto cb = [&](const HMapWrap& hw) { return OpScan(hw, &cursor, scan_op); };
 
-  OpResult<StringVec> result = ExecuteRO(cmd_cntx->tx, cb);
+  OpResult<StringVec> result = ExecuteRO(cmd_cntx->tx(), cb);
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
       cursor = 0;
@@ -857,7 +860,7 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
     return OpSet(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result && cmd == "HSET") {
     rb->SendLong(*result);
@@ -872,7 +875,7 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
@@ -987,7 +990,7 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
     return str_vec;
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     if (result->size() == 1 && args.size() == 1)
       rb->SendBulkString(result->front());

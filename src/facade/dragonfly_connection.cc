@@ -25,8 +25,8 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
+#include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
@@ -127,11 +127,11 @@ namespace facade {
 
 namespace {
 
-void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
+void SendProtocolError(RespSrvParser::Result pres, SinkReplyBuilder* builder) {
   constexpr string_view res = "-ERR Protocol error: "sv;
-  if (pres == RedisParser::BAD_BULKLEN) {
+  if (pres == RespSrvParser::BAD_BULKLEN) {
     builder->SendProtocolError(absl::StrCat(res, "invalid bulk length"));
-  } else if (pres == RedisParser::BAD_ARRAYLEN) {
+  } else if (pres == RespSrvParser::BAD_ARRAYLEN) {
     builder->SendProtocolError(absl::StrCat(res, "invalid multibulk length"));
   } else {
     builder->SendProtocolError(absl::StrCat(res, "parse error"));
@@ -231,9 +231,9 @@ void OpenTrafficLogger(string_view base_path) {
   std::ignore = tl_traffic_logger.log_file->Write(version);
 }
 
-void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
+void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
                 ServiceInterface::ContextInfo ci) {
-  string_view cmd = resp.front().GetView();
+  string_view cmd = args.Front();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
 
@@ -261,7 +261,7 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
 
   // has_more, num_parts
   write_u32(has_more ? 1 : 0);
-  write_u32(uint32_t(resp.size()));
+  write_u32(uint32_t(args.size()));
 
   // Grab the lock and check if the file is still open.
   lock_guard lk{tl_traffic_logger.mutex};
@@ -269,14 +269,14 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
     return;
 
   // part_len, ...
-  for (auto part : resp) {
+  for (auto part : args) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
       }
       next = stack_buf;
     }
-    write_u32(part.GetView().size());
+    write_u32(part.size());
   }
 
   // Write the data itself.
@@ -286,10 +286,9 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
   }
 
-  for (auto part : resp) {
-    if (auto blob_len = part.GetView().size(); blob_len > 0) {
-      blobs[index++] =
-          iovec{.iov_base = const_cast<char*>(part.GetView().data()), .iov_len = blob_len};
+  for (auto part : args) {
+    if (auto blob_len = part.size(); blob_len > 0) {
+      blobs[index++] = iovec{.iov_base = const_cast<char*>(part.data()), .iov_len = blob_len};
 
       if (index >= blobs.size()) {
         if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
@@ -397,14 +396,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
     }
-    size_t operator()(const AclUpdateMessagePtr& msg) {
-      size_t key_cap = std::accumulate(
-          msg->keys.key_globs.begin(), msg->keys.key_globs.end(), 0, [](auto acc, auto& str) {
-            return acc + (str.first.capacity() * sizeof(char)) + sizeof(str.second);
-          });
-      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(char) +
-             msg->commands.capacity() * sizeof(uint64_t) + key_cap;
-    }
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
     }
@@ -432,7 +423,6 @@ struct Connection::AsyncOperations {
   void operator()(const PubMessage& msg);
   void operator()(ParsedCommand& msg);
   void operator()(const MonitorMessage& msg);
-  void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
   void operator()(CheckpointMessage msg);
   void operator()(const InvalidationMessage& msg);
@@ -449,17 +439,6 @@ struct Connection::AsyncOperations {
 void Connection::AsyncOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
-}
-
-void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
-  if (self->cntx()) {
-    if (msg.username == self->cntx()->authed_username) {
-      self->cntx()->acl_commands = msg.commands;
-      self->cntx()->keys = msg.keys;
-      self->cntx()->pub_sub = msg.pub_sub;
-      self->cntx()->acl_db_idx = msg.db_indx;
-    }
-  }
 }
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
@@ -583,9 +562,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   // TODO: to move parser initialization to where we initialize the reply builder.
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser(RedisParser::Mode::SERVER,
-                                          GetFlag(FLAGS_max_multi_bulk_len),
-                                          GetFlag(FLAGS_max_bulk_len)));
+      redis_parser_.reset(
+          new RespSrvParser(GetFlag(FLAGS_max_multi_bulk_len), GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_ = make_unique<MemcacheParser>();
@@ -992,7 +970,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
     }
 
     io_buf_.CommitWrite(*recv_sz);
-    string_view ib = ToSV(io_buf_.InputBuffer());
+    string_view ib = io::View(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
       // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
       // Reject the connection.
@@ -1002,7 +980,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
     ib = ib.substr(last_len);
     size_t pos = ib.find('\n');
     if (pos != string_view::npos) {
-      ib = ToSV(io_buf_.InputBuffer().first(last_len + pos));
+      ib = io::View(io_buf_.InputBuffer().first(last_len + pos));
       if (ib.size() < 10 || ib.back() != '\r')
         return false;
 
@@ -1090,7 +1068,7 @@ void Connection::ConnectionFlow() {
     VLOG(1) << "Error parser status " << parser_error_;
 
     if (redis_parser_) {
-      SendProtocolError(RedisParser::Result(parser_error_), reply_builder_.get());
+      SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
     } else {
       DCHECK(memcache_parser_);
       reply_builder_->SendProtocolError("bad command line format");
@@ -1178,17 +1156,17 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
 Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   uint32_t consumed = 0;
-  RedisParser::Result result = RedisParser::OK;
+  RespSrvParser::Result result = RespSrvParser::OK;
 
-  auto dispatch_sync = [this] {
-    FillBackedArgs(tmp_parse_args_, parsed_cmd_);
-    service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_);
-  };
+  auto dispatch_sync = [this] { service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_); };
 
   auto dispatch_async = [this]() -> MessageHandle {
     PipelineMessagePtr ptr = GetFromPoolOrCreate();
-    FillBackedArgs(tmp_parse_args_, ptr.get());
-    return {std::move(ptr)};
+
+    // parsed_cmd_ has the parsed arguments. Move it to the message and set it up
+    // with a new empty ParsedCommand for the next parse.
+    auto* res = std::exchange(parsed_cmd_, ptr.release());
+    return {PipelineMessagePtr{res}};
   };
 
   io::Bytes read_buffer = io_buf_.InputBuffer();
@@ -1199,20 +1177,13 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
   do {
-    result = redis_parser_->Parse(read_buffer, &consumed, &tmp_parse_args_);
+    DCHECK(parsed_cmd_);
+    result = redis_parser_->Parse(read_buffer, &consumed, parsed_cmd_);
     request_consumed_bytes_ += consumed;
     total_consumed += consumed;
-    if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
-      // If we get a non-STRING type (e.g., NIL, ARRAY), it's a protocol error.
-      bool valid_input = std::all_of(tmp_parse_args_.begin(), tmp_parse_args_.end(),
-                                     [](const auto& arg) { return arg.type == RespExpr::STRING; });
-      if (!valid_input) {
-        LOG(WARNING) << "Invalid argument - expected all STRING types";
-        result = RedisParser::BAD_STRING;
-        break;
-      }
-
-      DVLOG(2) << "Got Args with first token " << ToSV(tmp_parse_args_.front().GetBuf());
+    if (result == RespSrvParser::OK) {
+      DCHECK(!parsed_cmd_->empty());
+      DVLOG(2) << "Got Args with first token " << parsed_cmd_->Front();
 
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
@@ -1220,16 +1191,15 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       bool has_more = consumed < read_buffer.size();
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
-        LogTraffic(id_, has_more, absl::MakeSpan(tmp_parse_args_),
-                   service_->GetContextInfo(cc_.get()));
+        LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
-    if (result != RedisParser::OK && result != RedisParser::INPUT_PENDING) {
+    if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
       LOG_IF(WARNING, cntx()->replica_conn)
-          << "Redis parser error: " << result << " during parse: " << ToSV(read_buffer);
+          << "Redis parser error: " << result << " during parse: " << io::View(read_buffer);
     }
     read_buffer.remove_prefix(consumed);
 
@@ -1240,15 +1210,15 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
       stats_->num_read_yields++;
       ThisFiber::Yield();
     }
-  } while (RedisParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
+  } while (RespSrvParser::OK == result && read_buffer.size() > 0 && !reply_builder_->GetError());
 
   io_buf_.ConsumeInput(total_consumed);
 
   parser_error_ = result;
-  if (result == RedisParser::OK)
+  if (result == RespSrvParser::OK)
     return OK;
 
-  if (result == RedisParser::INPUT_PENDING) {
+  if (result == RespSrvParser::INPUT_PENDING) {
     DCHECK_EQ(read_buffer.size(), 0u);
 
     return NEED_MORE;
@@ -1468,7 +1438,7 @@ void Connection::SquashPipeline() {
   auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
     // Count control messages at front
     size_t ctrl_offset = 0;
-    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsCheckPoint()) {
       ctrl_offset++;
     }
     const auto& elem = dispatch_q_[ctrl_offset + i++];
@@ -1506,7 +1476,7 @@ void Connection::SquashPipeline() {
     stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
   }
   auto it = dispatch_q_.begin();
-  while (it->IsControl())  // Skip all newly received intrusive messages
+  while (it->IsCheckPoint())  // Skip newly received checkpoint messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit) {
@@ -1532,7 +1502,7 @@ void Connection::ClearPipelinedMessages() {
   // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsControl())
+    if (msg.IsCheckPoint())
       visit(async_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
@@ -1555,7 +1525,7 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "df:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
+  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsCheckPoint();
   absl::StrAppend(&info, "dq:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dq:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dq:intrusive=", intrusive_front, ", ");
@@ -1763,10 +1733,6 @@ void Connection::SendMonitorMessageAsync(string msg) {
   SendAsync({MonitorMessage{std::move(msg)}});
 }
 
-void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
-}
-
 void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
   if (!IsCurrentlyDispatching())
     return;
@@ -1803,7 +1769,7 @@ void Connection::SendAsync(MessageHandle msg) {
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints) if
   // async_fb_ is running (joinable).
-  if (cc_->conn_closing && (!msg.IsControl() || !async_fb_.IsJoinable()))
+  if (cc_->conn_closing && (!msg.IsCheckPoint() || !async_fb_.IsJoinable()))
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
@@ -1843,9 +1809,9 @@ void Connection::SendAsync(MessageHandle msg) {
     pending_pipeline_bytes_ += used_mem;
   }
 
-  if (msg.IsControl()) {
+  if (msg.IsCheckPoint()) {
     auto it = dispatch_q_.begin();
-    while (it < dispatch_q_.end() && it->IsControl())
+    while (it < dispatch_q_.end() && it->IsCheckPoint())
       ++it;
     dispatch_q_.insert(it, std::move(msg));
   } else {
@@ -1949,9 +1915,13 @@ bool Connection::IsHttp() const {
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + cmn::HeapSize(dispatch_q_) + cmn::HeapSize(name_) +
-               cmn::HeapSize(tmp_parse_args_) + cmn::HeapSize(tmp_cmd_vec_) +
                cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
                cmn::HeapSize(reply_builder_);
+
+  // parsed_cmd_ can be null when dispatching a command, or for http connections.
+  if (parsed_cmd_) {
+    mem += UsedMemoryInternal(*parsed_cmd_);
+  }
 
   // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
@@ -2019,15 +1989,8 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
-    unsigned val_len_to_read = memcache_parser_->DEBUG_val_len_to_read();
     MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
-    if (result == MemcacheParser::PARSE_ERROR) {
-      LOG_FIRST_N(WARNING, 5) << "Memcache parse error, cmd_cnt: " << local_stats_.cmds
-                              << " val_len_to_read: " << val_len_to_read
-                              << ", chunk: " << absl::CEscape(io::View(io_buf_.InputBuffer()));
-    }
-
     io_buf_.ConsumeInput(consumed);
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "

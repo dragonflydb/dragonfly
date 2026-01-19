@@ -1844,6 +1844,16 @@ TEST_F(SearchFamilyTest, KnnSearchOptions) {
   resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 1 @vector $query_vector]", "PARAMS", "2",
               "query_vector", query_vector, "LIMIT", "0", "2"});
   EXPECT_THAT(resp, AreDocIds("doc:1"));
+
+  // Parenthesized star - used by LangChain for KNN queries (issue #6342)
+  resp = Run({"FT.SEARCH", "my_index", "(*)=>[KNN 2 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // Double parenthesized star
+  resp = Run({"FT.SEARCH", "my_index", "((*))=>[KNN 2 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
 }
 
 TEST_F(SearchFamilyTest, KnnWithSortBy) {

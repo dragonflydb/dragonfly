@@ -169,7 +169,7 @@ class RestoreArgs {
 
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
-  RdbRestoreValue(RdbVersion rdb_version) {
+  explicit RdbRestoreValue(RdbVersion rdb_version) {
     rdb_version_ = rdb_version;
   }
 
@@ -364,7 +364,6 @@ class Renamer {
     bool sticky;
   };
 
- private:
   Transaction* const transaction_;
 
   const std::string_view src_key_;
@@ -672,7 +671,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
   // ScanCb can preempt due to journaling expired entries and we need to make sure that
-  // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
+  // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.GetLatch()->Wait();
 
@@ -1006,50 +1005,50 @@ ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist, Tra
   return renamer.Rename(destination_should_not_exist);
 }
 
-void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, Transaction* tx, SinkReplyBuilder* builder) {
+void ExpireTimeGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
-  OpResult<uint64_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
-    builder->SendLong(ttl);
+    cmd_cntx->SendLong(ttl);
     return;
   }
 
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      builder->SendLong(-2);
+      cmd_cntx->SendLong(-2);
       break;
     default:
       LOG_IF(ERROR, result.status() != OpStatus::SKIPPED)
           << "Unexpected status " << result.status();
-      builder->SendLong(-1);
+      cmd_cntx->SendLong(-1);
       break;
   }
 }
 
-void TtlGeneric(CmdArgList args, TimeUnit unit, Transaction* tx, SinkReplyBuilder* builder) {
+void TtlGeneric(CmdArgList args, TimeUnit unit, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpTtl(t, shard, key); };
-  OpResult<uint64_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
-    builder->SendLong(ttl);
+    cmd_cntx->SendLong(ttl);
     return;
   }
 
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      builder->SendLong(-2);
+      cmd_cntx->SendLong(-2);
       break;
     default:
       LOG_IF(ERROR, result.status() != OpStatus::SKIPPED)
           << "Unexpected status " << result.status();
-      builder->SendLong(-1);
+      cmd_cntx->SendLong(-1);
       break;
   }
 }
@@ -1091,10 +1090,10 @@ void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
     return OpStatus::OK;
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  DVLOG(2) << "Del ts " << cmd_cntx->tx->txid();
+  DVLOG(2) << "Del ts " << cmd_cntx->tx()->txid();
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (cmd_cntx->mc_command()) {
@@ -1139,7 +1138,6 @@ void GenericFamily::Unlink(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() > 1) {
     return cmd_cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
@@ -1147,23 +1145,28 @@ void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
   string_view msg;
 
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (cmd_cntx->server_conn_cntx()->conn_state.subscribe_info && !rb->IsResp3()) {
     if (args.size() == 1) {
       msg = ArgS(args, 0);
     }
 
-    string_view resp[2] = {"pong", msg};
-    return rb->SendBulkStrArr(resp);
+    auto replier = [msg = string(msg)](RedisReplyBuilder* rb) {
+      string_view resp[2] = {"pong", msg};
+      rb->SendBulkStrArr(resp);
+    };
+    return cmd_cntx->ReplyWith(std::move(replier));
   }
 
   if (args.size() == 0) {
-    return rb->SendSimpleString("PONG");
+    return cmd_cntx->SendSimpleString("PONG");
   }
 
   msg = ArgS(args, 0);
   DVLOG(2) << "Ping " << msg;
 
-  return rb->SendBulkString(msg);
+  auto replier = [msg = string(msg)](RedisReplyBuilder* rb) { rb->SendBulkString(msg); };
+  return cmd_cntx->ReplyWith(std::move(replier));
 }
 
 void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1179,7 +1182,7 @@ void GenericFamily::Exists(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
   return cmd_cntx->SendLong(result.load(memory_order_acquire));
@@ -1190,7 +1193,7 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
@@ -1220,7 +1223,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
 
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
@@ -1244,7 +1247,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
@@ -1271,7 +1274,8 @@ void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx->server_conn_cntx());
   } while (cursor != 0 && keys.size() < output_limit);
 
-  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkStrArr(keys);
+  auto replier = [keys = std::move(keys)](RedisReplyBuilder* rb) { rb->SendBulkStrArr(keys); };
+  return cmd_cntx->ReplyWith(std::move(replier));
 }
 
 void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1296,7 +1300,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
@@ -1330,7 +1334,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
-  OpStatus status = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
     return cmd_cntx->SendError(kExpiryOutOfRange);
@@ -1339,7 +1343,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Stick(CmdArgList args, CommandContext* cmd_cntx) {
-  Transaction* transaction = cmd_cntx->tx;
+  Transaction* transaction = cmd_cntx->tx();
   VLOG(1) << "Stick " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
@@ -1372,6 +1376,7 @@ struct SortEntry
     // Store score only if we need it
     : public std::conditional_t<ALPHA, std::tuple<>, SortEntryScore> {
   std::string key;
+  const std::string* bound_value = nullptr;
 
   bool Parse(std::string&& item) {
     if constexpr (!ALPHA) {
@@ -1395,6 +1400,17 @@ struct SortEntry
     }
     key = absl::StrCat(item);
     return true;
+  }
+
+  void BindValue(const std::string* value) {
+    bound_value = value;
+  }
+
+  std::string_view ResultKey() const {
+    if (bound_value) {
+      return *bound_value;
+    }
+    return key;
   }
 
   static bool less(const SortEntry& l, const SortEntry& r) {
@@ -1431,30 +1447,23 @@ SortEntryList MakeSortEntryList(bool alpha) {
 
 // Iterate over container with generic function that accepts strings and ints
 template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
-  auto cb = [&func](container_utils::ContainerEntry ce) {
-    if (ce.value)
-      return func(ce.ToString());
-    else
-      return func(ce.longval);
-  };
-
   switch (pv.ObjType()) {
     case OBJ_LIST:
-      return container_utils::IterateList(pv, cb);
+      return container_utils::IterateList(pv, func);
     case OBJ_SET:
-      return container_utils::IterateSet(pv, cb);
+      return container_utils::IterateSet(pv, func);
     case OBJ_ZSET:
       return container_utils::IterateSortedSet(
           pv.GetRobjWrapper(),
-          [&cb](container_utils::ContainerEntry ce, double) { return cb(ce); });
+          [&](container_utils::ContainerEntry ce, double) { return func(ce); });
     default:
       return false;
   }
 }
 
 // Create a SortEntryList from given key
-OpResult<pair<SortEntryList, CompactObjType>> OpFetchSortEntries(const OpArgs& op_args,
-                                                                 std::string_view key, bool alpha) {
+OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_view key,
+                                            SortEntryList* dest) {
   using namespace container_utils;
 
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
@@ -1465,19 +1474,56 @@ OpResult<pair<SortEntryList, CompactObjType>> OpFetchSortEntries(const OpArgs& o
     return OpStatus::WRONG_TYPE;
   }
 
-  auto result = MakeSortEntryList(alpha);
   bool success = std::visit(
       [&pv = it->second](auto& entries) {
         entries.reserve(pv.Size());
-        return Iterate(pv, [&entries](auto&& val) {
-          return entries.emplace_back().Parse(std::forward<decltype(val)>(val));
+        return Iterate(pv, [&entries](const ContainerEntry& entry) {
+          if (entry.IsString())
+            return entries.emplace_back().Parse(entry.ToString());
+          else
+            return entries.emplace_back().Parse(entry.as_long());
         });
       },
-      result);
+      *dest);
   if (!success)
     return OpStatus::INVALID_NUMERIC_RESULT;
 
-  return std::make_pair(std::move(result), it->second.ObjType());
+  return it->second.ObjType();
+}
+
+// Fetch container elements as strings (for BY pattern support)
+OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const OpArgs& op_args,
+                                                                        std::string_view key) {
+  using namespace container_utils;
+
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (!IsValid(it)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+  if (!IsContainer(it->second)) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  vector<string> elements;
+  elements.reserve(it->second.Size());
+
+  Iterate(it->second, [&elements](const ContainerEntry& entry) {
+    elements.emplace_back(entry.ToString());
+    return true;
+  });
+
+  return std::make_pair(std::move(elements), it->second.ObjType());
+}
+
+// Fetch a string value from a key (for BY pattern lookups)
+// TODO: does not support tiering.
+string OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (!IsValid(it) || it->second.ObjType() != OBJ_STRING) {
+    return {};  // Missing key defaults to empty string
+  }
+
+  return it->second.ToString();
 }
 
 template <typename IteratorBegin, typename IteratorEnd>
@@ -1495,7 +1541,7 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
   for (auto it = start_it; it != end_it; ++it) {
-    ql_v2->Push(it->key, where);
+    ql_v2->Push(it->ResultKey(), where);
   }
   len = ql_v2->Size();
 
@@ -1509,119 +1555,292 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   return len;
 }
 
-void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
-  std::string_view key = ArgS(args, 0);
+struct SortParams {
   bool alpha = false;
   bool reversed = false;
-  std::optional<std::string_view> store_key;
-  std::optional<std::pair<size_t, size_t>> bounds;
-  auto* builder = cmd_cntx->rb();
-  for (size_t i = 1; i < args.size(); i++) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, i));
-    if (arg == "ALPHA") {
-      alpha = true;
-    } else if (arg == "DESC") {
-      reversed = true;
-    } else if (arg == "ASC") {
-      reversed = false;
-    } else if (arg == "LIMIT") {
-      int offset, limit;
-      if (i + 2 >= args.size()) {
-        return cmd_cntx->SendError(kSyntaxErr);
-      }
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &offset) ||
-          !absl::SimpleAtoi(ArgS(args, i + 2), &limit)) {
-        return cmd_cntx->SendError(kInvalidIntErr);
-      }
-      bounds = {offset, limit};
-      i += 2;
-    } else if (!is_read_only && arg == "STORE") {
-      if (i + 1 >= args.size()) {
-        return cmd_cntx->SendError(kSyntaxErr);
-      }
-      store_key = ArgS(args, i + 1);
-      i += 1;
-    } else {
-      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
-      return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
-    }
+  bool is_read_only = false;
+  bool to_sort = true;
+
+  optional<string_view> store_key;
+
+  // first is offset, second is count
+  optional<pair<uint32_t, uint32_t>> bounds;
+
+  // These options are parsed but currently not fully supported or used by the visitor.
+  optional<string_view> by_pattern;
+  vector<string_view> get_patterns;
+};
+
+template <typename C>
+auto GetSortRange(const C& entries, const optional<pair<uint32_t, uint32_t>>& bounds) {
+  auto start_it = entries.begin();
+  auto end_it = entries.end();
+  if (bounds) {
+    start_it += std::min<uint32_t>(bounds->first, entries.size());
+    end_it = entries.begin() + std::min<uint32_t>(bounds->first + bounds->second, entries.size());
   }
 
-  // Asserting that if is_read_only as true, then store_key should not exist.
-  DLOG(INFO) << "is_read_only parameter: " << is_read_only
-             << " and store_key parameter: " << bool(store_key);
-  assert(((is_read_only && !bool(store_key)) || !is_read_only));
+  return std::make_pair(start_it, end_it);
+};
 
-  ShardId source_sid = Shard(key, shard_set->size());
-  OpResult<pair<SortEntryList, CompactObjType>> fetch_result;
-  auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
-    // in case of SORT option, we fetch only on the source shard
-    if (shard->shard_id() == source_sid) {
-      fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
-    }
-    return OpStatus::OK;
-  };
+// Visitor to handle the actual sorting and reply generation
+struct SortVisitor {
+  const SortParams& params;
+  CompactObjType result_type;
+  CommandContext* cmd_cntx;
+  vector<string> raw_elements;
 
-  cmd_cntx->tx->Execute(std::move(fetch_cb), !bool(store_key));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  if (!fetch_result.ok()) {
-    cmd_cntx->tx->Conclude();
-    if (fetch_result == OpStatus::WRONG_TYPE)
-      return cmd_cntx->SendError(fetch_result.status());
-    else if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
-      return cmd_cntx->SendError("One or more scores can't be converted into double");
-    else
-      return rb->SendEmptyArray();
-  }
-
-  auto result_type = fetch_result->second;
-
-  auto sort_call = [result_type, bounds, reversed, is_read_only, &rb, &store_key,
-                    &cmd_cntx](auto& entries) {
+  template <typename T> void operator()(T& entries) {
     using value_t = typename std::decay_t<decltype(entries)>::value_type;
-    auto cmp = reversed ? &value_t::greater : &value_t::less;
-    if (bounds) {
-      auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
+    auto cmp = params.reversed ? &value_t::greater : &value_t::less;
+
+    DCHECK(params.to_sort);
+
+    DVLOG(2) << "Sorting " << entries.size() << " elements";
+
+    // Sort logic
+    if (params.bounds) {
+      auto sort_it =
+          entries.begin() +
+          std::min<uint32_t>(params.bounds->first + params.bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
       std::sort(entries.begin(), entries.end(), cmp);
     }
 
-    auto start_it = entries.begin();
-    auto end_it = entries.end();
-    if (bounds) {
-      start_it += std::min(bounds->first, entries.size());
-      end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
-    }
-
-    if (!bool(store_key)) {
+    if (!params.store_key) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-      rb->StartCollection(std::distance(start_it, end_it),
-                          is_set ? CollectionType::SET : CollectionType::ARRAY);
+      auto replier = [entries = std::move(entries), bounds = params.bounds, is_set,
+                      raw_elements = std::move(raw_elements)](RedisReplyBuilder* rb) {
+        DVLOG(2) << "Replying with sorted entries, count: " << entries.size();
+        auto [start_it, end_it] = GetSortRange(entries, bounds);
 
-      for (auto it = start_it; it != end_it; ++it) {
-        rb->SendBulkString(it->key);
-      }
+        rb->StartCollection(std::distance(start_it, end_it),
+                            is_set ? CollectionType::SET : CollectionType::ARRAY);
+
+        for (auto it = start_it; it != end_it; ++it) {
+          rb->SendBulkString(it->ResultKey());
+        }
+      };
+      cmd_cntx->ReplyWith(std::move(replier));
     } else {
-      ShardId dest_sid = Shard(store_key.value(), shard_set->size());
+      std::string_view store_key_sv = params.store_key.value();
+      ShardId dest_sid = Shard(store_key_sv, shard_set->size());
       OpResult<uint32_t> store_len;
+
       auto store_callback = [&](Transaction* t, EngineShard* shard) {
         ShardId shard_id = shard->shard_id();
         if (shard_id == dest_sid) {
-          store_len = OpStore(t->GetOpArgs(shard), store_key.value(), start_it, end_it);
+          auto [start_it, end_it] = GetSortRange(entries, params.bounds);
+          store_len = OpStore(t->GetOpArgs(shard), store_key_sv, start_it, end_it);
         }
         return OpStatus::OK;
       };
-      cmd_cntx->tx->Execute(std::move(store_callback), true);
+      cmd_cntx->tx()->Execute(std::move(store_callback), true);
+
       if (store_len) {
-        rb->SendLong(store_len.value());
+        cmd_cntx->SendLong(store_len.value());
       } else {
         cmd_cntx->SendError(store_len.status());
       }
     }
-  };
+  }
+};
 
-  std::visit(sort_call, fetch_result.value().first);
+// Fetches external keys referenced by a BY pattern and fills the sort entries. We deliberately
+// perform "read uncommitted" lookups across arbitrary shards, so this helper does not preserve the
+// enclosing transaction's isolation guarantees.
+OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
+                                          const vector<string>& raw_elements,
+                                          const DbContext& db_cntx, SortEntryList* sorted_entries) {
+  DCHECK(params.by_pattern);
+
+  vector<vector<pair<size_t, string>>> keys_by_shard(shard_set->size());
+  std::string_view pattern = *params.by_pattern;
+  size_t star_pos = pattern.find('*');
+  DCHECK_NE(star_pos, std::string_view::npos);
+  for (size_t i = 0; i < raw_elements.size(); ++i) {
+    string ext_key =
+        absl::StrCat(pattern.substr(0, star_pos), raw_elements[i], pattern.substr(star_pos + 1));
+    ShardId sid = Shard(ext_key, shard_set->size());
+    keys_by_shard[sid].emplace_back(i, std::move(ext_key));
+  }
+
+  std::visit([&](auto& entries) { entries.resize(raw_elements.size()); }, *sorted_entries);
+  atomic_bool parse_error{false};
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    bool success = std::visit(
+        [&](auto& dest) {
+          for (const auto& [idx, ext_key] : keys_by_shard[sid]) {
+            string external_value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
+            auto& entry = dest[idx];
+            if (!entry.Parse(std::move(external_value)))
+              return false;
+            entry.BindValue(&raw_elements[idx]);
+          }
+          return true;
+        },
+        *sorted_entries);
+    if (!success) {
+      parse_error.store(true, memory_order_relaxed);
+    }
+  });
+
+  if (parse_error.load(memory_order_relaxed)) {
+    return OpStatus::INVALID_NUMERIC_RESULT;
+  }
+
+  return OpStatus::OK;
+}
+
+void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
+  CmdArgParser parser(args);
+  std::string_view key = parser.Next();
+  SortParams params;
+  params.is_read_only = is_read_only;
+
+  while (parser.HasNext()) {
+    if (parser.Check("ALPHA")) {
+      params.alpha = true;
+    } else if (parser.Check("DESC")) {
+      params.reversed = true;
+    } else if (parser.Check("ASC")) {
+      params.reversed = false;
+    } else if (parser.Check("LIMIT")) {
+      uint32_t offset = parser.Next<uint32_t>();
+      uint32_t limit = parser.Next<uint32_t>();
+      params.bounds = {offset, limit};
+    } else if (!is_read_only && parser.Check("STORE", &params.store_key)) {
+    } else if (parser.Check("BY", &params.by_pattern)) {
+    } else if (parser.Check("GET")) {
+      params.get_patterns.push_back(parser.Next());
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << parser.Peek();
+      return cmd_cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+
+  // Validate BY pattern has exactly one '*'
+  if (params.by_pattern) {
+    size_t star_count = std::count(params.by_pattern->begin(), params.by_pattern->end(), '*');
+    if (star_count == 0) {
+      // "nosort" pattern - no '*' means skip sorting, preserve insertion order
+      params.to_sort = false;
+      params.by_pattern.reset();
+    } else if (star_count != 1) {
+      return cmd_cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  // Asserting that if is_read_only as true, then store_key should not exist.
+  DVLOG(1) << "is_read_only parameter: " << is_read_only
+           << " and store_key parameter: " << bool(params.store_key);
+  DCHECK(((is_read_only && !bool(params.store_key)) || !is_read_only));
+
+  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
+  DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
+
+  CompactObjType source_type = OBJ_STRING;  // undefined in this context
+
+  // "BY nosort" or we need to sort by external keys - fetch unsorted first.
+  bool fetch_unsorted = !params.to_sort || params.by_pattern;
+  bool single_hop = !bool(params.store_key);
+  vector<string> raw_elements;
+  ShardId source_sid = Shard(key, shard_set->size());
+
+  // The high level steps are:
+  // 1. Fetch container elements (strings only, no parsing) if no sorting needed.
+  // 2. If sorting needed, prepare SortEntryList and fetch external keys if BY pattern is used.
+  // 3. Perform sorting and generate reply or store result if STORE option is used.
+  // 4. If no sorting needed, reply with fetched raw elements (with LIMIT if any).
+  if (fetch_unsorted) {
+    // Step 1: Fetch container elements (strings only, no parsing)
+    OpResult<pair<vector<string>, CompactObjType>> elem_result;
+
+    auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == source_sid) {
+        elem_result = OpFetchContainerElements(t->GetOpArgs(shard), key);
+      }
+      return OpStatus::OK;
+    };
+
+    cmd_cntx->tx()->Execute(std::move(fetch_cb), single_hop);
+
+    // elem_result->first is empty both for missing/empty containers and for errors;
+    // use elem_result's OpStatus to distinguish actual error cases (e.g. WRONG_TYPE).
+    if (elem_result->first.empty()) {
+      cmd_cntx->tx()->Conclude();
+      if (elem_result == OpStatus::WRONG_TYPE)
+        return cmd_cntx->SendError(elem_result.status());
+      else
+        return cmd_cntx->SendEmptyArray();
+    }
+
+    raw_elements.swap(elem_result->first);
+    source_type = elem_result->second;
+  }
+
+  if (params.to_sort) {
+    // Step 2 and 3: Prepare SortEntryList, fetch external keys if needed, perform sorting
+
+    auto sorted_entries =
+        MakeSortEntryList(params.alpha);  // Numeric or alpha depending on params.alpha
+    OpStatus sort_status = OpStatus::OK;
+
+    // Handle BY pattern with external key lookups
+    if (params.by_pattern) {
+      DCHECK(source_type == OBJ_SET || source_type == OBJ_ZSET || source_type == OBJ_LIST);
+      sort_status =
+          PopulateSortEntriesFromByPattern(params, raw_elements, db_cntx, &sorted_entries);
+    } else {  // No BY pattern, sort directly on fetched elements
+      OpResult<CompactObjType> fetch_result;
+      auto fetch_cb = [&](Transaction* t, EngineShard* shard) {
+        // in case of SORT option, we fetch only on the source shard
+        if (shard->shard_id() == source_sid) {
+          fetch_result = OpFetchSortEntries(t->GetOpArgs(shard), key, &sorted_entries);
+        }
+        return OpStatus::OK;
+      };
+
+      cmd_cntx->tx()->Execute(std::move(fetch_cb), single_hop);
+      sort_status = fetch_result.status();
+      source_type = *fetch_result;
+    }
+
+    if (sort_status != OpStatus::OK) {
+      DVLOG(2) << "Sorting failed with status " << sort_status;
+      cmd_cntx->tx()->Conclude();
+      if (sort_status == OpStatus::WRONG_TYPE)
+        return cmd_cntx->SendError(sort_status);
+      if (sort_status == OpStatus::INVALID_NUMERIC_RESULT)
+        return cmd_cntx->SendError("One or more scores can't be converted into double");
+      return cmd_cntx->SendEmptyArray();
+    }
+
+    SortVisitor visitor{params, source_type, cmd_cntx, std::move(raw_elements)};
+    std::visit(visitor, sorted_entries);
+    return;
+  }
+
+  // No sorting required, just reply with fetched raw elements (with LIMIT if any)
+  DVLOG(1) << "Replying with unsorted " << raw_elements.size() << " elements from key " << key;
+  DCHECK(!raw_elements.empty());
+  auto replier = [raw_elements = std::move(raw_elements), params,
+                  source_type](RedisReplyBuilder* rb) {
+    auto [start_it, end_it] = GetSortRange(raw_elements, params.bounds);
+    bool is_set = (source_type == OBJ_SET || source_type == OBJ_ZSET);
+    rb->StartCollection(std::distance(start_it, end_it),
+                        is_set ? CollectionType::SET : CollectionType::ARRAY);
+    for (auto it = start_it; it != end_it; ++it) {
+      rb->SendBulkString(*it);
+    }
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
 void GenericFamily::Sort(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1638,7 +1857,6 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto rdb_version =
       GetRdbVersion(serialized_value, cmd_cntx->server_conn_cntx()->journal_emulated);
-  auto* builder = cmd_cntx->rb();
   if (!rdb_version) {
     return cmd_cntx->SendError(kInvalidDumpValueErr);
   }
@@ -1657,11 +1875,11 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
                      rdb_version.value());
   };
 
-  OpStatus result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   switch (result) {
     case OpStatus::OK:
-      return builder->SendOk();
+      return cmd_cntx->SendOk();
     case OpStatus::KEY_EXISTS:
       return cmd_cntx->SendError("-BUSYKEY Target key name already exists.");
     case OpStatus::INVALID_VALUE:
@@ -1676,7 +1894,6 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view ttl_str = parser.Next();
   uint32_t ttl_sec;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
@@ -1686,10 +1903,13 @@ void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
     return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
 
-  OpResult<vector<long>> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    rb->SendLongArr(absl::MakeConstSpan(result.value()));
+    auto replier = [vec = std::move(result.value())](RedisReplyBuilder* rb) {
+      rb->SendLongArr(absl::MakeConstSpan(vec));
+    };
+    cmd_cntx->ReplyWith(std::move(replier));
   } else {
     cmd_cntx->SendError(result.status());
   }
@@ -1703,7 +1923,7 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
 
-  OpResult<long> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cmd_cntx->SendLong(*result);
@@ -1717,7 +1937,6 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view target_db_sv = ArgS(args, 1);
   int32_t target_db;
-  auto* builder = cmd_cntx->rb();
   if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
@@ -1726,7 +1945,7 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
 
-  if (target_db == cmd_cntx->tx->GetDbIndex()) {
+  if (target_db == cmd_cntx->tx()->GetDbIndex()) {
     return cmd_cntx->SendError("source and destination objects are the same");
   }
 
@@ -1746,29 +1965,28 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
-  builder->SendLong(res == OpStatus::OK);
+  cmd_cntx->SendLong(res == OpStatus::OK);
 }
 
 void GenericFamily::Rename(CmdArgList args, CommandContext* cmd_cntx) {
-  auto reply = RenameGeneric(args, false, cmd_cntx->tx);
+  auto reply = RenameGeneric(args, false, cmd_cntx->tx());
   cmd_cntx->SendError(reply);
 }
 
 void GenericFamily::RenameNx(CmdArgList args, CommandContext* cmd_cntx) {
-  auto reply = RenameGeneric(args, true, cmd_cntx->tx);
-  auto* rb = cmd_cntx->rb();
+  auto reply = RenameGeneric(args, true, cmd_cntx->tx());
   if (!reply.status) {
     return cmd_cntx->SendError(reply.ToSv(), reply.kind);
   }
 
   OpStatus st = reply.status.value();
   if (st == OpStatus::OK) {
-    rb->SendLong(1);
+    cmd_cntx->SendLong(1);
   } else if (st == OpStatus::KEY_EXISTS) {
-    rb->SendLong(0);
+    cmd_cntx->SendLong(0);
   } else {
     cmd_cntx->SendError(st);
   }
@@ -1778,7 +1996,6 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
@@ -1787,7 +2004,7 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("source and destination objects are the same");
   }
 
-  Renamer renamer(cmd_cntx->tx, k1, k2, shard_set->size(), true);
+  Renamer renamer(cmd_cntx->tx(), k1, k2, shard_set->size(), true);
   auto reply = renamer.Rename(!replace);
 
   if (!reply.status) {
@@ -1796,36 +2013,35 @@ void GenericFamily::Copy(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpStatus st = reply.status.value();
   if (st == OpStatus::OK) {
-    rb->SendLong(1);
+    cmd_cntx->SendLong(1);
   } else if (st == OpStatus::KEY_EXISTS) {
-    rb->SendLong(0);
+    cmd_cntx->SendLong(0);
   } else if (st == OpStatus::KEY_NOTFOUND) {
-    rb->SendLong(0);
+    cmd_cntx->SendLong(0);
   } else {
     cmd_cntx->SendError(reply);
   }
 }
 
 void GenericFamily::ExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
-  ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx->tx, cmd_cntx->rb());
+  ExpireTimeGeneric(args, TimeUnit::SEC, cmd_cntx);
 }
 
 void GenericFamily::PExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
-  ExpireTimeGeneric(args, TimeUnit::MSEC, cmd_cntx->tx, cmd_cntx->rb());
+  ExpireTimeGeneric(args, TimeUnit::MSEC, cmd_cntx);
 }
 
 void GenericFamily::Ttl(CmdArgList args, CommandContext* cmd_cntx) {
-  TtlGeneric(args, TimeUnit::SEC, cmd_cntx->tx, cmd_cntx->rb());
+  TtlGeneric(args, TimeUnit::SEC, cmd_cntx);
 }
 
 void GenericFamily::Pttl(CmdArgList args, CommandContext* cmd_cntx) {
-  TtlGeneric(args, TimeUnit::MSEC, cmd_cntx->tx, cmd_cntx->rb());
+  TtlGeneric(args, TimeUnit::MSEC, cmd_cntx);
 }
 
 void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   int64_t index;
-  auto* builder = cmd_cntx->rb();
   if (!absl::SimpleAtoi(key, &index)) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
   }
@@ -1838,12 +2054,12 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   if (cntx->conn_state.db_index == index) {
     // accept a noop.
-    return builder->SendOk();
+    return cmd_cntx->SendOk();
   }
 
   // Only global/non-atomic multi transactions can change dbs safely,
   // locked-ahead transactions acquired keys ahead for a specific dbindex
-  if (auto* tx = cmd_cntx->tx; tx && tx->IsMulti()) {
+  if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
     if (tx->GetMultiMode() == Transaction::LOCK_AHEAD)
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
@@ -1860,22 +2076,22 @@ void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
   };
   shard_set->RunBriefInParallel(std::move(cb));
 
-  return builder->SendOk();
+  return cmd_cntx->SendOk();
 }
 
 void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    DVLOG(1) << "Dump " << cmd_cntx->tx->DebugId() << ": " << key << ", dump size "
+    DVLOG(1) << "Dump " << cmd_cntx->tx()->DebugId() << ": " << key << ", dump size "
              << result.value().size();
-    rb->SendBulkString(*result);
+    auto reply = [data = std::move(*result)](RedisReplyBuilder* rb) { rb->SendBulkString(data); };
+    cmd_cntx->ReplyWith(std::move(reply));
   } else {
-    rb->SendNull();
+    cmd_cntx->SendNull();
   }
 }
 
@@ -1891,33 +2107,35 @@ void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
       return OpStatus::KEY_NOTFOUND;
     }
   };
-  OpResult<CompactObjType> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<CompactObjType> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!result) {
-    cmd_cntx->rb()->SendSimpleString("none");
+    cmd_cntx->SendSimpleString("none");
   } else {
-    cmd_cntx->rb()->SendSimpleString(ObjTypeToString(result.value()));
+    cmd_cntx->SendSimpleString(ObjTypeToString(result.value()));
   }
 }
 
 void GenericFamily::Time(CmdArgList args, CommandContext* cmd_cntx) {
   uint64_t now_usec;
-  if (cmd_cntx->tx) {
-    now_usec = cmd_cntx->tx->GetDbContext().time_now_ms * 1000;
+  if (cmd_cntx->tx()) {
+    now_usec = cmd_cntx->tx()->GetDbContext().time_now_ms * 1000;
   } else {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
   DCHECK_GT(now_usec, 0u);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->StartArray(2);
-  rb->SendLong(now_usec / 1000000);
-  rb->SendLong(now_usec % 1000000);
+  auto replier = [now_usec](RedisReplyBuilder* rb) {
+    rb->StartArray(2);
+    rb->SendLong(now_usec / 1000000);
+    rb->SendLong(now_usec % 1000000);
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
 void GenericFamily::Echo(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  return rb->SendBulkString(key);
+  auto replier = [key = string(key)](RedisReplyBuilder* rb) { rb->SendBulkString(key); };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
@@ -1925,20 +2143,25 @@ void GenericFamily::Echo(CmdArgList args, CommandContext* cmd_cntx) {
 void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(token, &cursor)) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
-      string_view help_arr[] = {
-          "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ <len>]",
-          "    MATCH <glob> - pattern to match keys against",
-          "    TYPE <type> - type of values to match",
-          "    COUNT <count> - number of keys to return",
-          "    ATTR <v|p|a|u> - filter by attributes: v - volatile (ttl), ",
-          "    p - persistent (no ttl), a - accessed since creation, u - untouched",
-          "    MINMSZ <len> - keeps keys with values, whose allocated size is greater or equal to",
-          "        the specified length",
+      auto replier = [](RedisReplyBuilder* rb) {
+        string_view help_arr[] = {
+            "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ "
+            "<len>]",
+            "    MATCH <glob> - pattern to match keys against",
+            "    TYPE <type> - type of values to match",
+            "    COUNT <count> - number of keys to return",
+            "    ATTR <v|p|a|u> - filter by attributes: v - volatile (ttl), ",
+            "    p - persistent (no ttl), a - accessed since creation, u - untouched",
+            "    MINMSZ <len> - keeps keys with values, whose allocated size is greater or equal "
+            "to",
+            "        the specified length",
+        };
+
+        rb->SendSimpleStrArr(help_arr);
       };
-      return builder->SendSimpleStrArr(help_arr);
+      return cmd_cntx->ReplyWith(std::move(replier));
     }
     return cmd_cntx->SendError("invalid cursor");
   }
@@ -1954,9 +2177,13 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   StringVec keys;
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
-  RedisReplyBuilder::ArrayScope scope{builder, 2};
-  builder->SendBulkString(absl::StrCat(cursor));
-  builder->SendBulkStrArr(keys);
+  auto replier = [cursor, keys = std::move(keys)](RedisReplyBuilder* builder) {
+    RedisReplyBuilder::ArrayScope scope{builder, 2};
+    builder->SendBulkString(absl::StrCat(cursor));
+    builder->SendBulkStrArr(keys);
+  };
+
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
@@ -2008,17 +2235,19 @@ void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
       [&](ShardId) { return true; });
 
   auto candidates_count = candidates_counter.load(memory_order_relaxed);
-  std::optional<string> random_key = std::nullopt;
-  auto random_idx = absl::Uniform<size_t>(bitgen, 0, candidates_count);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  for (const auto& candidate : candidates_collection) {
+
+  size_t random_idx = absl::Uniform<size_t>(bitgen, 0, candidates_count);
+  for (auto& candidate : candidates_collection) {
     if (random_idx >= candidate.size()) {
       random_idx -= candidate.size();
     } else {
-      return rb->SendBulkString(candidate[random_idx]);
+      auto replier = [key = std::move(candidate[random_idx])](RedisReplyBuilder* builder) {
+        builder->SendBulkString(key);
+      };
+      return cmd_cntx->ReplyWith(std::move(replier));
     }
   }
-  rb->SendNull();
+  cmd_cntx->SendNull();
 }
 
 using CI = CommandId;
@@ -2098,7 +2327,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
       << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
-      << CI{"SORT", CO::JOURNALED, -2, 1, -1, acl::kSort}.HFUNC(Sort)
+      << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
       << CI{"MOVE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}
              .HFUNC(Move)

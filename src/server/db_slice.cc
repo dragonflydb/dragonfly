@@ -548,6 +548,18 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
 
+    if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is still
+                                 // valid after
+                                 // PreUpdateBlocking.
+      auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
+      LOG_IF(DFATAL, fresh_it != res->exp_it)
+          << "Inconsistent state after PreUpdateBlocking for key " << key
+          << ", db_index: " << cntx.db_index
+          << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
+          << ", expire table size: " << db_arr_[cntx.db_index]->expire.size()
+          << util::fb2::GetStacktrace();
+    }
+
     return {{it, exp_it, AutoUpdater{cntx.db_index, key, it, this}}};
   } else {
     return OpStatus::KEY_NOTFOUND;
@@ -673,6 +685,17 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
+      if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is
+                                   // still valid after
+                                   // PreUpdateBlocking.
+        auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
+        LOG_IF(DFATAL, fresh_it != res->exp_it)
+            << "Inconsistent state after PreUpdateBlocking for key " << key
+            << ", db_index: " << cntx.db_index
+            << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
+            << ", expire table size: " << db_arr_[cntx.db_index]->expire.size()
+            << util::fb2::GetStacktrace();
+      }
       return ItAndUpdater{
           .it = it, .exp_it = exp_it, .post_updater{cntx.db_index, key, it, this}, .is_new = false};
     } else {
@@ -1131,6 +1154,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
       res.exp_it = ExpIterator(exp_it, StringOrView::FromView(key));
       table_memory_ += (db.expire.mem_usage() - table_before);
     }
+  } else {
+    // we shouldn't have expiration if expire_at_ms is 0.
+    auto fresh_exp_it = db.expire.Find(it->first.AsRef());
+    LOG_IF(DFATAL, IsValid(fresh_exp_it))
+        << "Inconsistent state, entry " << key
+        << " leave stale expiration: " << fresh_exp_it->second.duration_ms();
   }
 
   return op_result;

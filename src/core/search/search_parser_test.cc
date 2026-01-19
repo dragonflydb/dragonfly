@@ -240,6 +240,11 @@ TEST_F(SearchParserTest, Parse) {
 
   EXPECT_EQ(0, Parse("@name:{escape\\-err*}"));
 
+  // Parenthesized star - used by LangChain for KNN queries (issue #6342)
+  EXPECT_EQ(0, Parse("(*)"));
+  EXPECT_EQ(0, Parse("((*))"));
+  EXPECT_EQ(0, Parse("(((*)))"));
+
   // Colon in tag value
   EXPECT_EQ(0, Parse("@t:{Tag:value}"));
   EXPECT_EQ(0, Parse("@t:{Tag:*}"));

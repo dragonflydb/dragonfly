@@ -25,12 +25,15 @@ class RESPObj {
     ARRAY = REDIS_REPLY_ARRAY,
     INTEGER = REDIS_REPLY_INTEGER,
     NIL = REDIS_REPLY_NIL,
+    REPLY_STATUS = REDIS_REPLY_STATUS,
     DOUBLE = REDIS_REPLY_DOUBLE,
+    ERROR = REDIS_REPLY_ERROR,
   };
   RESPObj() = default;
   RESPObj(redisReply* reply, bool needs_to_free) : reply_(reply), needs_to_free_(needs_to_free) {
   }
 
+  // TODO remove copy ctor, because it is not a deep copy
   RESPObj(const RESPObj& other) : reply_(other.reply_), needs_to_free_(false) {
   }
   RESPObj& operator=(const RESPObj& other) = delete;
@@ -85,6 +88,10 @@ class RESPParser {
   }
 
   std::optional<RESPObj> Feed(const char* data, size_t len);
+
+  size_t BufferPos() const {
+    return reader_->pos;
+  }
 
  private:
   redisReader* reader_;
@@ -167,8 +174,11 @@ template <class T> std::optional<T> RESPObj::As() const {
     return std::nullopt;
   }
   if constexpr (std::is_constructible_v<T, std::string_view>) {
-    if (reply_->type == REDIS_REPLY_STRING) {
+    if (reply_->type == REDIS_REPLY_STRING || reply_->type == REDIS_REPLY_ERROR ||
+        reply_->type == REDIS_REPLY_STATUS) {
       return T{std::string_view{reply_->str, reply_->len}};
+    } else if (reply_->type == REDIS_REPLY_NIL) {
+      return T{std::string_view("NIL")};
     }
   } else if constexpr (std::is_integral_v<T>) {
     if (reply_->type == REDIS_REPLY_INTEGER) {

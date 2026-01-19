@@ -3545,37 +3545,36 @@ async def test_SortedSearchRequest(df_factory: DflyInstanceFactory):
     docs_num = 100
     for i in range(0, docs_num):
         assert (
-            await cclient.execute_command(
-                "HSET", f"s{i}", "title", f"test {i}", "size", f"{docs_num - i}"
-            )
+            await cclient.execute_command("HSET", f"s{i}", "title", f"test {i}", "size", f"{i}")
             == 2
         )
 
     async def search_test():
-        limit_size = 20
+        limit_size = random.randint(1, docs_num // 2)
+        offset = random.randint(0, docs_num // 2)
         res = await nodes[0].client.execute_command(
             "FT.SEARCH",
             "idx",
             "@title:test",
             "text",
-            "LIMIT",
-            "0",
-            "1000",
             "SORTBY",
             "size",
             "ASC",
             "LIMIT",
-            "0",
+            f"{offset}",
             f"{limit_size}",
         )
         assert res[0] == docs_num
-        for i in range(0, limit_size):
-            assert f"s{docs_num - i - 1}" in res
+        for i in range(offset, offset + limit_size):
+            assert f"s{i}" in res, f"offset: {offset}, limit_size: {limit_size}, res: {res}"
 
-        for i in range(0, docs_num - limit_size):
+        for i in range(0, offset):
             assert f"s{i}" not in res
 
-    await asyncio.gather(*(search_test() for _ in range(docs_num)))
+        for i in range(offset + limit_size, docs_num):
+            assert f"s{i}" not in res
+
+    await asyncio.gather(*(search_test() for _ in range(2)))
 
 
 async def verify_keys_match_number_of_index_docs(client, expected_num_keys):

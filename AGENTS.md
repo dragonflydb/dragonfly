@@ -43,6 +43,7 @@
 - **Summary**: 1-2 sentences explaining *what* changed and *why*.
 - **Changes**: Bullet points for key changes.
 - **Fixes**: Link issues (e.g., "Fixes #123").
+- **Commit messages**: Keep every line (subject and body) <= 100 characters; wrap long descriptions.
 ---
 
 ### GitHub Copilot
@@ -431,6 +432,7 @@ Quick reference to the most important files in the codebase.
 6. **Python imports**: `pip3 install -r tests/dragonfly/requirements.txt && export DRAGONFLY_PATH=...`
 7. **Helio modifications**: DON'T edit `helio/` (it's a submodule)
 8. **io_uring/epoll**: Test both: `pytest --df proactor_type=epoll`
+9. **CodeQL checks**: DON'T run codeql_checker when testing changes - it's slow and unnecessary for development
 
 ---
 
@@ -466,6 +468,7 @@ Before claiming a task is complete, verify:
 - [ ] New feature has corresponding test coverage
 - [ ] Tests pass in both Debug and Release builds
 - [ ] Tests pass with ASAN/UBSAN enabled (if applicable)
+- [ ] **DO NOT run codeql_checker** - it's slow and unnecessary for development testing
 
 ### Pre-commit & Style
 

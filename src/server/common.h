@@ -326,8 +326,9 @@ struct ScanOpts {
   };
   std::optional<Mask> mask;
   size_t min_malloc_size = 0;
+  bool novalues = false;
   bool Matches(std::string_view val_name) const;
-  static OpResult<ScanOpts> TryFrom(CmdArgList args);
+  static OpResult<ScanOpts> TryFrom(CmdArgList args, bool allow_novalues = false);
 };
 
 // I use relative time from Feb 1, 2023 in seconds.

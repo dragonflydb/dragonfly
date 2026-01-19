@@ -1047,7 +1047,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
 
   auto* cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
+      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
       &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1063,7 +1063,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
     return rb->SendDouble(popped_array->front().second);
   }
 
-  DVLOG(1) << "result for " << cmd_cntx->tx->DebugId() << " is " << popped_key.status();
+  DVLOG(1) << "result for " << cmd_cntx->tx()->DebugId() << " is " << popped_key.status();
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return cmd_cntx->SendError(kWrongTypeErr);
@@ -1071,7 +1071,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED: {
-      auto error = cluster::SlotOwnershipError(*cmd_cntx->tx->GetUniqueSlotId());
+      auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
       return cmd_cntx->SendError(std::move(error));
     }
@@ -1507,7 +1507,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
   if (op_args->num_keys == 0) {
     return cmd_cntx->SendError(absl::StrCat("at least 1 input key is needed for ", cmd));
   }
-  Transaction* tx = cmd_cntx->tx;
+  Transaction* tx = cmd_cntx->tx();
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] =
@@ -1612,7 +1612,7 @@ void ZPopMinMaxFromArgs(CmdArgList args, bool reverse, CommandContext* cmd_cntx)
     }
   }
 
-  OutputScoredArrayResult(ZPopMinMaxInternal(key, FilterShards::NO, count, reverse, cmd_cntx->tx),
+  OutputScoredArrayResult(ZPopMinMaxInternal(key, FilterShards::NO, count, reverse, cmd_cntx->tx()),
                           cmd_cntx->rb());
 }
 
@@ -1665,7 +1665,7 @@ void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
     return OpStatus::OK;
   };
 
-  auto* tx = cmd_cntx->tx;
+  auto* tx = cmd_cntx->tx();
   // Don't conclude the transaction if we're storing the result.
   tx->Execute(std::move(range_cb), !range_params.store_key);
 
@@ -1789,7 +1789,7 @@ void ZRankGeneric(CmdArgList args, bool reverse, CommandContext* cmd_cntx) {
     return OpRank(t->GetOpArgs(shard), key, member, reverse, with_score);
   };
 
-  OpResult<RankResult> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<RankResult> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (result) {
     if (with_score) {
@@ -1812,7 +1812,7 @@ void ZRemRangeGeneric(string_view key, const ZSetFamily::ZRangeSpec& range_spec,
     return OpRemRange(t->GetOpArgs(shard), key, range_spec);
   };
 
-  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
@@ -1904,7 +1904,7 @@ void ZSetFamily::ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemb
     return ZSetFamily::OpAdd(t->GetOpArgs(shard), zparams, key, memb_sp);
   };
 
-  OpResult<AddResult> add_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<AddResult> add_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (base::_in(add_result.status(), {OpStatus::WRONG_TYPE, OpStatus::OUT_OF_MEMORY})) {
     return cmd_cntx->SendError(add_result.status());
   }
@@ -2176,7 +2176,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
     }
     members.emplace_back(val, member);
   }
-  DCHECK(cmd_cntx->tx);
+  DCHECK(cmd_cntx->tx());
 
   if (to_sort_fields) {
     if (num_members == 2) {  // fix unique_members for this special case.
@@ -2205,7 +2205,7 @@ void CmdZCard(CmdArgList args, CommandContext* cmd_cntx) {
     return find_res.value()->second.Size();
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
     return;
@@ -2229,7 +2229,7 @@ void CmdZCount(CmdArgList args, CommandContext* cmd_cntx) {
     return OpCount(t->GetOpArgs(shard), key, si);
   };
 
-  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
@@ -2291,7 +2291,7 @@ void CmdZDiff(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -2343,14 +2343,14 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(cb), false);
+  cmd_cntx->tx()->Execute(std::move(cb), false);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // Check shard results for WRONG_TYPE returned
   for (auto& sm_map : maps) {
     if (sm_map.status() == OpStatus::WRONG_TYPE) {
-      cmd_cntx->tx->Conclude();
+      cmd_cntx->tx()->Conclude();
       return cmd_cntx->SendError(sm_map.status());
     }
   }
@@ -2372,7 +2372,7 @@ void CmdZDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(store_cb, true);
+  cmd_cntx->tx()->Execute(store_cb, true);
   rb->SendLong(smvec.size());
 }
 
@@ -2402,7 +2402,7 @@ void CmdZIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
                              ScoredMemberSpan{&scored_member, 1});
   };
 
-  OpResult add_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult add_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (add_result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
   }
@@ -2450,7 +2450,7 @@ void CmdZInterCard(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   OpResult<ScoredMap> result = IntersectResults(maps, AggType::NOOP);
   if (!result)
@@ -2483,7 +2483,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(cb), false /* possibly another hop */);
+  cmd_cntx->tx()->Execute(std::move(cb), false /* possibly another hop */);
 
   // Keep all the keys found (first only for each shard) in a set for fast lookups.
   absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
@@ -2509,14 +2509,14 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
     }
   }
 
-  if (!key_to_pop.has_value() && (!is_blocking || cmd_cntx->tx->IsMulti())) {
-    cmd_cntx->tx->Conclude();
+  if (!key_to_pop.has_value() && (!is_blocking || cmd_cntx->tx()->IsMulti())) {
+    cmd_cntx->tx()->Conclude();
     response_builder->SendNull();
     return;
   }
   // if we don't have any key to pop and it's blocking then we will block it using `WaitOnWatch`
   if (is_blocking && !key_to_pop.has_value()) {
-    auto trans = cmd_cntx->tx;
+    auto trans = cmd_cntx->tx();
     auto* cntx = cmd_cntx->server_conn_cntx();
     auto* ns = &trans->GetNamespace();
 
@@ -2554,7 +2554,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
 
   // Pop elements from relevant set.
   OpResult<ScoredArray> pop_result = ZPopMinMaxInternal(
-      *key_to_pop, FilterShards::YES, zmpop_args.pop_count, zmpop_args.is_max, cmd_cntx->tx);
+      *key_to_pop, FilterShards::YES, zmpop_args.pop_count, zmpop_args.is_max, cmd_cntx->tx());
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
     return response_builder->SendError(kWrongTypeErr);
@@ -2595,7 +2595,7 @@ void CmdZLexCount(CmdArgList args, CommandContext* cmd_cntx) {
     return OpLexCount(t->GetOpArgs(shard), key, li);
   };
 
-  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
@@ -2698,7 +2698,7 @@ void CmdZRem(CmdArgList args, CommandContext* cmd_cntx) {
     return OpRem(t->GetOpArgs(shard), key, members);
   };
 
-  OpResult<unsigned> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<unsigned> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     cmd_cntx->SendError(kWrongTypeErr);
   } else {
@@ -2730,7 +2730,7 @@ void CmdZRandMember(CmdArgList args, CommandContext* cmd_cntx) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);
   };
 
-  OpResult<ScoredArray> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<ScoredArray> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result) {
     rb->SendScoredArray(result.value(), params.with_scores);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -2753,7 +2753,7 @@ void CmdZScore(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  OpResult<double> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<double> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     rb->SendError(kWrongTypeErr);
   } else if (!result) {
@@ -2766,7 +2766,7 @@ void CmdZScore(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdZMScore(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
@@ -2805,7 +2805,7 @@ void CmdZScan(CmdArgList args, CommandContext* cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);
     rb->SendBulkString(absl::StrCat(cursor));

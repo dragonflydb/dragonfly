@@ -81,8 +81,6 @@ ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose aut
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
-ABSL_RETIRED_FLAG(bool, track_exec_frequencies, true,
-                  "DEPRECATED. Whether to track exec frequencies for multi exec");
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
@@ -123,11 +121,9 @@ ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
 
-ABSL_FLAG(uint32_t, uring_wake_mode, 1,
-          "0 - use eventfd, 1 - use io_uring, 2 - use io_uring with immediate flush of the "
-          "notification");
+ABSL_RETIRED_FLAG(uint32_t, uring_wake_mode, 1, "DEPRECATED");
 
-ABSL_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "");
+ABSL_RETIRED_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "DEPRECATED");
 
 ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
 ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
@@ -313,28 +309,18 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
   return message;
 }
 
-void SendMonitor(const std::string& msg) {
-  const auto& monitor_repo = ServerState::tlocal()->Monitors();
-  const auto& monitors = monitor_repo.monitors();
-  if (monitors.empty()) {
-    return;
-  }
-  VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '" << msg
-          << "' for " << monitors.size();
-
-  for (auto monitor_conn : monitors) {
-    monitor_conn->SendMonitorMessageAsync(msg);
-  }
-}
-
 void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList tail_args) {
-  //  We have connections waiting to get the info on the last command, send it to them
-  string monitor_msg = MakeMonitorMessage(cntx, cid, tail_args);
+  auto cb = [msg = MakeMonitorMessage(cntx, cid, tail_args)](unsigned idx, util::ProactorBase*) {
+    const auto& monitors = ServerState::tlocal()->Monitors().monitors();
+    if (monitors.empty())
+      return;
 
-  VLOG(2) << "Sending command '" << monitor_msg << "' to the clients that registered on it";
-
-  shard_set->pool()->DispatchBrief(
-      [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
+    VLOG(2) << "Sending command '" << msg << "' from " << ProactorBase::me()->GetPoolIndex()
+            << " to " << monitors.size() << " monitors";
+    for (auto monitor_conn : monitors)
+      monitor_conn->SendMonitorMessageAsync(msg);
+  };
+  shard_set->pool()->DispatchBrief(std::move(cb));
 }
 
 class InterpreterReplier : public RedisReplyBuilder {
@@ -775,20 +761,6 @@ std::vector<std::string> GetMutableFlagNames() {
                             FLAGS_squash_stats_latency_lower_limit);
 }
 
-void UpdateUringFlagsOnThread() {
-#ifdef __linux__
-  if (auto* pb = ProactorBase::me(); pb->GetKind() == fb2::ProactorBase::IOURING) {
-    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(pb);
-    uint32_t mode = absl::GetFlag(FLAGS_uring_wake_mode);
-    uint32_t threshold = absl::GetFlag(FLAGS_uring_submit_threshold);
-
-    up->ConfigureMsgRing(mode > 0);
-    up->ConfigureSubmitWakeup(mode == 2);
-    up->SetSubmitQueueThreshold(threshold);
-  }
-#endif
-}
-
 void UpdateSchedulerFlagsOnThread() {
   using fb2::detail::Scheduler;
   auto* sched = util::fb2::detail::FiberScheduler();
@@ -879,6 +851,41 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
       return "";
   }
   return "";
+}
+
+OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
+                           const ShardArgs& args) {
+  if (conn_ref.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return OpStatus::OK;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId();
+
+  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
+  auto& db_slice = slice_args.GetDbSlice();
+  for (auto key : args)
+    db_slice.TrackKey(conn_ref, key);
+
+  return OpStatus::OK;
+}
+
+void TrackIfNeeded(CommandContext* cmd_cntx) {
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& info = cntx->conn_state.tracking_info_;
+  if (auto* tx = cmd_cntx->tx(); tx) {
+    // Reset it, because in multi/exec the transaction pointer is the same and
+    // we will end up triggerring the callback on the following commands. To avoid this
+    // we reset it.
+    tx->SetTrackingCallback({});
+    if (cmd_cntx->cid->IsReadOnly() && info.ShouldTrackKeys()) {
+      auto conn = cntx->conn()->Borrow();
+      tx->SetTrackingCallback([conn](Transaction* trans) {
+        auto* shard = EngineShard::tlocal();
+        OpTrackKeys(trans->GetOpArgs(shard), conn, trans->GetShardArgs(shard->shard_id()));
+      });
+    }
+  }
 }
 
 }  // namespace
@@ -977,10 +984,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // Register squsher flags
   RegisterMutableFlags(&config_registry, MultiCommandSquasher::GetMutableFlagNames(),
                        []() { MultiCommandSquasher::UpdateFromFlags(); });
-  // Register uring proactor flags
-  RegisterMutableFlags(&config_registry,
-                       base::GetFlagNames(FLAGS_uring_wake_mode, FLAGS_uring_submit_threshold),
-                       []() { UpdateUringFlagsOnThread(); });
+
   // Register scheduler flags
   RegisterMutableFlags(
       &config_registry,
@@ -1073,7 +1077,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
-    UpdateUringFlagsOnThread();
     UpdateSchedulerFlagsOnThread();
   });
   SetHuffmanTable(GetFlag(FLAGS_huffman_table));
@@ -1282,8 +1285,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_c
     return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
   }
 
-  return VerifyConnectionAclStatus(cmd_cntx.cid, cmd_cntx.server_conn_cntx(),
-                                   "ACL rules changed between the MULTI and EXEC", tail_args);
+  return std::nullopt;
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
@@ -1376,10 +1378,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
     return ErrorReply{"This Redis command is not allowed from script"};
 
   if (under_script) {
-    DCHECK(dfly_cntx.transaction);
+    auto* tx = dfly_cntx.transaction;
+    DCHECK(tx);
     // The following commands access shards arbitrarily without having keys, so they can only be run
     // non atomically or globally.
-    Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
+    Transaction::MultiMode mode = tx->GetMultiMode();
     bool shard_access = (cid.opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
@@ -1407,7 +1410,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
-  absl::Cleanup clear_last_error([parsed_cmd]() { parsed_cmd->rb()->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args.Front());
@@ -1419,8 +1421,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
     return DispatchResult::ERROR;
   }
 
-  CommandContext* cmnd_cntx = static_cast<CommandContext*>(parsed_cmd);
-  ConnectionContext* dfly_cntx = cmnd_cntx->server_conn_cntx();
+  CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
+  ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
   bool dispatching_in_multi = under_script || under_exec;
@@ -1428,8 +1430,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   CmdArgVec tmp_vec;
   ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
 
-  if (cmnd_cntx->conn()) {  // no owner in replica context.
-    auto* conn = cmnd_cntx->conn();
+  if (cmd_cntx->conn()) {  // no owner in replica context.
+    auto* conn = cmd_cntx->conn();
 
     if (VLOG_IS_ON(2)) {
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
@@ -1467,7 +1469,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
       }
     }
     DCHECK(!err->status);
-    cmnd_cntx->SendError(err->ToSv(), err->kind);
+    cmd_cntx->SendError(err->ToSv(), err->kind);
     return DispatchResult::ERROR;
   }
 
@@ -1485,7 +1487,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
     if (cid->IsJournaled()) {
       exec_info.is_write = true;
     }
-    cmnd_cntx->SendSimpleString("QUEUED");
+    cmd_cntx->SendSimpleString("QUEUED");
     return DispatchResult::OK;
   }
 
@@ -1500,7 +1502,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
           dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
 
       if (status != OpStatus::OK) {
-        cmnd_cntx->SendError(status);
+        cmd_cntx->SendError(status);
         return DispatchResult::ERROR;
       }
     }
@@ -1515,7 +1517,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
         if (auto st =
                 dist_trans->InitByArgs(dfly_cntx->ns, dfly_cntx->conn_state.db_index, tail_args);
             st != OpStatus::OK) {
-          cmnd_cntx->SendError(StatusToMsg(st));
+          cmd_cntx->SendError(StatusToMsg(st));
           return DispatchResult::ERROR;
         }
       }
@@ -1528,13 +1530,13 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   }
 
   DispatchResult res = DispatchResult::ERROR;
-  cmnd_cntx->cid = cid;
-  cmnd_cntx->tx = dfly_cntx->transaction;
-  res = InvokeCmd(tail_args, cmnd_cntx);
+  cmd_cntx->SetupTx(cid, dfly_cntx->transaction);
+
+  res = InvokeCmd(tail_args, cmd_cntx);
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
-    cmnd_cntx->SendError("Internal Error");
-    cmnd_cntx->rb()->CloseConnection();
+    cmd_cntx->SendError("Internal Error");
+    cmd_cntx->rb()->CloseConnection();
   }
 
   if (!dispatching_in_multi) {
@@ -1572,26 +1574,6 @@ class ReplyGuard {
   std::string_view cid_name_;
 };
 
-OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
-                           const ShardArgs& args) {
-  if (conn_ref.IsExpired()) {
-    DVLOG(2) << "Connection expired, exiting TrackKey function.";
-    return OpStatus::OK;
-  }
-
-  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId();
-
-  auto& db_slice = slice_args.GetDbSlice();
-  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
-  for (auto key : args) {
-    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
-             << " into the tracking client set of key " << key;
-    db_slice.TrackKey(conn_ref, key);
-  }
-
-  return OpStatus::OK;
-}
-
 DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx) {
   auto* cid = cmd_cntx->cid;
   DCHECK(cid);
@@ -1612,46 +1594,24 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
       return DispatchResult::OK;
     }
     cmd_cntx->SendError(*err);
-    // return ERROR only for internal error aborts
-    builder->ConsumeLastError();
 
     return err->status == OpStatus::OUT_OF_MEMORY ? DispatchResult::OOM : DispatchResult::OK;
   }
 
-  // We are not sending any admin command in the monitor, and we do not want to
-  // do any processing if we don't have any waiting connections with monitor
-  // enabled on them - see https://redis.io/commands/monitor/
-  // For EXEC command specifically, we dispatch monitor after executing all queued commands
-  // to preserve correct ordering (MULTI, commands, EXEC) instead of (MULTI, EXEC, commands)
-  bool should_dispatch_monitor =
-      !ServerState::tlocal()->Monitors().Empty() && cid->CanBeMonitored();
-  if (should_dispatch_monitor) {
+  bool has_monitors = !ServerState::tlocal()->Monitors().Empty();
+  if (cid->CanBeMonitored() && has_monitors) {
     DispatchMonitor(cntx, cid, tail_args);
   }
 
   ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
-  auto& info = cntx->conn_state.tracking_info_;
-  Transaction* tx = cmd_cntx->tx;
-  if (tx) {
-    // Reset it, because in multi/exec the transaction pointer is the same and
-    // we will end up triggerring the callback on the following commands. To avoid this
-    // we reset it.
-    tx->SetTrackingCallback({});
-    if (cid->IsReadOnly() && info.ShouldTrackKeys()) {
-      auto conn = cntx->conn()->Borrow();
-      tx->SetTrackingCallback([conn](Transaction* trans) {
-        auto* shard = EngineShard::tlocal();
-        OpTrackKeys(trans->GetOpArgs(shard), conn, trans->GetShardArgs(shard->shard_id()));
-      });
-    }
-  }
+  TrackIfNeeded(cmd_cntx);
+  auto* tx = cmd_cntx->tx();
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
 #endif
-  auto last_error = builder->ConsumeLastError();
-  DCHECK(last_error.empty());
+  builder->ConsumeLastError();  // throw away last error
   try {
     cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
@@ -1671,8 +1631,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
   }
 
-  auto cid_name = cid->name();
-  if ((!tx && cid_name != "MULTI") || (tx && !tx->IsMulti())) {
+  if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
     // Each time we execute a command we need to increase the sequence number in
     // order to properly track clients when OPTIN is used.
     // We don't do this for `multi/exec` because it would break the
@@ -2018,7 +1977,7 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
     keys_existed.fetch_add(res.value_or(0), memory_order_relaxed);
     return OpStatus::OK;
   };
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
@@ -2065,7 +2024,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 }
 
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
-  auto* tx = cmd_cntx->tx;
+  auto* tx = cmd_cntx->tx();
   DCHECK(tx);
   DVLOG(2) << "CallFromScript " << ca.args[0];
 
@@ -2116,7 +2075,7 @@ void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   }
 
   auto* cntx = cmd_cntx->server_conn_cntx();
-  BorrowedInterpreter interpreter{cmd_cntx->tx, &cntx->conn_state};
+  BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return cmd_cntx->SendError(res.error().Format(), facade::kScriptErrType);
@@ -2133,7 +2092,7 @@ void Service::EvalRo(CmdArgList args, CommandContext* cmd_cntx) {
 void Service::EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
   auto* cntx = cmd_cntx->server_conn_cntx();
-  BorrowedInterpreter interpreter{cmd_cntx->tx, &cntx->conn_state};
+  BorrowedInterpreter interpreter{cmd_cntx->tx(), &cntx->conn_state};
   CallSHA(args, sha, interpreter, read_only, cmd_cntx);
 }
 
@@ -2211,12 +2170,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
   return false;
 }
 
-static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode multi_mode,
+// `multi_mode` is the deduced multi mode that is not yet set on the transaction
+static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_mode,
                                    const Transaction& tx) {
-  if (!sid.has_value() || multi_mode != Transaction::LOCK_AHEAD) {
-    return false;
-  }
-
   if (tx.GetMultiMode() != Transaction::NOT_DETERMINED) {
     // We may be running EVAL under MULTI. Currently RunSingleShardMulti() will attempt to lock
     // keys, in which case will be already locked by MULTI. We could optimize this path as well
@@ -2224,7 +2180,11 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, Transaction::MultiMode
     return false;
   }
 
-  return true;
+  // If we have only a single shard, we can run a global command without hops
+  if (shard_set->size() == 1 && multi_mode == Transaction::GLOBAL)
+    return true;
+
+  return one_shard && multi_mode == Transaction::LOCK_AHEAD;
 }
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
@@ -2256,8 +2216,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
 
-  optional<ShardId> sid;
-
+  optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
@@ -2274,7 +2233,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   }
 
   sinfo->async_cmds_heap_limit = GetFlag(FLAGS_multi_eval_squash_buffer);
-  Transaction* tx = cmd_cntx->tx;
+  Transaction* tx = cmd_cntx->tx();
   CHECK(tx != nullptr);
 
   Interpreter::RunResult result;
@@ -2288,7 +2247,14 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     sinfo.reset();
   };
 
-  if (CanRunSingleShardMulti(sid, script_mode, *tx)) {
+  if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
+    // It might be that there are no declared keys, but there is only a single shard
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+    DCHECK(sid.has_value() || shard_set->size() == 1);
+    ShardId real_sid = sid.value_or(ShardId(0));
+#pragma GCC diagnostic pop
+
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -2297,10 +2263,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareMultiForScheduleSingleHop(conn_cntx->ns, *sid, conn_cntx->db_index(), args);
+    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys,
+                            script_mode);
+
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
+          new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
@@ -2309,10 +2277,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       return OpStatus::OK;
     });
 
-    if (*sid != ss->thread_index()) {
+    // Migration only makes sense if there are distinct shards
+    if (sid.has_value() && *sid != ss->thread_index()) {
       VLOG(2) << "Migrating connection " << conn_cntx->conn() << " from "
-              << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
-      conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid), false);
+              << ProactorBase::me()->GetPoolIndex() << " to " << real_sid;
+      conn_cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(real_sid), false);
     }
   } else {
     Transaction::MultiMode tx_mode = tx->GetMultiMode();
@@ -2494,7 +2463,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
   if (state != ExecScriptUse::NONE) {
     exec_info.preborrowed_interpreter =
-        BorrowedInterpreter(cmd_cntx->tx, &cntx->conn_state).Release();
+        BorrowedInterpreter(cmd_cntx->tx(), &cntx->conn_state).Release();
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
@@ -2509,7 +2478,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() &&
       !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
-    cmd_cntx->tx->UnlockMulti();
+    cmd_cntx->tx()->UnlockMulti();
     return rb->SendNull();
   }
 
@@ -2522,7 +2491,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    string descr = CreateExecDescriptor(exec_info.body, cmd_cntx->tx->GetUniqueShardCnt());
+    string descr = CreateExecDescriptor(exec_info.body, cmd_cntx->tx()->GetUniqueShardCnt());
     ServerState::tlocal()->exec_freq_count[descr]++;
 
     if (GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
@@ -2538,8 +2507,8 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
         CmdArgList args = scmd.ArgList(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
-          cmd_cntx->tx->MultiSwitchCmd(scmd.Cid());
-          OpStatus st = cmd_cntx->tx->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
+          cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
+          OpStatus st = cmd_cntx->tx()->InitByArgs(cntx->ns, cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
             cmd_cntx->SendError(st);
             break;
@@ -2560,12 +2529,12 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (scheduled) {
     VLOG(2) << "Exec unlocking " << exec_info.body.size() << " commands";
-    cmd_cntx->tx->UnlockMulti();
+    cmd_cntx->tx()->UnlockMulti();
   }
 
-  // Dispatch EXEC to monitor after all queued commands have been executed
-  // to preserve correct ordering (MULTI, commands, EXEC)
-  if (!ServerState::tlocal()->Monitors().Empty() && (exec_cid_->opt_mask() & CO::ADMIN) == 0) {
+  // Dispatch at the end manually to have (MULTI, cmds..., EXEC) order
+  if (!ServerState::tlocal()->Monitors().Empty()) {
+    LOG_IF(DFATAL, exec_cid_->opt_mask() & CO::ADMIN) << "EXEC should be non admin command";
     DispatchMonitor(cntx, exec_cid_, args);
   }
 

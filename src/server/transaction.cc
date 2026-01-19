@@ -574,14 +574,19 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   return res;
 }
 
-void Transaction::PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db,
-                                                   CmdArgList args) {
-  multi_.reset();
-  InitBase(ns, db, args);
+void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys,
+                                      MultiMode mode) {
+  if (mode == LOCK_AHEAD) {
+    StartMultiLockedAhead(ns, db, keys, true);  // delay locking until first hop
+  } else {
+    DCHECK_EQ(mode, GLOBAL);
+    StartMultiGlobal(ns, db);
+  }
   EnableShard(sid);
-  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
-  CHECK(key_index);
-  StoreKeysInArgs(*key_index);
+  MultiBecomeSquasher();
+
+  // As we never change commands, conclude immediately
+  coordinator_state_ |= COORD_CONCLUDING;
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.
@@ -1654,6 +1659,16 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         string_view opt = ArgS(args, args.size() - 2);
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
           bonus = args.size() - 1;
+        }
+      }
+
+      if (name == "SORT") {
+        if (args.size() >= 3) {
+          // SORT key ... STORE destkey
+          string_view opt = ArgS(args, args.size() - 2);
+          if (absl::EqualsIgnoreCase(opt, "STORE")) {
+            bonus = args.size() - 1;
+          }
         }
       }
     }
