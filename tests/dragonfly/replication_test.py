@@ -3681,7 +3681,6 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     c_replica3 = replica3.client()
 
     c_master = master.client()
-    c_master
 
     await c_master.execute_command("debug populate 5000")
 
