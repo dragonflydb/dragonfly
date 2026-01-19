@@ -1225,6 +1225,46 @@ void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
+void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view key = ArgS(args, 0);
+  auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok()) {
+      return it_res.status();
+    }
+
+    // Read string value (handles tiered storage if needed)
+    StringResult str_result = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
+
+    // Handle both immediate value and tiered storage future
+    string value;
+    if (holds_alternative<string>(str_result)) {
+      value = std::move(get<string>(str_result));
+    } else {
+      auto& future = get<TieredStorage::TResult<string>>(str_result);
+      io::Result<string> io_res = future.Get();
+      if (!io_res) {
+        return OpStatus::IO_ERROR;
+      }
+      value = std::move(*io_res);
+    }
+
+    // Compute XXH3 hash and return as 16-char hex string
+    return XXH3_Digest(value);
+  };
+
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (result) {
+    rb->SendBulkString(*result);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    rb->SendNull();
+  } else {
+    cmd_cntx->SendError(result.status());
+  }
+}
+
 void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
@@ -1727,6 +1767,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
+      << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
