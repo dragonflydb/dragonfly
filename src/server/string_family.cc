@@ -1225,12 +1225,12 @@ void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void CmdDigest(CmdArgList args, CommandContext* cmnd_cntx) {
+void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok()) {
-      return it_res.status();  // Return error for other cases
+      return it_res.status();
     }
 
     // Read string value (handles tiered storage if needed)
@@ -1242,22 +1242,26 @@ void CmdDigest(CmdArgList args, CommandContext* cmnd_cntx) {
       value = std::move(get<string>(str_result));
     } else {
       auto& future = get<TieredStorage::TResult<string>>(str_result);
-      value = std::move(future).Get().value();
+      io::Result<string> io_res = future.Get();
+      if (!io_res) {
+        return OpStatus::IO_ERROR;
+      }
+      value = std::move(*io_res);
     }
 
     // Compute XXH3 hash and return as 16-char hex string
     return XXH3_Digest(value);
   };
 
-  OpResult<string> result = cmnd_cntx->tx()->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx->rb());
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (result) {
     rb->SendBulkString(*result);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
   } else {
-    cmnd_cntx->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
