@@ -1060,8 +1060,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   // Experimental async path
   if (cmd_cntx->IsDeferredReply()) {
     boost::intrusive_ptr<Transaction> tx(cmd_cntx->tx());
-    auto* blocker = tx->Blocker();
-    blocker->Add(1);
+    tx->Blocker()->Add(1);
 
     auto cb = [cmd_cntx, sparams, tx]() mutable {
       EngineShard* shard = EngineShard::tlocal();
@@ -1097,7 +1096,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       }
       LOG(FATAL) << "TBD " << status;
     };
-    cmd_cntx->Resolve(blocker, std::move(replier));
+    cmd_cntx->Resolve(tx->Blocker(), std::move(replier));
 
     return;
   }

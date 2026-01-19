@@ -5,7 +5,6 @@
 
 #include "facade/dragonfly_connection.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
@@ -2092,13 +2091,14 @@ bool Connection::ReplyMCBatch() {
 
   // Loop over finished command and break on first blocked
   reply_builder_->SetBatchMode(true);
-  for (auto& cmd = parsed_head_; cmd != parsed_to_execute_; cmd = cmd->next) {
+  for (auto& cmd = parsed_head_; cmd != parsed_to_execute_;) {
     if (!cmd->CanReply())
       break;
 
     current_wait_.reset();
     cmd->SendReply();
-    ReleaseParsedCommand(cmd, cmd->next != parsed_to_execute_ /* is_pipelined */);
+    auto* prev = exchange(cmd, cmd->next);
+    ReleaseParsedCommand(prev, cmd != parsed_to_execute_ /* is_pipelined */);
     if (reply_builder_->GetError())
       return false;
   }
