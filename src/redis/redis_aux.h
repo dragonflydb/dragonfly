@@ -20,14 +20,13 @@
 typedef struct ServerStub {
   size_t max_map_field_len, max_listpack_map_bytes;
 
-  size_t zset_max_listpack_entries;
-  size_t zset_max_listpack_value;
-
-  size_t stream_node_max_bytes;
   long long stream_node_max_entries;
 } Server;
 
 extern Server server;
+
+#define ZSET_MAX_LISTPACK_ENTRIES 128
+#define ZSET_MAX_LISTPACK_VALUE 32
 
 void InitRedisTables();
 

@@ -4,14 +4,23 @@
 
 #pragma once
 
-extern "C" {
-#include "redis/quicklist.h"
-}
-
 #include <absl/functional/function_ref.h>
 
 #include <string>
 #include <variant>
+
+#define QL_FILL_BITS 16
+#define QL_COMP_BITS 16
+#define QL_BM_BITS 4
+
+/* quicklist node encodings */
+#define QUICKLIST_NODE_ENCODING_RAW 1
+#define QUICKLIST_NODE_ENCODING_LZF 2
+#define QLIST_NODE_ENCODING_LZ4 3
+
+/* quicklist node container formats */
+#define QUICKLIST_NODE_CONTAINER_PLAIN 1
+#define QUICKLIST_NODE_CONTAINER_PACKED 2
 
 namespace dfly {
 
@@ -45,6 +54,12 @@ class QList {
     unsigned int attempted_compress : 1; /* node can't compress; too small */
     unsigned int dont_compress : 1;      /* prevent compression of entry that will be used later */
     unsigned int extra : 25;             /* more bits to steal for future usage */
+
+    bool IsCompressed() const {
+      return encoding != QUICKLIST_NODE_ENCODING_RAW;
+    }
+
+    size_t GetLZF(void** data) const;
   };
 
   // Provides wrapper around the references to the listpack entries.
