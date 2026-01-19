@@ -360,7 +360,7 @@ class Connection : public util::Connection {
   struct WaitEvent {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
 
-    std::optional<util::fb2::EventCount::Key> key;
+    std::optional<util::fb2::EventCount::SubKey> key;
   };
 
   ParsedCommand* CreateParsedCommand();

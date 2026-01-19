@@ -2095,8 +2095,9 @@ bool Connection::ReplyMCBatch() {
     if (!cmd->CanReply())
       break;
 
-    current_wait_.reset();
+    current_wait_.reset();  // we must free waiter before proceeding with other commands
     cmd->SendReply();
+
     auto* prev = exchange(cmd, cmd->next);
     ReleaseParsedCommand(prev, cmd != parsed_to_execute_ /* is_pipelined */);
     if (reply_builder_->GetError())
@@ -2333,15 +2334,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
 
   do {
-    bool async_cmd_ready = false;
     HandleMigrateRequest();
 
-    // Register completion for current head if its pending and seen for the first time
-    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_) {
-      if (cmd->CanReply())
-        async_cmd_ready = true;
-      else if (!current_wait_.has_value())
-        current_wait_.emplace(cmd, &ioevent_waiter);
+    // Register completion for current head if its pending and we don't wait
+    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_ && current_wait_.has_value()) {
+      current_wait_.emplace(cmd, &ioevent_waiter);
     }
 
     if (io_buf_.InputLen() == 0) {
@@ -2353,11 +2350,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // The exception is when we use io_uring with multishot recv enabled, in which case
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-      io_event_.await([this, &async_cmd_ready]() {
-        async_cmd_ready |=
-            parsed_head_ && parsed_head_ != parsed_to_execute_ && parsed_head_->CanReply();
-        bool cmd_ready = async_cmd_ready || (parsed_head_ && parsed_head_ == parsed_to_execute_);
-        return io_buf_.InputLen() > 0 || cmd_ready || io_ec_;
+      io_event_.await([this]() {
+        // TODO: optimize CanReply with looking up waiter key
+        bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
+        bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
+        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || io_ec_;
       });
     }
 
