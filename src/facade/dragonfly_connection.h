@@ -110,10 +110,6 @@ class Connection : public util::Connection {
       return std::holds_alternative<CheckpointMessage>(handle);
     }
 
-    bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle);
-    }
-
     bool IsPubMsg() const {
       return std::holds_alternative<PubMessagePtr>(handle);
     }
@@ -122,10 +118,10 @@ class Connection : public util::Connection {
       return std::holds_alternative<MonitorMessage>(handle);
     }
 
-    bool IsReplying() const;  // control messges don't reply, messages carrying data do
+    bool IsReplying() const;  // control messages don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MigrationRequestMessage,
-                 CheckpointMessage, InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, MigrationRequestMessage, CheckpointMessage,
+                 InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -288,20 +284,22 @@ class Connection : public util::Connection {
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();
 
-  // Dispatches a single (Redis or MC) command.
-  // `has_more` should indicate whether the io buffer has more commands
-  // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
-  // has_more is true, otherwise uses synchronous dispatch.
-  void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
-                      absl::FunctionRef<MessageHandle()> cmd_msg_cb);
+  // Executes pending Redis commands from the pipeline list.
+  // Returns true if the batch finished or was paused to prioritize a control message.
+  // Returns false if a fatal error occurred (e.g., socket closed or builder error).
+  bool ExecuteRedisBatch();
 
   // Handles events from the dispatch queue.
   void AsyncFiber();
 
+  // Schedules a message for asynchronous execution on the dispatch fiber.
+  // NOTE: This is exclusively for Admin/Intrusive/Control messages (e.g., PubSub, Monitor,
+  // Migration). Standard data pipeline commands must use EnqueueParsedCommand() to utilize the
+  // zero-allocation intrusive list.
   void SendAsync(MessageHandle msg);
 
   // Updates memory stats and pooling, must be called for all used messages
-  void RecycleMessage(MessageHandle msg);
+  void UpdateIntrusiveMessageStats(MessageHandle msg);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
@@ -363,7 +361,12 @@ class Connection : public util::Connection {
 
   ParsedCommand* CreateParsedCommand();
   void EnqueueParsedCommand();
+
+  // Releases the command memory back to the pool.
+  // Set is_pipelined=true if the command was executed (to update latency/throughput stats).
+  // Set is_pipelined=false if the command is being dropped/cleaned up without execution.
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+
   void DestroyParsedQueue();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
@@ -406,7 +409,7 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
-  unsigned parsed_cmd_q_len_ = 0;
+  unsigned parsed_cmd_q_len_ = 0;  // number of commands in parsed_cmd_ queue
 
   uint32_t id_;
   Protocol protocol_;
