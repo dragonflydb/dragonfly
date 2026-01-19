@@ -664,7 +664,8 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
     if (!prefix.empty()) {
-      // Ensure prefix ends with '/' to treat it as a directory-like namespace and avoid matching objects with similar prefix names.
+      // Ensure prefix ends with '/' to treat it as a directory-like namespace and avoid
+      // matching objects with similar prefix names.
       if (prefix.back() == '/') {
         request.SetPrefix(std::string(prefix));
       } else {
