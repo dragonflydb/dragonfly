@@ -1331,11 +1331,8 @@ size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes
   for (auto index : indexes) {
     total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
   }
-  if (total_shard_lsn == 0) {
-    // Journal always starts at pos 1
-    return 1;
-  }
-  return total_shard_lsn;
+  // Journal always starts at pos 1
+  return std::max<size_t>(1UL, total_shard_lsn);
 }
 
 uint32_t DflyShardReplica::FlowId() const {
