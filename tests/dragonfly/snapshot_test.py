@@ -431,7 +431,6 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
         seeder = DebugPopulateSeeder(key_target=10_000)
         await seeder.run(async_client)
 
-        # Force a snapshot now rather than waiting for cron so reload is deterministic
 
         start_capture = await DebugPopulateSeeder.capture(async_client)
         instance.stop()
