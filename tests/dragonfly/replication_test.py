@@ -3691,13 +3691,13 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     seeder = SeederV2(key_target=100)
     await seeder.run(c_master, target_deviation=0.01)
 
-    await check_all_replicas_finished([c_replica1, c_replica2], c_master)
+    await check_all_replicas_finished([c_replica1, c_replica2, c_replica3], c_master)
 
     await c_replica1.execute_command("repltakeover 5")
     await c_replica2.execute_command(f"replicaof localhost {replica1.port}")
     await c_replica3.execute_command(f"replicaof localhost {replica1.port}")
 
-    await check_all_replicas_finished([c_replica2], c_replica1)
+    await check_all_replicas_finished([c_replica2, c_replica3], c_replica1)
 
     replica1.stop()
     replica2.stop()
