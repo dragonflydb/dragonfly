@@ -1060,7 +1060,6 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   // Experimental async path
   if (cmd_cntx->IsDeferredReply()) {
     boost::intrusive_ptr<Transaction> tx(cmd_cntx->tx());
-    tx->Blocker()->Add(1);
 
     auto cb = [cmd_cntx, sparams, tx]() mutable {
       EngineShard* shard = EngineShard::tlocal();
@@ -1080,6 +1079,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       tx->Blocker()->Dec();
     };
 
+    cmd_cntx->tx()->Blocker()->Add(1);
     ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
     shard_set->Add(shard_id, cb);  // cb is copied here
 
