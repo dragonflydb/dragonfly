@@ -422,6 +422,8 @@ async def test_s3_snapshot(async_client, tmp_dir):
     }
 )
 async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
+    # this test checks that after saving to s3, stopping the server and starting a new one
+    # we can load the snapshot from s3 correctly.
     try:
         instance = df_factory.create()
         instance.start()
