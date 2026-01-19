@@ -1651,7 +1651,6 @@ TEST_F(GenericFamilyTest, Delex) {
   EXPECT_EQ(0, CheckedInt({"delex", "key9", "IFDNE", string(digest9_str)}));
   EXPECT_EQ(Run({"get", "key9"}), "value9");
 
-  // DELEX with condition on non-string type returns WRONGTYPE error
   Run({"lpush", "list1", "item"});
   EXPECT_THAT(Run({"delex", "list1", "IFEQ", "item"}), ErrArg("WRONGTYPE"));
 
@@ -1662,13 +1661,8 @@ TEST_F(GenericFamilyTest, Delex) {
   // DELEX with too many arguments returns error
   EXPECT_THAT(Run({"delex", "key", "IFEQ", "val", "extra"}), ErrArg("wrong number of arguments"));
 
-  // DELEX with exactly 2 arguments (key + one arg) should return error
-  // This is the bug fix: previously would delete unconditionally
   EXPECT_THAT(Run({"delex", "key11", "randomarg"}), ErrArg("wrong number of arguments"));
-
   EXPECT_THAT(Run({"delex", "key12", "IFEQ"}), ErrArg("wrong number of arguments"));
-
-  // DELEX with 2 args, various invalid cases
   EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
 }
 

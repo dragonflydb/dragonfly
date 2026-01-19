@@ -944,12 +944,8 @@ TEST_F(StringFamilyTest, Digest) {
   Run({"set", "key", "value"});
   auto resp = Run({"digest", "key"});
   ASSERT_EQ(resp.type, RespExpr::STRING);
-  string_view digest = ToSV(resp.GetBuf());
-  EXPECT_EQ(16, digest.size());
-  // Verify it's a valid hex string
-  for (char c : digest) {
-    EXPECT_TRUE((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
-  }
+  string digest = resp.GetString();
+  EXPECT_EQ("87d57e269b9df0f0", digest);
 
   // Digest of non-existent key returns nil
   EXPECT_THAT(Run({"digest", "nonexistent"}), ArgType(RespExpr::NIL));
