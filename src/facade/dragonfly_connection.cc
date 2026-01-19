@@ -2337,7 +2337,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     HandleMigrateRequest();
 
     // Register completion for current head if its pending and we don't wait
-    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_ && current_wait_.has_value()) {
+    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_ && !current_wait_.has_value()) {
       current_wait_.emplace(cmd, &ioevent_waiter);
     }
 
