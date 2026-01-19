@@ -362,7 +362,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-  const quicklistNode* node = (const quicklistNode*)ql->Head();
+  const QList::Node* node = ql->Head();
   size_t len = ql->node_count();
 
   RETURN_ON_ERR(SaveLen(len));
@@ -373,10 +373,11 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
     // Use listpack encoding
     RETURN_ON_ERR(SaveLen(node->container));
-    if (quicklistNodeIsCompressed(node)) {
+    if (node->IsCompressed()) {
       void* data;
-      size_t compress_len = quicklistGetLzf(node, &data);
-
+      size_t compress_len = node->GetLZF(&data);
+      // TODO: LZ4 compression mode is not enabled for list objects yet.
+      // If it will be enabled in the future, we need to adjust here accordingly.
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
       RETURN_ON_ERR(SaveString(node->entry, node->sz));

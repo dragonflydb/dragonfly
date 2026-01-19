@@ -59,8 +59,6 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
-ABSL_RETIRED_FLAG(bool, list_experimental_v2, true,
-                  "Enables dragonfly specific implementation of quicklist");
 
 namespace dfly {
 
@@ -135,6 +133,25 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   return value;
 }
 
+QList* CreateOrGet(const OpArgs& op_args, string_view key, bool create, PrimeValue* pv) {
+  QList* res = nullptr;
+
+  if (create) {
+    res = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                        GetFlag(FLAGS_list_compress_depth));
+    pv->InitRobj(OBJ_LIST, kEncodingQL2, res);
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+    if (blocking_controller) {
+      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
+    }
+  } else {
+    DCHECK(pv->ObjType() == OBJ_LIST && pv->Encoding() == kEncodingQL2);
+    res = GetQLV2(*pv);
+  }
+
+  return res;
+}
+
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
   auto& db_slice = op_args.GetDbSlice();
@@ -144,7 +161,6 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   auto src_it = src_res->it;
   QList* srcql_v2 = nullptr;
-  QList* destql_v2 = nullptr;
   string val;
   size_t prev_len = 0;
 
@@ -169,17 +185,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
   src_it = src_res->it;
 
-  if (dest_res.is_new) {
-    destql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                              GetFlag(FLAGS_list_compress_depth));
-    dest_res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, destql_v2);
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
-    if (blocking_controller) {
-      blocking_controller->Awaken(op_args.db_cntx.db_index, dest);
-    }
-  } else {
-    destql_v2 = GetQLV2(dest_res.it->second);
-  }
+  QList* destql_v2 = CreateOrGet(op_args, dest, dest_res.is_new, &dest_res.it->second);
 
   val = srcql_v2->Pop(ToWhere(src_dir));
   destql_v2->Push(val, ToWhere(dest_dir));
@@ -218,7 +224,6 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, const facade::ArgRange& vals, bool journal_rewrite) {
-  EngineShard* es = op_args.shard;
   DbSlice::ItAndUpdater res;
 
   if (skip_notexist) {
@@ -235,29 +240,13 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   size_t len = 0;
   DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
-  QList* ql_v2 = nullptr;
-
-  if (res.is_new) {
-    ql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                          GetFlag(FLAGS_list_compress_depth));
-    res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
-  } else {
-    DCHECK(res.it->second.ObjType() == OBJ_LIST && res.it->second.Encoding() == kEncodingQL2);
-    ql_v2 = GetQLV2(res.it->second);
-  }
+  QList* ql_v2 = CreateOrGet(op_args, key, res.is_new, &res.it->second);
 
   QList::Where where = ToWhere(dir);
   for (string_view v : vals) {
     ql_v2->Push(v, where);
   }
   len = ql_v2->Size();
-
-  if (res.is_new) {
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
-    if (blocking_controller) {
-      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
-    }
-  }
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";

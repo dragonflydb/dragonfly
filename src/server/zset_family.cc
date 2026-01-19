@@ -201,8 +201,7 @@ int ZsetAdd(PrimeValue* pv, double score, std::string_view ele, int in_flags, in
 
       /* check if the element is too large or the list
        * becomes too long *before* executing zzlInsert. */
-      if (zl_len >= server.zset_max_listpack_entries ||
-          ele.size() > server.zset_max_listpack_value) {
+      if (zl_len >= ZSET_MAX_LISTPACK_ENTRIES || ele.size() > ZSET_MAX_LISTPACK_VALUE) {
         auto* ptr = detail::SortedMap::FromListPack(pv->memory_resource(), lp);
         pv->InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, ptr);
       } else {
@@ -2059,9 +2058,8 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   // When we have too many members to add, make sure field_len is large enough to use
   // skiplist encoding.
-  size_t field_len = members.size() > server.zset_max_listpack_entries
-                         ? UINT32_MAX
-                         : members.front().second.size();
+  size_t field_len =
+      members.size() > ZSET_MAX_LISTPACK_ENTRIES ? UINT32_MAX : members.front().second.size();
   auto res_it = PrepareZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)

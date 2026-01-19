@@ -680,8 +680,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (!config_.streamed && zs->Size() <= server.zset_max_listpack_entries &&
-      maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
+  if (!config_.streamed && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
+      maxelelen <= ZSET_MAX_LISTPACK_VALUE && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
     CompactObj::DeleteMR<detail::SortedMap>(zs);
