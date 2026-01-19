@@ -663,8 +663,13 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
-    if (!prefix.empty())
-      request.SetPrefix(std::string(prefix));
+    if (!prefix.empty()) {
+      if (prefix.back() == '/') {
+        request.SetPrefix(std::string(prefix));
+      } else {
+        request.SetPrefix(std::string(prefix) + '/');
+      }
+    }
     request.SetDelimiter("/");
 
     if (!continuation_token.empty()) {
