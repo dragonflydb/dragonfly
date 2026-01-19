@@ -384,20 +384,6 @@ class Transaction {
   }
 
  private:
-  // Holds number of locks for each IntentLock::Mode: shared and exlusive.
-  struct LockCnt {
-    unsigned& operator[](IntentLock::Mode mode) {
-      return cnt[int(mode)];
-    }
-
-    unsigned operator[](IntentLock::Mode mode) const {
-      return cnt[int(mode)];
-    }
-
-   private:
-    unsigned cnt[2] = {0, 0};
-  };
-
   struct alignas(64) PerShardData {
     PerShardData() {
     }
@@ -627,6 +613,7 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes
   OpStatus block_cancel_result_ = OpStatus::OK;
