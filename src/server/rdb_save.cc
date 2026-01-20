@@ -360,6 +360,20 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    size_t len = 1;  // 1 node
+    RETURN_ON_ERR(SaveLen(len));
+
+    // Node 1
+    RETURN_ON_ERR(SaveLen(QUICKLIST_NODE_CONTAINER_PACKED));
+    size_t lp_bytes = lpBytes(lp);
+    RETURN_ON_ERR(SaveString(lp, lp_bytes));
+
+    FlushIfNeeded(FlushState::kFlushEndEntry);
+    return error_code{};
+  }
+
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
   const QList::Node* node = ql->Head();

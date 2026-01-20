@@ -70,6 +70,10 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
 }
 
 void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
+  if (encoding == kEncodingListPack) {
+    lpFree((uint8_t*)ptr);
+    return;
+  }
   CHECK_EQ(encoding, kEncodingQL2);
   CompactObj::DeleteMR<QList>(ptr);
 }
@@ -329,7 +333,10 @@ pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, PageUsage* page_usage
   }
 }
 
-pair<void*, bool> DefragList(unsigned /**/, void* ptr, PageUsage* page_usage) {
+pair<void*, bool> DefragList(unsigned encoding, void* ptr, PageUsage* page_usage) {
+  if (encoding == kEncodingListPack) {
+    return DefragListPack((uint8_t*)ptr, page_usage);
+  }
   auto* qlist_ptr = static_cast<QList*>(ptr);
   bool reallocated = qlist_ptr->DefragIfNeeded(page_usage);
   return {ptr, reallocated};
@@ -400,6 +407,9 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
+      if (encoding_ == kEncodingListPack) {
+        return zmalloc_usable_size(inner_obj_);
+      }
       return ((QList*)inner_obj_)->MallocUsed(slow);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
@@ -423,6 +433,9 @@ size_t RobjWrapper::Size() const {
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
     case OBJ_LIST:
+      if (encoding_ == kEncodingListPack) {
+        return lpLength((uint8_t*)inner_obj_);
+      }
       return ((QList*)inner_obj_)->Size();
     case OBJ_ZSET: {
       switch (encoding_) {

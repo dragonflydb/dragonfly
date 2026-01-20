@@ -187,6 +187,7 @@ class QList {
 
   size_t MallocUsed(bool slow) const;
 
+  // Iterates over entries from start to end (inclusive).
   void Iterate(IterateFunc cb, long start, long end) const;
 
   // Returns an iterator to tail or the head of the list.

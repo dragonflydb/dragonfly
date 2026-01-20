@@ -69,10 +69,12 @@ using IterateFunc = std::function<bool(ContainerEntry)>;
 using IterateSortedFunc = std::function<bool(ContainerEntry, double)>;
 using IterateKVFunc = std::function<bool(ContainerEntry, ContainerEntry)>;
 
-// Iterate over all values and call func(val). Iteration stops as soon
+// Iterate over all values in [start, end] range (inclusive) and call func(val).
+// Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
-// without stopping.
-bool IterateList(const PrimeValue& pv, const IterateFunc& func, long start = 0, long end = -1);
+// without breaking.
+bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start = 0,
+                 size_t end = SIZE_MAX);
 
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
@@ -82,8 +84,8 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
 // without stopping.
-bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, int32_t start = 0,
-                      int32_t end = -1, bool reverse = false, bool use_score = false);
+bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, size_t start = 0,
+                      size_t end = SIZE_MAX, bool reverse = false, bool use_score = false);
 
 bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func);
 
