@@ -3724,7 +3724,7 @@ async def test_repl_offset(df_factory):
     # 1 repl flow per proactor.
     proactors = 2
     # if `replicaof no one` on `c_replica2` does not preserve the journal offsets,
-    # then the assertion below shall fail. In that case, replicas full sync first
+    # then the assertion below shall fail. In that case, replicas perform a full sync first
     # and as there are no journal changes the slave offsets are 2 (1 per shard).
     assert info["slave_repl_offset"] > proactors
     assert info["psync_successes"] == 1

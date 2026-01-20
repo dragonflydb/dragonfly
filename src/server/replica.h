@@ -187,7 +187,8 @@ class Replica : ProtocolClient {
 
   // When replica starts full sync it is set to false and true when it completes the full sync.
   // Disconnects do not reset this, so this variable is still true if the master
-  // is not connected and the state_mask_ is cleared. Furthermore, on reconnects that enter full sync
+  // is not connected and the state_mask_ is cleared.
+  // Furthermore, on reconnects that enter full sync
   // again this variable is set to false until full sync completes.
   // Therefore, we have a consistent view of the replica:
   // 1. True. Replica passed full sync even if master disconnects. In fact, once a
