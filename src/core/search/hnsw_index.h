@@ -19,12 +19,17 @@ class HnswVectorIndex {
   bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
   void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
 
+  bool IsVectorCopied() const {
+    return copy_vector_;
+  }
+
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k,
                                                  std::optional<size_t> ef) const;
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                                  const std::vector<GlobalDocId>& allowed) const;
 
  private:
+  bool copy_vector_;
   size_t dim_;
   VectorSimilarity sim_;
   std::unique_ptr<HnswlibAdapter> adapter_;

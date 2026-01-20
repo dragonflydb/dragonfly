@@ -241,6 +241,14 @@ class CompactObj {
 
   bool DefragIfNeeded(PageUsage* page_usage);
 
+  void SetOmitDefrag(bool v) {
+    mask_bits_.omit_defrag = v;
+  }
+
+  bool OmitDefrag() const {
+    return mask_bits_.omit_defrag;
+  }
+
   bool HasStashPending() const {
     return mask_bits_.io_pending;
   }
@@ -513,6 +521,8 @@ class CompactObj {
       // reached this item while travering the database to set items as cold.
       // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
       uint8_t touched : 1;  // used to mark keys that were accessed.
+
+      uint8_t omit_defrag : 1;  // mark object to skip defragmentation.
     } mask_bits_;
   };
 

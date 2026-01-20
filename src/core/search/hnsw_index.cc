@@ -162,7 +162,8 @@ struct HnswlibAdapter {
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,
                                  PMR_NS::memory_resource*)
-    : dim_{params.dim},
+    : copy_vector_(copy_vector),
+      dim_{params.dim},
       sim_{params.sim},
       adapter_{make_unique<HnswlibAdapter>(params, copy_vector)} {
   DCHECK(params.use_hnsw);

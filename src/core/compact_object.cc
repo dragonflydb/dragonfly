@@ -1000,6 +1000,10 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
   static const bool disable_json_defragmentation =
       absl::GetFlag(FLAGS_disable_json_defragmentation);
 
+  if (OmitDefrag()) {
+    return false;
+  }
+
   switch (taglen_) {
     case ROBJ_TAG:
       // currently only these object types are supported for this operation
