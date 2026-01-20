@@ -89,7 +89,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     // We need to sent PING to synchronize with the journal. The reason is
     // that the call to SetExpireAllowed(false) does not disable in-flight
     // expirations. So for example, it could be that Heartbeat() is
-    // writting a series of expirations to the journal and if we don't sent
+    // writing a series of expirations to the journal and if we don't sent
     // PING here we risk data loss as shard->journal()->GetLsn() below
     // is not accurate (it can change between preemption points because
     // the in-flight expirations are not complete).
