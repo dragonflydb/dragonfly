@@ -1336,7 +1336,7 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
 bool ShouldDenyOnOOM(const CommandContext& cmd_cntx) {
   DCHECK_NE(cmd_cntx.start_time_ns, 0u);
   ServerState& etl = *ServerState::tlocal();
-  if ((cmd_cntx.cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
+  if ((cmd_cntx.cid()->opt_mask() & CO::DENYOOM) && etl.is_master) {
     auto memory_stats = etl.GetMemoryUsage(cmd_cntx.start_time_ns);
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
