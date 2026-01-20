@@ -470,9 +470,9 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
     lsn_vec.push_back(value);
   }
 
-  DCHECK(flow_id >= lsn_vec.size());
-  LOG_IF(ERROR, flow_id >= lsn_vec.size()) << "Corrupted state detected";
+  DCHECK(flow_id < lsn_vec.size());
   if (flow_id >= lsn_vec.size()) {
+    LOG(ERROR) << "Corrupted state detected. Partial sync is off";
     return std::nullopt;
   }
 
