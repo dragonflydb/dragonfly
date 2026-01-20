@@ -5,6 +5,7 @@
 
 #include "facade/dragonfly_connection.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
@@ -2069,12 +2070,11 @@ bool Connection::ExecuteMCBatch() {
     if (is_head)
       stats_->pipeline_dispatch_calls++;
 
-    // Advance the head if we executed the current head synchronously
-    if (!cmd->IsDeferredReply()) {
-      DCHECK(is_head);  // only head can execute sync
-      cmd = advance_head();
-    } else {
+    if (cmd->IsDeferredReply()) {
       cmd = cmd->next;
+    } else {
+      DCHECK(is_head);       // only head can execute sync
+      cmd = advance_head();  // advance it
     }
   }
 
@@ -2332,6 +2332,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // TODO: restructure due to bad OnCompletion interface
   auto ioevent_cb = [this]() { io_event_.notify(); };
   util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
+  absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
 
   do {
     HandleMigrateRequest();
