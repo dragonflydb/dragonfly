@@ -174,7 +174,7 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
   hist->key_len.Add(it->first.MallocUsed());
 
   if (pv.ObjType() == OBJ_LIST) {
-    IterateList(pv, per_entry_cb, 0, -1);
+    IterateList(pv, per_entry_cb);
     if (pv.Encoding() == kEncodingQL2) {
       const QList* ql = static_cast<QList*>(pv.RObjPtr());
       val_len = ql->MallocUsed(true);

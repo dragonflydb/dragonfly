@@ -421,7 +421,10 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
 
   // Calculate new start and end given offset and limit.
   start += params_.offset;
-  end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
+  end = min<size_t>(size_t(start) + params_.limit - 1, end);
+  if (start > end) {
+    return;
+  }
 
   container_utils::IterateSortedSet(
       *pv_,

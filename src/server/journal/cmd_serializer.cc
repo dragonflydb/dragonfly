@@ -176,7 +176,7 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
         commands += aggregator.AddArg(ce.ToString());
         return true;
       },
-      /*start=*/0, /*end=*/-1, /*reverse=*/false, /*use_score=*/true);
+      /*start=*/0, /*end=*/SIZE_MAX, /*reverse=*/false, /*use_score=*/true);
   return commands;
 }
 
