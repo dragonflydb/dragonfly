@@ -950,14 +950,9 @@ TEST_F(ListFamilyTest, BLMoveSimultaneously) {
 // Move key five times in rings 0 -> 1 -> 2 ... -> 0
 TEST_F(ListFamilyTest, BLMoveRings) {
   vector<fb2::Fiber> fibers;
-#pragma GCC diagnostic push
-// We compile this code both with C++17 and C++20 and if you capture
-// by [=, this] it becomes an error on C++17 and if you capture
-// by [=] it becomes and error in C++20
-#pragma GCC diagnostic ignored "-Wdeprecated"
   for (int j = 0; j < 5; j++) {
     for (int i = 0; i < 10; i++) {
-      fibers.emplace_back(pp_->at(i % pp_->size())->LaunchFiber([=]() {
+      fibers.emplace_back(pp_->at(i % pp_->size())->LaunchFiber([i, j, this]() {
         auto key1 = to_string(i);
         auto key2 = to_string((i + 1) % 10);
         Run(key1 + to_string(j), {"blmove", key1, key2, "LEFT", "RIGHT", "0"});
@@ -978,16 +973,16 @@ TEST_F(ListFamilyTest, BLMoveRings) {
 
 // Move in waves where each wave layer has a fixed set of "vertices" through which all values travel
 TEST_F(ListFamilyTest, BLMoveWaves) {
-  const int kFlow = 64;
+  static constexpr int kFlow = 64;
   vector<int> wave_sizes = {1 /* 0:0 */, kFlow, kFlow / 2, kFlow / 4, kFlow / 8, kFlow / 3,
                             kFlow / 5,   1,     kFlow / 6, kFlow,     kFlow / 4, 1};
 
   vector<fb2::Fiber> fibers;
   for (size_t i = 1; i < wave_sizes.size(); i++) {
     for (size_t j = 0; j < kFlow; j++) {
-      auto src = to_string(i - 1) + ":" + to_string(j / (kFlow / wave_sizes[i - 1]));
-      auto dest = to_string(i) + ":" + to_string(j / (kFlow / wave_sizes[i]));
-      fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
+      fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([i, j, wave_sizes, this]() {
+        auto src = to_string(i - 1) + ":" + to_string(j / (kFlow / wave_sizes[i - 1]));
+        auto dest = to_string(i) + ":" + to_string(j / (kFlow / wave_sizes[i]));
         Run("c" + to_string(i * kFlow + j), {"blmove", src, dest, "LEFT", "RIGHT", "0"});
       }));
     }

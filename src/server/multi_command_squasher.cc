@@ -170,7 +170,8 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
       return !opts_.error_abort;
     }
   }
-  CommandContext cmd_cntx{cmd->Cid(), tx, rb, cntx_};
+  CommandContext cmd_cntx{rb, cntx_};
+  cmd_cntx.SetupTx(cmd->Cid(), tx);
   service_->InvokeCmd(args, &cmd_cntx);
   return true;
 }
@@ -182,6 +183,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   auto* local_tx = sinfo.local_tx.get();
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   CmdArgVec arg_vec;
+  CommandContext cmd_cntx{&crb, cntx_};
+  cmd_cntx.SetupTx(nullptr, local_tx);
 
   auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
                              CapturingReplyBuilder::Payload* dst) {
@@ -209,7 +212,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     if (status != OpStatus::OK) {
       crb.SendError(status);
     } else {
-      CommandContext cmd_cntx{dispatched.cmd->Cid(), local_tx, &crb, cntx_};
+      cmd_cntx.UpdateCid(dispatched.cmd->Cid());
       service_->InvokeCmd(args, &cmd_cntx);
     }
     move_reply(crb.Take(), &dispatched.reply);

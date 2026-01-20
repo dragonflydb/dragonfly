@@ -939,4 +939,44 @@ TEST_F(StringFamilyTest, EmptyKeys) {
   EXPECT_EQ(Run({"SUBSTR", "foo", "0", "-1"}), "");
 }
 
+TEST_F(StringFamilyTest, Digest) {
+  // Basic digest computation returns 16-char hex string
+  Run({"set", "key", "value"});
+  auto resp = Run({"digest", "key"});
+  ASSERT_EQ(resp.type, RespExpr::STRING);
+  string digest = resp.GetString();
+  EXPECT_EQ("87d57e269b9df0f0", digest);
+
+  // Digest of non-existent key returns nil
+  EXPECT_THAT(Run({"digest", "nonexistent"}), ArgType(RespExpr::NIL));
+
+  // Digest consistency - same value always produces same digest
+  Run({"set", "key1", "testvalue"});
+  Run({"set", "key2", "testvalue"});
+  auto digest1 = Run({"digest", "key1"});
+  auto digest2 = Run({"digest", "key2"});
+  EXPECT_EQ(ToSV(digest1.GetBuf()), ToSV(digest2.GetBuf()));
+
+  // Different values produce different digests
+  Run({"set", "key3", "different"});
+  auto digest3 = Run({"digest", "key3"});
+  EXPECT_NE(ToSV(digest1.GetBuf()), ToSV(digest3.GetBuf()));
+
+  // Works with integer-encoded strings
+  Run({"set", "intkey", "123"});
+  auto int_digest = Run({"digest", "intkey"});
+  ASSERT_EQ(int_digest.type, RespExpr::STRING);
+  EXPECT_EQ(16, ToSV(int_digest.GetBuf()).size());
+
+  // Works with empty strings
+  Run({"set", "empty", ""});
+  auto empty_digest = Run({"digest", "empty"});
+  ASSERT_EQ(empty_digest.type, RespExpr::STRING);
+  EXPECT_EQ(16, ToSV(empty_digest.GetBuf()).size());
+
+  // Digest of non-string type returns WRONGTYPE error
+  Run({"lpush", "list", "item"});
+  EXPECT_THAT(Run({"digest", "list"}), ErrArg("WRONGTYPE"));
+}
+
 }  // namespace dfly

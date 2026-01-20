@@ -29,7 +29,7 @@ jobs:
     name: Build arm64 on ubuntu-24.04-arm
     needs: create-release
     container:
-      image: ghcr.io/romange/ubuntu-dev:20
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
     steps:
     - uses: actions/checkout@v6

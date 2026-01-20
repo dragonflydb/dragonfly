@@ -1512,4 +1512,158 @@ TEST_F(GenericFamilyTest, SortBy) {
   ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*_*"}), ErrArg("syntax error"));
 }
 
+TEST_F(GenericFamilyTest, SortGet) {
+  // Setup test data
+  Run({"del", "mylist"});
+  Run({"lpush", "mylist", "1", "2", "3"});
+  Run({"set", "obj_1", "first"});
+  Run({"set", "obj_2", "second"});
+  Run({"set", "obj_3", "third"});
+  Run({"set", "weight_1", "30"});
+  Run({"set", "weight_2", "20"});
+  Run({"set", "weight_3", "10"});
+
+  // Test 1: Basic GET with single pattern (sorted numerically: 1,2,3)
+  auto resp = Run({"sort", "mylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("first", "second", "third"));
+
+  // Test 2: GET with special # pattern (returns element itself, sorted: 1,2,3)
+  resp = Run({"sort", "mylist", "GET", "#"});
+  ASSERT_THAT(resp, RespElementsAre("1", "2", "3"));
+
+  // Test 3: Multiple GET patterns
+  resp = Run({"sort", "mylist", "GET", "#", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
+
+  // Test 4: GET with BY pattern (sorted by weight: 3(10), 2(20), 1(30))
+  resp = Run({"sort", "mylist", "BY", "weight_*", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", "second", "first"));
+
+  // Test 5: Multiple GET patterns with BY
+  resp = Run({"sort", "mylist", "BY", "weight_*", "GET", "#", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "third", "2", "second", "1", "first"));
+
+  // Test 6: GET with missing keys (should return empty strings, sorted: 1,2,3)
+  Run({"del", "obj_2"});
+  resp = Run({"sort", "mylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("first", "", "third"));
+
+  // Restore obj_2 for further tests
+  Run({"set", "obj_2", "second"});
+
+  // Test 7: GET with DESC (sorted DESC: 3,2,1)
+  resp = Run({"sort", "mylist", "DESC", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", "second", "first"));
+
+  // Test 8: GET with ALPHA
+  Run({"del", "strlist"});
+  Run({"lpush", "strlist", "c", "b", "a"});
+  Run({"set", "obj_a", "alpha"});
+  Run({"set", "obj_b", "beta"});
+  Run({"set", "obj_c", "gamma"});
+  resp = Run({"sort", "strlist", "ALPHA", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("alpha", "beta", "gamma"));
+
+  // Test 9: GET with LIMIT
+  resp = Run({"sort", "mylist", "GET", "#", "GET", "obj_*", "LIMIT", "1", "2"});
+  ASSERT_THAT(resp, RespElementsAre("2", "second", "3", "third"));
+
+  // Test 10: GET with STORE
+  resp = Run({"sort", "mylist", "GET", "#", "GET", "obj_*", "STORE", "result"});
+  ASSERT_THAT(resp, IntArg(6));  // 3 elements * 2 GET patterns = 6 stored values
+  resp = Run({"lrange", "result", "0", "-1"});
+  ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
+
+  // Test 11: GET with BY nosort
+  resp = Run({"sort", "mylist", "BY", "nosort", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", "second", "first"));  // insertion order
+
+  // Test 12: GET pattern validation (multiple asterisks should error)
+  ASSERT_THAT(Run({"sort", "mylist", "GET", "obj_*_*"}), ErrArg("syntax error"));
+
+  // Test 13: GET with empty list
+  Run({"del", "emptylist"});
+  Run({"lpush", "emptylist", "placeholder"});
+  Run({"lpop", "emptylist"});
+  resp = Run({"sort", "emptylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, ArrLen(0));
+
+  // Test 14: GET with literal pattern (no asterisk)
+  Run({"set", "fixed_key", "fixed_value"});
+  resp = Run({"sort", "mylist", "GET", "fixed_key"});
+  ASSERT_THAT(resp, RespElementsAre("fixed_value", "fixed_value", "fixed_value"));
+
+  // Test 15: SORT_RO with GET
+  resp = Run({"sort_ro", "mylist", "GET", "#", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
+}
+
+TEST_F(GenericFamilyTest, Delex) {
+  // DELEX without condition behaves like DEL
+  Run({"set", "key1", "value1"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key1"}));
+  EXPECT_THAT(Run({"get", "key1"}), ArgType(RespExpr::NIL));
+
+  // DELEX on non-existent key returns 0
+  EXPECT_EQ(0, CheckedInt({"delex", "nonexistent"}));
+
+  // DELEX IFEQ deletes when values match
+  Run({"set", "key2", "value2"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key2", "IFEQ", "value2"}));
+  EXPECT_THAT(Run({"get", "key2"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFEQ does not delete when values differ
+  Run({"set", "key3", "value3"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key3", "IFEQ", "wrongvalue"}));
+  EXPECT_EQ(Run({"get", "key3"}), "value3");
+
+  // DELEX IFNE deletes when values differ
+  Run({"set", "key4", "value4"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key4", "IFNE", "differentvalue"}));
+  EXPECT_THAT(Run({"get", "key4"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFNE does not delete when values match
+  Run({"set", "key5", "value5"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key5", "IFNE", "value5"}));
+  EXPECT_EQ(Run({"get", "key5"}), "value5");
+
+  // DELEX IFDEQ tests - get digest first and use it
+  Run({"set", "key6", "value6"});
+  auto digest = Run({"digest", "key6"});
+  string_view digest_str = ToSV(digest.GetBuf());
+  EXPECT_EQ(1, CheckedInt({"delex", "key6", "IFDEQ", string(digest_str)}));
+  EXPECT_THAT(Run({"get", "key6"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFDEQ does not delete when digests differ
+  Run({"set", "key7", "value7"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key7", "IFDEQ", "0000000000000000"}));
+  EXPECT_EQ(Run({"get", "key7"}), "value7");
+
+  // DELEX IFDNE deletes when digests differ
+  Run({"set", "key8", "value8"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key8", "IFDNE", "0000000000000000"}));
+  EXPECT_THAT(Run({"get", "key8"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFDNE does not delete when digests match
+  Run({"set", "key9", "value9"});
+  auto digest9 = Run({"digest", "key9"});
+  string_view digest9_str = ToSV(digest9.GetBuf());
+  EXPECT_EQ(0, CheckedInt({"delex", "key9", "IFDNE", string(digest9_str)}));
+  EXPECT_EQ(Run({"get", "key9"}), "value9");
+
+  Run({"lpush", "list1", "item"});
+  EXPECT_THAT(Run({"delex", "list1", "IFEQ", "item"}), ErrArg("WRONGTYPE"));
+
+  // DELEX with invalid option returns syntax error
+  Run({"set", "key10", "value10"});
+  EXPECT_THAT(Run({"delex", "key10", "INVALID", "value"}), ErrArg("Unknown subcommand"));
+
+  // DELEX with too many arguments returns error
+  EXPECT_THAT(Run({"delex", "key", "IFEQ", "val", "extra"}), ErrArg("wrong number of arguments"));
+
+  EXPECT_THAT(Run({"delex", "key11", "randomarg"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"delex", "key12", "IFEQ"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
+}
+
 }  // namespace dfly

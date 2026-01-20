@@ -1368,7 +1368,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [=]() mutable {
+    auto load_func = [file, existing_keys, load_opts, aggregated_result, this]() mutable {
       error_code load_ec = LoadRdb(file, existing_keys, &load_opts);
       if (load_ec) {
         aggregated_result->first_error = load_ec;
@@ -3733,7 +3733,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
   facade::RedisReplyBuilder rb(&sink);
   const bool use_replica_of_v2 = absl::GetFlag(FLAGS_experimental_replicaof_v2);
-  CommandContext cmd_cntx{nullptr, nullptr, &rb, nullptr};
+  CommandContext cmd_cntx{&rb, nullptr};
   if (use_replica_of_v2) {
     ReplicaOfInternalV2(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
     return;

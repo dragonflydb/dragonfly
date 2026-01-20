@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - container: "ubuntu-dev:20"
+          - container: "ubuntu-dev:20-gcc14"
             build-type: Release
             compiler: {cxx: g++, c: gcc}
             cxx_flags: "-fprofile-arcs -ftest-coverage"
