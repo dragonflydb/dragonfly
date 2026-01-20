@@ -1001,6 +1001,7 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
       absl::GetFlag(FLAGS_disable_json_defragmentation);
 
   if (OmitDefrag()) {
+    page_usage->RecordNotRequired();
     return false;
   }
 

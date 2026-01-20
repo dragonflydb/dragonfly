@@ -751,7 +751,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
         output.write(data_level0_memory_, cur_element_count * size_data_per_element_);
 
-        if(copy_vector_) {
+        if (copy_vector_) {
           output.write(data_vector_memory_, cur_element_count * data_size_);
         }
 
@@ -835,16 +835,19 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
             throw std::runtime_error("Not enough memory: loadIndex failed to allocate level0");
         input.read(data_level0_memory_, cur_element_count * size_data_per_element_);
 
-        if(copy_vector_) {
+        if (copy_vector_) {
           data_vector_memory_ = (char *) malloc(max_elements * data_size_);
           if (data_vector_memory_ == nullptr)
               throw std::runtime_error("Not enough memory: loadIndex failed to allocate vector memory");
           input.read(data_vector_memory_, cur_element_count * data_size_);
         }
 
-        null_vector = (char*)malloc(data_size_);
-        if (null_vector == nullptr)
-            throw std::runtime_error("Not enough memory: loadIndex failed to allocate null vector");
+        if (!copy_vector_) {
+          null_vector = (char*)malloc(data_size_);
+          memset(null_vector, 0, data_size_);
+          if (null_vector == nullptr)
+              throw std::runtime_error("Not enough memory: loadIndex failed to allocate null vector");
+        }
 
         size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
 
@@ -1050,11 +1053,11 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   void updatePoint(const void* dataPoint, tableint internalId, float updateNeighborProbability) {
     if (copy_vector_) {
-      auto data_ptr = (const char**)(getDataPtrByInternalId(internalId));
-      *data_ptr = static_cast<const char*>(dataPoint);
-    } else {
       char* data_ptr = getDataByInternalId(internalId);
       memcpy(data_ptr, dataPoint, data_size_);
+    } else {
+      auto data_ptr = (const char**)(getDataPtrByInternalId(internalId));
+      *data_ptr = static_cast<const char*>(dataPoint);
     }
 
     int maxLevelCopy = maxlevel_;
