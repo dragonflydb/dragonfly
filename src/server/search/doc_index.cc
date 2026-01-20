@@ -376,8 +376,8 @@ void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeVal
 
 void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
                                               ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
-                                              PrimeValue& pv) {
-  auto accessor = GetAccessor(db_cntx, pv);
+                                              PrimeValue* pv) {
+  auto accessor = GetAccessor(db_cntx, *pv);
 
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
@@ -388,7 +388,7 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
           index) {
         bool added = index->Add(global_id, *accessor, field_ident);
         if (added && !index->IsVectorCopied()) {
-          pv.SetOmitDefrag(true);
+          pv->SetOmitDefrag(true);
         }
       }
     }
@@ -806,11 +806,11 @@ vector<string> ShardDocIndices::GetIndexNames() const {
   return names;
 }
 
-void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeValue& pv) {
-  DCHECK(IsIndexedKeyType(pv));
+void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeValue* pv) {
+  DCHECK(IsIndexedKeyType(*pv));
   for (auto& [index_name, index] : indices_) {
-    if (index->Matches(key, pv.ObjType())) {
-      std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, pv);
+    if (index->Matches(key, pv->ObjType())) {
+      std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, *pv);
       if (doc_id) {
         index->AddDocToGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
       }

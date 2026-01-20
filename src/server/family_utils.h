@@ -116,7 +116,7 @@ inline std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList valu
 inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
                                     EngineShard* shard) {
   if (IsIndexedKeyType(pv)) {
-    shard->search_indices()->AddDoc(key, db_cntx, pv);
+    shard->search_indices()->AddDoc(key, db_cntx, &pv);
   }
 }
 
