@@ -306,6 +306,15 @@ class Transaction {
     return multi_->mode;
   }
 
+  util::fb2::EmbeddedBlockingCounter* Blocker() {
+    return &run_barrier_;
+  }
+
+  // Temporary
+  OpStatus* LocalResultPtr() {
+    return &local_result_;
+  }
+
   // Whether the transaction is multi and runs in an atomic mode.
   // This, instead of just IsMulti(), should be used to check for the possibility of
   // different optimizations, because they can safely be applied to non-atomic multi
@@ -384,20 +393,6 @@ class Transaction {
   }
 
  private:
-  // Holds number of locks for each IntentLock::Mode: shared and exlusive.
-  struct LockCnt {
-    unsigned& operator[](IntentLock::Mode mode) {
-      return cnt[int(mode)];
-    }
-
-    unsigned operator[](IntentLock::Mode mode) const {
-      return cnt[int(mode)];
-    }
-
-   private:
-    unsigned cnt[2] = {0, 0};
-  };
-
   struct alignas(64) PerShardData {
     PerShardData() {
     }
@@ -627,6 +622,7 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes
   OpStatus block_cancel_result_ = OpStatus::OK;

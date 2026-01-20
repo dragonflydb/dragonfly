@@ -10,7 +10,7 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20"]
+        container: ["ubuntu-dev:20-gcc14"]
         proactor: [Uring]
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]

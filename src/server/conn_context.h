@@ -368,23 +368,22 @@ class ConnectionContext : public facade::ConnectionContext {
 class CommandContext : public facade::ParsedCommand {
  public:
   CommandContext() = default;
-
-  CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* rb,
-                 ConnectionContext* cntx)
-      : cid(_cid), tx_(_tx) {
-    Init(rb, cntx);
+  CommandContext(facade::SinkReplyBuilder* rb, facade::ConnectionContext* conn_cntx) {
+    Init(rb, conn_cntx);
   }
 
-  void SetupTx(const CommandId* _cid, Transaction* tx) {
-    cid = _cid;
+  void SetupTx(const CommandId* cid, Transaction* tx) {
+    cid_ = cid;
     tx_ = tx;
+  }
+
+  void UpdateCid(const CommandId* cid) {
+    cid_ = cid;
   }
 
   virtual size_t GetSize() const override {
     return sizeof(CommandContext);
   }
-
-  const CommandId* cid = nullptr;
 
   uint64_t start_time_ns = 0;
 
@@ -409,9 +408,15 @@ class CommandContext : public facade::ParsedCommand {
     return tx_;
   }
 
+  const CommandId* cid() const {
+    return cid_;
+  }
+
  protected:
   void ReuseInternal() final;
+
   Transaction* tx_ = nullptr;
+  const CommandId* cid_ = nullptr;
 };
 
 }  // namespace dfly

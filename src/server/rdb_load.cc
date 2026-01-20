@@ -680,8 +680,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (!config_.streamed && zs->Size() <= server.zset_max_listpack_entries &&
-      maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
+  if (!config_.streamed && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
+      maxelelen <= ZSET_MAX_LISTPACK_VALUE && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
     CompactObj::DeleteMR<detail::SortedMap>(zs);
@@ -2886,7 +2886,8 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   for (unsigned i = 0; i < resp_vec.size(); i++) {
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
-  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd);
+  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
+                           facade::AsyncPreference::ONLY_SYNC);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

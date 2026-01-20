@@ -96,8 +96,8 @@ zlexrangespec GetLexRange(bool reverse, const ZSetFamily::LexInterval& li) {
   return range;
 }
 
-bool IsListPack(const detail::RobjWrapper* robj_wrapper) {
-  return robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK;
+bool IsListPack(const PrimeValue& pv) {
+  return pv.Encoding() == OBJ_ENCODING_LISTPACK;
 }
 
 /* Delete the element 'ele' from the sorted set, returning 1 if the element
@@ -105,17 +105,17 @@ bool IsListPack(const detail::RobjWrapper* robj_wrapper) {
  * taken from t_zset.c
  */
 
-int ZsetDel(detail::RobjWrapper* robj_wrapper, std::string_view ele) {
-  if (IsListPack(robj_wrapper)) {
-    uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
+int ZsetDel(PrimeValue* pv, std::string_view ele) {
+  if (IsListPack(*pv)) {
+    uint8_t* lp = (uint8_t*)pv->RObjPtr();
     unsigned char* eptr = detail::ZzlFind(lp, ele, nullptr);
     if (eptr) {
       lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
-      robj_wrapper->set_inner_obj(lp);
+      pv->SetRObjPtr(lp);
       return 1;
     }
-  } else if (robj_wrapper->encoding() == OBJ_ENCODING_SKIPLIST) {
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+  } else if (pv->Encoding() == OBJ_ENCODING_SKIPLIST) {
+    detail::SortedMap* zs = (detail::SortedMap*)pv->RObjPtr();
     if (zs->Delete(ele))
       return 1;
   }
@@ -123,22 +123,104 @@ int ZsetDel(detail::RobjWrapper* robj_wrapper, std::string_view ele) {
 }
 
 // taken from t_zset.c
-std::optional<double> GetZsetScore(const detail::RobjWrapper* robj_wrapper,
-                                   std::string_view member) {
-  if (IsListPack(robj_wrapper)) {
+std::optional<double> GetZsetScore(const PrimeValue& pv, std::string_view member) {
+  if (IsListPack(pv)) {
     double score;
-    if (detail::ZzlFind((uint8_t*)robj_wrapper->inner_obj(), member, &score) == NULL)
+    if (detail::ZzlFind((uint8_t*)pv.RObjPtr(), member, &score) == NULL)
       return std::nullopt;
     return score;
   }
 
-  if (robj_wrapper->encoding() == OBJ_ENCODING_SKIPLIST) {
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+  if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
+    detail::SortedMap* zs = (detail::SortedMap*)pv.RObjPtr();
     return zs->GetScore(member);
   }
 
   LOG(FATAL) << "Unknown sorted set encoding";
   return 0;
+}
+
+int ZsetAdd(PrimeValue* pv, double score, std::string_view ele, int in_flags, int* out_flags,
+            double* newscore) {
+  *out_flags = 0; /* We'll return our response flags. */
+  double curscore;
+
+  /* NaN as input is an error regardless of all the other parameters. */
+  if (isnan(score)) {
+    *out_flags = ZADD_OUT_NAN;
+    return 0;
+  }
+
+  /* Update the sorted set according to its encoding. */
+  if (pv->Encoding() == OBJ_ENCODING_LISTPACK) {
+    /* Turn options into simple to check vars. */
+    bool incr = (in_flags & ZADD_IN_INCR) != 0;
+    bool nx = (in_flags & ZADD_IN_NX) != 0;
+    bool xx = (in_flags & ZADD_IN_XX) != 0;
+    bool gt = (in_flags & ZADD_IN_GT) != 0;
+    bool lt = (in_flags & ZADD_IN_LT) != 0;
+
+    uint8_t* lp = (uint8_t*)pv->RObjPtr();
+    uint8_t* eptr = detail::ZzlFind(lp, ele, &curscore);
+    if (eptr != NULL) {
+      /* NX? Return, same element already exists. */
+      if (nx) {
+        *out_flags |= ZADD_OUT_NOP;
+        return 1;
+      }
+
+      /* Prepare the score for the increment if needed. */
+      if (incr) {
+        score += curscore;
+        if (isnan(score)) {
+          *out_flags |= ZADD_OUT_NAN;
+          return 0;
+        }
+      }
+
+      /* GT/LT? Only update if score is greater/less than current. */
+      if ((lt && score >= curscore) || (gt && score <= curscore)) {
+        *out_flags |= ZADD_OUT_NOP;
+        return 1;
+      }
+
+      if (newscore)
+        *newscore = score;
+
+      /* Remove and re-insert when score changed. */
+      if (score != curscore) {
+        lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
+        lp = detail::ZzlInsert(lp, ele, score);
+        pv->SetRObjPtr(lp);
+        *out_flags |= ZADD_OUT_UPDATED;
+      }
+
+      return 1;
+    } else if (!xx) {
+      unsigned zl_len = lpLength(lp) / 2;
+
+      /* check if the element is too large or the list
+       * becomes too long *before* executing zzlInsert. */
+      if (zl_len >= ZSET_MAX_LISTPACK_ENTRIES || ele.size() > ZSET_MAX_LISTPACK_VALUE) {
+        auto* ptr = detail::SortedMap::FromListPack(pv->memory_resource(), lp);
+        pv->InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, ptr);
+      } else {
+        lp = detail::ZzlInsert(lp, ele, score);
+        pv->SetRObjPtr(lp);
+        if (newscore)
+          *newscore = score;
+        *out_flags |= ZADD_OUT_ADDED;
+        return 1;
+      }
+    } else {
+      *out_flags |= ZADD_OUT_NOP;
+      return 1;
+    }
+  }
+
+  CHECK_EQ(pv->Encoding(), OBJ_ENCODING_SKIPLIST);
+  detail::SortedMap* ss = (detail::SortedMap*)pv->RObjPtr();
+  return ss->AddElem(score, ele, in_flags, out_flags, newscore);
 }
 
 void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuilder* builder) {
@@ -199,7 +281,7 @@ enum class Action : uint8_t { RANGE = 0, REMOVE = 1, POP = 2 };
 class IntervalVisitor {
  public:
   IntervalVisitor(Action action, const ZSetFamily::RangeParams& params, PrimeValue* pv)
-      : action_(action), params_(params), robj_wrapper_(pv->GetRobjWrapper()) {
+      : action_(action), params_(params), pv_(pv) {
   }
 
   void operator()(const ZSetFamily::IndexInterval& ii);
@@ -255,14 +337,14 @@ class IntervalVisitor {
 
   Action action_;
   ZSetFamily::RangeParams params_;
-  detail::RobjWrapper* robj_wrapper_;
+  PrimeValue* pv_;
 
   ScoredArray result_;
   unsigned removed_ = 0;
 };
 
 void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
-  unsigned long llen = robj_wrapper_->Size();
+  unsigned long llen = pv_->Size();
   int64_t start = ii.first;
   int64_t end = ii.second;
 
@@ -339,10 +421,13 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
 
   // Calculate new start and end given offset and limit.
   start += params_.offset;
-  end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
+  end = min<size_t>(size_t(start) + params_.limit - 1, end);
+  if (start > end) {
+    return;
+  }
 
   container_utils::IterateSortedSet(
-      robj_wrapper_,
+      *pv_,
       [this](container_utils::ContainerEntry ce, double score) {
         result_.emplace_back(ce.ToString(), score);
         return true;
@@ -351,78 +436,78 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
 }
 
 void IntervalVisitor::ActionRange(const zrangespec& range) {
-  if (IsListPack(robj_wrapper_)) {
+  if (IsListPack(*pv_)) {
     ExtractListPack(range);
   } else {
-    CHECK_EQ(robj_wrapper_->encoding(), OBJ_ENCODING_SKIPLIST);
+    CHECK_EQ(pv_->Encoding(), OBJ_ENCODING_SKIPLIST);
     ExtractSkipList(range);
   }
 }
 
 void IntervalVisitor::ActionRange(const zlexrangespec& range) {
-  if (IsListPack(robj_wrapper_)) {
+  if (IsListPack(*pv_)) {
     ExtractListPack(range);
   } else {
-    CHECK_EQ(robj_wrapper_->encoding(), OBJ_ENCODING_SKIPLIST);
+    CHECK_EQ(pv_->Encoding(), OBJ_ENCODING_SKIPLIST);
     ExtractSkipList(range);
   }
 }
 
 void IntervalVisitor::ActionRem(unsigned start, unsigned end) {
-  if (IsListPack(robj_wrapper_)) {
-    uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
+  if (IsListPack(*pv_)) {
+    uint8_t* zl = (uint8_t*)pv_->RObjPtr();
 
     removed_ = (end - start) + 1;
     zl = lpDeleteRange(zl, 2 * start, 2 * removed_);
-    robj_wrapper_->set_inner_obj(zl);
+    pv_->SetRObjPtr(zl);
   } else {
-    CHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper_->encoding());
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+    CHECK_EQ(OBJ_ENCODING_SKIPLIST, pv_->Encoding());
+    detail::SortedMap* zs = (detail::SortedMap*)pv_->RObjPtr();
     removed_ = zs->DeleteRangeByRank(start, end);
   }
 }
 
 void IntervalVisitor::ActionRem(const zrangespec& range) {
-  if (IsListPack(robj_wrapper_)) {
-    uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
+  if (IsListPack(*pv_)) {
+    uint8_t* zl = (uint8_t*)pv_->RObjPtr();
     unsigned long deleted = 0;
     zl = detail::ZzlDeleteRangeByScore(zl, &range, &deleted);
-    robj_wrapper_->set_inner_obj(zl);
+    pv_->SetRObjPtr(zl);
     removed_ = deleted;
   } else {
-    CHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper_->encoding());
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+    CHECK_EQ(OBJ_ENCODING_SKIPLIST, pv_->Encoding());
+    detail::SortedMap* zs = (detail::SortedMap*)pv_->RObjPtr();
     removed_ = zs->DeleteRangeByScore(range);
   }
 }
 
 void IntervalVisitor::ActionRem(const zlexrangespec& range) {
-  if (IsListPack(robj_wrapper_)) {
-    uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
+  if (IsListPack(*pv_)) {
+    uint8_t* zl = (uint8_t*)pv_->RObjPtr();
     unsigned long deleted = 0;
     zl = detail::ZzlDeleteRangeByLex(zl, &range, &deleted);
-    robj_wrapper_->set_inner_obj(zl);
+    pv_->SetRObjPtr(zl);
     removed_ = deleted;
   } else {
-    CHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper_->encoding());
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+    CHECK_EQ(OBJ_ENCODING_SKIPLIST, pv_->Encoding());
+    detail::SortedMap* zs = (detail::SortedMap*)pv_->RObjPtr();
     removed_ = zs->DeleteRangeByLex(range);
   }
 }
 
 void IntervalVisitor::ActionPop(ZSetFamily::TopNScored sc) {
   if (sc > 0) {
-    if (IsListPack(robj_wrapper_)) {
+    if (IsListPack(*pv_)) {
       PopListPack(sc);
     } else {
-      CHECK_EQ(robj_wrapper_->encoding(), OBJ_ENCODING_SKIPLIST);
+      CHECK_EQ(pv_->Encoding(), OBJ_ENCODING_SKIPLIST);
       PopSkipList(sc);
     }
   }
 }
 
 void IntervalVisitor::ExtractListPack(const zrangespec& range) {
-  uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
+  uint8_t* zl = (uint8_t*)pv_->RObjPtr();
   uint8_t *eptr, *sptr;
   uint8_t* vstr;
   unsigned int vlen = 0;
@@ -466,7 +551,7 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
 }
 
 void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
-  detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+  detail::SortedMap* zs = (detail::SortedMap*)pv_->RObjPtr();
 
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
@@ -475,7 +560,7 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
 }
 
 void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
-  uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
+  uint8_t* zl = (uint8_t*)pv_->RObjPtr();
   uint8_t *eptr, *sptr = nullptr;
   uint8_t* vstr = nullptr;
   unsigned int vlen = 0;
@@ -523,14 +608,14 @@ void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
 }
 
 void IntervalVisitor::ExtractSkipList(const zlexrangespec& range) {
-  detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+  detail::SortedMap* zs = (detail::SortedMap*)pv_->RObjPtr();
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
   result_ = zs->GetLexRange(range, offset, limit, params_.reverse);
 }
 
 void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
-  uint8_t* zl = (uint8_t*)robj_wrapper_->inner_obj();
+  uint8_t* zl = (uint8_t*)pv_->RObjPtr();
   uint8_t *eptr, *sptr;
   uint8_t* vstr;
   unsigned int vlen = 0;
@@ -565,11 +650,11 @@ void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
   }
 
   /* We can finally delete the elements */
-  robj_wrapper_->set_inner_obj(lpDeleteRange(zl, start, 2 * sc));
+  pv_->SetRObjPtr(lpDeleteRange(zl, start, 2 * sc));
 }
 
 void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
-  detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+  detail::SortedMap* zs = (detail::SortedMap*)pv_->RObjPtr();
 
   /* We start from the header, or the tail if reversed. */
   result_ = zs->PopTopScores(sc, params_.reverse);
@@ -996,7 +1081,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
   PrimeValue& pv = it->second;
-  CHECK_GT(pv.Size(), 0u) << key << " " << pv.GetRobjWrapper()->encoding();
+  CHECK_GT(pv.Size(), 0u) << key << " " << pv.Encoding();
 
   IntervalVisitor iv{Action::POP, range_spec.params, &pv};
   std::visit(iv, range_spec.interval);
@@ -1006,8 +1091,8 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   auto res = iv.PopResult();
 
   // We don't store empty keys
-  CHECK(!res.empty()) << key << " failed to pop from type " << pv.GetRobjWrapper()->encoding()
-                      << " now size is " << pv.Size();
+  CHECK(!res.empty()) << key << " failed to pop from type " << pv.Encoding() << " now size is "
+                      << pv.Size();
 
   auto zlen = pv.Size();
   if (zlen == 0) {
@@ -1197,9 +1282,9 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
   if (!res_it)
     return res_it.status();
 
-  const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
-  if (IsListPack(robj_wrapper)) {
-    unsigned char* zl = (uint8_t*)robj_wrapper->inner_obj();
+  auto& pv = res_it.value()->second;
+  if (IsListPack(pv)) {
+    unsigned char* zl = (uint8_t*)pv.RObjPtr();
     unsigned char *eptr, *sptr;
 
     eptr = lpSeek(zl, 0);
@@ -1228,8 +1313,8 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
     }
     return res;
   }
-  DCHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
-  detail::SortedMap* ss = (detail::SortedMap*)robj_wrapper->inner_obj();
+  DCHECK_EQ(pv.Encoding(), OBJ_ENCODING_SKIPLIST);
+  detail::SortedMap* ss = (detail::SortedMap*)pv.RObjPtr();
 
   RankResult res{};
 
@@ -1257,7 +1342,7 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
   if (!res_it)
     return res_it.status();
 
-  const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
+  auto& pv = res_it.value()->second;
   zrangespec range = GetZrangeSpec(false, interval);
   unsigned count = 0;
 
@@ -1265,8 +1350,8 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
     return 0;
   }
 
-  if (IsListPack(robj_wrapper)) {
-    uint8_t* zl = (uint8_t*)robj_wrapper->inner_obj();
+  if (IsListPack(pv)) {
+    uint8_t* zl = (uint8_t*)pv.RObjPtr();
     uint8_t *eptr, *sptr;
     double score;
 
@@ -1297,8 +1382,8 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
       }
     }
   } else {
-    CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), robj_wrapper->encoding());
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), pv.Encoding());
+    detail::SortedMap* zs = (detail::SortedMap*)pv.RObjPtr();
     count = zs->Count(range);
   }
 
@@ -1313,10 +1398,10 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
 
   zlexrangespec range = GetLexRange(false, interval);
   unsigned count = 0;
-  const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
 
-  if (IsListPack(robj_wrapper)) {
-    uint8_t* zl = (uint8_t*)robj_wrapper->inner_obj();
+  auto& pv = res_it.value()->second;
+  if (IsListPack(pv)) {
+    uint8_t* zl = (uint8_t*)pv.RObjPtr();
     uint8_t *eptr, *sptr;
 
     /* Use the first element in range as the starting point */
@@ -1339,8 +1424,8 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
       }
     }
   } else {
-    DCHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper->encoding());
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    DCHECK_EQ(OBJ_ENCODING_SKIPLIST, pv.Encoding());
+    detail::SortedMap* zs = (detail::SortedMap*)pv.RObjPtr();
     count = zs->LexCount(range);
   }
 
@@ -1354,12 +1439,12 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, const facade::A
   if (!res_it)
     return res_it.status();
 
-  detail::RobjWrapper* robj_wrapper = res_it->it->second.GetRobjWrapper();
+  auto& pv = res_it->it->second;
   unsigned deleted = 0;
   for (string_view member : members)
-    deleted += ZsetDel(robj_wrapper, member);
+    deleted += ZsetDel(&pv, member);
 
-  auto zlen = robj_wrapper->Size();
+  auto zlen = pv.Size();
   res_it->post_updater.Run();
 
   if (zlen == 0) {
@@ -1384,11 +1469,10 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
 
   MScoreResponse scores(members.Size());
 
-  const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
-
+  auto& pv = res_it.value()->second;
   size_t i = 0;
   for (string_view member : members.Range())
-    scores[i++] = GetZsetScore(robj_wrapper, member);
+    scores[i++] = GetZsetScore(pv, member);
 
   return scores;
 }
@@ -1406,7 +1490,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   StringVec res;
   char buf[128];
 
-  if (IsListPack(pv.GetRobjWrapper())) {
+  if (IsListPack(pv)) {
     ZSetFamily::RangeParams params;
     params.with_scores = true;
     IntervalVisitor iv{Action::RANGE, params, const_cast<PrimeValue*>(&pv)};
@@ -1977,9 +2061,8 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   // When we have too many members to add, make sure field_len is large enough to use
   // skiplist encoding.
-  size_t field_len = members.size() > server.zset_max_listpack_entries
-                         ? UINT32_MAX
-                         : members.front().second.size();
+  size_t field_len =
+      members.size() > ZSET_MAX_LISTPACK_ENTRIES ? UINT32_MAX : members.front().second.size();
   auto res_it = PrepareZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)
@@ -1993,28 +2076,28 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
 
   OpStatus op_status = OpStatus::OK;
   AddResult aresult;
-  detail::RobjWrapper* robj_wrapper = res_it->it->second.GetRobjWrapper();
-  bool is_list_pack = IsListPack(robj_wrapper);
+  auto& pv = res_it->it->second;
+  bool is_list_pack = IsListPack(pv);
 
   // opportunistically reserve space if multiple entries are about to be added.
   if ((zparams.flags & ZADD_IN_XX) == 0 && members.size() > 2) {
     if (is_list_pack) {
-      uint8_t* zl = (uint8_t*)robj_wrapper->inner_obj();
+      uint8_t* zl = (uint8_t*)pv.RObjPtr();
       size_t malloc_reserved = zmalloc_size(zl);
       size_t min_sz = EstimateListpackMinBytes(members);
       if (min_sz > malloc_reserved) {
         zl = (uint8_t*)zrealloc(zl, min_sz);
-        robj_wrapper->set_inner_obj(zl);
+        pv.SetRObjPtr(zl);
       }
     } else {
-      detail::SortedMap* sm = (detail::SortedMap*)robj_wrapper->inner_obj();
+      detail::SortedMap* sm = (detail::SortedMap*)pv.RObjPtr();
       sm->Reserve(members.size());
     }
   }
 
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
-    int retval = robj_wrapper->ZsetAdd(m.first, m.second, zparams.flags, &retflags, &new_score);
+    int retval = ZsetAdd(&pv, m.first, m.second, zparams.flags, &retflags, &new_score);
 
     if (zparams.flags & ZADD_IN_INCR) {
       if (retval == 0) {
@@ -2077,8 +2160,7 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
     return res_it.status();
 
   const PrimeValue& pv = res_it.value()->second;
-  const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
-  auto res = GetZsetScore(robj_wrapper, member);
+  auto res = GetZsetScore(pv, member);
   if (!res) {
     return OpStatus::MEMBER_NOTFOUND;
   }

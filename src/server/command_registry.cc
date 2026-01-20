@@ -129,38 +129,6 @@ constexpr int32_t kLatencyHistogramPrecision = 2;
 
 }  // namespace
 
-void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
-  DCHECK_GT(start_time_ns, 0u);
-  int64_t after = absl::GetCurrentTimeNanos();
-
-  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = (after - start_time_ns) / 1000;
-
-  cid->RecordLatency(ss->thread_index(), execution_time_usec);
-
-  DCHECK(conn_cntx_ != nullptr);
-
-  // TODO: we should probably discard more commands here,
-  // not just the blocking ones
-  const auto* conn = server_conn_cntx()->conn();
-  if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
-      // Use SafeTLocal() to avoid accessing the wrong thread local instance
-      ServerState::SafeTLocal()->ShouldLogSlowCmd(execution_time_usec)) {
-    vector<string> aux_params;
-    CmdArgVec aux_slices;
-
-    if (tail_args.empty() && cid->name() == "EXEC") {
-      // abuse tail_args to pass more information about the slow EXEC.
-      aux_params.emplace_back(StrCat("CMDCOUNT/", exec_body_len));
-      aux_slices.emplace_back(aux_params.back());
-      tail_args = absl::MakeSpan(aux_slices);
-    }
-    ServerState::SafeTLocal()->GetSlowLog().Add(cid->name(), tail_args, conn->GetName(),
-                                                conn->RemoteEndpointStr(), execution_time_usec,
-                                                absl::GetCurrentTimeNanos() / 1000);
-  }
-}
-
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,

@@ -146,6 +146,7 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
 void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
   body.emplace_back(cid, args);
   stored_cmd_bytes += body.back().UsedMemory();
+  is_write |= cid->IsJournaled();
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
@@ -267,10 +268,42 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 }
 
 void CommandContext::ReuseInternal() {
-  cid = nullptr;
+  cid_ = nullptr;
   tx_ = nullptr;
   start_time_ns = 0;
   exec_body_len = 0;
+}
+
+void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
+  DCHECK_GT(start_time_ns, 0u);
+  int64_t after = absl::GetCurrentTimeNanos();
+
+  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
+  int64_t execution_time_usec = (after - start_time_ns) / 1000;
+
+  cid_->RecordLatency(ss->thread_index(), execution_time_usec);
+
+  DCHECK(conn_cntx_ != nullptr);
+
+  // TODO: we should probably discard more commands here,
+  // not just the blocking ones
+  const auto* conn = server_conn_cntx()->conn();
+  if (!(cid_->opt_mask() & CO::BLOCKING) && conn != nullptr &&
+      // Use SafeTLocal() to avoid accessing the wrong thread local instance
+      ServerState::SafeTLocal()->ShouldLogSlowCmd(execution_time_usec)) {
+    vector<string> aux_params;
+    CmdArgVec aux_slices;
+
+    if (tail_args.empty() && cid_->name() == "EXEC") {
+      // abuse tail_args to pass more information about the slow EXEC.
+      aux_params.emplace_back(absl::StrCat("CMDCOUNT/", exec_body_len));
+      aux_slices.emplace_back(aux_params.back());
+      tail_args = absl::MakeSpan(aux_slices);
+    }
+    ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
+                                                conn->RemoteEndpointStr(), execution_time_usec,
+                                                absl::GetCurrentTimeNanos() / 1000);
+  }
 }
 
 }  // namespace dfly

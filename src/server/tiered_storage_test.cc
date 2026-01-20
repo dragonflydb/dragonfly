@@ -503,7 +503,7 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   UpdateFromFlags();
 
-  const size_t kNUM = 100;
+  static constexpr size_t kNUM = 100;
 
   auto build_command = [](string_view key) {
     vector<string> cmd = {"HSET", string{key}};
@@ -520,7 +520,7 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   }
 
   // Wait for all to be stashed or in end up in bins
-  ExpectConditionWithinTimeout([=] {
+  ExpectConditionWithinTimeout([this] {
     auto metrics = GetMetrics();
     return metrics.tiered_stats.total_stashes +
                metrics.tiered_stats.small_bins_filling_entries_cnt ==

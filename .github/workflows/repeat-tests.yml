@@ -41,7 +41,7 @@ jobs:
   build:
     strategy:
       matrix:
-        container: ["ubuntu-dev:20"]
+        container: ["ubuntu-dev:20-gcc14"]
         proactor: [Uring]
         build-type: [Debug]
         runner: [ubuntu-latest]

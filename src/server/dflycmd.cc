@@ -598,7 +598,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     VLOG(1) << "Takeover accepted, shutting down.";
     std::string save_arg = "NOSAVE";
     MutableSlice sargs(save_arg);
-    CommandContext child_cmd_cntx{nullptr, nullptr, cmd_cntx->rb(), nullptr};
+    CommandContext child_cmd_cntx{cmd_cntx->rb(), nullptr};
     sf_->ShutdownCmd(CmdArgList(&sargs, 1), &child_cmd_cntx);
     return;
   }
