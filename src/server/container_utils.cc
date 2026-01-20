@@ -157,12 +157,8 @@ bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, si
     }
   }
   ql->Iterate(
-      [&](const QList::Entry& entry) {
-        if (entry.is_int()) {
-          success = func(ContainerEntry{entry.ival()});
-        } else {
-          success = func(ContainerEntry{entry.view().data(), entry.view().size()});
-        }
+      [&](const CollectionEntry& entry) {
+        success = func(entry);
         return success;
       },
       start, end);
