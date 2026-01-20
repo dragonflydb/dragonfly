@@ -2057,7 +2057,7 @@ bool Connection::ExecuteMCBatch() {
       continue;
     }
 
-    // We must continue with async execution is we already have executing commands
+    // We must continue with async execution if we already have executing commands
     auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
 
     if (!ioloop_v2_)  // only v2 loop supports any async commands so far
