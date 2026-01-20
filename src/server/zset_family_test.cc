@@ -707,7 +707,7 @@ TEST_F(ZSetFamilyTest, ZUnionStore) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "c", "3"));
 }
 
-// Check that SUNIONSTORE overwrites a value including resetting its expiration
+// Check that ZUNIONSTORE overwrites a value including resetting its expiration
 TEST_F(ZSetFamilyTest, ZUnionStoreExpiration) {
   EXPECT_THAT(Run({"zadd", "z1", "1", "a", "2", "b"}), IntArg(2));
   EXPECT_THAT(Run({"zadd", "z2", "3", "c", "2", "b"}), IntArg(2));
