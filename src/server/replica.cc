@@ -1322,7 +1322,10 @@ std::string Replica::GetCurrentPhase() const {
 }
 
 std::vector<unsigned> Replica::GetFlowMapAtIndex(size_t index) const {
-  DCHECK(index < thread_flow_map_.size());
+  // Not all proactors have flows
+  if (index >= thread_flow_map_.size()) {
+    return {};
+  }
   return thread_flow_map_[index];
 }
 
