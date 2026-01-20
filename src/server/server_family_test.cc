@@ -313,19 +313,20 @@ TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
 
 TEST_F(ServerFamilyTest, ToggleTrackingOnAndOff) {
   Run("HELLO 3");
-  // seq = 1
+  // seq = 0
   auto resp = Run("CLIENT TRACKING ON OPTIN");
+  // seq = 1
   EXPECT_THAT(resp.GetString(), "OK");
 
-  // seq = 2, caching = 1
   resp = Run("CLIENT CACHING YES");
+  // seq = 2, caching = 1
   EXPECT_THAT(resp.GetString(), "OK");
 
   resp = Run("CLIENT TRACKING OFF");
-  // seq = 3, caching = 1
   resp = Run("CLIENT TRACKING ON OPTIN");
+  // seq = 3, caching = 1
   EXPECT_THAT(resp.GetString(), "OK");
-  // seq(3) != caching(1)
+  // seq(3 - 1) != caching(1)
   resp = Run("GET foo");
   resp = Run("SET foo tmp");
   EXPECT_THAT(resp.GetString(), "OK");
