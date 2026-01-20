@@ -44,7 +44,7 @@ class Service : public facade::ServiceInterface {
                                                   unsigned count, facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
-  // Check VerifyCommandExecution and invoke command with args
+  // Check OOM and invoke command with args
   facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
 
   // Verify command prepares execution in correct state.

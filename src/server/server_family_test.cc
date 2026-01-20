@@ -326,7 +326,7 @@ TEST_F(ServerFamilyTest, ToggleTrackingOnAndOff) {
   resp = Run("CLIENT TRACKING ON OPTIN");
   // seq = 3, caching = 1
   EXPECT_THAT(resp.GetString(), "OK");
-  // seq(3 - 1) != caching(1)
+  // seq(3) != (caching(1) + 1)
   resp = Run("GET foo");
   resp = Run("SET foo tmp");
   EXPECT_THAT(resp.GetString(), "OK");

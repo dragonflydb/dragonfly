@@ -251,7 +251,7 @@ struct ConnectionState {
     }
 
     void ResetCachingSequenceNumber() {
-      caching_seq_num_ = 0;
+      caching_seq_num_ = 1;
     }
 
     bool HasOption(Options option) const {
