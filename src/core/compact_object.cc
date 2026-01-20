@@ -1029,7 +1029,7 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
 }
 
 bool CompactObj::HasAllocated() const {
-  if (IsRef() || taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
+  if (mask_bits_.ref || taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
