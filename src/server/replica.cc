@@ -580,10 +580,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   {
     unsigned num_df_flows = shard_flows_.size();
     if (last_master_sync_data && num_df_flows != last_master_sync_data->last_journal_LSNs.size()) {
-      last_master_sync_data = std::nullopt;
       LOG(WARNING) << "last master has different flow size: "
                    << last_master_sync_data->last_journal_LSNs.size()
                    << " than current: " << num_df_flows;
+      last_master_sync_data = std::nullopt;
     }
 
     // Going out of the way to avoid using std::vector<bool>...
