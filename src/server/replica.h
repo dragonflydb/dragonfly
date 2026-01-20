@@ -136,7 +136,7 @@ class Replica : ProtocolClient {
     // on disconnects the replica state mask is cleared. We use this variable
     // to track if the replica reached full sync. When master disconnects,
     // we use this variable to print the journal offsets in info command even
-    // when the link is down.
+    // when the link is down. It's reset whenever a full sync is initiated again.
     bool passed_full_sync;
   };
 
