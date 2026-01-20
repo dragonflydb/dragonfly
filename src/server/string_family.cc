@@ -1074,7 +1074,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       std::string_view key = cmd_cntx->mc_command()->key();
       std::string_view value = cmd_cntx->mc_command()->value();
 
-      // This is what a hop finishes with, but inside transacion code
+      // This is what a hop finishes with, but inside transaction code
       *tx->LocalResultPtr() = set_cmd.Set(sparams, key, value);
       tx->Blocker()->Dec();
     };
