@@ -362,7 +362,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-  const quicklistNode* node = (const quicklistNode*)ql->Head();
+  const QList::Node* node = ql->Head();
   size_t len = ql->node_count();
 
   RETURN_ON_ERR(SaveLen(len));
@@ -373,10 +373,11 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
     // Use listpack encoding
     RETURN_ON_ERR(SaveLen(node->container));
-    if (quicklistNodeIsCompressed(node)) {
+    if (node->IsCompressed()) {
       void* data;
-      size_t compress_len = quicklistGetLzf(node, &data);
-
+      size_t compress_len = node->GetLZF(&data);
+      // TODO: LZ4 compression mode is not enabled for list objects yet.
+      // If it will be enabled in the future, we need to adjust here accordingly.
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
       RETURN_ON_ERR(SaveString(node->entry, node->sz));
@@ -468,9 +469,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
   DCHECK_EQ(OBJ_ZSET, pv.ObjType());
-  const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
   if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    auto* zs = static_cast<detail::SortedMap*>(pv.RObjPtr());
 
     RETURN_ON_ERR(SaveLen(zs->Size()));
     std::error_code ec;
@@ -498,7 +498,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
     });
   } else {
     CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK));
-    uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
     size_t lp_bytes = lpBytes(lp);
 
     RETURN_ON_ERR(SaveString((uint8_t*)lp, lp_bytes));

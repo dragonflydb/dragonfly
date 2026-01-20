@@ -59,7 +59,7 @@ using namespace std;
       this->Compress(_node);                      \
   } while (0)
 
-#define QLIST_NODE_ENCODING_LZ4 3
+#define QL_NODE_IS_PLAIN(node) ((node)->container == QUICKLIST_NODE_CONTAINER_PLAIN)
 
 namespace dfly {
 
@@ -101,6 +101,44 @@ bool IsLargeElement(size_t sz, int fill) {
     return sz > SIZE_SAFETY_LIMIT;
   else
     return sz > NodeNegFillLimit(fill);
+}
+
+/* Calculate the size limit or length limit of the quicklist node
+ * based on 'fill', and is also used to limit list listpack. */
+void quicklistNodeLimit(int fill, size_t* size, unsigned int* count) {
+  *size = SIZE_MAX;
+  *count = UINT_MAX;
+
+  if (fill >= 0) {
+    /* Ensure that one node have at least one entry */
+    *count = (fill == 0) ? 1 : fill;
+  } else {
+    *size = NodeNegFillLimit(fill);
+  }
+}
+
+#define sizeMeetsSafetyLimit(sz) ((sz) <= SIZE_SAFETY_LIMIT)
+
+/* Check if the limit of the quicklist node has been reached to determine if
+ * insertions, merges or other operations that would increase the size of
+ * the node can be performed.
+ * Return 1 if exceeds the limit, otherwise 0. */
+int quicklistNodeExceedsLimit(int fill, size_t new_sz, unsigned int new_count) {
+  size_t sz_limit;
+  unsigned int count_limit;
+  quicklistNodeLimit(fill, &sz_limit, &count_limit);
+
+  if (ABSL_PREDICT_TRUE(sz_limit != SIZE_MAX)) {
+    return new_sz > sz_limit;
+  } else if (count_limit != UINT_MAX) {
+    /* when we reach here we know that the limit is a size limit (which is
+     * safe, see comments next to optimization_level and SIZE_SAFETY_LIMIT) */
+    if (!sizeMeetsSafetyLimit(new_sz))
+      return 1;
+    return new_count > count_limit;
+  }
+
+  ABSL_UNREACHABLE();
 }
 
 bool NodeAllowInsert(const QList::Node* node, const int fill, const size_t sz) {
@@ -185,6 +223,16 @@ inline ssize_t NodeSetEntry(QList::Node* node, uint8_t* entry) {
   node->sz = new_sz;
   return diff;
 }
+
+/* quicklistLZF is a 8+N byte struct holding 'sz' followed by 'compressed'.
+ * 'sz' is byte length of 'compressed' field.
+ * 'compressed' is LZF data with total (compressed) length 'sz'
+ * NOTE: uncompressed length is stored in quicklistNode->sz.
+ * When quicklistNode->entry is compressed, node->entry points to a quicklistLZF */
+using quicklistLZF = struct quicklistLZF {
+  size_t sz; /* LZF size in bytes*/
+  char compressed[];
+};
 
 inline quicklistLZF* GetLzf(QList::Node* node) {
   DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF ||
@@ -382,6 +430,13 @@ QList::Node* SplitNode(QList::Node* node, int offset, bool after, ssize_t* diff)
 
 __thread QList::Stats QList::stats;
 
+size_t QList::Node::GetLZF(void** data) const {
+  DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF || encoding == QLIST_NODE_ENCODING_LZ4);
+  quicklistLZF* lzf = (quicklistLZF*)entry;
+  *data = lzf->compressed;
+  return lzf->sz;
+}
+
 void QList::SetPackedThreshold(unsigned threshold) {
   packed_threshold = threshold;
 }
@@ -576,7 +631,7 @@ bool QList::Replace(long index, std::string_view elem) {
 }
 
 size_t QList::MallocUsed(bool slow) const {
-  size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(quicklist));
+  size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(QList));
   if (slow) {
     for (Node* node = head_; node; node = node->next) {
       node_size += zmalloc_usable_size(node->entry);

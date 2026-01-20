@@ -22,6 +22,9 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+/* quicklist compression disable */
+#define QUICKLIST_NOCOMPRESS 0
+
 namespace dfly {
 
 using namespace std;

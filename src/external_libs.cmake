@@ -127,7 +127,7 @@ if (WITH_SEARCH)
     uni-algo
     URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
 
-    CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
+    CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=20"
   )
 
   add_third_party(

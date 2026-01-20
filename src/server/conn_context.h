@@ -368,11 +368,8 @@ class ConnectionContext : public facade::ConnectionContext {
 class CommandContext : public facade::ParsedCommand {
  public:
   CommandContext() = default;
-
-  CommandContext(const CommandId* _cid, Transaction* _tx, facade::SinkReplyBuilder* rb,
-                 ConnectionContext* cntx)
-      : tx_(_tx), cid_(_cid) {
-    Init(rb, cntx);
+  CommandContext(facade::SinkReplyBuilder* rb, facade::ConnectionContext* conn_cntx) {
+    Init(rb, conn_cntx);
   }
 
   void SetupTx(const CommandId* cid, Transaction* tx) {
