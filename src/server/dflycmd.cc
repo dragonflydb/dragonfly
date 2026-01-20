@@ -86,10 +86,10 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
 
   if (with_ping) {
-    // We need to sent PING to synchronize with the journal. The reason is
+    // We need to send PING to synchronize with the journal. The reason is
     // that the call to SetExpireAllowed(false) does not disable in-flight
     // expirations. So for example, it could be that Heartbeat() is
-    // writing a series of expirations to the journal and if we don't sent
+    // writing a series of expirations to the journal and if we don't send
     // PING here we risk data loss as shard->journal()->GetLsn() below
     // is not accurate (it can change between preemption points because
     // the in-flight expirations are not complete).
