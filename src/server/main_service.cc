@@ -1480,9 +1480,24 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
   if (cid == nullptr) {
+    DCHECK(async_pref == AsyncPreference::ONLY_SYNC);  // Error will be missed, temporary
     parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
+
+  // Determine if command should run async
+  switch (async_pref) {
+    case AsyncPreference::ONLY_SYNC:
+      break;
+    case AsyncPreference::ONLY_ASYNC:
+      if (!cid->IsAsync())
+        return DispatchResult::WOULD_BLOCK;
+      [[fallthrough]];
+    case AsyncPreference::PREFER_ASYNC:
+      if (cid->IsAsync())
+        parsed_cmd->SetDeferredReply();
+      break;
+  };
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
@@ -1785,8 +1800,6 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       break;
     case MemcacheParser::SET:
       cmd_name = "SET";
-      if (cntx->conn()->IsIoLoopV2())
-        parsed_cmd->AllowAsyncExecution();  // Enable for SET command.
       break;
     case MemcacheParser::ADD:
       cmd_name = "SET";

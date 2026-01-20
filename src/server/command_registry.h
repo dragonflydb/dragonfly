@@ -191,6 +191,10 @@ class CommandId : public facade::CommandId {
 
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
+  bool IsAsync() const {
+    return name() == "SET";  // Temporary
+  }
+
  private:
   std::optional<CO::PubSubKind> kind_pubsub_;
   std::optional<CO::MultiControlKind> kind_multi_ctr_;

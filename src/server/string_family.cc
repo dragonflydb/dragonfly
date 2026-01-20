@@ -1057,33 +1057,16 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  if (cmd_cntx->AsyncExecutionAllowed()) {
-    // TODO: run asynchronous flow and exit.
-    // 1.
-    //    a. Transaction should support non-blocking execution for single hop/single shard commands.
-    //    b. Transaction ScheduleSingleHop accepts absl::FunctionRef which can not be used for
-    //       async operations. We need to change it to accept std::function or similar.
-    //       As a result, we will need to introduce a new transactional API for async operations.
-    //    c. Scheduling needs to be written for async operations. The good news is that for single
-    //       hop/single shard operations, the scheduling always succeeds.
-    //    4. Multi shard async operations are more complicated, as we may need to retry scheduling
-    //       attempts and then to execute the callback. However, it is possible to do -
-    //       we just need to reimplement the logic, so that the last scheduled shard
-    //       triggers the next asynchronous operation instead of running in coordinator thread.
-    // 2. No need to worry about tiering at this point.
-    // 3. Provide customizable reply mechanism that is called from the shard thread and passes
-    //    the response to ParsedCommand. There is equivalent to what we do today when passing
-    //    the response back via ScheduleSingleHop. But if we store in ParsedCommand, we do not need
-    //    to worry about reordering of responses, as pipelined ParsedCommands will be
-    //    already ordered.
+  // Experimental async path
+  if (cmd_cntx->IsDeferredReply()) {
+    boost::intrusive_ptr<Transaction> tx(cmd_cntx->tx());
 
-    boost::intrusive_ptr<Transaction> tr_ptr(cmd_cntx->tx());
-    auto cb = [cmd_cntx, sparams, tr_ptr]() {
+    auto cb = [cmd_cntx, sparams, tx]() mutable {
       EngineShard* shard = EngineShard::tlocal();
       bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-      SetCmd set_cmd(OpArgs{shard, nullptr, tr_ptr->GetDbContext()}, explicit_journal);
+      SetCmd set_cmd(OpArgs{shard, nullptr, tx->GetDbContext()}, explicit_journal);
 
-      // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
+      // If we are here, it's Memcache SET (because IsDeferredReply() is true).
       // So we can use mc_command data.
       // For Memcache, we use the values from the command.
       // TODO: we will need to get arguments in a different way for Redis protocol.
@@ -1091,23 +1074,29 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       std::string_view key = cmd_cntx->mc_command()->key();
       std::string_view value = cmd_cntx->mc_command()->value();
 
-      OpStatus status = set_cmd.Set(sparams, key, value);
+      // This is what a hop finishes with, but inside transaction code
+      *tx->LocalResultPtr() = set_cmd.Set(sparams, key, value);
+      tx->Blocker()->Dec();
+    };
 
+    cmd_cntx->tx()->Blocker()->Add(1);
+    ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
+    shard_set->Add(shard_id, cb);  // cb is copied here
+
+    auto replier = [cmd_cntx, tx](SinkReplyBuilder* rb) {
+      auto status = *tx->LocalResultPtr();
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.
         MCRender render(cmd_cntx->mc_command()->cmd_flags);
-        cmd_cntx->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+        rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
         return;
       }
       if (status == OpStatus::OUT_OF_MEMORY) {
-        return cmd_cntx->SendError(kOutOfMemory);
+        return rb->SendError(kOutOfMemory);
       }
       LOG(FATAL) << "TBD " << status;
     };
-
-    cmd_cntx->SetDeferredReply();  // we defer the reply for sure.
-    ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
-    shard_set->Add(shard_id, cb);
+    cmd_cntx->Resolve(tx->Blocker(), std::move(replier));
 
     return;
   }
