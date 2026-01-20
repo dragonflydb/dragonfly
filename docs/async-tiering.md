@@ -142,7 +142,7 @@ graph TB
     classDef invisible fill:none,stroke:none,color:none,width:0px,height:0px;
 ```
 
-Consider for example, two high level `Read` operations for two different keys K1 and K2 residing on the same page.
+Consider, for example, two high level `Read` operations for two different keys K1 and K2 residing on the same page.
 For K1, we issue a page read from `DiskStorage` tracked by its offset. For K2, if we check and find an active operation fetching that offset, we link the K2 callback to the K1 completion, avoiding duplicate I/O.
 
 Consider issuing a `Read` request for a key (e.g., during `GET`). This triggers a disk read for the corresponding page. If `Delete` is called for the same key (e.g., via `DEL` or `SET` overwriting the key) while the read is in progress, we must be careful. Immediately calling `DiskStorage::MarkAsFree` could allow a subsequent `Stash` to overwrite the page while it's being read. To prevent this race condition, `MarkAsFree` calls are queued until concurrent reads on the affected segment complete.
