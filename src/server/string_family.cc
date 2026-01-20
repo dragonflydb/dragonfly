@@ -1066,7 +1066,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
       SetCmd set_cmd(OpArgs{shard, nullptr, tx->GetDbContext()}, explicit_journal);
 
-      // If we are here, it's Memcache SET (because AsyncExecutionAllowed is true).
+      // If we are here, it's Memcache SET (because IsDeferredReply() is true).
       // So we can use mc_command data.
       // For Memcache, we use the values from the command.
       // TODO: we will need to get arguments in a different way for Redis protocol.
