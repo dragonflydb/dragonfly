@@ -39,21 +39,24 @@ class QList {
    * items). recompress: 1 bit, bool, true if node is temporary decompressed for usage.
    * attempted_compress: 1 bit, boolean, used for verifying during testing.
    * dont_compress: 1 bit, boolean, used for preventing compression of entry.
-   * extra: 9 bits, free for future use; pads out the remainder of 32 bits
    * */
 
   struct Node {
     Node* prev;
     Node* next;
     unsigned char* entry;
-    size_t sz;                           /* entry size in bytes */
-    unsigned int count : 16;             /* count of items in listpack */
-    unsigned int encoding : 2;           /* RAW==1 or LZF==2 */
-    unsigned int container : 2;          /* PLAIN==1 or PACKED==2 */
-    unsigned int recompress : 1;         /* was this node previous compressed? */
-    unsigned int attempted_compress : 1; /* node can't compress; too small */
-    unsigned int dont_compress : 1;      /* prevent compression of entry that will be used later */
-    unsigned int extra : 25;             /* more bits to steal for future usage */
+    size_t sz : 48;    /* entry size in bytes */
+    size_t count : 16; /* count of items in listpack */
+
+    uint16_t encoding : 2;           /* RAW==1 or LZF==2 */
+    uint16_t container : 2;          /* PLAIN==1 or PACKED==2 */
+    uint16_t recompress : 1;         /* was this node previous compressed? */
+    uint16_t attempted_compress : 1; /* node can't compress; too small */
+    uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
+    uint16_t reserved1 : 9;          /* reserved for future use */
+
+    uint16_t reserved2; /* more bits to steal for future usage */
+    uint32_t reserved3; /* more bits to steal for future usage */
 
     bool IsCompressed() const {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
