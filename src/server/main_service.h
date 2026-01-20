@@ -47,11 +47,6 @@ class Service : public facade::ServiceInterface {
   // Check VerifyCommandExecution and invoke command with args
   facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
 
-  // Verify command can be executed now (check out of memory), always called immediately before
-  // execution
-  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandContext& cmd_cntx,
-                                                           CmdArgList tail_args);
-
   // Verify command prepares excution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.

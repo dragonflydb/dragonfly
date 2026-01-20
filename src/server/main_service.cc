@@ -1266,10 +1266,11 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
+bool ShouldDenyOnOOM(const CommandContext& cmd_cntx) {
+  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
   ServerState& etl = *ServerState::tlocal();
-  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    auto memory_stats = etl.GetMemoryUsage(curr_time_ns);
+  if ((cmd_cntx.cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
+    auto memory_stats = etl.GetMemoryUsage(cmd_cntx.start_time_ns);
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
     if (memory_stats.used_mem > limit ||
@@ -1281,16 +1282,6 @@ bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
     }
   }
   return false;
-}
-
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_cntx,
-                                                     CmdArgList tail_args) {
-  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
-  if (ShouldDenyOnOOM(cmd_cntx.cid, cmd_cntx.start_time_ns)) {
-    return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
-  }
-
-  return std::nullopt;
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
@@ -1467,6 +1458,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
 
     if (cid->name() == "REPLCONF") {
       DCHECK_GE(args_no_cmd.size(), 1u);
+      // We should not reply to REPLCONF ACKS.
       if (absl::EqualsIgnoreCase(args_no_cmd.Front(), "ACK")) {
         server_family_.GetDflyCmd()->OnClose(
             dfly_cntx->conn_state.replication_info.repl_session_id);
@@ -1591,10 +1583,8 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   DCHECK(builder);
   DCHECK(cntx);
 
-  if (auto err = VerifyCommandExecution(*cmd_cntx, tail_args); err) {
-    cmd_cntx->SendError(*err);
-
-    DCHECK(err->status == OpStatus::OUT_OF_MEMORY);
+  if (ShouldDenyOnOOM(*cmd_cntx)) {
+    cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
 
