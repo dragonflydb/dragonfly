@@ -383,9 +383,10 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 class DbSlice::PrimeBumpPolicy {
  public:
-  bool CanBump(const CompactObj& obj) const {
-    return !obj.IsSticky();
+  bool CanBump(const CompactKey& key) const {
+    return !key.IsSticky();
   }
+
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
     moved_items_.push_back(std::make_pair(source, dest));
   }
@@ -1129,8 +1130,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
                                                              std::string_view key, PrimeValue obj,
                                                              uint64_t expire_at_ms,
                                                              bool force_update) {
-  DCHECK(!obj.IsRef());
-
   auto op_result = AddOrFind(cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_result);
 

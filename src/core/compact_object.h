@@ -184,10 +184,6 @@ class CompactObj {
   // For containers - returns number of elements in the container.
   size_t Size() const;
 
-  bool IsRef() const {
-    return mask_bits_.ref;
-  }
-
   std::string_view GetSlice(std::string* scratch) const;
 
   std::string ToString() const {
@@ -231,14 +227,6 @@ class CompactObj {
     mask_bits_.mc_flag = e;
   }
 
-  bool WasTouched() const {
-    return mask_bits_.touched;
-  }
-
-  void SetTouched(bool e) {
-    mask_bits_.touched = e;
-  }
-
   bool DefragIfNeeded(PageUsage* page_usage);
 
   bool HasStashPending() const {
@@ -247,14 +235,6 @@ class CompactObj {
 
   void SetStashPending(bool b) {
     mask_bits_.io_pending = b;
-  }
-
-  bool IsSticky() const {
-    return mask_bits_.sticky;
-  }
-
-  void SetSticky(bool e) {
-    mask_bits_.sticky = e;
   }
 
   unsigned Encoding() const;
@@ -548,6 +528,22 @@ struct CompactKey : public CompactObj {
     res.mask_bits_.ref = 1;
 
     return res;
+  }
+
+  bool IsSticky() const {
+    return mask_bits_.sticky;
+  }
+
+  void SetSticky(bool e) {
+    mask_bits_.sticky = e;
+  }
+
+  bool WasTouched() const {
+    return mask_bits_.touched;
+  }
+
+  void SetTouched(bool e) {
+    mask_bits_.touched = e;
   }
 };
 
