@@ -86,16 +86,9 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
 
   if (with_ping) {
-    // We need to send PING to synchronize with the journal. The reason is
-    // that the call to SetExpireAllowed(false) does not disable in-flight
-    // expirations. So for example, it could be that Heartbeat() is
-    // writing a series of expirations to the journal and if we don't send
-    // PING here we risk data loss as shard->journal()->GetLsn() below
-    // is not accurate (it can change between preemption points because
-    // the in-flight expirations are not complete).
-    // Furthermore, after this flow is used to wait for the taking over
-    // node, we should not call PING again as it would increment the LSN
-    // number beyond what was observed by the taking over node.
+    // PING forces replica to send the most recent last_acked_lsn.
+    // ACKS from the replica are send only every X commands or every 3 seconds (flag configurable)
+    // or when forced (by the PING above).
     shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
   }
 
@@ -562,7 +555,7 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
     auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
-      // PING to synchronize with in-flight expirations.
+      // PING to force the replica to send the last acked lsn.
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard, true)) {
         catchup_success.store(false);
       }
@@ -588,9 +581,9 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
       }
 
       auto cb = [repl_ptr = repl_ptr, end_time, &rest_catchup_success](EngineShard* shard) {
-        // Do not PING because we will increment LSN beyond what was
-        // observed by the taking over node improperly disabling partial
-        // sync.
+        // We can't PING here as it will advance our LSN and disable partial sync for these nodes.
+        // Instead, wait and be optimistic that the end_time is not short. If the nodes didn't sync
+        // up in time, it's ok, they will fall back to full sync when reconfigured.
         if (!WaitReplicaFlowToCatchup(end_time, repl_ptr.get(), shard, false)) {
           rest_catchup_success.store(false);
         }
