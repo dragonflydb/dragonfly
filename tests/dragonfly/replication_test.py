@@ -3699,9 +3699,8 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
 
     await check_all_replicas_finished([c_replica2, c_replica3], c_replica1)
 
-    replica1.stop()
-    replica2.stop()
-    replica3.stop()
+    for replica in (replica1, replica2, replica3):
+        replica.stop()
 
     lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
     assert len(lines) == 0
