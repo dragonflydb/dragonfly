@@ -707,6 +707,19 @@ TEST_F(ZSetFamilyTest, ZUnionStore) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "c", "3"));
 }
 
+// Check that SUNIONSTORE overwrites a value including resetting its expiration
+TEST_F(ZSetFamilyTest, ZUnionStoreExpiration) {
+  EXPECT_THAT(Run({"zadd", "z1", "1", "a", "2", "b"}), IntArg(2));
+  EXPECT_THAT(Run({"zadd", "z2", "3", "c", "2", "b"}), IntArg(2));
+
+  Run({"set", "target", "some-value"});
+  EXPECT_THAT(Run({"expire", "target", "1010"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "target"}), IntArg(1010));
+
+  EXPECT_THAT(Run({"zunionstore", "target", "2", "z1", "z2"}), IntArg(3));
+  EXPECT_THAT(Run({"ttl", "target"}), IntArg(-1));
+}
+
 TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
   EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
   EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));

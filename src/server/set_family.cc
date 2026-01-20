@@ -503,6 +503,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     // for non-overwrite case it must be set.
     if (!overwrite && co.ObjType() != OBJ_SET)
       return OpStatus::WRONG_TYPE;
+
+    if (overwrite)  // Overwriting the value removes expiration
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, add_res.it);
   }
 
   if (add_res.is_new || overwrite) {

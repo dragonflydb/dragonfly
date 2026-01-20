@@ -592,7 +592,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
 
     // Note - correct behavior is to return TTL before it was updated by GAT,
     // but this is complex to implement so we return the updated TTL.
-    if (value.HasExpire() && cmd_flags.return_ttl) {
+    if (it->first.HasExpire() && cmd_flags.return_ttl) {
       auto exp_it = db_slice.GetDBTable(t->GetDbIndex())->expire.Find(it->first);
       int64_t expire_time_ms = db_slice.ExpireTime(exp_it->second);
       int64_t ttl_ms = expire_time_ms - t->GetDbContext().time_now_ms;
@@ -880,7 +880,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
     key.SetSticky(true);
   }
 
-  bool has_expire = prime_value.HasExpire();
+  bool has_expire = key.HasExpire();
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -899,7 +899,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   // overwrite existing entry.
   prime_value.SetString(value);
 
-  DCHECK_EQ(has_expire, prime_value.HasExpire());
+  DCHECK_EQ(has_expire, key.HasExpire());
 
   PostEdit(params, it_upd->it.key(), value, &prime_value);
   return OpStatus::OK;

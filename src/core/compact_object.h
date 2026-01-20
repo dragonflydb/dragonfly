@@ -214,14 +214,6 @@ class CompactObj {
     return o.operator==(sl);
   }
 
-  bool HasExpire() const {
-    return mask_bits_.expire;
-  }
-
-  void SetExpire(bool e) {
-    mask_bits_.expire = e;
-  }
-
   bool HasFlag() const {
     return mask_bits_.mc_flag;
   }
@@ -552,6 +544,14 @@ struct CompactKey : public CompactObj {
     res.mask_bits_.ref = 1;
 
     return res;
+  }
+
+  bool HasExpire() const {
+    return mask_bits_.expire;
+  }
+
+  void SetExpire(bool e) {
+    mask_bits_.expire = e;
   }
 };
 
