@@ -516,7 +516,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
      * and won't realloc on every XADD.
      * When listpack reaches max number of entries, we'll shrink the
      * allocation to fit the data. */
-    size_t prealloc = STREAM_LISTPACK_MAX_PRE_ALLOCATE;
+    size_t prealloc = 0;
 
     lp = lpNew(prealloc);
     lp = lpAppendInteger(lp, 1); /* One item, the one we are adding. */
