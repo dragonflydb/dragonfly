@@ -278,9 +278,21 @@ void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_i
     streamIteratorStop(&si);
 }
 
-void checkListPackNotEmpty(unsigned char* lp) {
+void checkListPackValid(unsigned char* lp) {
+  unsigned char* p = NULL;
   if(lpBytes(lp) == 0) {
-   fprintf(stderr, "Error: corrupted listpack found.");
+   fprintf(stderr, "Error: corrupted listpack header found.\n");
+   abort();
+  }
+  p = lpValidateFirst(lp);
+  if(p == NULL) {
+   fprintf(stderr, "Error: empty listpack found.\n");
+   abort();
+  }
+
+  if (lpValidateNext(lp, &p, lpBytes(lp)) == 0) {
+   lpRepr(lp);
+   fprintf(stderr, "Error: corrupted listpack found.\n");
    abort();
   }
 }
@@ -327,7 +339,11 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         if (trim_strategy == TRIM_STRATEGY_MAXLEN && s->length <= maxlen)
             break;
 
-        unsigned char *lp = ri.data, *p = lpFirst(lp);
+        unsigned char *lp = ri.data;
+        unsigned char *p;
+
+        checkListPackValid(lp);
+        p = lpFirst(lp);
         int64_t entries = lpGetInteger(p);
 
         /* Check if we exceeded the amount of work we could do */
@@ -452,7 +468,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
 
         /* Update the listpack with the new pointer. */
         raxInsert(s->rax_tree,ri.key,ri.key_len,lp,NULL);
-        checkListPackNotEmpty(lp);
+        checkListPackValid(lp);
 
         break; /* If we are here, there was enough to delete in the current
                   node, so no need to go to the next node. */
@@ -760,7 +776,7 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
         if (si->lp != lp)
             raxInsert(si->stream->rax_tree,si->ri.key,si->ri.key_len,lp,NULL);
 
-        checkListPackNotEmpty(lp);
+        checkListPackValid(lp);
     }
 
     /* Update the number of entries counter. */
