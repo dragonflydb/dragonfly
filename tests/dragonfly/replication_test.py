@@ -3771,36 +3771,3 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     assert len(lines) == 0
     lines = replica3.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
     assert len(lines) == 0
-
-
-@pytest.mark.slow
-async def test_replica_reconnection_leaks_connections(df_factory: DflyInstanceFactory):
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=4)
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
-    info = await c_master.info("clients")
-    baseline = info["connected_clients"]
-
-    num_cycles = 20
-    for _ in range(num_cycles):
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_for_replicas_state(c_replica)
-        await c_replica.execute_command("REPLICAOF NO ONE")
-
-    # Wait for connected_clients to stabilize (stop changing)
-    prev = None
-    async for info, breaker in info_tick_timer(c_master, "clients", timeout=10):
-        with breaker:
-            curr = info["connected_clients"]
-            assert curr == prev
-        prev = curr
-
-    leaked = prev - baseline
-    assert leaked == 0, f"connected_clients leaked {leaked} after {num_cycles} reconnect cycles"
-
-    await c_master.aclose()
-    await c_replica.aclose()

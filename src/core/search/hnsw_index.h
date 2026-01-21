@@ -22,25 +22,6 @@ struct HnswIndexMetadata {
   double mult = 0.0;             // Multiplier for random level generation
 };
 
-// Node data structure for HNSW serialization
-struct HnswNodeData {
-  uint32_t internal_id;
-  GlobalDocId global_id;
-  int level;
-  std::vector<std::vector<uint32_t>> levels_links;  // Links for each level (0 to level)
-
-  // Returns the total serialized size in bytes.
-  // Format: internal_id(4) + global_id(8) + level(4)
-  //         + for each level: links_num(4) + links(4 each)
-  size_t TotalSize() const {
-    size_t size = 4 + 8 + 4;  // internal_id + global_id + level
-    for (const auto& links : levels_links) {
-      size += 4 + links.size() * 4;  // links_num + links
-    }
-    return size;
-  }
-};
-
 struct HnswlibAdapter;
 class HnswVectorIndex {
  public:
@@ -63,13 +44,6 @@ class HnswVectorIndex {
 
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
-
-  // Get total number of nodes in the index
-  size_t GetNodeCount() const;
-
-  // Get nodes in the specified range [start, end)
-  // Returns vector of node data for serialization
-  std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const;
 
  private:
   bool copy_vector_;

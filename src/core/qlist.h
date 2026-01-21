@@ -7,7 +7,6 @@
 #include <absl/functional/function_ref.h>
 
 #include <cstdint>
-#include <memory>
 #include <string>
 
 #include "core/collection_entry.h"
@@ -285,6 +284,10 @@ class QList {
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
   void OffloadNode(Node* node);
+
+  // Initializes iterator's zi_ to point to the element at offset_.
+  // Decompresses the node if needed. Assumes current_ is not null.
+  void InitIteratorEntry(Iterator* it) const;
 
   // Initializes iterator's zi_ to point to the element at offset_.
   // Decompresses the node if needed. Assumes current_ is not null.

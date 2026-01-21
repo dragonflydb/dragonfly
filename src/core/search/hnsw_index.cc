@@ -133,45 +133,6 @@ struct HnswlibAdapter {
     return metadata;
   }
 
-  size_t GetNodeCount() const {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return world_.cur_element_count.load();
-  }
-
-  std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    size_t count = world_.cur_element_count.load();
-    end = std::min(end, count);
-    start = std::min(start, end);
-
-    std::vector<HnswNodeData> result;
-    result.reserve(end - start);
-
-    for (size_t internal_id = start; internal_id < end; ++internal_id) {
-      HnswNodeData node_data;
-      node_data.internal_id = internal_id;
-      node_data.global_id = world_.getExternalLabel(internal_id);
-      node_data.level = world_.element_levels_[internal_id];
-
-      node_data.levels_links.resize(node_data.level + 1);
-
-      auto* ll0 = world_.get_linklist0(internal_id);
-      unsigned short link_count0 = world_.getListCount(ll0);
-      auto* links0 = reinterpret_cast<uint32_t*>(ll0 + 1);
-      node_data.levels_links[0].assign(links0, links0 + link_count0);
-
-      for (int lvl = 1; lvl <= node_data.level; ++lvl) {
-        auto* ll = world_.get_linklist(internal_id, lvl);
-        unsigned short link_count = world_.getListCount(ll);
-        auto* links = reinterpret_cast<uint32_t*>(ll + 1);
-        node_data.levels_links[lvl].assign(links, links + link_count);
-      }
-
-      result.push_back(std::move(node_data));
-    }
-    return result;
-  }
-
  private:
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
@@ -262,14 +223,6 @@ void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
   return adapter_->GetMetadata();
-}
-
-size_t HnswVectorIndex::GetNodeCount() const {
-  return adapter_->GetNodeCount();
-}
-
-std::vector<HnswNodeData> HnswVectorIndex::GetNodesRange(size_t start, size_t end) const {
-  return adapter_->GetNodesRange(start, end);
 }
 
 }  // namespace dfly::search

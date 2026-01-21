@@ -1156,6 +1156,7 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
   return false;
 }
 
+<<<<<<< HEAD
 void QList::OffloadNode(Node* node) {
   DCHECK(tiering_params_ && node->offloaded == 0);
   num_offloaded_nodes_++;
@@ -1166,6 +1167,11 @@ void QList::OffloadNode(Node* node) {
 void QList::InitIteratorEntry(Iterator* it) const {
   DCHECK(it->current_);
   const_cast<QList*>(this)->AccessForReads(true, it->current_);
+=======
+void QList::InitIteratorEntry(Iterator* it) const {
+  DCHECK(it->current_);
+  const_cast<QList*>(this)->malloc_size_ += DecompressNodeIfNeeded(true, it->current_);
+>>>>>>> 6d41056d (fix: QList::iterator semantics (#6439))
   if (QL_NODE_IS_PLAIN(it->current_)) {
     it->zi_ = it->current_->entry;
   } else {
@@ -1187,6 +1193,10 @@ auto QList::GetIterator(Where where) const -> Iterator {
     it.offset_ = -1;
     it.direction_ = REV;
     it.node_id_ = len_ - 1;
+  }
+
+  if (it.current_) {
+    InitIteratorEntry(&it);
   }
 
   if (it.current_) {
@@ -1376,6 +1386,12 @@ bool QList::Erase(const long start, unsigned count) {
 }
 
 uint8_t* QList::TryExtractListpack() {
+<<<<<<< HEAD
+=======
+  // TODO: enable this once we support listpack encoding for lists.
+  return nullptr;
+
+>>>>>>> e3641e8b (chore: support listpack with lists (#6424))
   if (len_ != 1 || QL_NODE_IS_PLAIN(head_) || !ShouldStoreAsListPack(head_->sz) ||
       head_->IsCompressed()) {
     return nullptr;
@@ -1413,7 +1429,11 @@ bool QList::Iterator::Next() {
     return true;
 
   // Move to the next node.
+<<<<<<< HEAD
   const_cast<QList*>(owner_)->CompressByDepth(current_);
+=======
+  const_cast<QList*>(owner_)->Compress(current_);
+>>>>>>> 6d41056d (fix: QList::iterator semantics (#6439))
 
   if (direction_ == FWD) {
     /* Forward traversal, Jumping to start of next node */
