@@ -28,7 +28,7 @@ add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set
     interpreter.cc glob_matcher.cc mi_memory_resource.cc qlist.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc task_queue.cc
     tx_queue.cc string_set.cc string_map.cc top_keys.cc detail/bitpacking.cc detail/listpack_wrap.cc
-    count_min_sketch.cc oah_entry.cc)
+    detail/listpack.cc count_min_sketch.cc oah_entry.cc)
 
 cxx_link(dfly_core base dfly_search_core dfly_page_usage fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
@@ -55,6 +55,7 @@ helio_cxx_test(flatbuffers_test dfly_core TRDP::flatbuffers LABELS DFLY)
 helio_cxx_test(bloom_test dfly_core LABELS DFLY)
 helio_cxx_test(allocation_tracker_test dfly_core absl::random_random LABELS DFLY)
 helio_cxx_test(qlist_test dfly_core DATA testdata/list.txt.zst LABELS DFLY)
+helio_cxx_test(listpack_test dfly_core redis_lib LABELS DFLY)
 helio_cxx_test(zstd_test dfly_core TRDP::zstd LABELS DFLY)
 helio_cxx_test(top_keys_test dfly_core LABELS DFLY)
 helio_cxx_test(page_usage_stats_test dfly_core LABELS DFLY)
