@@ -67,7 +67,9 @@ sequenceDiagram
 
 The coordinator fiber schedules a command on a shard thread. The command performs initial work, issues an asynchronous read, and returns a `ResultFuture` to the coordinator. The coordinator waits for fulfillment before replying. This parallelism hides most I/O latency (assuming non-saturated SSDs).
 
-For complex operations like `APPEND`, a post-read handler runs on the shard thread. Since in-place disk modification isn't supported, `APPEND` becomes an IO-READ followed by a handler that modifies the value in memory. The updated value is then returned to the coordinator.
+For complex operations like `APPEND`, that require reading the value and modifying it, a post-read handler runs on the shard thread. Since in-place disk modification isn't supported, `APPEND` becomes an IO-READ followed by a handler that modifies the value in memory. The result is returned to the coordinator and the modified value is uploaded to memory and is deleted on disk.
+
+It is important to note that only a single read is issued for all pending asynchronous commands for a given key. Once the read finished, all callbacks are executed consecutively and atomically. This guarantees correctness of operation order and outside observers. This execution loops is aided by specialized Decoder classes that keep an intermediary value in-between modifications or avoid creating it at all for read-only sequences.
 
 Unlike the previous design where `DbSlice::Find(...)` handled tiering transparently, command implementations handling offloaded values must now use callbacks or futures (e.g., via `TieredStorage::Read` or `Modify`).
 
