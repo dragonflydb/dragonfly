@@ -44,7 +44,7 @@ struct HnswNodeData {
 struct HnswlibAdapter;
 class HnswVectorIndex {
  public:
-  explicit HnswVectorIndex(const search::SchemaField::VectorParams& params,
+  explicit HnswVectorIndex(const search::SchemaField::VectorParams& params, bool copy_vector,
                            PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
 
   ~HnswVectorIndex();

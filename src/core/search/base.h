@@ -41,6 +41,7 @@ inline std::pair<ShardId, DocId> DecomposeGlobalDocId(GlobalDocId id) {
 enum class VectorSimilarity { L2, IP, COSINE };
 
 using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (size) */>;
+using BorrowedFtVector = const char*;
 
 // Query params represent named parameters for queries supplied via PARAMS.
 struct QueryParams {
@@ -73,7 +74,7 @@ using SortableValue = std::variant<std::monostate, double, std::string>;
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
-  using VectorInfo = search::OwnedFtVector;
+  using VectorInfo = std::variant<search::OwnedFtVector, search::BorrowedFtVector>;
   using StringList = absl::InlinedVector<std::string_view, 1>;
   using NumsList = absl::InlinedVector<double, 1>;
 
@@ -83,7 +84,7 @@ struct DocumentAccessor {
   virtual std::optional<StringList> GetStrings(std::string_view active_field) const = 0;
 
   /* Returns nullopt if the specified field is not a vector */
-  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const = 0;
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field, size_t dim) const = 0;
 
   /* Return nullopt if the specified field is not a list of doubles */
   virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const = 0;

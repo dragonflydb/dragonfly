@@ -76,6 +76,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   std::mutex deleted_elements_lock;               // lock for deleted_elements
   std::unordered_set<tableint> deleted_elements;  // contains internal ids of deleted elements
 
+  char* null_vector_{nullptr};  // Static null vector that is used when data pointer is null
+
   HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s) {
   }
 
@@ -133,6 +135,12 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         throw std::runtime_error("Not enough memory");
     }
 
+    // If null vector pointer is provided we can use this for all null vectors
+    null_vector_ = (char*)mi_malloc(data_size_);
+    if (null_vector_ == nullptr)
+      throw std::runtime_error("Not enough memory");
+    memset(null_vector_, 0, data_size_);
+
     cur_element_count = 0;
 
     visited_list_pool_ = std::unique_ptr<VisitedListPool>(new VisitedListPool(1, max_elements));
@@ -163,6 +171,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       mi_free(data_vector_memory_);
     }
+    mi_free(null_vector_);
     mi_free(linkLists_);
     linkLists_ = nullptr;
     cur_element_count = 0;
@@ -835,6 +844,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
               throw std::runtime_error("Not enough memory: loadIndex failed to allocate vector memory");
           input.read(data_vector_memory_, cur_element_count * data_size_);
         }
+
+        null_vector_ = (char*)mi_malloc(data_size_);
+        if (null_vector_ == nullptr)
+            throw std::runtime_error("Not enough memory: loadIndex failed to allocate null vector");
 
         size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
 
