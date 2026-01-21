@@ -337,7 +337,8 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     StoreKeysInArgs(key_index);
 
     unique_shard_cnt_ = 1;
-    string_view akey = *key_index.Range(full_args_).begin();
+    string_view akey = full_args_[*key_index];
+
     if (is_stub)  // stub transactions don't migrate
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     else {
@@ -1659,6 +1660,16 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         string_view opt = ArgS(args, args.size() - 2);
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
           bonus = args.size() - 1;
+        }
+      }
+
+      if (name == "SORT") {
+        if (args.size() >= 3) {
+          // SORT key ... STORE destkey
+          string_view opt = ArgS(args, args.size() - 2);
+          if (absl::EqualsIgnoreCase(opt, "STORE")) {
+            bonus = args.size() - 1;
+          }
         }
       }
     }

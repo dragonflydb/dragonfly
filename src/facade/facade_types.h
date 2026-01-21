@@ -294,7 +294,7 @@ using MemoryBytesFlag = strings::MemoryBytesFlag;
 constexpr uint16_t kRecvSockGid = 0;
 
 // Size of the buffer in bufring (kRecvSockGid).
-constexpr size_t kRecvBufSize = 128;
+constexpr size_t kRecvBufSize = 1500;
 
 }  // namespace facade
 

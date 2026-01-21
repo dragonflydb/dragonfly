@@ -1,0 +1,45 @@
+# Copilot Build Environment Setup Steps
+# This file contains steps to configure the Dragonfly build environment
+# with AWS, GCP, GPERF, and UNWIND disabled for faster development builds
+
+name: Copilot setup steps
+
+# Automatically run the setup steps when they are changed to allow for easy validation, and
+# allow manual testing through the repository's "Actions" tab
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  # The job MUST be called `copilot-setup-steps` or it will not be picked up by Copilot.
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Install required system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-context-dev
+
+      - name: Configure CMake build (Debug, no AWS/GCP)
+        run: ./helio/blaze.sh -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_GPERF=OFF
+
+      - name: Install pre-commit
+        run: pip3 install pre-commit
+
+# Notes:
+# - The build directory will be created at build-dbg/
+# - Disabling AWS/GCP significantly speeds up compilation
+# - WITH_GPERF=OFF disables Google Performance Tools
+# - Use ninja for faster parallel builds

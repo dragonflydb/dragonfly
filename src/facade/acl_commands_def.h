@@ -43,7 +43,7 @@ struct UserCredentials {
   AclKeys keys;
   AclPubSub pub_sub;
   std::string ns;
-  size_t db;
+  size_t db{0};
 };
 
 }  // namespace dfly::acl

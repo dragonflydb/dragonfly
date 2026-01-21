@@ -1042,7 +1042,7 @@ void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     return cmd_cntx->SendLong(result.value());
   }
@@ -1065,7 +1065,7 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
     return find_res.status();
   };
 
-  OpResult<void> result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx);
 }
 
@@ -1088,7 +1088,7 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
     return find_res.status();
   };
 
-  OpResult<void> result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   auto replier = [result, memberships = std::move(memberships)](facade::SinkReplyBuilder* builder) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1107,9 +1107,9 @@ void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
   string_view member = ArgS(args, 2);
 
   Mover mover{src, dest, member, true};
-  mover.Find(cmd_cntx->tx);
+  mover.Find(cmd_cntx->tx());
 
-  OpResult<unsigned> result = mover.Commit(cmd_cntx->tx);
+  OpResult<unsigned> result = mover.Commit(cmd_cntx->tx());
   if (!result) {
     return cmd_cntx->SendError(result.status());
   }
@@ -1125,7 +1125,7 @@ void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   SendNumeric(result, cmd_cntx);
 }
 
@@ -1141,7 +1141,7 @@ void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
     return find_res.value()->second.Size();
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   SendNumeric(result, cmd_cntx);
 }
 
@@ -1160,7 +1160,7 @@ void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto replier = [result = std::move(result),
                   pop_single = (args.size() == 1)](facade::SinkReplyBuilder* builder) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1200,7 +1200,7 @@ void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   SetReplies{cmd_cntx}.Send(rsv);
 }
@@ -1238,10 +1238,10 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(diff_cb), false);
+  cmd_cntx->tx()->Execute(std::move(diff_cb), false);
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     cmd_cntx->SendError(rsv.status());
     return;
   }
@@ -1255,14 +1255,14 @@ void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(store_cb), true);
+  cmd_cntx->tx()->Execute(std::move(store_cb), true);
   cmd_cntx->SendLong(result_size);
 }
 
 void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     SetReplies{cmd_cntx}.Send(std::move(*result));
@@ -1288,7 +1288,7 @@ void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
     return OpRandMember(t->GetOpArgs(shard), key, count);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(cb);
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
 
   auto replier = [is_count, result = std::move(result)](facade::SinkReplyBuilder* builder) {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1316,8 +1316,8 @@ void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx->GetUniqueShardCnt());
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx()->GetUniqueShardCnt());
   if (result) {
     SetReplies{cmd_cntx}.Send(std::move(*result));
   } else {
@@ -1343,11 +1343,11 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(inter_cb), false);
+  cmd_cntx->tx()->Execute(std::move(inter_cb), false);
 
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     cmd_cntx->SendError(result.status());
     return;
   }
@@ -1360,7 +1360,7 @@ void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(store_cb), true);
+  cmd_cntx->tx()->Execute(std::move(store_cb), true);
   cmd_cntx->SendLong(result->size());
 }
 
@@ -1382,8 +1382,8 @@ void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx->GetUniqueShardCnt(), limit);
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx()->GetUniqueShardCnt(), limit);
 
   if (result) {
     return cmd_cntx->SendLong(result->size());
@@ -1400,7 +1400,7 @@ void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   ResultSetView unionset = UnionResultVec(result_set);
   SetReplies{cmd_cntx}.Send(unionset);
@@ -1424,11 +1424,11 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(union_cb), false);
+  cmd_cntx->tx()->Execute(std::move(union_cb), false);
 
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     cmd_cntx->SendError(unionset.status());
     return;
   }
@@ -1442,7 +1442,7 @@ void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(store_cb), true);
+  cmd_cntx->tx()->Execute(std::move(store_cb), true);
   cmd_cntx->SendLong(result_size);
 }
 
@@ -1474,7 +1474,7 @@ void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
       auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1513,7 +1513,7 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
     return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals, keepttl);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     return cmd_cntx->SendLong(result.value());
   }

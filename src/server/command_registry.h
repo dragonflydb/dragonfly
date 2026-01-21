@@ -141,6 +141,8 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::BLOCKING;
   }
 
+  // See deduction logic for details. We don't monitor ADMIN commands
+  // and log the final `EXEC` command manually at the end.
   bool CanBeMonitored() const {
     return can_be_monitored_;
   }
@@ -188,6 +190,10 @@ class CommandId : public facade::CommandId {
   }
 
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
+
+  bool IsAsync() const {
+    return name() == "SET";  // Temporary
+  }
 
  private:
   std::optional<CO::PubSubKind> kind_pubsub_;

@@ -56,6 +56,12 @@ struct AstGeoNode {
 struct AstNegateNode {
   AstNegateNode(AstNode&& node);
 
+  AstNegateNode(const AstNegateNode&) = delete;
+  AstNegateNode& operator=(const AstNegateNode&) = delete;
+
+  AstNegateNode(AstNegateNode&&) noexcept = default;
+  AstNegateNode& operator=(AstNegateNode&&) noexcept = default;
+
   std::unique_ptr<AstNode> node;
 };
 
@@ -66,6 +72,12 @@ struct AstLogicalNode {
   // If either node is already a logical node with the same op, it'll be re-used.
   AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op);
 
+  AstLogicalNode(const AstLogicalNode&) = delete;
+  AstLogicalNode& operator=(const AstLogicalNode&) = delete;
+
+  AstLogicalNode(AstLogicalNode&&) noexcept = default;
+  AstLogicalNode& operator=(AstLogicalNode&&) noexcept = default;
+
   LogicOp op;
   std::vector<AstNode> nodes;
 };
@@ -73,6 +85,12 @@ struct AstLogicalNode {
 // Selects specific field for subtree
 struct AstFieldNode {
   AstFieldNode(std::string field, AstNode&& node);
+
+  AstFieldNode(const AstFieldNode&) = delete;
+  AstFieldNode& operator=(const AstFieldNode&) = delete;
+
+  AstFieldNode(AstFieldNode&&) noexcept = default;
+  AstFieldNode& operator=(AstFieldNode&&) noexcept = default;
 
   std::string field;
   std::unique_ptr<AstNode> node;
@@ -104,6 +122,12 @@ struct AstKnnNode {
 
   AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
+  AstKnnNode(const AstKnnNode&) = delete;
+  AstKnnNode& operator=(const AstKnnNode&) = delete;
+
+  AstKnnNode(AstKnnNode&&) noexcept = default;
+  AstKnnNode& operator=(AstKnnNode&&) noexcept = default;
+
   friend std::ostream& operator<<(std::ostream& stream, const AstKnnNode& matrix) {
     return stream;
   }
@@ -125,6 +149,12 @@ using NodeVariants =
 
 struct AstNode : public NodeVariants {
   using variant::variant;
+
+  AstNode(const AstNode&) = delete;
+  AstNode& operator=(const AstNode&) = delete;
+
+  AstNode(AstNode&&) noexcept = default;
+  AstNode& operator=(AstNode&&) noexcept = default;
 
   friend std::ostream& operator<<(std::ostream& stream, const AstNode& matrix) {
     return stream;

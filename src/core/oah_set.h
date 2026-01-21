@@ -30,8 +30,6 @@ class OAHSet {  // Open Addressing Hash Set
 
     iterator(OAHSet* owner, uint32_t bucket_id, uint32_t pos_in_bucket)
         : owner_(owner), bucket_(bucket_id), pos_(pos_in_bucket) {
-      // TODO rewrite, it's inefficient
-      SetEntryIt();
     }
 
     void SetExpiryTime(uint32_t ttl_sec) {
@@ -83,7 +81,6 @@ class OAHSet {  // Open Addressing Hash Set
       return owner_;
     }
 
-   private:
     // find valid entry_ iterator starting from buckets_it_ and set it
     void SetEntryIt() {
       if (!owner_)
@@ -100,13 +97,15 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
    private:
-    OAHSet* owner_;
-    uint32_t bucket_;
-    uint32_t pos_;
+    OAHSet* owner_ = nullptr;
+    uint32_t bucket_ = 0;
+    uint32_t pos_ = 0;
   };
 
   iterator begin() {
-    return iterator(this, 0, 0);
+    iterator res(this, 0, 0);
+    res.SetEntryIt();
+    return res;
   }
 
   iterator end() {
@@ -288,6 +287,21 @@ class OAHSet {  // Open Addressing Hash Set
 
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash, capacity_log_);
+
+    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    const uint32_t capacity_mask = Capacity() - 1;
+
+    // fast check
+    for (uint32_t i = 0; i < kDisplacementSize; i++) {
+      const uint32_t bid = (bucket_id + i) & capacity_mask;
+      if ((entries_[bid].GetHash() == ext_hash) && entries_[bid].IsEntry()) {
+        if (entries_[bid].Key() == member) {
+          entries_[bid].ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+          return !entries_[bid].Empty() ? iterator{this, bid, 0} : end();
+        }
+      }
+    }
+
     auto res = FindInternal(bucket_id, member, hash);
     return res;
   }

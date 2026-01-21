@@ -59,8 +59,6 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
-ABSL_RETIRED_FLAG(bool, list_experimental_v2, true,
-                  "Enables dragonfly specific implementation of quicklist");
 
 namespace dfly {
 
@@ -71,15 +69,113 @@ using time_point = Transaction::time_point;
 
 namespace {
 
-QList* GetQLV2(const PrimeValue& mv) {
-  return (QList*)mv.RObjPtr();
+struct ListWrapper {
+  unsigned encoding = 0;
+  union {
+    QList* ql = nullptr;
+    uint8_t* listpack;
+  };
+
+  size_t Size() const {
+    return ql->Size();
+  }
+
+  auto Pop(QList::Where where) {
+    return ql->Pop(where);
+  }
+
+  void Push(string_view value, QList::Where where) {
+    ql->Push(value, where);
+  }
+
+  string First(QList::Where where) const {
+    auto it = ql->GetIterator(where);
+    CHECK(it.Next());
+    return it.Get().to_string();
+  }
+
+  std::optional<string> At(long index) const {
+    auto it = ql->GetIterator(index);
+    if (!it.Next())
+      return nullopt;
+    return it.Get().to_string();
+  }
+
+  vector<uint32_t> Pos(string_view element, int rank, uint32_t count, uint32_t max_len,
+                       QList::Where where) const;
+
+  bool Insert(string_view pivot, string_view elem, QList::InsertOpt insert_opt) {
+    return ql->Insert(pivot, elem, insert_opt);
+  }
+
+  unsigned Remove(string_view elem, unsigned count, QList::Where where);
+
+  bool Replace(long index, string_view elem) {
+    return ql->Replace(index, elem);
+  }
+
+  void Erase(long start, long count) {
+    ql->Erase(start, count);
+  }
+};
+
+ListWrapper GetLW(const PrimeValue& mv) {
+  return ListWrapper{.encoding = mv.Encoding(), .ql = static_cast<QList*>(mv.RObjPtr())};
 }
+
+vector<uint32_t> ListWrapper::Pos(string_view element, int rank, uint32_t count, uint32_t max_len,
+                                  QList::Where where) const {
+  DCHECK_GT(rank, 0);
+  vector<uint32_t> matches;
+
+  auto it = ql->GetIterator(where);
+  unsigned index = 0;
+  while (it.Next() && (max_len == 0 || index < max_len)) {
+    if (it.Get() == element) {
+      if (rank == 1) {
+        auto k = (where == QList::HEAD) ? index : ql->Size() - index - 1;
+        matches.push_back(k);
+        if (count && matches.size() >= count)
+          break;
+      } else {
+        rank--;
+      }
+    }
+    index++;
+  }
+  return matches;
+}
+
+unsigned ListWrapper::Remove(string_view elem, unsigned count, QList::Where where) {
+  unsigned removed = 0;
+  int64_t ival;
+
+  // try parsing the element into an integer.
+  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
+
+  auto it = ql->GetIterator(where);
+  auto is_match = [&](const QList::Entry& entry) {
+    return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
+  };
+
+  while (it.Next()) {
+    QList::Entry entry = it.Get();
+    if (is_match(entry)) {
+      it = ql->Erase(it);
+      removed++;
+      if (count && removed == count)
+        break;
+    }
+  }
+
+  return removed;
+}
+
+enum class ListDir : uint8_t { LEFT, RIGHT };
 
 QList::Where ToWhere(ListDir dir) {
   return dir == ListDir::LEFT ? QList::HEAD : QList::TAIL;
 }
-
-enum InsertParam : uint8_t { INSERT_BEFORE, INSERT_AFTER };
 
 ListDir ParseDir(facade::CmdArgParser* parser) {
   return parser->MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
@@ -114,10 +210,10 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   std::string value;
   size_t len;
 
-  QList* ql = GetQLV2(it->second);
+  ListWrapper lw = GetLW(it->second);
   QList::Where where = ToWhere(dir);
-  value = ql->Pop(where);
-  len = ql->Size();
+  value = lw.Pop(where);
+  len = lw.Size();
 
   it_res->post_updater.Run();
 
@@ -135,6 +231,25 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   return value;
 }
 
+QList* CreateOrGet(const OpArgs& op_args, string_view key, bool create, PrimeValue* pv) {
+  QList* res = nullptr;
+
+  if (create) {
+    res = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                        GetFlag(FLAGS_list_compress_depth));
+    pv->InitRobj(OBJ_LIST, kEncodingQL2, res);
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+    if (blocking_controller) {
+      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
+    }
+  } else {
+    DCHECK(pv->ObjType() == OBJ_LIST && pv->Encoding() == kEncodingQL2);
+    res = GetLW(*pv).ql;
+  }
+
+  return res;
+}
+
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
   auto& db_slice = op_args.GetDbSlice();
@@ -143,19 +258,17 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     return src_res.status();
 
   auto src_it = src_res->it;
-  QList* srcql_v2 = nullptr;
-  QList* destql_v2 = nullptr;
+  ListWrapper srcql_v2;
   string val;
   size_t prev_len = 0;
 
   DCHECK_EQ(src_it->second.Encoding(), kEncodingQL2);
-  srcql_v2 = GetQLV2(src_it->second);
-  prev_len = srcql_v2->Size();
+  srcql_v2 = GetLW(src_it->second);
+  prev_len = srcql_v2.Size();
 
   if (src == dest) {  // simple case.
-    val = srcql_v2->Pop(ToWhere(src_dir));
-    srcql_v2->Push(val, ToWhere(dest_dir));
-
+    val = srcql_v2.Pop(ToWhere(src_dir));
+    srcql_v2.Push(val, ToWhere(dest_dir));
     return val;
   }
 
@@ -169,19 +282,9 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
   src_it = src_res->it;
 
-  if (dest_res.is_new) {
-    destql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                              GetFlag(FLAGS_list_compress_depth));
-    dest_res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, destql_v2);
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
-    if (blocking_controller) {
-      blocking_controller->Awaken(op_args.db_cntx.db_index, dest);
-    }
-  } else {
-    destql_v2 = GetQLV2(dest_res.it->second);
-  }
+  QList* destql_v2 = CreateOrGet(op_args, dest, dest_res.is_new, &dest_res.it->second);
 
-  val = srcql_v2->Pop(ToWhere(src_dir));
+  val = srcql_v2.Pop(ToWhere(src_dir));
   destql_v2->Push(val, ToWhere(dest_dir));
 
   src_res->post_updater.Run();
@@ -208,17 +311,12 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
   const PrimeValue& pv = it_res.value()->second;
   DCHECK_GT(pv.Size(), 0u);  // should be not-empty.
 
-  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
-  QList* ql = GetQLV2(pv);
-  auto it = ql->GetIterator(ToWhere(dir));
-  CHECK(it.Next());
-
-  return it.Get().to_string();
+  ListWrapper lw = GetLW(pv);
+  return lw.First(ToWhere(dir));
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, const facade::ArgRange& vals, bool journal_rewrite) {
-  EngineShard* es = op_args.shard;
   DbSlice::ItAndUpdater res;
 
   if (skip_notexist) {
@@ -235,29 +333,13 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   size_t len = 0;
   DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
-  QList* ql_v2 = nullptr;
-
-  if (res.is_new) {
-    ql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                          GetFlag(FLAGS_list_compress_depth));
-    res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
-  } else {
-    DCHECK(res.it->second.ObjType() == OBJ_LIST && res.it->second.Encoding() == kEncodingQL2);
-    ql_v2 = GetQLV2(res.it->second);
-  }
+  QList* ql_v2 = CreateOrGet(op_args, key, res.is_new, &res.it->second);
 
   QList::Where where = ToWhere(dir);
   for (string_view v : vals) {
     ql_v2->Push(v, where);
   }
   len = ql_v2->Size();
-
-  if (res.is_new) {
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
-    if (blocking_controller) {
-      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
-    }
-  }
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
@@ -284,8 +366,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   size_t prev_len = 0;
   StringVec res;
 
-  QList* ql = GetQLV2(it->second);
-  prev_len = ql->Size();
+  ListWrapper lw = GetLW(it->second);
+  prev_len = lw.Size();
 
   if (prev_len < count) {
     count = prev_len;
@@ -297,7 +379,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
 
   QList::Where where = ToWhere(dir);
   for (unsigned i = 0; i < count; ++i) {
-    string val = ql->Pop(where);
+    string val = lw.Pop(where);
     if (return_results) {
       res.push_back(std::move(val));
     }
@@ -387,8 +469,8 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
   if (!res)
     return res.status();
 
-  QList* ql = GetQLV2(res.value()->second);
-  return ql->Size();
+  ListWrapper lw = GetLW(res.value()->second);
+  return lw.Size();
 }
 
 OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index) {
@@ -396,11 +478,11 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   if (!res)
     return res.status();
 
-  QList* ql = GetQLV2(res.value()->second);
-  auto it = ql->GetIterator(index);
-  if (!it.Next())
+  ListWrapper lw = GetLW(res.value()->second);
+  optional elem = lw.At(index);
+  if (!elem)
     return OpStatus::KEY_NOTFOUND;
-  return it.Get().to_string();
+  return std::move(*elem);
 }
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
@@ -413,35 +495,19 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_
     return it_res.status();
 
   const PrimeValue& pv = (*it_res)->second;
-  vector<uint32_t> matches;
+  ListWrapper lw = GetLW(pv);
 
-  QList* ql = GetQLV2(pv);
   QList::Where where = QList::HEAD;
   if (rank < 0) {
     rank = -rank;
     where = QList::TAIL;
   }
 
-  auto it = ql->GetIterator(where);
-  unsigned index = 0;
-  while (it.Next() && (max_len == 0 || index < max_len)) {
-    if (it.Get() == element) {
-      if (rank == 1) {
-        auto k = (where == QList::HEAD) ? index : ql->Size() - index - 1;
-        matches.push_back(k);
-        if (count && matches.size() >= count)
-          break;
-      } else {
-        rank--;
-      }
-    }
-    index++;
-  }
-  return matches;
+  return lw.Pos(element, rank, count, max_len, where);
 }
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
-                       InsertParam insert_param) {
+                       QList::InsertOpt insert_opt) {
   DCHECK(key.data() && pivot.data() && elem.data());
 
   auto& db_slice = op_args.GetDbSlice();
@@ -449,14 +515,12 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
   if (!it_res)
     return it_res.status();
 
-  PrimeValue& pv = it_res->it->second;
+  ListWrapper lw = GetLW(it_res->it->second);
 
   int res = -1;
 
-  QList* ql = GetQLV2(pv);
-  QList::InsertOpt insert_opt = (insert_param == INSERT_BEFORE) ? QList::BEFORE : QList::AFTER;
-  if (ql->Insert(pivot, elem, insert_opt)) {
-    res = int(ql->Size());
+  if (lw.Insert(pivot, elem, insert_opt)) {
+    res = int(lw.Size());
   }
 
   return res;
@@ -468,37 +532,16 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   if (!it_res)
     return it_res.status();
 
-  size_t len = 0;
-  unsigned removed = 0;
+  ListWrapper lw = GetLW(it_res->it->second);
 
-  int64_t ival;
-
-  // try parsing the element into an integer.
-  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
-
-  QList* ql = GetQLV2(it_res->it->second);
   QList::Where where = QList::HEAD;
-
   if (count < 0) {
     count = -count;
     where = QList::TAIL;
   }
 
-  auto it = ql->GetIterator(where);
-  auto is_match = [&](const QList::Entry& entry) {
-    return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
-  };
-
-  while (it.Next()) {
-    QList::Entry entry = it.Get();
-    if (is_match(entry)) {
-      it = ql->Erase(it);
-      removed++;
-      if (count && removed == count)
-        break;
-    }
-  }
-  len = ql->Size();
+  unsigned removed = lw.Remove(elem, count, where);
+  size_t len = lw.Size();
 
   it_res->post_updater.Run();
 
@@ -515,10 +558,9 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
   if (!it_res)
     return it_res.status();
 
-  auto it = it_res->it;
+  ListWrapper lw = GetLW(it_res->it->second);
   OpStatus status = OpStatus::OUT_OF_RANGE;
-  QList* ql = GetQLV2(it->second);
-  if (ql->Replace(index, elem))
+  if (lw.Replace(index, elem))
     status = OpStatus::OK;
   return status;
 }
@@ -556,9 +598,9 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     rtrim = llen - end - 1;
   }
 
-  QList* ql = GetQLV2(it->second);
-  ql->Erase(0, ltrim);
-  ql->Erase(-rtrim, rtrim);
+  ListWrapper lw = GetLW(it->second);
+  lw.Erase(0, ltrim);
+  lw.Erase(-rtrim, rtrim);
 
   it_res->post_updater.Run();
 
@@ -645,7 +687,7 @@ void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx, cmd_cntx->rb());
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
@@ -661,7 +703,7 @@ void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx, cmd_cntx->server_conn_cntx());
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -694,7 +736,7 @@ void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx, cmd_cntx->server_conn_cntx());
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -802,7 +844,7 @@ void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandConte
     return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
   };
 
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     return cmd_cntx->SendLong(result.value());
   }
@@ -827,7 +869,7 @@ void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
   };
 
-  OpResult<StringVec> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
@@ -864,7 +906,7 @@ void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   auto* cntx = cmd_cntx->server_conn_cntx();
-  Transaction* tx = cmd_cntx->tx;
+  Transaction* tx = cmd_cntx->tx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
       tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
@@ -945,7 +987,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(cb), false /* followed by another hop */);
+  cmd_cntx->tx()->Execute(std::move(cb), false /* followed by another hop */);
 
   // Find the first existing key from command arguments
   optional<string_view> key_to_pop;
@@ -958,7 +1000,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
       continue;
 
     const auto& [found_key, is_valid_type] = *found_keys_per_shard[sid];
-    ShardArgs shard_args = cmd_cntx->tx->GetShardArgs(sid);
+    ShardArgs shard_args = cmd_cntx->tx()->GetShardArgs(sid);
 
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it) {
       if (found_key == *it && it.index() < min_index) {
@@ -972,7 +1014,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Handle errors and empty cases first
   if (!key_to_pop || found_wrong_type) {
-    cmd_cntx->tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     if (found_wrong_type) {
       response_builder->SendError(kWrongTypeErr);
     } else {
@@ -993,7 +1035,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx->Execute(std::move(cb_pop), true);
+  cmd_cntx->tx()->Execute(std::move(cb_pop), true);
 
   if (result) {
     response_builder->StartArray(2);
@@ -1033,7 +1075,7 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   ConnectionContext* conn_cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
+      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
       &conn_cntx->paused);
 
   if (popped_key.ok()) {
@@ -1072,7 +1114,7 @@ void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     cmd_cntx->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -1121,7 +1163,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
-  Transaction* trans = cmd_cntx->tx;
+  Transaction* trans = cmd_cntx->tx();
   auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1156,7 +1198,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  OpResult<string> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1170,7 +1212,7 @@ void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
+  QList::InsertOpt ins_opt = parser.MapNext("AFTER", QList::AFTER, "BEFORE", QList::BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -1179,10 +1221,10 @@ void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK(pivot.data() && elem.data());
 
   auto cb = [&, &pivot = pivot, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
+    return OpInsert(t->GetOpArgs(shard), key, pivot, elem, ins_opt);
   };
 
-  OpResult<int> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     return rb->SendLong(result.value_or(0));
   }
@@ -1204,7 +1246,7 @@ void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  OpStatus st = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpStatus st = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (st == OpStatus::KEY_NOTFOUND)
     st = OpStatus::OK;
   cmd_cntx->SendError(st);
@@ -1226,7 +1268,7 @@ void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  auto res = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
     return rb->SendError(res.status());
   }
@@ -1249,7 +1291,7 @@ void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<uint32_t> result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     return cmd_cntx->SendLong(result.value_or(0));
   }
@@ -1270,7 +1312,7 @@ void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<void> result = cmd_cntx->tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (result) {
     cmd_cntx->rb()->SendOk();
   } else {
@@ -1295,7 +1337,7 @@ void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
   if (auto err = parser.TakeError(); err)
     return cmd_cntx->SendError(err.MakeReply());
 
-  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx, cmd_cntx->rb());
+  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
 }  // namespace

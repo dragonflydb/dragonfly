@@ -5,6 +5,7 @@
 
 #include "facade/dragonfly_connection.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
@@ -396,14 +397,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
     }
-    size_t operator()(const AclUpdateMessagePtr& msg) {
-      size_t key_cap = std::accumulate(
-          msg->keys.key_globs.begin(), msg->keys.key_globs.end(), 0, [](auto acc, auto& str) {
-            return acc + (str.first.capacity() * sizeof(char)) + sizeof(str.second);
-          });
-      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(char) +
-             msg->commands.capacity() * sizeof(uint64_t) + key_cap;
-    }
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
     }
@@ -431,7 +424,6 @@ struct Connection::AsyncOperations {
   void operator()(const PubMessage& msg);
   void operator()(ParsedCommand& msg);
   void operator()(const MonitorMessage& msg);
-  void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
   void operator()(CheckpointMessage msg);
   void operator()(const InvalidationMessage& msg);
@@ -448,17 +440,6 @@ struct Connection::AsyncOperations {
 void Connection::AsyncOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
-}
-
-void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
-  if (self->cntx()) {
-    if (msg.username == self->cntx()->authed_username) {
-      self->cntx()->acl_commands = msg.commands;
-      self->cntx()->keys = msg.keys;
-      self->cntx()->pub_sub = msg.pub_sub;
-      self->cntx()->acl_db_idx = msg.db_indx;
-    }
-  }
 }
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
@@ -500,7 +481,7 @@ void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
   DVLOG(2) << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
-  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd);
+  self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC);
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
@@ -1178,7 +1159,10 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
-  auto dispatch_sync = [this] { service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_); };
+  auto dispatch_sync = [this] {
+    service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
+                              facade::AsyncPreference::ONLY_SYNC);
+  };
 
   auto dispatch_async = [this]() -> MessageHandle {
     PipelineMessagePtr ptr = GetFromPoolOrCreate();
@@ -1458,7 +1442,7 @@ void Connection::SquashPipeline() {
   auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
     // Count control messages at front
     size_t ctrl_offset = 0;
-    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsControl()) {
+    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsCheckPoint()) {
       ctrl_offset++;
     }
     const auto& elem = dispatch_q_[ctrl_offset + i++];
@@ -1496,7 +1480,7 @@ void Connection::SquashPipeline() {
     stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
   }
   auto it = dispatch_q_.begin();
-  while (it->IsControl())  // Skip all newly received intrusive messages
+  while (it->IsCheckPoint())  // Skip newly received checkpoint messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit) {
@@ -1522,7 +1506,7 @@ void Connection::ClearPipelinedMessages() {
   // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsControl())
+    if (msg.IsCheckPoint())
       visit(async_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
@@ -1545,7 +1529,7 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "df:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsControl();
+  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsCheckPoint();
   absl::StrAppend(&info, "dq:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dq:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dq:intrusive=", intrusive_front, ", ");
@@ -1753,10 +1737,6 @@ void Connection::SendMonitorMessageAsync(string msg) {
   SendAsync({MonitorMessage{std::move(msg)}});
 }
 
-void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
-}
-
 void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
   if (!IsCurrentlyDispatching())
     return;
@@ -1793,7 +1773,7 @@ void Connection::SendAsync(MessageHandle msg) {
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints) if
   // async_fb_ is running (joinable).
-  if (cc_->conn_closing && (!msg.IsControl() || !async_fb_.IsJoinable()))
+  if (cc_->conn_closing && (!msg.IsCheckPoint() || !async_fb_.IsJoinable()))
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
@@ -1833,9 +1813,9 @@ void Connection::SendAsync(MessageHandle msg) {
     pending_pipeline_bytes_ += used_mem;
   }
 
-  if (msg.IsControl()) {
+  if (msg.IsCheckPoint()) {
     auto it = dispatch_q_.begin();
-    while (it < dispatch_q_.end() && it->IsControl())
+    while (it < dispatch_q_.end() && it->IsCheckPoint())
       ++it;
     dispatch_q_.insert(it, std::move(msg));
   } else {
@@ -2053,70 +2033,51 @@ bool Connection::ParseMCBatch() {
 }
 
 bool Connection::ExecuteMCBatch() {
+  auto advance_head = [this]() -> ParsedCommand* {
+    auto* cmd = parsed_head_;
+    parsed_head_ = cmd->next;
+    ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
+    return parsed_head_;
+  };
+
   // Execute sequentially all parsed commands.
-
-  unsigned num_pipelined = 0;
-  while (parsed_to_execute_) {
-    auto* cmd = parsed_to_execute_;
-    bool is_head = (cmd == parsed_head_);
-
-    bool has_replied = false;
-
-    if (is_head) {
-      // Protocol parse errors create commands with already cached replies.
-      // Try sending payload now in case it's already set.
-      has_replied = cmd->SendPayload();
-      DVLOG(2) << "Maybe replying head: " << has_replied;
-    } else {
-      // We are not the head command, so we can not reply directly.
-      if (cmd->IsDeferredReply()) {
-        has_replied = true;  // The error reply is filled by the parser.
-      } else {
-        cmd->SetDeferredReply();
-      }
-    }
-
-    if (!has_replied) {
-      DCHECK(cmd->conn_cntx() == cc_.get());
-      service_->DispatchMC(cmd);
-
-      // If the reply was not deferred, then DispatchMC has surely replied.
-      has_replied = !cmd->IsDeferredReply();
-      DVLOG(2) << "Executed command, has_replied: " << has_replied;
-    }
-
-    if (has_replied) {
-      if (num_pipelined > 0) {
-        stats_->pipeline_dispatch_commands += num_pipelined;
-        stats_->pipeline_dispatch_calls++;
-        num_pipelined = 0;
-      }
-    } else {
-      num_pipelined++;
-    }
-
-    parsed_to_execute_ = cmd->next;
-
-    // Only if commands have deferred replies we need to keep them in the parsed queue
-    // until they complete.
-    if (is_head && has_replied) {
-      // This is head and it replied to the client socket, so we can remove it from the parsed
-      // queue right away.
-      // This optimization makes the ReplyMCBatch call a no-op unless we actually run asynchronous
-      // commands with deferred replies.
-      parsed_head_ = parsed_to_execute_;
-      ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
-    }
-
-    if (reply_builder_->GetError()) {
+  for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
+    if (reply_builder_->GetError())
       return false;
+    bool is_head = cmd == parsed_head_;
+
+    // parser errors are stored as deferred replies
+    if (cmd->IsDeferredReply() && cmd->CanReply()) {
+      if (is_head) {
+        cmd->SendReply();
+        cmd = advance_head();
+      } else {
+        cmd = cmd->next;
+      }
+      continue;
+    }
+
+    // We must continue with async execution if we already have executing commands
+    auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
+
+    if (!ioloop_v2_)  // only v2 loop supports any async commands so far
+      mode = AsyncPreference::ONLY_SYNC;
+
+    if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK)
+      break;  // Sync command. Wait for current async commands to finish
+
+    stats_->pipeline_dispatch_commands++;
+    if (is_head)
+      stats_->pipeline_dispatch_calls++;
+
+    if (cmd->IsDeferredReply()) {
+      cmd = cmd->next;
+    } else {
+      DCHECK(is_head);       // only head can execute sync
+      cmd = advance_head();  // advance it
     }
   }
 
-  if (num_pipelined > 0) {
-    stats_->pipeline_dispatch_commands += num_pipelined;
-    stats_->pipeline_dispatch_calls++;
-  }
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
   return true;
@@ -2128,21 +2089,19 @@ bool Connection::ReplyMCBatch() {
     return true;
   }
 
+  // Loop over finished command and break on first blocked
   reply_builder_->SetBatchMode(true);
-  while (parsed_head_ != parsed_to_execute_) {
-    auto* cmd = parsed_head_;
-    if (!cmd->PollHeadForCompletion())
+  for (auto& cmd = parsed_head_; cmd != parsed_to_execute_;) {
+    if (!cmd->CanReply())
       break;
 
-    // This command finished processing and can be replied.
-    auto* next = cmd->next;
+    current_wait_.reset();  // we must free waiter before proceeding with other commands
+    cmd->SendReply();
 
-    cmd->SendPayload();
-    ReleaseParsedCommand(cmd, next != parsed_to_execute_ /* is_pipelined */);
-    parsed_head_ = next;
-    if (reply_builder_->GetError()) {
+    auto* prev = exchange(cmd, cmd->next);
+    ReleaseParsedCommand(prev, cmd != parsed_to_execute_ /* is_pipelined */);
+    if (reply_builder_->GetError())
       return false;
-    }
   }
 
   if (parsed_head_ == nullptr)
@@ -2212,11 +2171,7 @@ void Connection::DestroyParsedQueue() {
     auto* cmd = parsed_head_;
     stats_->dispatch_queue_bytes -= cmd->UsedMemory();
     parsed_head_ = cmd->next;
-
-    if (cmd->MarkForDestruction()) {  // whether async operation finished or not started
-      DVLOG(2) << "Deleting parsed command " << cmd;
-      delete cmd;
-    }
+    delete cmd;
   }
   parsed_tail_ = nullptr;
   parsed_cmd_q_len_ = 0;
@@ -2374,8 +2329,18 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
+  // TODO: restructure due to bad OnCompletion interface
+  auto ioevent_cb = [this]() { io_event_.notify(); };
+  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
+  absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
+
   do {
     HandleMigrateRequest();
+
+    // Register completion for current head if its pending and we don't wait
+    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_ && !current_wait_.has_value()) {
+      current_wait_.emplace(cmd, &ioevent_waiter);
+    }
 
     if (io_buf_.InputLen() == 0) {
       // Poll again for readiness. The event handler registered above is edge triggered
@@ -2387,8 +2352,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // we rely on the kernel to keep feeding us data until we multishot is disabled.
       DoReadOnRecv(FiberSocketBase::RecvNotification{true});
       io_event_.await([this]() {
-        return io_buf_.InputLen() > 0 || (parsed_head_ && parsed_head_->PollHeadForCompletion()) ||
-               io_ec_;
+        // TODO: optimize CanReply with looking up waiter key
+        bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
+        bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
+        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || io_ec_;
       });
     }
 
@@ -2409,7 +2376,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
     } else {
       parse_status = NEED_MORE;
+
       if (parsed_head_) {
+        if (parsed_head_ == parsed_to_execute_)
+          ExecuteMCBatch();
         ReplyMCBatch();
       }
     }
@@ -2459,6 +2429,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   } while (peer->IsOpen());
 
   return parse_status;
+}
+
+Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w)
+    : key(cmd->Blocker()->OnCompletion(w)) {
 }
 
 void ResetStats() {
