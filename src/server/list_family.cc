@@ -90,13 +90,13 @@ struct ListWrapper {
 
   string First(QList::Where where) const {
     auto it = ql->GetIterator(where);
-    CHECK(it.Next());
+    CHECK(it.Valid());
     return it.Get().to_string();
   }
 
   std::optional<string> At(long index) const {
     auto it = ql->GetIterator(index);
-    if (!it.Next())
+    if (!it.Valid())
       return nullopt;
     return it.Get().to_string();
   }
@@ -129,8 +129,13 @@ vector<uint32_t> ListWrapper::Pos(string_view element, int rank, uint32_t count,
   vector<uint32_t> matches;
 
   auto it = ql->GetIterator(where);
+  if (!it.Valid())
+    return matches;
+
   unsigned index = 0;
-  while (it.Next() && (max_len == 0 || index < max_len)) {
+  do {
+    if (max_len != 0 && index >= max_len)
+      break;
     if (it.Get() == element) {
       if (rank == 1) {
         auto k = (where == QList::HEAD) ? index : ql->Size() - index - 1;
@@ -142,7 +147,7 @@ vector<uint32_t> ListWrapper::Pos(string_view element, int rank, uint32_t count,
       }
     }
     index++;
-  }
+  } while (it.Next());
   return matches;
 }
 
@@ -158,12 +163,16 @@ unsigned ListWrapper::Remove(string_view elem, unsigned count, QList::Where wher
     return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
   };
 
-  while (it.Next()) {
+  while (it.Valid()) {
     QList::Entry entry = it.Get();
     if (is_match(entry)) {
       it = ql->Erase(it);
       removed++;
       if (count && removed == count)
+        break;
+      // iter now points to next element, don't call Next()
+    } else {
+      if (!it.Next())
         break;
     }
   }

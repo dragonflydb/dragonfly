@@ -69,9 +69,14 @@ class QList {
   using Entry = CollectionEntry;
   class Iterator {
    public:
+    // Returns true if the iterator is valid (points to an element).
+    bool Valid() const {
+      return zi_ != nullptr;
+    }
+
     Entry Get() const;
 
-    // Returns false if no more entries.
+    // Advances to the next/prev element. Returns false if no more entries.
     bool Next();
 
    private:
@@ -155,14 +160,13 @@ class QList {
   void Iterate(IterateFunc cb, long start, long end) const;
 
   // Returns an iterator to tail or the head of the list.
-  // To mirror the quicklist interface, the iterator is not valid until Next() is called.
-  // TODO: to fix this.
+  // result.Valid() is true if the list is not empty.
   Iterator GetIterator(Where where) const;
 
   // Returns an iterator at a specific index 'idx',
   // or Invalid iterator if index is out of range.
   // negative index - means counting from the tail.
-  // Requires calling subsequent Next() to initialize the iterator.
+  // result.Valid() is true if the index is within range.
   Iterator GetIterator(long idx) const;
 
   uint32_t node_count() const {
@@ -243,6 +247,10 @@ class QList {
 
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
+
+  // Initializes iterator's zi_ to point to the element at offset_.
+  // Decompresses the node if needed. Assumes current_ is not null.
+  void InitIteratorEntry(Iterator* it) const;
 
   Node* head_ = nullptr;
   size_t malloc_size_ = 0;  // size of the quicklist struct
