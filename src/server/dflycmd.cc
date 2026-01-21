@@ -80,11 +80,17 @@ bool ToSyncId(string_view str, uint32_t* num) {
 }
 
 bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* replica,
-                              EngineShard* shard) {
+                              EngineShard* shard, bool with_ping) {
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
   namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
-  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+
+  if (with_ping) {
+    // PING forces replica to send the most recent last_acked_lsn.
+    // ACKS from the replica are send only every X commands or every 3 seconds (flag configurable)
+    // or when forced (by the PING above).
+    shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+  }
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
 
@@ -549,7 +555,8 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   if (*status == OpStatus::OK) {
     dfly::SharedLock lk{replica_ptr->shared_mu};
     auto cb = [replica_ptr = replica_ptr, end_time, &catchup_success](EngineShard* shard) {
-      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+      // PING to force the replica to send the last acked lsn.
+      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard, true)) {
         catchup_success.store(false);
       }
     };
@@ -574,7 +581,10 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
       }
 
       auto cb = [repl_ptr = repl_ptr, end_time, &rest_catchup_success](EngineShard* shard) {
-        if (!WaitReplicaFlowToCatchup(end_time, repl_ptr.get(), shard)) {
+        // We can't PING here as it will advance our LSN and disable partial sync for these nodes.
+        // Instead, wait and be optimistic that the end_time is not short. If the nodes didn't sync
+        // up in time, it's ok, they will fall back to full sync when reconfigured.
+        if (!WaitReplicaFlowToCatchup(end_time, repl_ptr.get(), shard, false)) {
           rest_catchup_success.store(false);
         }
       };

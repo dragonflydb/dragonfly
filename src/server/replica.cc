@@ -627,6 +627,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
       DVLOG(1) << "Calling Flush on all slots " << this;
 
+      passed_full_sync_ = false;
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
       } else {
@@ -663,6 +664,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
     RdbLoader::PerformPostLoad(&service_);
   }
+
+  passed_full_sync_ = true;
 
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
@@ -1280,6 +1283,7 @@ auto Replica::GetSummary() const -> Summary {
     }
     res.psync_successes = psync_successes_;
     res.psync_attempts = psync_attempts_;
+    res.passed_full_sync = passed_full_sync_;
     return res;
   };
 
@@ -1318,14 +1322,17 @@ std::string Replica::GetCurrentPhase() const {
 }
 
 std::vector<unsigned> Replica::GetFlowMapAtIndex(size_t index) const {
-  DCHECK(index < thread_flow_map_.size());
+  // Not all proactors have flows
+  if (index >= thread_flow_map_.size()) {
+    return {};
+  }
   return thread_flow_map_[index];
 }
 
 size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const {
   size_t total_shard_lsn = 0;
   for (auto index : indexes) {
-    total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
+    total_shard_lsn += shard_flows_[index]->JournalExecutedCount();
   }
   return total_shard_lsn;
 }
