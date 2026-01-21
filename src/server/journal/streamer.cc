@@ -583,7 +583,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
         ++stats_.keys_written;
         ++shard_stats.total_migrated_keys;
         uint64_t expire = 0;
-        if (pv.HasExpire()) {
+        if (it->first.HasExpire()) {
           auto eit = expire_table.Find(it->first);
           CHECK(IsValid(eit)) << " " << expire_table.size();
           expire = db_slice_->ExpireTime(eit->second);

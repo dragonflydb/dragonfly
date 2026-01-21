@@ -268,6 +268,9 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
       return OpStatus::WRONG_TYPE;
   }
 
+  if (!add_res.is_new && zparams.override)
+    db_slice.RemoveExpire(op_args.db_cntx.db_index, it);
+
   auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.is_new && blocking_controller) {
     blocking_controller->Awaken(op_args.db_cntx.db_index, key);

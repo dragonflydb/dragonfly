@@ -394,7 +394,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
       oinfo.external_len.emplace(pv.GetExternalSlice().second);
     }
 
-    if (pv.HasExpire()) {
+    if (it->first.HasExpire()) {
       ExpireIterator exp_it = exp_t->Find(it->first);
       CHECK(!exp_it.is_done());
 

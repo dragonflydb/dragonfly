@@ -631,7 +631,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   auto& db_slice = op_args.GetDbSlice();
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
-  if (prime_it->second.HasExpire()) {
+  if (prime_it->first.HasExpire()) {
     it = db_slice.ExpireIfNeeded(op_args.db_cntx, it).it;
     if (!IsValid(it))
       return false;
@@ -640,9 +640,9 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
     if (opts.mask == ScanOpts::Mask::Volatile) {
-      matches &= it->second.HasExpire();
+      matches &= it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Permanent) {
-      matches &= !it->second.HasExpire();
+      matches &= !it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Accessed) {
       matches &= it->first.WasTouched();
     } else if (opts.mask == ScanOpts::Mask::Untouched) {
@@ -892,7 +892,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore expire flag after std::move.
-  from_res.it->second.SetExpire(IsValid(from_res.exp_it));
+  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
 
   db_slice.Del(op_args.db_cntx, from_res.it);
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
@@ -940,12 +940,12 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore the expire flag on 'from' so we could delete it from expire table.
-  from_res.it->second.SetExpire(IsValid(from_res.exp_it));
+  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
 
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     to_res.it->second = std::move(from_obj);
-    to_res.it->second.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
+    to_res.it->first.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
 
     // It is guaranteed that UpdateExpire() call does not erase the element because then
     // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
