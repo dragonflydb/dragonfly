@@ -7,7 +7,8 @@
 #include <absl/functional/function_ref.h>
 
 #include <string>
-#include <variant>
+
+#include "core/collection_entry.h"
 
 #define QL_FILL_BITS 16
 #define QL_COMP_BITS 16
@@ -65,44 +66,7 @@ class QList {
     size_t GetLZF(void** data) const;
   };
 
-  // Provides wrapper around the references to the listpack entries.
-  class Entry {
-    std::variant<std::string_view, int64_t> value_;
-
-   public:
-    Entry(const char* value, size_t length) : value_{std::string_view(value, length)} {
-    }
-
-    explicit Entry(int64_t longval) : value_{longval} {
-    }
-
-    // Assumes value is not int64.
-    std::string_view view() const {
-      return std::get<std::string_view>(value_);
-    }
-
-    bool is_int() const {
-      return std::holds_alternative<int64_t>(value_);
-    }
-
-    int64_t ival() const {
-      return std::get<int64_t>(value_);
-    }
-
-    bool operator==(std::string_view sv) const;
-
-    friend bool operator==(std::string_view sv, const Entry& entry) {
-      return entry == sv;
-    }
-
-    std::string to_string() const {
-      if (std::holds_alternative<int64_t>(value_)) {
-        return std::to_string(std::get<int64_t>(value_));
-      }
-      return std::string(view());
-    }
-  };
-
+  using Entry = CollectionEntry;
   class Iterator {
    public:
     Entry Get() const;

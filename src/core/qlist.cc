@@ -1241,15 +1241,6 @@ bool QList::Erase(const long start, unsigned count) {
   return true;
 }
 
-bool QList::Entry::operator==(std::string_view sv) const {
-  if (std::holds_alternative<int64_t>(value_)) {
-    char buf[absl::numbers_internal::kFastToBufferSize];
-    char* end = absl::numbers_internal::FastIntToBuffer(std::get<int64_t>(value_), buf);
-    return sv == std::string_view(buf, end - buf);
-  }
-  return view() == sv;
-}
-
 bool QList::Iterator::Next() {
   if (!current_)
     return false;

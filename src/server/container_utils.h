@@ -4,6 +4,7 @@
 #pragma once
 
 #include "base/logging.h"
+#include "core/collection_entry.h"
 #include "core/compact_object.h"
 #include "server/table.h"
 
@@ -25,45 +26,7 @@ inline bool IsContainer(const PrimeValue& pv) {
   return (type == OBJ_LIST || type == OBJ_SET || type == OBJ_ZSET);
 }
 
-// Stores either:
-// - A single long long value (longval) when value = nullptr
-// - A single char* (value) when value != nullptr
-struct ContainerEntry {
-  ContainerEntry(const char* value, size_t length) : value_{value}, length_{length} {
-  }
-  ContainerEntry(long long longval) : value_{nullptr}, longval_{longval} {
-  }
-
-  std::string ToString() const {
-    if (value_)
-      return {value_, length_};
-    else
-      return absl::StrCat(longval_);
-  }
-
-  bool IsString() const {
-    return value_ != nullptr;
-  }
-
-  const char* data() const {
-    return value_;
-  }
-
-  size_t size() const {
-    return length_;
-  }
-
-  long long as_long() const {
-    return longval_;
-  }
-
- private:
-  const char* value_;
-  union {
-    size_t length_;
-    long long longval_;
-  };
-};
+using ContainerEntry = CollectionEntry;
 
 using IterateFunc = std::function<bool(ContainerEntry)>;
 using IterateSortedFunc = std::function<bool(ContainerEntry, double)>;
