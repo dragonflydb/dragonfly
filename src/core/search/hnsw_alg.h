@@ -2,6 +2,7 @@
 
 #include <hnswlib/hnswalg.h>
 #include <hnswlib/visited_list_pool.h>
+#include <mimalloc.h>
 
 #pragma once
 
@@ -122,12 +123,12 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     label_offset_ = size_links_level0_ + vector_ptr_size;
     offsetLevel0_ = 0;
 
-    data_level0_memory_ = (char*)malloc(max_elements_ * size_data_per_element_);
+    data_level0_memory_ = (char*)mi_malloc(max_elements_ * size_data_per_element_);
     if (data_level0_memory_ == nullptr)
       throw std::runtime_error("Not enough memory");
 
     if (copy_vector) {
-      data_vector_memory_ = (char*)malloc(max_elements_ * data_size_);
+      data_vector_memory_ = (char*)mi_malloc(max_elements_ * data_size_);
       if (data_vector_memory_ == nullptr)
         throw std::runtime_error("Not enough memory");
     }
@@ -140,7 +141,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     enterpoint_node_ = -1;
     maxlevel_ = -1;
 
-    linkLists_ = (char**)malloc(sizeof(void*) * max_elements_);
+    linkLists_ = (char**)mi_malloc(sizeof(void*) * max_elements_);
     if (linkLists_ == nullptr)
       throw std::runtime_error("Not enough memory: HierarchicalNSW failed to allocate linklists");
     size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
@@ -153,14 +154,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   void clear() {
-    free(data_level0_memory_);
+    mi_free(data_level0_memory_);
     data_level0_memory_ = nullptr;
     for (tableint i = 0; i < cur_element_count; i++) {
       if (element_levels_[i] > 0)
-        free(linkLists_[i]);
+        mi_free(linkLists_[i]);
     }
-    free(data_vector_memory_);
-    free(linkLists_);
+    mi_free(data_vector_memory_);
+    mi_free(linkLists_);
     linkLists_ = nullptr;
     cur_element_count = 0;
     visited_list_pool_.reset(nullptr);
@@ -666,7 +667,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     // Reallocate base layer
     char* data_level0_memory_new =
-        (char*)realloc(data_level0_memory_, new_max_elements * size_data_per_element_);
+        (char*)mi_realloc(data_level0_memory_, new_max_elements * size_data_per_element_);
     if (data_level0_memory_new == nullptr)
       throw std::runtime_error("Not enough memory: resizeIndex failed to allocate base layer");
     data_level0_memory_ = data_level0_memory_new;
@@ -674,14 +675,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     // If we copy vectors, reallocate also vector data memory
     if (copy_vector_) {
       char* data_vector_memory_new =
-          (char*)realloc(data_vector_memory_, new_max_elements * data_size_);
+          (char*)mi_realloc(data_vector_memory_, new_max_elements * data_size_);
       if (data_vector_memory_new == nullptr)
         throw std::runtime_error("Not enough memory: resizeIndex failed to allocate vector memory");
       data_vector_memory_ = data_vector_memory_new;
     }
 
     // Reallocate all other layers
-    char** linkLists_new = (char**)realloc(linkLists_, sizeof(void*) * new_max_elements);
+    char** linkLists_new = (char**)mi_realloc(linkLists_, sizeof(void*) * new_max_elements);
     if (linkLists_new == nullptr)
       throw std::runtime_error("Not enough memory: resizeIndex failed to allocate other layers");
     linkLists_ = linkLists_new;
@@ -819,13 +820,13 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
         input.seekg(pos, input.beg);
 
-        data_level0_memory_ = (char *) malloc(max_elements * size_data_per_element_);
+        data_level0_memory_ = (char *) mi_malloc(max_elements * size_data_per_element_);
         if (data_level0_memory_ == nullptr)
             throw std::runtime_error("Not enough memory: loadIndex failed to allocate level0");
         input.read(data_level0_memory_, cur_element_count * size_data_per_element_);
 
         if(copy_vector_) {
-          data_vector_memory_ = (char *) malloc(max_elements * data_size_);
+          data_vector_memory_ = (char *) mi_malloc(max_elements * data_size_);
           if (data_vector_memory_ == nullptr)
               throw std::runtime_error("Not enough memory: loadIndex failed to allocate vector memory");
           input.read(data_vector_memory_, cur_element_count * data_size_);
@@ -839,7 +840,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
         visited_list_pool_.reset(new VisitedListPool(1, max_elements));
 
-        linkLists_ = (char **) malloc(sizeof(void *) * max_elements);
+        linkLists_ = (char **) mi_malloc(sizeof(void *) * max_elements);
         if (linkLists_ == nullptr)
             throw std::runtime_error("Not enough memory: loadIndex failed to allocate linklists");
         element_levels_ = std::vector<int>(max_elements);
@@ -854,7 +855,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
                 linkLists_[i] = nullptr;
             } else {
                 element_levels_[i] = linkListSize / size_links_per_element_;
-                linkLists_[i] = (char *) malloc(linkListSize);
+                linkLists_[i] = (char *) mi_malloc(linkListSize);
                 if (linkLists_[i] == nullptr)
                     throw std::runtime_error("Not enough memory: loadIndex failed to allocate linklist");
                 input.read(linkLists_[i], linkListSize);
@@ -1268,7 +1269,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     if (curlevel) {
-      linkLists_[cur_c] = (char*)malloc(size_links_per_element_ * curlevel + 1);
+      linkLists_[cur_c] = (char*)mi_malloc(size_links_per_element_ * curlevel + 1);
       if (linkLists_[cur_c] == nullptr)
         throw std::runtime_error("Not enough memory: addPoint failed to allocate linklist");
       memset(linkLists_[cur_c], 0, size_links_per_element_ * curlevel + 1);
