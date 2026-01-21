@@ -716,7 +716,7 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
-  return {*base_, key_index_.Size()};
+  return {*base_, key_index_.Size(), nullopt};
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {

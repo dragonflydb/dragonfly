@@ -207,7 +207,7 @@ struct DocIndexInfo {
   size_t num_docs = 0;
 
   // HNSW metadata for vector index (if present)
-  std::optional<search::HnswIndexMetadata> hnsw_metadata;
+  std::optional<search::HnswIndexMetadata> hnsw_metadata = std::nullopt;
 
   // Build original ft.create command that can be used to re-create this index
   std::string BuildRestoreCommand() const;
