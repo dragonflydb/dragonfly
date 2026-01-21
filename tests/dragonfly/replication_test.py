@@ -3677,6 +3677,9 @@ async def test_repl_offset(df_factory):
 
     df_factory.start_all([master, replica1, replica2, replica3])
     c_master = master.client()
+    c_replica1 = replica1.client()
+    c_replica2 = replica2.client()
+    c_replica3 = replica3.client()
 
     seeder = DebugPopulateSeeder(key_target=50)
     await seeder.run(c_master)
