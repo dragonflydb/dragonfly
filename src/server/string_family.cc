@@ -1059,12 +1059,9 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Experimental async path
   if (cmd_cntx->IsDeferredReply()) {
-    boost::intrusive_ptr<Transaction> tx(cmd_cntx->tx());
-
-    auto cb = [cmd_cntx, sparams, tx]() mutable {
-      EngineShard* shard = EngineShard::tlocal();
+    auto cb = [cmd_cntx, sparams](Transaction* t, EngineShard* shard) {
       bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-      SetCmd set_cmd(OpArgs{shard, nullptr, tx->GetDbContext()}, explicit_journal);
+      SetCmd set_cmd(OpArgs{shard, nullptr, t->GetDbContext()}, explicit_journal);
 
       // If we are here, it's Memcache SET (because IsDeferredReply() is true).
       // So we can use mc_command data.
@@ -1075,15 +1072,13 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       std::string_view value = cmd_cntx->mc_command()->value();
 
       // This is what a hop finishes with, but inside transaction code
-      *tx->LocalResultPtr() = set_cmd.Set(sparams, key, value);
-      tx->Blocker()->Dec();
+      return set_cmd.Set(sparams, key, value);
     };
+    auto wrapped_cb = std::make_unique<decltype(cb)>(std::move(cb));
+    cmd_cntx->tx()->SingleHopSingleKeyAsync(*wrapped_cb);
 
-    cmd_cntx->tx()->Blocker()->Add(1);
-    ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
-    shard_set->Add(shard_id, cb);  // cb is copied here
-
-    auto replier = [cmd_cntx, tx](SinkReplyBuilder* rb) {
+    auto replier = [cmd_cntx, tx = boost::intrusive_ptr{cmd_cntx->tx()},
+                    wrapped_cb = std::move(wrapped_cb)](SinkReplyBuilder* rb) {
       auto status = *tx->LocalResultPtr();
       if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
         // Relevant to MC.
@@ -1096,8 +1091,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       }
       LOG(FATAL) << "TBD " << status;
     };
-    cmd_cntx->Resolve(tx->Blocker(), std::move(replier));
-
+    cmd_cntx->Resolve(cmd_cntx->tx()->Blocker(), std::move(replier));
     return;
   }
 
