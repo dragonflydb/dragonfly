@@ -193,6 +193,8 @@ class ParsedCommand : public cmn::BackedArguments {
   std::variant<payload::Payload, AsyncTask> reply_;
 };
 
+#ifdef __linux__
 static_assert(sizeof(ParsedCommand) == 232);
+#endif
 
 }  // namespace facade
