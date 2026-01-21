@@ -2911,7 +2911,12 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   if (!def.empty() && def[0] == '{') {
     // New JSON format with HNSW metadata
     try {
-      auto json = jsoncons::json::parse(def);
+      auto json_opt = JsonFromString(def);
+      if (!json_opt) {
+        LOG(ERROR) << "Invalid search index JSON: " << def;
+        return;
+      }
+      const auto& json = *json_opt;
       string index_name = json["name"].as<string>();
       string cmd = json["cmd"].as<string>();
 

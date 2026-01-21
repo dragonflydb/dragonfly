@@ -1412,13 +1412,13 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
         }
 
         // Save index definition as JSON with HNSW metadata
-        jsoncons::json index_json;
+        TmpJson index_json;
         index_json["name"] = index_name;
         index_json["cmd"] = index_info.BuildRestoreCommand();
 
         if (index_info.hnsw_metadata.has_value()) {
           const auto& meta = index_info.hnsw_metadata.value();
-          jsoncons::json hnsw_meta;
+          TmpJson hnsw_meta;
           hnsw_meta["max_elements"] = meta.max_elements;
           hnsw_meta["cur_element_count"] = meta.cur_element_count;
           hnsw_meta["maxlevel"] = meta.maxlevel;
