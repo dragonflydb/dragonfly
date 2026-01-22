@@ -255,6 +255,48 @@ TEST_F(QListTest, InsertDelete) {
   EXPECT_EQ(0, ql_.Size());
 }
 
+TEST_F(QListTest, EraseLastElementInNodeAdvancesToNextNode) {
+  // Regression test for iterator semantics: when erasing the last element
+  // within a multi-entry node and another node follows, the iterator should
+  // correctly advance to the first element of the next node.
+
+  // Create a QList with fill=2 to ensure max 2 elements per node
+  ql_ = QList(2, QUICKLIST_NOCOMPRESS);
+
+  // Push 3 elements: this creates 2 nodes (first with 2 elements, second with 1)
+  ql_.Push("first", QList::HEAD);   // Will be at index 2 after all pushes
+  ql_.Push("second", QList::HEAD);  // Will be at index 1 after all pushes
+  ql_.Push("third", QList::HEAD);   // Will be at index 0 after all pushes
+
+  // Verify we have 2 nodes as expected
+  ASSERT_EQ(2, ql_.node_count());
+  ASSERT_EQ(3, ql_.Size());
+
+  // Node structure should be:
+  // Node 1: ["third", "second"]
+  // Node 2: ["first"]
+
+  auto items = ToItems();
+  EXPECT_THAT(items, ElementsAre("third", "second", "first"));
+
+  // Get iterator to "second" (last element in first node)
+  auto it = ql_.GetIterator(1);
+  ASSERT_TRUE(it.Valid());
+  ASSERT_EQ("second", it.Get().view());
+
+  // Erase "second" - this is the last element in the first node
+  it = ql_.Erase(it);
+
+  // Iterator should now point to "first" (first element of the second node)
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ("first", it.Get().view());
+
+  // Verify the list is correct
+  items = ToItems();
+  EXPECT_THAT(items, ElementsAre("third", "first"));
+  EXPECT_EQ(2, ql_.Size());
+}
+
 TEST_F(QListTest, PushPlain) {
   // push a value large enough to trigger plain node insertion.
   string val(9000, 'a');
