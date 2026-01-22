@@ -2075,16 +2075,19 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       tx->UnlockMulti(true);
       tx->StartMultiNonAtomic();
       info->lock_tags.clear();
+      info->key_backing.clear();
       return;
     case CT::LOCK:
+      if (tx->GetMultiMode() != Transaction::NON_ATOMIC)
+        return;
+
       info->key_backing.resize(ca.args.size());
       for (size_t i = 0; i < ca.args.size(); i++) {
         info->key_backing[i] = ca.args[i];  // copy key
         info->lock_tags.insert(LockTag(info->key_backing[i]));
       }
 
-      tx->MultiSwitchCmd(registry_.Find("EVAL"));  // just to change command id
-      tx->Refurbish();
+      tx->MultiSwitchCmd(registry_.Find("EVAL"));  // change cid + refurbish
       tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
       return;
     case CT::ACALL:
