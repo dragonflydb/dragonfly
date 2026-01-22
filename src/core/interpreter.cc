@@ -1198,7 +1198,7 @@ int Interpreter::RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* e
 
     // Verify argument are non-empty for all calls but unlock
     if (args->empty() && (call_type & CallArgs::UNLOCK) == 0) {
-      PushError(lua_, "Please specify at least one argument for redis.call()");
+      PushError(lua_, "Please specify at least one argument for this call");
       args = nullopt;
     }
 
