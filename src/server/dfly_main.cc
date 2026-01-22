@@ -223,7 +223,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // Only enabled when running under systemd (INVOCATION_ID is set) to avoid
   // breaking containerized deployments where binding to localhost would make
   // the service unreachable from the host.
-  // GetPassword() checks both --requirepass flag and DFLY_requirepass env var.
+  // GetPassword() checks both --requirepass flag and DFLY_PASSWORD env var.
   bool running_under_systemd = getenv("INVOCATION_ID") != nullptr;
   bool protected_mode = running_under_systemd && bind.empty() && GetPassword().empty();
   const char* bind_addr = nullptr;
