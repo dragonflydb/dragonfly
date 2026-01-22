@@ -270,12 +270,19 @@ class TestEmulated:
 
 # Unfortunately we can't test --announce_port here because that causes the Python Cluster client to
 # throw if it can't access the port in `CLUSTER SLOTS` :|
+# We use a regular client instead of RedisCluster to avoid connection issues with announced IPs
+# that may not be reachable in all environments (e.g., 127.0.0.2 in containers).
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
-    def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
-        expected = {(0, 16383): {"primary": ("127.0.0.2", df_server.port), "replicas": []}}
-        res = cluster_client.execute_command("CLUSTER SLOTS")
-        assert expected == res
+    def test_cluster_slots_command(self, df_server, client: redis.Redis):
+        res = client.execute_command("CLUSTER SLOTS")
+        assert len(res) == 1
+        slot_range = res[0]
+        assert slot_range[0] == 0  # start slot
+        assert slot_range[1] == 16383  # end slot
+        node_info = slot_range[2]
+        assert node_info[0] == "127.0.0.2"  # announced IP
+        assert node_info[1] == df_server.port
 
 
 @dataclass
