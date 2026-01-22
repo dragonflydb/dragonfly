@@ -304,9 +304,11 @@ void BaseFamilyTest::ResetService() {
           }
 
           LOG(ERROR) << "Transaction for shard " << es->shard_id();
+          std::unique_lock conn_lck{mu_};
           for (auto& conn : connections_) {
             auto* context = conn.second->cmd_cntx();
-            if (context->transaction && context->transaction->IsActive(es->shard_id())) {
+            if (context->transaction && context->transaction->IsScheduled() &&
+                context->transaction->IsActive(es->shard_id())) {
               LOG(ERROR) << context->transaction->DebugId(es->shard_id());
             }
           }
