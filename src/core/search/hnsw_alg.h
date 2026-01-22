@@ -68,7 +68,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   mutable std::atomic<long> metric_distance_computations{0};
   mutable std::atomic<long> metric_hops{0};
 
-  bool copy_vector_ = false;
+  bool copy_vector_ = true;
 
   bool allow_replace_deleted_ =
       false;  // flag to replace deleted elements (marked as deleted) during insertions
@@ -86,7 +86,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   }
 
   HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s, size_t max_elements, size_t M = 16,
-                  size_t ef_construction = 200, size_t random_seed = 100, bool copy_vector = false,
+                  size_t ef_construction = 200, size_t random_seed = 100, bool copy_vector = true,
                   bool allow_replace_deleted = false)
       : label_op_locks_(MAX_LABEL_OPERATION_LOCKS),
         link_list_locks_(max_elements),
@@ -160,7 +160,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       if (element_levels_[i] > 0)
         mi_free(linkLists_[i]);
     }
-    mi_free(data_vector_memory_);
+    if (copy_vector_) {
+      mi_free(data_vector_memory_);
+    }
     mi_free(linkLists_);
     linkLists_ = nullptr;
     cur_element_count = 0;
@@ -209,8 +211,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       return (data_vector_memory_ + internal_id * data_size_);
     } else {
-      char** data_ptr = (char**)(getDataPtrByInternalId(internal_id));
-      return *data_ptr;
+      char* unaligned_data_ptr = (char*)(getDataPtrByInternalId(internal_id));
+      char* data_ptr = nullptr;
+      memcpy(static_cast<void*>(&data_ptr), unaligned_data_ptr, sizeof(void*));
+      return data_ptr;
     }
   }
 
@@ -1038,8 +1042,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
     } else {
-      auto data_ptr = (const char**)(getDataPtrByInternalId(internalId));
-      *data_ptr = static_cast<const char*>(dataPoint);
+      memcpy(getDataPtrByInternalId(internalId), &dataPoint, sizeof(void*));
     }
 
     int maxLevelCopy = maxlevel_;
@@ -1264,8 +1267,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       memcpy(getDataByInternalId(cur_c), data_point, data_size_);
     } else {
-      auto data_ptr = (const char**)(getDataPtrByInternalId(cur_c));
-      *data_ptr = static_cast<const char*>(data_point);
+      memcpy(getDataPtrByInternalId(cur_c), &data_point, sizeof(void*));
     }
 
     if (curlevel) {
