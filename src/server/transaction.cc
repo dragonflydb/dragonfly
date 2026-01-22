@@ -497,7 +497,7 @@ void Transaction::InitTxTime() {
 
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
-  // DCHECK(!cb_ptr_);
+  DCHECK(!cb_ptr_);
 
   multi_->cmd_seq_num++;
 
@@ -510,7 +510,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
 
   cid_ = cid;
   re_enabled_auto_journal_ = false;
-  // cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 
   for (auto& sd : shard_data_) {
     sd.slice_count = sd.slice_start = 0;
@@ -565,7 +565,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
   absl::StrAppend(&res, " {id=", trans_id(this));
-  // absl::StrAppend(&res, " {cb_ptr=", absl::StrFormat("%p", static_cast<const void*>(cb_ptr_)));
+  absl::StrAppend(&res, " {cb_ptr=", bool(cb_ptr_));
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
@@ -593,7 +593,7 @@ void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, Cm
 // Runs in the dbslice thread. Returns true if the transaction concluded.
 bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
   DCHECK_GT(txid_, 0u);
-  // CHECK(cb_ptr_) << DebugId();
+  CHECK(cb_ptr_) << DebugId();
 
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
@@ -692,7 +692,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     result = (*cb_ptr_)(this, shard);
 
     if (unique_shard_cnt_ == 1) {
-      // cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
+      cb_ptr_.reset();  // We can do it because only a single thread runs the callback.
       local_result_ = result;
     } else {
       if (result == OpStatus::OUT_OF_MEMORY) {
@@ -1042,7 +1042,7 @@ void Transaction::Conclude() {
 void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
-  // cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {

@@ -200,7 +200,8 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
-  // Experimental command
+  // Experimental command. Dispatch single hop and return,
+  // use Blocker() primitive to wait for it to finish
   void SingleHopAsync(RunnableType cb);
 
   // Execute single hop with return value and conclude.
