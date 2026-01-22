@@ -611,11 +611,13 @@ void QList::AppendPlain(unsigned char* data, size_t sz) {
 bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
   Iterator it = GetIterator(HEAD);
 
-  while (it.Next()) {
-    if (it.Get() == pivot) {
-      Insert(it, elem, opt);
-      return true;
-    }
+  if (it.Valid()) {
+    do {
+      if (it.Get() == pivot) {
+        Insert(it, elem, opt);
+        return true;
+      }
+    } while (it.Next());
   }
 
   return false;
@@ -623,7 +625,7 @@ bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt)
 
 bool QList::Replace(long index, std::string_view elem) {
   Iterator it = GetIterator(index);
-  if (it.Next()) {
+  if (it.Valid()) {
     Replace(it, elem);
     return true;
   }
@@ -650,10 +652,12 @@ void QList::Iterate(IterateFunc cb, long start, long end) const {
   if (end < 0 || end >= long(Size()))
     end = Size() - 1;
   Iterator it = GetIterator(start);
-  while (start <= end && it.Next()) {
-    if (!cb(it.Get()))
-      break;
-    start++;
+  if (it.Valid()) {
+    do {
+      if (start > end || !cb(it.Get()))
+        break;
+      start++;
+    } while (it.Next());
   }
 }
 
@@ -1053,6 +1057,16 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
   return false;
 }
 
+void QList::InitIteratorEntry(Iterator* it) const {
+  DCHECK(it->current_);
+  const_cast<QList*>(this)->malloc_size_ += DecompressNodeIfNeeded(true, it->current_);
+  if (QL_NODE_IS_PLAIN(it->current_)) {
+    it->zi_ = it->current_->entry;
+  } else {
+    it->zi_ = lpSeek(it->current_->entry, it->offset_);
+  }
+}
+
 auto QList::GetIterator(Where where) const -> Iterator {
   Iterator it;
   it.owner_ = this;
@@ -1065,6 +1079,10 @@ auto QList::GetIterator(Where where) const -> Iterator {
     it.current_ = _Tail();
     it.offset_ = -1;
     it.direction_ = REV;
+  }
+
+  if (it.current_) {
+    InitIteratorEntry(&it);
   }
 
   return it;
@@ -1119,6 +1137,8 @@ auto QList::GetIterator(long idx) const -> Iterator {
     iter.offset_ = (-index) - 1 + accum;
   }
 
+  InitIteratorEntry(&iter);
+
   return iter;
 }
 
@@ -1137,10 +1157,9 @@ auto QList::Erase(Iterator it) -> Iterator {
     deleted_node = DelPackedIndex(node, it.zi_);
   }
 
-  /* after delete, the zi is now invalid for any future usage. */
-  it.zi_ = NULL;
+  it.zi_ = NULL;  // Reset current entry pointer
 
-  /* If current node is deleted, we must update iterator node and offset. */
+  // If current node is deleted, we must update iterator node and offset.
   if (deleted_node) {
     if (it.direction_ == FWD) {
       it.current_ = next;
@@ -1149,6 +1168,10 @@ auto QList::Erase(Iterator it) -> Iterator {
       it.current_ = len_ ? prev : nullptr;
       it.offset_ = -1;
     }
+  }
+
+  if (it.current_) {
+    InitIteratorEntry(&it);
   }
 
   // Sanity, should be noop in release mode.
@@ -1246,24 +1269,15 @@ bool QList::Iterator::Next() {
     return false;
 
   int plain = QL_NODE_IS_PLAIN(current_);
-  if (!zi_) {
-    /* If !zi, use current index. */
-    const_cast<QList*>(owner_)->malloc_size_ += DecompressNodeIfNeeded(true, current_);
-    if (ABSL_PREDICT_FALSE(plain))
-      zi_ = current_->entry;
-    else
-      zi_ = lpSeek(current_->entry, offset_);
-  } else if (ABSL_PREDICT_FALSE(plain)) {
+
+  // Advance to the next element in the current node.
+  if (ABSL_PREDICT_FALSE(plain)) {
     zi_ = NULL;
   } else {
-    unsigned char* (*nextFn)(unsigned char*, unsigned char*) = NULL;
-    int offset_update = 0;
+    unsigned char* (*nextFn)(unsigned char*, unsigned char*) = lpNext;
+    int offset_update = 1;
 
-    /* else, use existing iterator offset and get prev/next as necessary. */
-    if (direction_ == FWD) {
-      nextFn = lpNext;
-      offset_update = 1;
-    } else {
+    if (direction_ == REV) {
       DCHECK_EQ(REV, direction_);
       nextFn = lpPrev;
       offset_update = -1;
@@ -1275,7 +1289,7 @@ bool QList::Iterator::Next() {
   if (zi_)
     return true;
 
-  // Retry again with the next node.
+  // Move to the next node.
   const_cast<QList*>(owner_)->Compress(current_);
 
   if (direction_ == FWD) {
@@ -1289,7 +1303,11 @@ bool QList::Iterator::Next() {
     current_ = (current_ == owner_->head_) ? nullptr : current_->prev;
   }
 
-  return current_ ? Next() : false;
+  if (!current_)
+    return false;
+
+  owner_->InitIteratorEntry(this);
+  return zi_ != nullptr;
 }
 
 auto QList::Iterator::Get() const -> Entry {
