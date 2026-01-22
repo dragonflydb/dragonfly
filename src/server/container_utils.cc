@@ -142,10 +142,7 @@ using namespace std;
 bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, size_t end) {
   DCHECK_LE(start, end);
   bool success = true;
-
-  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
-  QList* ql = static_cast<QList*>(pv.RObjPtr());
-  size_t len = ql->Size();
+  size_t len = pv.Size();
   if (len == 0) {
     return true;
   }
@@ -156,6 +153,33 @@ bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, si
       return true;
     }
   }
+
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t* lp = static_cast<uint8_t*>(pv.RObjPtr());
+    uint8_t* p = lpSeek(lp, start);
+    while (p && start <= end) {
+      unsigned int slen;
+      long long lval;
+      uint8_t* vstr = lpGetValue(p, &slen, &lval);
+
+      if (vstr) {
+        success = func(ContainerEntry{reinterpret_cast<const char*>(vstr), slen});
+      } else {
+        success = func(ContainerEntry{lval});
+      }
+
+      if (!success)
+        break;
+
+      p = lpNext(lp, p);
+      start++;
+    }
+    return success;
+  }
+
+  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
+  QList* ql = static_cast<QList*>(pv.RObjPtr());
+
   ql->Iterate(
       [&](const CollectionEntry& entry) {
         success = func(entry);

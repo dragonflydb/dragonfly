@@ -27,6 +27,14 @@ namespace dfly {
 
 class PageUsage;
 
+// Heuristic: for values smaller than 2 KiB we prefer the compact listpack
+// representation. 2048 was chosen as a conservative threshold that matches
+// common quicklist usage patterns and avoids creating very large listpacks
+// that are costly to reallocate or compress.
+inline bool ShouldStoreAsListPack(size_t size) {
+  return size < 2048;
+}
+
 class QList {
  public:
   enum Where : uint8_t { TAIL, HEAD };
@@ -143,8 +151,8 @@ class QList {
   // Returns the popped value. Precondition: list is not empty.
   std::string Pop(Where where);
 
-  void AppendListpack(unsigned char* zl);
-  void AppendPlain(unsigned char* zl, size_t sz);
+  void AppendListpack(uint8_t* zl);
+  void AppendPlain(uint8_t* zl, size_t sz);
 
   // Returns true if pivot found and elem inserted, false otherwise.
   bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
@@ -191,6 +199,11 @@ class QList {
   const Node* Tail() const {
     return _Tail();
   }
+
+  // Returns nullptr if quicklist does not fit the necessary requirements
+  // to be converted to listpack, and listpack otherwise. The ownership over the listpack
+  // blob is moved to the caller.
+  uint8_t* TryExtractListpack();
 
   void set_fill(int fill) {
     fill_ = fill;

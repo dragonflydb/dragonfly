@@ -88,15 +88,11 @@ bool ListPack::Insert(string_view pivot, string_view elem, QList::InsertOpt inse
   return false;
 }
 
-unsigned ListPack::Remove(string_view elem, unsigned count, QList::Where where) {
+unsigned ListPack::Remove(const CollectionEntry& elem, unsigned count, QList::Where where) {
   unsigned removed = 0;
-  int64_t ival;
-
-  // try parsing the element into an integer.
-  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
 
   auto is_match = [&](const QList::Entry& entry) {
-    return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
+    return elem.is_int() ? entry.is_int() && entry.ival() == elem.ival() : entry == elem.view();
   };
 
   uint8_t* p = GetFirst(where);

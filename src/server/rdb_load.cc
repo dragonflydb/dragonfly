@@ -622,7 +622,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 
   if (!config_.append) {
-    pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    // Try to convert to listpack if it's a single-node quicklist
+    if (uint8_t* lp = qlv2->TryExtractListpack()) {
+      CompactObj::DeleteMR<QList>(qlv2);
+      pv_->InitRobj(OBJ_LIST, kEncodingListPack, lp);
+    } else {
+      pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    }
   }
 }
 

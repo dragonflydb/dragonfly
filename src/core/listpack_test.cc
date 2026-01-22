@@ -39,6 +39,10 @@ class ListPackTest : public ::testing::Test {
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
+  unsigned Remove(string_view elem, unsigned count, QList::Where where) {
+    return lp_.Remove(CollectionEntry{elem.data(), elem.size()}, count, where);
+  }
+
   ListPack lp_;
   uint8_t* ptr_ = nullptr;
 };
@@ -59,7 +63,7 @@ TEST_F(ListPackTest, RemoveIntegerFromHead) {
   lp_.Push("3", QList::TAIL);
 
   // Remove integer value "1" from head
-  unsigned removed = lp_.Remove("1", 0, QList::HEAD);
+  unsigned removed = Remove("1", 0, QList::HEAD);
   EXPECT_EQ(2, removed);
   EXPECT_EQ(2, lp_.Size());
 
@@ -76,7 +80,7 @@ TEST_F(ListPackTest, RemoveFromTailAll) {
   lp_.Push("a", QList::TAIL);
 
   // Remove all "a" from tail direction
-  unsigned removed = lp_.Remove("a", 0, QList::TAIL);
+  unsigned removed = Remove("a", 0, QList::TAIL);
   EXPECT_EQ(3, removed);
   EXPECT_EQ(2, lp_.Size());
 
@@ -94,7 +98,7 @@ TEST_F(ListPackTest, RemoveFromTailWithCount) {
   lp_.Push("a", QList::TAIL);
 
   // Remove only 2 occurrences of "a" from tail (removes indices 4 and 2)
-  unsigned removed = lp_.Remove("a", 2, QList::TAIL);
+  unsigned removed = Remove("a", 2, QList::TAIL);
   EXPECT_EQ(2, removed);
   EXPECT_EQ(3, lp_.Size());
 
@@ -113,7 +117,7 @@ TEST_F(ListPackTest, RemoveFromTailConsecutive) {
   lp_.Push("target", QList::TAIL);
   lp_.Push("target", QList::TAIL);
 
-  unsigned removed = lp_.Remove("target", 0, QList::TAIL);
+  unsigned removed = Remove("target", 0, QList::TAIL);
   EXPECT_EQ(3, removed);
   EXPECT_EQ(1, lp_.Size());
   EXPECT_EQ("x", lp_.At(0));
@@ -129,7 +133,7 @@ TEST_F(ListPackTest, RemoveFromTailDeletesHead) {
   lp_.Push("b", QList::TAIL);
   lp_.Push("c", QList::TAIL);
 
-  unsigned removed = lp_.Remove("a", 0, QList::TAIL);
+  unsigned removed = Remove("a", 0, QList::TAIL);
   EXPECT_EQ(1, removed);
   EXPECT_EQ(2, lp_.Size());
 

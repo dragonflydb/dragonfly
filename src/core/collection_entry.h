@@ -21,6 +21,8 @@ struct CollectionEntry {
   explicit CollectionEntry(long long longval) : value_{nullptr}, longval_{longval} {
   }
 
+  CollectionEntry& operator=(const CollectionEntry&) = default;
+
   std::string ToString() const {
     if (value_)
       return {value_, length_};
