@@ -311,6 +311,29 @@ TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
              "OPTOUT mode enabled"));
 }
 
+TEST_F(ServerFamilyTest, ToggleTrackingOnAndOff) {
+  Run("HELLO 3");
+  // seq = 0
+  auto resp = Run("CLIENT TRACKING ON OPTIN");
+  // seq = 1
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  resp = Run("CLIENT CACHING YES");
+  // seq = 2, caching = 1
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  resp = Run("CLIENT TRACKING OFF");
+  resp = Run("CLIENT TRACKING ON OPTIN");
+  // seq = 3, caching = 1
+  EXPECT_THAT(resp.GetString(), "OK");
+  // seq(3) != (caching(1) + 1)
+  resp = Run("GET foo");
+  resp = Run("SET foo tmp");
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   // case 1. only read the keys doesn't trigger any notification.
   Run({"HELLO", "3"});

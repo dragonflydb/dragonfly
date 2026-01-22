@@ -873,6 +873,11 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 void TrackIfNeeded(CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.tracking_info_;
+
+  if (!info.IsTrackingOn()) {
+    return;
+  }
+
   if (auto* tx = cmd_cntx->tx(); tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
@@ -1328,10 +1333,11 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
+bool ShouldDenyOnOOM(const CommandContext& cmd_cntx) {
+  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
   ServerState& etl = *ServerState::tlocal();
-  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    auto memory_stats = etl.GetMemoryUsage(curr_time_ns);
+  if ((cmd_cntx.cid()->opt_mask() & CO::DENYOOM) && etl.is_master) {
+    auto memory_stats = etl.GetMemoryUsage(cmd_cntx.start_time_ns);
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
     if (memory_stats.used_mem > limit ||
@@ -1343,16 +1349,6 @@ bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
     }
   }
   return false;
-}
-
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_cntx,
-                                                     CmdArgList tail_args) {
-  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
-  if (ShouldDenyOnOOM(cmd_cntx.cid(), cmd_cntx.start_time_ns)) {
-    return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
-  }
-
-  return std::nullopt;
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
@@ -1531,6 +1527,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
     if (cid->name() == "REPLCONF") {
       DCHECK_GE(args_no_cmd.size(), 1u);
+      // We should not reply to REPLCONF ACKS.
       if (absl::EqualsIgnoreCase(args_no_cmd.Front(), "ACK")) {
         server_family_.GetDflyCmd()->OnClose(
             dfly_cntx->conn_state.replication_info.repl_session_id);
@@ -1616,16 +1613,9 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   DCHECK(builder);
   DCHECK(cntx);
 
-  if (auto err = VerifyCommandExecution(*cmd_cntx, tail_args); err) {
-    // We need to skip this because ACK's should not be replied to
-    // Bonus points because this allows to continue replication with ACL users who got
-    // their access revoked and reinstated
-    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
-      return DispatchResult::OK;
-    }
-    cmd_cntx->SendError(*err);
-
-    return err->status == OpStatus::OUT_OF_MEMORY ? DispatchResult::OOM : DispatchResult::OK;
+  if (ShouldDenyOnOOM(*cmd_cntx)) {
+    cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
+    return DispatchResult::OOM;
   }
 
   bool has_monitors = !ServerState::tlocal()->Monitors().Empty();
@@ -1661,13 +1651,15 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
     }
   }
 
-  if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
-    // Each time we execute a command we need to increase the sequence number in
-    // order to properly track clients when OPTIN is used.
-    // We don't do this for `multi/exec` because it would break the
-    // semantics, i.e, CACHING should stick for all commands following
-    // the CLIENT CACHING ON within a multi/exec block
-    cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+  if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
+    if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
+      // Each time we execute a command we need to increase the sequence number in
+      // order to properly track clients when OPTIN is used.
+      // We don't do this for `multi/exec` because it would break the
+      // semantics, i.e, CACHING should stick for all commands following
+      // the CLIENT CACHING ON within a multi/exec block
+      cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+    }
   }
 
   cmd_cntx->RecordLatency(tail_args);
