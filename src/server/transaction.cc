@@ -893,38 +893,54 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   return local_result_;
 }
 
-void Transaction::SingleHopSingleKeyAsync(RunnableType cb) {
-  DCHECK_EQ(unique_shard_cnt_, 1u);
-  DCHECK_EQ(shard_data_.size(), 1u);
+void Transaction::SingleHopAsync(RunnableType cb) {
+  CHECK(!multi_);
+  CHECK_EQ(coordinator_state_, 0u);
 
-  // Mark concluding & armed
   coordinator_state_ |= COORD_CONCLUDING;
   cb_ptr_ = cb;
-  shard_data_.front().is_armed.store(true, memory_order_relaxed);
 
-  // Keep alive till end and set barrier
-  run_barrier_.Add(1);
-  use_count_.fetch_add(1, memory_order_relaxed);
+  if (unique_shard_cnt_ == 1) {
+    CHECK_EQ(shard_data_.size(), 1u);
 
-  auto shard_cb = [this] {
-    ScheduleInShard(EngineShard::tlocal(), true);
+    // Arm immediately
+    shard_data_.front().is_armed.store(true, memory_order_relaxed);
 
-    if (shard_data_.front().local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
-      run_barrier_.Dec();
-      intrusive_ptr_release(this);
-    } else {
-      shard_set->Add(unique_shard_id_, [this] {  // possible deadlock
+    // Keep alive till end and set barrier
+    run_barrier_.Add(1);
+    use_count_.fetch_add(1, memory_order_relaxed);
+
+    auto shard_cb = [this] {
+      bool success = ScheduleInShard(EngineShard::tlocal(), true);
+      CHECK(success);  // single shard scheduling can't fail
+
+      if (shard_data_.front().local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
+        run_barrier_.Dec();
+        intrusive_ptr_release(this);
+      } else {
+        // do we really need to submit a shard callback?
+        // an armed transaction will be driven by the next previous txq entry
+
+        // possible deadlock beacuse of api
+        // but really we just need to re-schedule the callback
+        // shard_set->Add(unique_shard_id_, [this] {
+        //  EngineShard::tlocal()->PollExecution("exec_cb", this);
+        //  intrusive_ptr_release(this);
+        //});
         EngineShard::tlocal()->PollExecution("exec_cb", this);
         intrusive_ptr_release(this);
-      });
-    }
-  };
+      }
+    };
 
-  // Dispatch to shard
-  if (CanRunInlined())
-    shard_cb();
-  else
-    shard_set->Add(unique_shard_id_, shard_cb);
+    // Dispatch to shard
+    if (CanRunInlined())
+      shard_cb();
+    else
+      shard_set->Add(unique_shard_id_, shard_cb);
+  } else {
+    ScheduleInternal();
+    DispatchHop();  // won't wait on run_barrier_
+  }
 }
 
 // Runs in coordinator thread.

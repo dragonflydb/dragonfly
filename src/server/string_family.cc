@@ -1057,39 +1057,35 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  // Experimental async path
+  // Experimental async path, memcache only
   if (cmd_cntx->IsDeferredReply()) {
-    auto cb = [cmd_cntx, sparams](Transaction* t, EngineShard* shard) {
+    CHECK(cmd_cntx->mc_command());
+
+    auto cb = [cmd_cntx, key, value, sparams](Transaction* t, EngineShard* shard) {
       bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
       SetCmd set_cmd(OpArgs{shard, nullptr, t->GetDbContext()}, explicit_journal);
 
-      // If we are here, it's Memcache SET (because IsDeferredReply() is true).
-      // So we can use mc_command data.
-      // For Memcache, we use the values from the command.
-      // TODO: we will need to get arguments in a different way for Redis protocol.
-      DCHECK(cmd_cntx->mc_command());
-      std::string_view key = cmd_cntx->mc_command()->key();
-      std::string_view value = cmd_cntx->mc_command()->value();
-
-      // This is what a hop finishes with, but inside transaction code
       return set_cmd.Set(sparams, key, value);
     };
+
+    // Wrap callback to keep it alive inside the replier
     auto wrapped_cb = std::make_unique<decltype(cb)>(std::move(cb));
-    cmd_cntx->tx()->SingleHopSingleKeyAsync(*wrapped_cb);
+    cmd_cntx->tx()->SingleHopAsync(*wrapped_cb);
 
     auto replier = [cmd_cntx, tx = boost::intrusive_ptr{cmd_cntx->tx()},
                     wrapped_cb = std::move(wrapped_cb)](SinkReplyBuilder* rb) {
-      auto status = *tx->LocalResultPtr();
-      if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
-        // Relevant to MC.
-        MCRender render(cmd_cntx->mc_command()->cmd_flags);
-        rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
-        return;
-      }
-      if (status == OpStatus::OUT_OF_MEMORY) {
-        return rb->SendError(kOutOfMemory);
-      }
-      LOG(FATAL) << "TBD " << status;
+      switch (auto status = *tx->LocalResultPtr()) {
+        case OpStatus::SKIPPED:
+        case OpStatus::OK: {
+          MCRender render(cmd_cntx->mc_command()->cmd_flags);
+          rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+          return;
+        }
+        case OpStatus::OUT_OF_MEMORY:
+          return rb->SendError(kOutOfMemory);
+        default:
+          LOG(FATAL) << "Unknown status" << status;
+      };
     };
     cmd_cntx->Resolve(cmd_cntx->tx()->Blocker(), std::move(replier));
     return;

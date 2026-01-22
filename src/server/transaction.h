@@ -201,7 +201,7 @@ class Transaction {
   OpStatus ScheduleSingleHop(RunnableType cb);
 
   // Experimental command
-  void SingleHopSingleKeyAsync(RunnableType cb);
+  void SingleHopAsync(RunnableType cb);
 
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
