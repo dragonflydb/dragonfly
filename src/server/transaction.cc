@@ -1100,6 +1100,13 @@ pair<uint16_t, bool> Transaction::DisarmInShardWhen(ShardId sid, uint16_t releva
 }
 
 bool Transaction::IsActive(ShardId sid) const {
+  if (shard_data_.empty()) {
+    return false;
+  }
+
+  DCHECK(!shard_data_.empty()) << "IsActive: shard_data_ empty, sid=" << sid
+                               << ", unique_shard_cnt_=" << unique_shard_cnt_ << ", name=" << Name()
+                               << ", txid=" << txid_;
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
   if (unique_shard_cnt_ == 1) {
