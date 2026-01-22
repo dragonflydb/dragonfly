@@ -980,35 +980,63 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
-  facade::CmdArgParser parser{args};
+void AyncCmdSet(string_view key, string_view value, SetCmd::SetParams sparams,
+                CommandContext* cmd_cntx) {
+  CHECK(cmd_cntx->mc_command());
 
-  auto [key, value] = parser.Next<string_view, string_view>();
+  auto cb = [cmd_cntx, key, value, sparams](Transaction* t, EngineShard* shard) {
+    bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+    SetCmd set_cmd(t->GetOpArgs(shard), explicit_journal);
 
+    return set_cmd.Set(sparams, key, value);
+  };
+
+  // Wrap callback to keep it alive inside the replier
+  auto wrapped_cb = std::make_unique<decltype(cb)>(std::move(cb));
+  cmd_cntx->tx()->SingleHopAsync(*wrapped_cb);
+
+  auto replier = [cmd_cntx, tx = boost::intrusive_ptr{cmd_cntx->tx()},
+                  wrapped_cb = std::move(wrapped_cb)](SinkReplyBuilder* rb) {
+    switch (auto status = *tx->LocalResultPtr()) {
+      case OpStatus::SKIPPED:
+      case OpStatus::OK: {
+        MCRender render(cmd_cntx->mc_command()->cmd_flags);
+        rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+        return;
+      }
+      case OpStatus::OUT_OF_MEMORY:
+        return rb->SendError(kOutOfMemory);
+      default:
+        LOG(FATAL) << "Unknown status" << status;
+    };
+  };
+  cmd_cntx->Resolve(cmd_cntx->tx()->Blocker(), std::move(replier));
+}
+
+struct NegativeExpire {};  // Returned if relative expiry was in the past
+std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
+    CmdArgParser parser, const CommandContext* cmd_cntx) {
   SetCmd::SetParams sparams;
 
   sparams.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
-  auto* builder = cmd_cntx->rb();
 
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-
       if (parser.HasError())
         break;
 
       // We can set expiry only once.
       if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return cmd_cntx->SendError(kSyntaxErr);
+        return facade::ErrorReply{kSyntaxErr};
 
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
-      if (int_arg <= 0) {
-        return cmd_cntx->SendError(InvalidExpireTime("set"));
-      }
+      if (int_arg <= 0)
+        return facade::ErrorReply{InvalidExpireTime("set")};
 
       DbSlice::ExpireParams expiry{
           .value = int_arg,
@@ -1019,23 +1047,11 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
       int64_t now_ms = GetCurrentTimeMs();
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
-        return cmd_cntx->SendError(InvalidExpireTime("set"));
+        return facade::ErrorReply{InvalidExpireTime("set")};
 
       // Remove existed key if the key is expired already
-      if (rel_ms < 0) {
-        cmd_cntx->tx()->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
-          ShardArgs args = tx->GetShardArgs(es->shard_id());
-          GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
-          return OpStatus::OK;
-        });
-        if (cmd_cntx->mc_command() != nullptr) {
-          cmd_cntx->SendSimpleString(
-              MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
-        } else {
-          cmd_cntx->SendOk();
-        }
-        return;
-      }
+      if (rel_ms < 0)
+        return NegativeExpire{};
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     } else if (parser.Check("_MCFLAGS")) {
@@ -1048,57 +1064,46 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    return err.MakeReply();
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
-
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return cmd_cntx->SendError(kSyntaxErr);
+    return facade::ErrorReply{kSyntaxErr};
   }
 
-  // Experimental async path
-  if (cmd_cntx->IsDeferredReply()) {
-    boost::intrusive_ptr<Transaction> tx(cmd_cntx->tx());
+  return sparams;
+}
 
-    auto cb = [cmd_cntx, sparams, tx]() mutable {
-      EngineShard* shard = EngineShard::tlocal();
-      bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-      SetCmd set_cmd(OpArgs{shard, nullptr, tx->GetDbContext()}, explicit_journal);
+void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
+  facade::CmdArgParser parser{args};
 
-      // If we are here, it's Memcache SET (because IsDeferredReply() is true).
-      // So we can use mc_command data.
-      // For Memcache, we use the values from the command.
-      // TODO: we will need to get arguments in a different way for Redis protocol.
-      DCHECK(cmd_cntx->mc_command());
-      std::string_view key = cmd_cntx->mc_command()->key();
-      std::string_view value = cmd_cntx->mc_command()->value();
+  auto [key, value] = parser.Next<string_view, string_view>();
+  auto params_result = ParseSetParams(parser, cmd_cntx);
 
-      // This is what a hop finishes with, but inside transaction code
-      *tx->LocalResultPtr() = set_cmd.Set(sparams, key, value);
-      tx->Blocker()->Dec();
-    };
+  if (holds_alternative<facade::ErrorReply>(params_result))
+    return cmd_cntx->SendError(get<facade::ErrorReply>(params_result));
 
-    cmd_cntx->tx()->Blocker()->Add(1);
-    ShardId shard_id = cmd_cntx->tx()->GetUniqueShard();
-    shard_set->Add(shard_id, cb);  // cb is copied here
-
-    auto replier = [cmd_cntx, tx](SinkReplyBuilder* rb) {
-      auto status = *tx->LocalResultPtr();
-      if (status == OpStatus::SKIPPED || status == OpStatus::OK) {
-        // Relevant to MC.
-        MCRender render(cmd_cntx->mc_command()->cmd_flags);
-        rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
-        return;
-      }
-      if (status == OpStatus::OUT_OF_MEMORY) {
-        return rb->SendError(kOutOfMemory);
-      }
-      LOG(FATAL) << "TBD " << status;
-    };
-    cmd_cntx->Resolve(tx->Blocker(), std::move(replier));
-
+  if (holds_alternative<NegativeExpire>(params_result)) {
+    cmd_cntx->tx()->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
+      ShardArgs args = tx->GetShardArgs(es->shard_id());
+      GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
+      return OpStatus::OK;
+    });
+    if (cmd_cntx->mc_command() != nullptr) {
+      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
+    } else {
+      cmd_cntx->SendOk();
+    }
     return;
+  }
+
+  auto& sparams = get<SetCmd::SetParams>(params_result);
+
+  // Experimental async path, memcache only
+  if (cmd_cntx->IsDeferredReply()) {
+    return AyncCmdSet(key, value, sparams, cmd_cntx);
   }
 
   optional<StringResult> prev;
@@ -1110,7 +1115,7 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpStatus result = SetGeneric(sparams, key, value, *cmd_cntx);
   if (result == OpStatus::WRONG_TYPE) {
-    return builder->SendError(kWrongTypeErr);
+    return cmd_cntx->SendError(kWrongTypeErr);
   }
 
   // If backpressure was provided, wait with reasonable limit (to avoid client deadlocking).

@@ -6,6 +6,7 @@
 
 #include <absl/functional/function_ref.h>
 
+#include <cstdint>
 #include <string>
 
 #include "core/collection_entry.h"

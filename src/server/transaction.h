@@ -200,6 +200,10 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
+  // Experimental command. Dispatch single hop and return,
+  // use Blocker() primitive to wait for it to finish
+  void SingleHopAsync(RunnableType cb);
+
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
@@ -604,9 +608,9 @@ class Transaction {
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;
 
-  RunnableType* cb_ptr_ = nullptr;    // Run on shard threads
-  const CommandId* cid_ = nullptr;    // Underlying command
-  std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
+  std::optional<RunnableType> cb_ptr_;  // Run on shard threads
+  const CommandId* cid_ = nullptr;      // Underlying command
+  std::unique_ptr<MultiData> multi_;    // Initialized when the transaction is multi/exec.
 
   TxId txid_{0};
   bool global_{false};
