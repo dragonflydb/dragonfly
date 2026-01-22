@@ -510,7 +510,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
 
   cid_ = cid;
   re_enabled_auto_journal_ = false;
-  cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 
   for (auto& sd : shard_data_) {
     sd.slice_count = sd.slice_start = 0;
@@ -565,7 +565,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
   absl::StrAppend(&res, " {id=", trans_id(this));
-  absl::StrAppend(&res, " {cb_ptr=", absl::StrFormat("%p", static_cast<const void*>(cb_ptr_)));
+  absl::StrAppend(&res, " {cb_ptr=", bool(cb_ptr_));
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
@@ -692,7 +692,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     result = (*cb_ptr_)(this, shard);
 
     if (unique_shard_cnt_ == 1) {
-      cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
+      cb_ptr_.reset();  // We can do it because only a single thread runs the callback.
       local_result_ = result;
     } else {
       if (result == OpStatus::OUT_OF_MEMORY) {
@@ -893,6 +893,56 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   return local_result_;
 }
 
+void Transaction::SingleHopAsync(RunnableType cb) {
+  CHECK(!multi_);
+  CHECK_EQ(coordinator_state_, 0u);
+
+  coordinator_state_ |= COORD_CONCLUDING;
+  cb_ptr_ = cb;
+
+  if (unique_shard_cnt_ == 1) {
+    CHECK_EQ(shard_data_.size(), 1u);
+
+    // Arm immediately
+    shard_data_.front().is_armed.store(true, memory_order_relaxed);
+
+    // Keep alive till end and set barrier
+    run_barrier_.Add(1);
+    use_count_.fetch_add(1, memory_order_relaxed);
+
+    auto shard_cb = [this] {
+      bool success = ScheduleInShard(EngineShard::tlocal(), true);
+      CHECK(success);  // single shard scheduling can't fail
+
+      if (shard_data_.front().local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
+        run_barrier_.Dec();
+        intrusive_ptr_release(this);
+      } else {
+        // do we really need to submit a shard callback?
+        // an armed transaction will be driven by the next previous txq entry
+
+        // possible deadlock beacuse of api
+        // but really we just need to re-schedule the callback
+        // shard_set->Add(unique_shard_id_, [this] {
+        //  EngineShard::tlocal()->PollExecution("exec_cb", this);
+        //  intrusive_ptr_release(this);
+        //});
+        EngineShard::tlocal()->PollExecution("exec_cb", this);
+        intrusive_ptr_release(this);
+      }
+    };
+
+    // Dispatch to shard
+    if (CanRunInlined())
+      shard_cb();
+    else
+      shard_set->Add(unique_shard_id_, shard_cb);
+  } else {
+    ScheduleInternal();
+    DispatchHop();  // won't wait on run_barrier_
+  }
+}
+
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
   if (multi_ && multi_->role == SQUASHED_STUB) {
@@ -901,7 +951,7 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   }
 
   local_result_ = OpStatus::OK;
-  cb_ptr_ = &cb;
+  cb_ptr_ = cb;
 
   if (IsAtomicMulti()) {
     multi_->concluding = conclude;
@@ -916,7 +966,7 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
 
   DispatchHop();
   run_barrier_.Wait();
-  cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 
   if (coordinator_state_ & COORD_CONCLUDING)
     coordinator_state_ &= ~COORD_SCHED;
@@ -992,7 +1042,7 @@ void Transaction::Conclude() {
 void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
-  cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {

@@ -2169,10 +2169,17 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
 void Connection::DestroyParsedQueue() {
   while (parsed_head_ != nullptr) {
     auto* cmd = parsed_head_;
+
+    // Being able to drop an in-flight transaction would require it keeping no pointers
+    // at all to any context data - too costly for now! (maybe let it own the arguments?)
+    if (cmd->IsDeferredReply() && !cmd->CanReply())
+      cmd->Blocker()->Wait();  // explicitly wait for it to finish
+
     stats_->dispatch_queue_bytes -= cmd->UsedMemory();
     parsed_head_ = cmd->next;
     delete cmd;
   }
+
   parsed_tail_ = nullptr;
   parsed_cmd_q_len_ = 0;
   delete parsed_cmd_;
