@@ -558,6 +558,9 @@ class Transaction {
   }
 
   unsigned SidToId(ShardId sid) const {
+    DCHECK(!shard_data_.empty()) << "SidToId: shard_data_ empty, sid=" << sid
+                                 << ", unique_shard_cnt_=" << unique_shard_cnt_
+                                 << ", name=" << Name() << ", txid=" << txid_;
     return sid < shard_data_.size() ? sid : 0;
   }
 

@@ -1,0 +1,116 @@
+name: single-unit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - abhijat/dnm/debug-test
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+  build:
+    strategy:
+      matrix:
+        include:
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
+
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/romange/${{ matrix.container }}
+      # Seems that docker by default prohibits running iouring syscalls
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Prepare Environment
+        run: |
+          uname -a
+          mkdir -p ${GITHUB_WORKSPACE}/build
+
+          echo "===================Before freeing up space ============================================"
+          df -h
+          rm -rf /hostroot/usr/share/dotnet
+          rm -rf /hostroot/usr/local/share/boost
+          rm -rf /hostroot/usr/local/lib/android
+          rm -rf /hostroot/opt/ghc
+          echo "===================After freeing up space ============================================"
+          touch /mnt/foo
+          ls -la /mnt/foo
+
+      - name: Configure CMake
+        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+        run: |
+          echo "ulimit is"
+          ulimit -s
+          echo "-----------------------------"
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
+
+          echo "ASAN/USAN"
+          export ASAN="ON"
+          export USAN="ON"
+
+          cmake -B ${GITHUB_WORKSPACE}/build \
+            -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
+            -DWITH_AWS=OFF \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
+            -GNinja \
+            -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
+            -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" -DWITH_AWS:BOOL=OFF \
+            -DWITH_ASAN="${ASAN}" \
+            -DWITH_USAN="${USAN}" \
+            -L
+
+          cd ${GITHUB_WORKSPACE}/build && pwd
+
+      - name: Build
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          ninja hll_family_test
+
+      - name: C++ Unit Tests - Epoll
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          timeout 30m ./hll_family_test --gtest_repeat=100 --gtest_break_on_failure
+
+      - name: C++ Unit Tests - IoUring
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
+          FLAGS_fiber_safety_margin=4096 timeout 30m ./hll_family_test --gtest_repeat=100 --gtest_break_on_failure
+
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
