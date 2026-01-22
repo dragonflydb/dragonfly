@@ -986,7 +986,7 @@ void AyncCmdSet(string_view key, string_view value, SetCmd::SetParams sparams,
 
   auto cb = [cmd_cntx, key, value, sparams](Transaction* t, EngineShard* shard) {
     bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-    SetCmd set_cmd(OpArgs{shard, nullptr, t->GetDbContext()}, explicit_journal);
+    SetCmd set_cmd(t->GetOpArgs(shard), explicit_journal);
 
     return set_cmd.Set(sparams, key, value);
   };
