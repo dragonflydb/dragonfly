@@ -1410,7 +1410,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
-      return ErrorReply{"-NOAUTH Authentication required."};
+      return ErrorReply{"-NOAUTH Authentication required.", facade::kNoAuthErrType};
     }
   }
 
