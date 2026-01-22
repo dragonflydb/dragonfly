@@ -22,6 +22,15 @@ struct HnswIndexMetadata {
   double mult = 0.0;             // Multiplier for random level generation
 };
 
+// Per-node HNSW data for serialization alongside keys (hash/JSON)
+// This structure contains the complete graph data needed to restore a single node
+struct HnswNodeData {
+  uint32_t internal_id = 0;        // The internal ID for this node
+  int level = 0;                   // The level of this node in the hierarchical graph
+  std::string level0_data;         // Level 0 links + vector data (from data_level0_memory_)
+  std::string higher_level_links;  // Links for levels > 0 (from linkLists_)
+};
+
 struct HnswlibAdapter;
 class HnswVectorIndex {
  public:
@@ -40,6 +49,11 @@ class HnswVectorIndex {
 
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
+
+  // Get HNSW node data for a specific document ID (for serialization)
+  std::optional<HnswNodeData> GetNodeData(GlobalDocId doc_id) const;
+
+  std::optional<uint32_t> GetInternalId(GlobalDocId doc_id) const;
 
  private:
   size_t dim_;

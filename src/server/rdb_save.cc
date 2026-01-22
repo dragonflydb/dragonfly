@@ -323,6 +323,25 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   return rdb_type;
 }
 
+error_code RdbSerializer::SaveHnswNode(std::string_view index_name, std::string_view field_name,
+                                       const search::HnswNodeData& node_data) {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_HNSW_NODE));
+
+  // Index name and field name we need to identify which index this node belongs to
+  RETURN_ON_ERR(SaveString(index_name));
+  RETURN_ON_ERR(SaveString(field_name));
+  RETURN_ON_ERR(SaveLen(node_data.internal_id));
+  RETURN_ON_ERR(SaveLen(static_cast<uint64_t>(node_data.level)));
+
+  // Save level 0 data (links + vector data + label)
+  RETURN_ON_ERR(SaveString(node_data.level0_data));
+
+  // Save higher level links (may be empty if level == 0)
+  RETURN_ON_ERR(SaveString(node_data.higher_level_links));
+
+  return error_code{};
+}
+
 error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   unsigned obj_type = pv.ObjType();
   CHECK_NE(obj_type, OBJ_STRING);

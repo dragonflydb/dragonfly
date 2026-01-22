@@ -133,6 +133,27 @@ struct HnswlibAdapter {
     return metadata;
   }
 
+  // Get node data for serialization
+  std::optional<HnswNodeData> GetNodeData(GlobalDocId doc_id) const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    auto node_ser_data = world_.getNodeDataByLabel(doc_id);
+    if (!node_ser_data) {
+      return std::nullopt;
+    }
+
+    HnswNodeData result;
+    result.internal_id = node_ser_data->internal_id;
+    result.level = node_ser_data->level;
+    result.level0_data = std::move(node_ser_data->level0_data);
+    result.higher_level_links = std::move(node_ser_data->higher_level_links);
+    return result;
+  }
+
+  std::optional<uint32_t> GetInternalId(GlobalDocId doc_id) const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return world_.getInternalIdByLabel(doc_id);
+  }
+
  private:
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
@@ -221,6 +242,14 @@ void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
   return adapter_->GetMetadata();
+}
+
+std::optional<HnswNodeData> HnswVectorIndex::GetNodeData(GlobalDocId doc_id) const {
+  return adapter_->GetNodeData(doc_id);
+}
+
+std::optional<uint32_t> HnswVectorIndex::GetInternalId(GlobalDocId doc_id) const {
+  return adapter_->GetInternalId(doc_id);
 }
 
 }  // namespace dfly::search

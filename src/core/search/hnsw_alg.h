@@ -845,6 +845,57 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     return data;
   }
 
+  // per-node HNSW data for serialization
+  struct NodeSerializationData {
+    tableint internal_id = 0;
+    int level = 0;
+    std::string level0_data;         // Complete level 0 data (links + vector + label)
+    std::string higher_level_links;  // Links for levels > 0
+  };
+
+  // Get serialization data for a node by its label (document ID)
+  std::optional<NodeSerializationData> getNodeDataByLabel(labeltype label) const {
+    std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
+
+    std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+    auto search = label_lookup_.find(label);
+    if (search == label_lookup_.end()) {
+      return std::nullopt;
+    }
+    tableint internalId = search->second;
+    lock_table.unlock();
+
+    if (isMarkedDeleted(internalId)) {
+      return std::nullopt;
+    }
+
+    NodeSerializationData data;
+    data.internal_id = internalId;
+    data.level = element_levels_[internalId];
+
+    // Copy level 0 data (links + vector data + label)
+    char* level0_ptr = data_level0_memory_ + internalId * size_data_per_element_;
+    data.level0_data.assign(level0_ptr, size_data_per_element_);
+
+    // Copy higher level links if present
+    if (data.level > 0) {
+      unsigned int linkListSize = size_links_per_element_ * data.level;
+      data.higher_level_links.assign(linkLists_[internalId], linkListSize);
+    }
+
+    return data;
+  }
+
+  // Get internal ID for a label, returns nullopt if not found
+  std::optional<tableint> getInternalIdByLabel(labeltype label) const {
+    std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+    auto search = label_lookup_.find(label);
+    if (search == label_lookup_.end()) {
+      return std::nullopt;
+    }
+    return search->second;
+  }
+
   /*
    * Marks an element with the given label deleted, does NOT really change the current graph.
    */

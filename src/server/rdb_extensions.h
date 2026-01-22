@@ -45,3 +45,7 @@ constexpr uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
 // RDB_OPCODE_DF_MASK define 4byte field with next flags
 constexpr uint32_t DF_MASK_FLAG_STICKY = (1 << 0);
 constexpr uint32_t DF_MASK_FLAG_MC_FLAGS = (1 << 1);
+
+// Opcode to store HNSW vector index node data alongside a key (hash/JSON)
+// This allows storing the HNSW graph connections with each document
+constexpr uint8_t RDB_OPCODE_HNSW_NODE = 221;

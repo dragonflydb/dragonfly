@@ -12,6 +12,7 @@ extern "C" {
 #include <optional>
 
 #include "base/pod_array.h"
+#include "core/search/hnsw_index.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
@@ -243,6 +244,11 @@ class RdbSerializer : public SerializerBase {
   // This function might preempt if flush_fun_ is used.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                                 uint32_t mc_flags, DbIndex dbid);
+
+  // Save HNSW node data before the key/value entry
+  // This stores the vector index graph connections alongside the document
+  std::error_code SaveHnswNode(std::string_view index_name, std::string_view field_name,
+                               const search::HnswNodeData& node_data);
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
