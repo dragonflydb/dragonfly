@@ -50,7 +50,7 @@ class ListPack {
   bool Insert(std::string_view pivot, std::string_view elem, QList::InsertOpt insert_opt);
 
   // Removes up to count occurrences of elem from the specified direction.
-  unsigned Remove(std::string_view elem, unsigned count, QList::Where where);
+  unsigned Remove(const CollectionEntry& elem, unsigned count, QList::Where where);
 
   // Replaces the element at the specified index with a new value.
   bool Replace(long index, std::string_view elem);
@@ -66,7 +66,7 @@ class ListPack {
   }
 
  private:
-  static QList::Entry GetEntry(uint8_t* pos);
+  static CollectionEntry GetEntry(uint8_t* pos);
 
   uint8_t* GetFirst(QList::Where where) const {
     return (where == QList::HEAD) ? lpFirst(lp_) : lpLast(lp_);
