@@ -2088,7 +2088,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       }
 
       tx->MultiSwitchCmd(registry_.Find("EVAL"));  // change cid + refurbish
-      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args);
+      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args, false);
       return;
     case CT::ACALL:
     case CT::APCALL:  // was handled above
@@ -2097,7 +2097,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       auto* prev = cmd_cntx->SwapReplier(&replier);
       DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
       cmd_cntx->SwapReplier(prev);
-  };
+  }
 }
 
 void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
