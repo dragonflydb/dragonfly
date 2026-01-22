@@ -15,6 +15,8 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/stacktrace.h"
@@ -295,7 +297,74 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     CHECK(res);
     ++type_freq_map_[*res];
   }
+
+#ifdef WITH_SEARCH
+  SerializeHnswNodes(db_indx, pk, pv);
+#endif
 }
+
+#ifdef WITH_SEARCH
+void SliceSnapshot::SerializeHnswNodes(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
+  // Only consider HASH and JSON objects for vector indices
+  unsigned obj_type = pv.ObjType();
+  if (obj_type != OBJ_HASH && obj_type != OBJ_JSON) {
+    return;
+  }
+
+  auto* indices = db_slice_->shard_owner()->search_indices();
+  if (!indices) {
+    return;
+  }
+
+  std::string scratch;
+  std::string_view key = pk.GetSlice(&scratch);
+  DbContext db_cntx{nullptr, db_indx, 0};
+
+  for (const auto& index_name : indices->GetIndexNames()) {
+    auto* shard_index = indices->GetIndex(index_name);
+    if (!shard_index) {
+      continue;
+    }
+
+    auto doc_id_opt = shard_index->GetDocId(key, db_cntx);
+    if (!doc_id_opt.has_value()) {
+      continue;
+    }
+
+    search::DocId local_doc_id = doc_id_opt.value();
+    search::GlobalDocId global_doc_id =
+        search::CreateGlobalDocId(db_slice_->shard_owner()->shard_id(), local_doc_id);
+
+    auto index_info = shard_index->GetInfo();
+    for (const auto& [field_ident, field_info] : index_info.base_index.schema.fields) {
+      if (field_info.type != search::SchemaField::VECTOR ||
+          (field_info.flags & search::SchemaField::NOINDEX)) {
+        continue;
+      }
+
+      const auto* vec_params =
+          std::get_if<search::SchemaField::VectorParams>(&field_info.special_params);
+      if (!vec_params || !vec_params->use_hnsw) {
+        continue;
+      }
+
+      auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+      if (!hnsw_index) {
+        continue;
+      }
+
+      auto node_data_opt = hnsw_index->GetNodeData(global_doc_id);
+      if (!node_data_opt.has_value()) {
+        continue;
+      }
+
+      // Serialize the HNSW node data
+      auto ec = serializer_->SaveHnswNode(index_name, field_info.short_name, node_data_opt.value());
+      CHECK(!ec);
+    }
+  }
+}
+#endif
 
 size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;

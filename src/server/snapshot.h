@@ -113,6 +113,11 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
+#ifdef WITH_SEARCH
+  // Serialize HNSW node data for keys that belong to vector indices
+  void SerializeHnswNodes(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
+#endif
+
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 

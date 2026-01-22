@@ -2205,6 +2205,23 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    // Skip HNSW node data - deserialization not yet implemented
+    // Format: index_name, field_name, internal_id (len), level (len), level0_data,
+    // higher_level_links
+    if (type == RDB_OPCODE_HNSW_NODE) {
+      string index_name, field_name, level0_data, higher_level_links;
+      SET_OR_RETURN(FetchGenericString(), index_name);
+      SET_OR_RETURN(FetchGenericString(), field_name);
+      [[maybe_unused]] uint64_t internal_id;
+      SET_OR_RETURN(LoadLen(nullptr), internal_id);
+      [[maybe_unused]] uint64_t level;
+      SET_OR_RETURN(LoadLen(nullptr), level);
+      SET_OR_RETURN(FetchGenericString(), level0_data);
+      SET_OR_RETURN(FetchGenericString(), higher_level_links);
+      VLOG(1) << "Skipping HNSW node for index=" << index_name << " field=" << field_name;
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
