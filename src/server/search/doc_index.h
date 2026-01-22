@@ -16,6 +16,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/hnsw_index.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
 #include "server/common.h"
@@ -204,6 +205,9 @@ struct DocIndex {
 struct DocIndexInfo {
   DocIndex base_index;
   size_t num_docs = 0;
+
+  // HNSW metadata for vector index (if present)
+  std::optional<search::HnswIndexMetadata> hnsw_metadata = std::nullopt;
 
   // Build original ft.create command that can be used to re-create this index
   std::string BuildRestoreCommand() const;

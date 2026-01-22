@@ -118,6 +118,21 @@ struct HnswlibAdapter {
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
+  HnswIndexMetadata GetMetadata() const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    HnswIndexMetadata metadata;
+    metadata.max_elements = world_.max_elements_;
+    metadata.cur_element_count = world_.cur_element_count.load();
+    metadata.maxlevel = world_.maxlevel_;
+    metadata.enterpoint_node = world_.enterpoint_node_;
+    metadata.M = world_.M_;
+    metadata.maxM = world_.maxM_;
+    metadata.maxM0 = world_.maxM0_;
+    metadata.ef_construction = world_.ef_construction_;
+    metadata.mult = world_.mult_;
+    return metadata;
+  }
+
  private:
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
@@ -203,4 +218,9 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
 void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
+
+HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
+  return adapter_->GetMetadata();
+}
+
 }  // namespace dfly::search
