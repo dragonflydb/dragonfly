@@ -966,7 +966,7 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
 
   DispatchHop();
   run_barrier_.Wait();
-  // cb_ptr_;
+  cb_ptr_.reset();
 
   if (coordinator_state_ & COORD_CONCLUDING)
     coordinator_state_ &= ~COORD_SCHED;
