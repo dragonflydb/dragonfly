@@ -476,6 +476,13 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
     lsn_vec.push_back(value);
   }
 
+  DCHECK(flow_id < lsn_vec.size());
+  if (flow_id >= lsn_vec.size()) {
+    LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsn_vec.size()
+               << ". Disabling partial sync.";
+    return std::nullopt;
+  }
+
   return {lsn_vec[flow_id]};
 }
 
