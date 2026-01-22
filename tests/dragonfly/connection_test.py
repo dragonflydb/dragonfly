@@ -1140,6 +1140,21 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert list[0]["lib-ver"] == "1.2.3.4"
 
 
+async def test_client_info(async_client: aioredis.Redis):
+    """Test CLIENT INFO returns info about the current connection only."""
+    await async_client.client_setname("test_client_info")
+
+    info = await async_client.execute_command("CLIENT INFO")
+    assert isinstance(info, str)
+    assert "name=test_client_info" in info
+
+    # Verify CLIENT INFO returns same format as CLIENT LIST but for single connection
+    client_list = await async_client.client_list()
+    assert len(client_list) == 1
+    # CLIENT INFO should contain the same client id as CLIENT LIST
+    assert f"id={client_list[0]['id']}" in info
+
+
 async def test_hiredis(df_factory):
     server = df_factory.create(proactor_threads=1)
     server.start()
