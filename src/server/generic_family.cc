@@ -1143,7 +1143,7 @@ ASYNC_CMD(Del) {
     return OpStatus::OK;
   }
 
-  void Reply(SinkReplyBuilder * rb) {
+  void Reply(SinkReplyBuilder * rb) override {
     uint32_t del_cnt = result.load(memory_order_relaxed);
     if (cntx()->mc_command()) {
       MCRender mc_render{cntx()->mc_command()->cmd_flags};
