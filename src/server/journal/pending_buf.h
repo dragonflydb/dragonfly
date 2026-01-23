@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <cassert>
 #include <deque>
 #include <numeric>
 

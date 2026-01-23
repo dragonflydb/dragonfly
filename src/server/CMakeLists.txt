@@ -58,7 +58,7 @@ endif()
 # Include cluster sources definitons (not separate target for now)
 add_subdirectory(cluster)
 if (NOT DEFINED DF_CLUSTER_SRCS)
-  message(FATAL_ERROR "Journal source files not exported via DF_CLUSTER_SRCS")
+  message(FATAL_ERROR "Cluster source files not exported via DF_CLUSTER_SRCS")
 endif()
 
 # Optionally compile collection commands
