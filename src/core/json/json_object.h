@@ -7,6 +7,7 @@
 #include <version>  // for __cpp_lib_to_chars macro.
 
 #include "core/detail/stateless_allocator.h"
+#include "core/json/detail/interned_string.h"
 
 // std::from_chars is available in C++17 if __cpp_lib_to_chars is defined.
 #if __cpp_lib_to_chars >= 201611L
@@ -23,7 +24,12 @@ namespace dfly {
 class PageUsage;
 
 using TmpJson = jsoncons::json;
-using JsonType = jsoncons::basic_json<char, jsoncons::sorted_policy, StatelessAllocator<char>>;
+
+struct InternedStringPolicy : jsoncons::sorted_policy {
+  template <typename, typename, typename> using member_key = detail::InternedString;
+};
+
+using JsonType = jsoncons::basic_json<char, InternedStringPolicy, StatelessAllocator<char>>;
 
 // A helper type to use in template functions which are expected to work with both TmpJson
 // and JsonType

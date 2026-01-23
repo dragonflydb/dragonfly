@@ -31,6 +31,7 @@ class JsonFamilyMemoryTest : public BaseFamilyTest {
     // BaseFamilyTest initializes the heap on shards serving transactions, the core running the test
     // needs this initialized explicitly.
     InitTLStatelessAllocMR(GetMemoryResource());
+    detail::InternedString::ResetPool();
   }
 
   auto GetJsonMemoryUsageFromDb(std::string_view key) {
@@ -131,7 +132,9 @@ TEST_F(JsonFamilyMemoryTest, JsonConsDelTest) {
   size_t memory_usage_after_erase = GetMemoryUsage() - start;
 
   EXPECT_GT(memory_usage_before_erase, memory_usage_after_erase);
-  EXPECT_EQ(memory_usage_after_erase, GetJsonMemoryUsageFromString(R"({"b":" "})"));
+  // b is interned, parsing it again will just reuse the same object and not use extra memory. to
+  // force a realistic comparison use a new character.
+  EXPECT_EQ(memory_usage_after_erase, GetJsonMemoryUsageFromString(R"({"x":" "})"));
 }
 
 TEST_F(JsonFamilyMemoryTest, SimpleDel) {
@@ -143,7 +146,8 @@ TEST_F(JsonFamilyMemoryTest, SimpleDel) {
   resp = GetJsonMemoryUsageFromDb("j1");
   EXPECT_THAT(resp, IntArg(start_size));
 
-  std::string_view json_after_del = R"({"b":" "})";
+  // Use non-interned key to get accurate usage
+  std::string_view json_after_del = R"({"k":" "})";
   size_t size_after_del = GetJsonMemoryUsageFromString(json_after_del);
 
   // Test that raw memory usage is correct
@@ -156,13 +160,16 @@ TEST_F(JsonFamilyMemoryTest, SimpleDel) {
   resp = Run({"JSON.DEL", "j1", "$.a"});
   EXPECT_THAT(resp, IntArg(1));
   resp = Run({"JSON.GET", "j1"});
-  EXPECT_EQ(resp, json_after_del);
+  EXPECT_EQ(resp, R"({"b":" "})");
   resp = GetJsonMemoryUsageFromDb("j1");
 
   /* We still expect the initial size here, because after deletion we do not call shrink_to_fit on
      the JSON object. As a result, the memory will not be deallocated. Check
      JsonFamilyMemoryTest::JsonConsDelTest for example. */
-  EXPECT_THAT(resp, IntArg(start_size));
+  // When deleting, json object member is erased. This causes deletion of the blob and the data it
+  // contained.
+  const size_t size_after_delete = start_size - sizeof(detail::InternedBlob) - 16;
+  EXPECT_THAT(resp, IntArg(size_after_delete));
 
   // Again set start json
   resp = Run({"JSON.SET", "j1", "$.a", "\"some text\""});
@@ -180,7 +187,8 @@ TEST_F(JsonFamilyMemoryTest, JsonShrinking) {
   resp = GetJsonMemoryUsageFromDb("j1");
   EXPECT_THAT(resp, IntArg(start_size));
 
-  std::string_view json_after_del = R"({"c":" "})";
+  // Change key but keep length so that interned key "c" does not throw off calculation
+  std::string_view json_after_del = R"({"z":" "})";
   size_t size_after_del = GetJsonMemoryUsageFromString(json_after_del);
 
   // Test that raw memory usage is correct
@@ -195,7 +203,7 @@ TEST_F(JsonFamilyMemoryTest, JsonShrinking) {
   resp = Run({"JSON.DEL", "j1", "$.b"});
   EXPECT_THAT(resp, IntArg(1));
   resp = Run({"JSON.GET", "j1"});
-  EXPECT_EQ(resp, json_after_del);
+  EXPECT_EQ(resp, R"({"c":" "})");
   resp = GetJsonMemoryUsageFromDb("j1");
   // Now we expect the size to be smaller, because shrink_to_fit was called
   EXPECT_THAT(resp, IntArg(size_after_del));
