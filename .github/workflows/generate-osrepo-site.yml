@@ -1,6 +1,8 @@
 name: generate-site
 on:
   workflow_dispatch:
+  release:
+    types: [published]
 
 jobs:
   gen-site:

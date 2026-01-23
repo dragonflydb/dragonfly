@@ -4,8 +4,9 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
-  release:
-    types: [ published ]
+  workflow_run:
+    workflows: ["generate-site"]
+    types: [completed]
 
 jobs:
   test-rpm:
