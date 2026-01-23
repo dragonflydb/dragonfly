@@ -1265,6 +1265,55 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
 
   s = CreateSliceSnapshot(shard, &db_slice, cntx);
 
+  // Serialize HNSW global indices for shard 0 only
+#ifdef WITH_SEARCH
+  if (shard->shard_id() == 0 && save_mode_ != SaveMode::RDB) {
+    auto all_indices = GlobalHnswIndexRegistry::Instance().GetAll();
+    for (const auto& [index_key, index] : all_indices) {
+      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
+      //          then for each node: internal_id, global_id, level,
+      //          zero_level_links_num, zero_level_links,
+      //          higher_level_links_num (only if level > 0),
+      //          higher_level_links (only if level > 0)]
+      auto& ser = meta_serializer_;
+      if (auto ec = ser.WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec)
+        continue;
+      if (auto ec = ser.SaveString(index_key); ec)
+        continue;
+
+      size_t node_count = index->GetNodeCount();
+      if (auto ec = ser.SaveLen(node_count); ec)
+        continue;
+
+      auto nodes = index->GetNodesRange(0, node_count);
+      for (const auto& node : nodes) {
+        if (auto ec = ser.SaveLen(node.internal_id); ec)
+          break;
+        if (auto ec = ser.SaveLen(node.global_id); ec)
+          break;
+        if (auto ec = ser.SaveLen(node.level); ec)
+          break;
+        // Zero level links
+        if (auto ec = ser.SaveLen(node.zero_level_links.size()); ec)
+          break;
+        for (uint32_t link : node.zero_level_links) {
+          if (auto ec = ser.SaveLen(link); ec)
+            break;
+        }
+        // Higher level links (only if level > 0)
+        if (node.level > 0) {
+          if (auto ec = ser.SaveLen(node.higher_level_links.size()); ec)
+            break;
+          for (uint32_t link : node.higher_level_links) {
+            if (auto ec = ser.SaveLen(link); ec)
+              break;
+          }
+        }
+      }
+    }
+  }
+#endif
+
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
 

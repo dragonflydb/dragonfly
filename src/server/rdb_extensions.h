@@ -45,3 +45,8 @@ constexpr uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
 // RDB_OPCODE_DF_MASK define 4byte field with next flags
 constexpr uint32_t DF_MASK_FLAG_STICKY = (1 << 0);
 constexpr uint32_t DF_MASK_FLAG_MC_FLAGS = (1 << 1);
+
+// Opcode to store HNSW vector index node data for global indices
+// Format: [index_name, internal_id, global_id, level, zero_level_links_num, zero_level_links,
+//          higher_level_links_num (only if level > 0), higher_level_links (only if level > 0)]
+constexpr uint8_t RDB_OPCODE_VECTOR_INDEX = 222;

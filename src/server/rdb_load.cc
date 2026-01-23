@@ -2205,6 +2205,49 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_VECTOR_INDEX) {
+      // Stub: read and ignore HNSW vector index data
+      // Format: [index_name, elements_number,
+      //          then for each node: internal_id, global_id, level,
+      //          zero_level_links_num, zero_level_links,
+      //          higher_level_links_num (only if level > 0),
+      //          higher_level_links (only if level > 0)]
+      string index_key;
+      SET_OR_RETURN(FetchGenericString(), index_key);
+
+      uint64_t elements_number;
+      SET_OR_RETURN(LoadLen(nullptr), elements_number);
+
+      for (uint64_t elem = 0; elem < elements_number; ++elem) {
+        [[maybe_unused]] uint64_t internal_id, global_id, level;
+        SET_OR_RETURN(LoadLen(nullptr), internal_id);
+        SET_OR_RETURN(LoadLen(nullptr), global_id);
+        SET_OR_RETURN(LoadLen(nullptr), level);
+
+        // Read zero level links
+        uint64_t zero_level_links_num;
+        SET_OR_RETURN(LoadLen(nullptr), zero_level_links_num);
+        for (uint64_t i = 0; i < zero_level_links_num; ++i) {
+          [[maybe_unused]] uint64_t link;
+          SET_OR_RETURN(LoadLen(nullptr), link);
+        }
+
+        // Read higher level links (only if level > 0)
+        if (level > 0) {
+          uint64_t higher_level_links_num;
+          SET_OR_RETURN(LoadLen(nullptr), higher_level_links_num);
+          for (uint64_t i = 0; i < higher_level_links_num; ++i) {
+            [[maybe_unused]] uint64_t link;
+            SET_OR_RETURN(LoadLen(nullptr), link);
+          }
+        }
+      }
+
+      VLOG(2) << "Ignoring HNSW vector index: " << index_key
+              << " elements_number=" << elements_number;
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
