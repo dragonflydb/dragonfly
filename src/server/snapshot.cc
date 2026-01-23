@@ -164,7 +164,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 void SliceSnapshot::SerializeGlobalHnswIndices() {
 #ifdef WITH_SEARCH
   // Serialize HNSW global indices for shard 0 only
-  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == RDB) {
+  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB) {
     return;
   }
 
