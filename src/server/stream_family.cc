@@ -513,7 +513,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
      * and won't realloc on every XADD.
      * When listpack reaches max number of entries, we'll shrink the
      * allocation to fit the data. */
-    size_t prealloc = STREAM_LISTPACK_MAX_PRE_ALLOCATE;
+    size_t prealloc = 32;
 
     lp = lpNew(prealloc);
     lp = lpAppendInteger(lp, 1); /* One item, the one we are adding. */
@@ -620,6 +620,13 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   s->length++;
   s->entries_added++;
   s->last_id = id;
+
+  raxStart(&ri, s->rax_tree);
+  raxSeek(&ri, "$", NULL, 0);
+  lp_bytes = lpBytes((uint8_t*)ri.data);
+  CHECK_GT(lp_bytes, 0U);
+  raxStop(&ri);
+
   if (s->length == 1)
     s->first_id = id;
   if (added_id)
@@ -1547,6 +1554,17 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
   }
 
   stream_inst->last_id = sid;
+  raxIterator ri;
+  raxStart(&ri, stream_inst->rax_tree);
+  raxSeek(&ri, "$", NULL, 0);
+
+  if (!raxEOF(&ri)) {
+    /* Get a reference to the tail node listpack. */
+    size_t lp_bytes = lpBytes((uint8_t*)ri.data);
+    CHECK_GT(lp_bytes, 0U);
+  }
+  raxStop(&ri);
+
   if (entries_added != -1)
     stream_inst->entries_added = entries_added;
   if (!streamIDEqZero(&max_xdel_id))
