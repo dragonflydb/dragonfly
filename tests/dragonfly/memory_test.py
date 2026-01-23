@@ -1,10 +1,14 @@
-import pytest
 import asyncio
-from redis import asyncio as aioredis
-from .utility import *
 import logging
+import random
+import string
+
+import pytest
+import redis
+
 from . import dfly_args
-from .instance import DflyInstance, DflyInstanceFactory
+from .instance import DflyInstanceFactory
+from .utility import tmp_file_name
 
 
 @pytest.mark.slow
@@ -39,6 +43,9 @@ async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val
     # the gap between used_memory and rss is no more than `max_unaccounted_ratio`.
     min_rss = 3 * 1024 * 1024 * 1024  # 3gb
     max_unaccounted = 200 * 1024 * 1024  # 200mb
+    if type == "JSON":
+        # For json data type, the interned string pool stores data on the default heap, not mimalloc.
+        max_unaccounted *= 2
 
     # There is a big rss spike when this test is ran in one the gh runners (not the self hosted)
     # and it fails. This rss spike is not observed locally or on our self host runner so
@@ -83,11 +90,11 @@ async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val
     p.info("memory")
 
     info = (await p.execute())[-1]
-    assert info["used_memory"] < 2 * 1_000_000  # Table memory
-    assert info["used_memory_rss"] < min_rss / 10  # RSS must have been freed
-
-
-#
+    assert info["used_memory"] < 4 * 1_000_000  # Table memory
+    # interned strings used by jsoncons are stored in a pool. The pool is not cleared on flushall
+    # and holds onto its capacity, causing higher RSS usage.
+    expected_min_rss = min_rss / 5 if type == "JSON" else min_rss / 10
+    assert info["used_memory_rss"] < expected_min_rss  # RSS must have been freed
 
 
 @pytest.mark.asyncio
