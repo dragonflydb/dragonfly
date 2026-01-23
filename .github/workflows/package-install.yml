@@ -11,8 +11,7 @@ on:
 jobs:
   test-rpm:
     runs-on: ubuntu-latest
-    # RPM only on x86_64
-    if: ${{ runner.arch == 'X64' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     container:
       image: ghcr.io/romange/fedora:30
     steps:
