@@ -17,7 +17,6 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
-#include "server/server_state.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
