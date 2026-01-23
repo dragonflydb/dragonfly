@@ -4,13 +4,16 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
 #include "facade/connection_ref.h"
 #include "facade/op_status.h"
 #include "server/common.h"
-#include "server/conn_context.h"
 #include "server/table.h"
+#include "server/tx_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 
@@ -492,11 +495,12 @@ class DbSlice {
     return uniq_fps_;
   }
 
-  void RegisterWatchedKey(DbIndex db_indx, std::string_view key,
-                          ConnectionState::ExecInfo* exec_info);
+  // Register key to be watched - when touched, set dirty_ptr to true
+  void RegisterWatchedKey(DbIndex db_indx, std::string_view key, std::atomic_bool* dirty_ptr);
 
-  // Unregisted all watched key entries for connection.
-  void UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info);
+  // Unregisted all watched key for given dirty_ptr
+  void UnregisterConnectionWatches(absl::Span<const std::pair<DbIndex, std::string>> keys,
+                                   const std::atomic_bool* dirty_ptr);
 
   void SetDocDeletionCallback(DocDeletionCallback ddcb);
 

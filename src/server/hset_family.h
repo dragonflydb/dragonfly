@@ -7,12 +7,12 @@
 #include <optional>
 
 #include "facade/op_status.h"
-#include "server/command_registry.h"
 #include "server/common.h"
 #include "server/table.h"
 namespace dfly {
 
 class StringMap;
+class CommandRegistry;
 
 using facade::OpResult;
 using facade::OpStatus;

@@ -20,6 +20,7 @@ namespace dfly {
 class ServerFamily;
 class CommandRegistry;
 class ConnectionContext;
+class CommandContext;
 }  // namespace dfly
 
 namespace dfly::cluster {
