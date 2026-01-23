@@ -797,7 +797,6 @@ error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
   DCHECK_LE(total_size, tmp_buf.size());
   uint8_t* ptr = tmp_buf.data();
 
-  // Write fixed fields
   absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.internal_id));
   ptr += 4;
   absl::little_endian::Store64(ptr, node.global_id);
@@ -805,7 +804,6 @@ error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
   absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.level));
   ptr += 4;
 
-  // Write links for each level
   for (const auto& level_links : node.levels_links) {
     absl::little_endian::Store32(ptr, static_cast<uint32_t>(level_links.size()));
     ptr += 4;

@@ -2218,7 +2218,6 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
       for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        // Read fixed fields
         [[maybe_unused]] uint32_t internal_id;
         SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
         [[maybe_unused]] uint64_t global_id;
@@ -2226,11 +2225,9 @@ error_code RdbLoader::Load(io::Source* src) {
         uint32_t level;
         SET_OR_RETURN(FetchInt<uint32_t>(), level);
 
-        // Read links for each level (0 to level)
         for (uint32_t lvl = 0; lvl <= level; ++lvl) {
           uint32_t links_num;
           SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
-          // Skip links
           for (uint32_t i = 0; i < links_num; ++i) {
             [[maybe_unused]] uint32_t link;
             SET_OR_RETURN(FetchInt<uint32_t>(), link);

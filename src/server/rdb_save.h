@@ -258,8 +258,7 @@ class RdbSerializer : public SerializerBase {
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
-  // Save HNSW index entry in an efficient binary format using little-endian encoding.
-  // Uses the provided tmp_buf for serialization to avoid repeated allocations.
+  // Save HNSW index entry using provided tmp_buf for serialization to avoid repeated allocations.
   std::error_code SaveHNSWEntry(const search::HnswNodeData& node, absl::Span<uint8_t> tmp_buf);
 
   size_t GetTempBufferSize() const override;
