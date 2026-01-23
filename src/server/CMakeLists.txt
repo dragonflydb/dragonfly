@@ -151,6 +151,7 @@ helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(interned_blob_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
