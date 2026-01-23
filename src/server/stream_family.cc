@@ -516,7 +516,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
      * and won't realloc on every XADD.
      * When listpack reaches max number of entries, we'll shrink the
      * allocation to fit the data. */
-    size_t prealloc = STREAM_LISTPACK_MAX_PRE_ALLOCATE;
+    size_t prealloc = 0;
 
     lp = lpNew(prealloc);
     lp = lpAppendInteger(lp, 1); /* One item, the one we are adding. */
@@ -776,7 +776,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -788,9 +788,10 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
   streamIterator si;
   int64_t numfields;
   streamID id;
-  const CompactObj& cobj = (*res_it)->second;
+  PrimeValue& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
   streamID sstart = opts.start.val, send = opts.end.val;
+  StreamMemTracker tracker;
 
   streamIteratorStart(&si, s, &sstart, &send, opts.is_rev);
   while (streamIteratorGetID(&si, &id, &numfields)) {
@@ -864,6 +865,8 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
   }
 
   streamIteratorStop(&si);
+
+  tracker.UpdateStreamSize(cobj);
 
   return result;
 }
@@ -1215,7 +1218,6 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
-  StreamMemTracker mem_tracker;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
       // MKSTREAM is enabled, so create the stream
@@ -1223,8 +1225,10 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
       if (!res_it)
         return res_it.status();
 
+      StreamMemTracker mem_tracker;
       stream* s = streamNew();
       res_it->it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+      mem_tracker.UpdateStreamSize(res_it->it->second);
     } else {
       return res_it.status();
     }
@@ -1245,6 +1249,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
     }
   }
 
+  StreamMemTracker mem_tracker;
   streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, entries_read);
   mem_tracker.UpdateStreamSize(res_it->it->second);
   return cg ? OpStatus::OK : OpStatus::BUSY_GROUP;
@@ -1521,7 +1526,6 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
 
   PrimeValue& pv = res_it->it->second;
   stream* stream_inst = (stream*)pv.RObjPtr();
-  long long entries_added = -1;
   streamID max_xdel_id{0, 0};
   streamID id = sid;
 
@@ -1540,18 +1544,9 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
     if (streamCompareID(&id, &maxid) < 0) {
       return OpStatus::STREAM_ID_SMALL;
     }
-
-    /* If an entries_added was provided, it can't be lower than the length. */
-    if (entries_added != -1 && stream_inst->length > uint64_t(entries_added)) {
-      return ErrorReply{
-          "The entries_added specified in XSETID is smaller than the target stream length",
-          "stream_added_small"};
-    }
   }
 
   stream_inst->last_id = sid;
-  if (entries_added != -1)
-    stream_inst->entries_added = entries_added;
   if (!streamIDEqZero(&max_xdel_id))
     stream_inst->max_deleted_entry_id = max_xdel_id;
 
