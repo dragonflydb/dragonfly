@@ -8,6 +8,7 @@
 
 #include "base/logging.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 #include "server/transaction.h"

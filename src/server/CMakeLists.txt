@@ -28,14 +28,14 @@ cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
 
 # Include journal sources (not separate target for now)
 add_subdirectory(journal)
-if(NOT DEFINED DF_JOUNRAL_SRCS)
-  message(FATAL_ERROR "Journal source files not exported via DF_JOUNRAL_SRCS")
+if(NOT DEFINED DF_JOURNAL_SRCS)
+  message(FATAL_ERROR "Journal source files not exported via DF_JOURNAL_SRCS")
 endif()
 
 # Define transaction library
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
-            cluster_support.cc common.cc
-            ${DF_JOUNRAL_SRCS}
+            cluster_support.cc common.cc command_registry.cc
+            ${DF_JOURNAL_SRCS}
             server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc
             acl/acl_log.cc slowlog.cc channel_store.cc)
@@ -78,7 +78,7 @@ endif()
 # Optionally include tiered_storage which interfaces with tiering_module
 add_library(dragonfly_lib
             engine_shard.cc engine_shard_set.cc
-            command_registry.cc config_registry.cc conn_context.cc
+            config_registry.cc conn_context.cc
             debugcmd.cc dflycmd.cc error.cc family_utils.cc
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}

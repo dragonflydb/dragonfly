@@ -7,6 +7,8 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
+#include <atomic>
+
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
 #include "facade/connection_ref.h"
