@@ -1,0 +1,52 @@
+name: package-install-tests
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["generate-site"]
+    types: [completed]
+
+jobs:
+  test-rpm:
+    runs-on: ubuntu-latest
+    # RPM only on x86_64
+    if: ${{ runner.arch == 'X64' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
+    container:
+      image: ghcr.io/romange/fedora:30
+    steps:
+      - name: Install on fedora
+        run: |
+          curl -Lo /etc/yum.repos.d/dragonfly.repo https://packages.dragonflydb.io/dragonfly.repo
+          dnf clean all
+          dnf makecache
+          dnf -y install dragonfly
+          dragonfly --version
+
+  test-deb-ubuntu:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    container:
+      image: ghcr.io/romange/ubuntu:noble
+    steps:
+      - name: Install on ubuntu
+        run: |
+          apt update
+          apt install -y curl
+          curl -Lo /usr/share/keyrings/dragonfly-keyring.public https://packages.dragonflydb.io/pgp-key.public
+          curl -Lo /etc/apt/sources.list.d/dragonfly.sources https://packages.dragonflydb.io/dragonfly.sources
+          apt update
+          apt install -y dragonfly
+          dragonfly --version
+
+  notify-on-failure:
+    runs-on: ubuntu-latest
+    needs: [test-rpm, test-deb-ubuntu]
+    if: ${{ always() && (needs.test-rpm.result == 'failure' || needs.test-deb-ubuntu.result == 'failure') }}
+    steps:
+      - name: Notify on failure
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Package install tests failed.\nCommit: ${{ github.sha }}\nJob: ${job_link}"
+          curl -sSf -X POST -H 'Content-Type: application/json' '${{ secrets.GSPACES_BOT_DF_BUILD }}' -d '{"text": "'"${message}"'"}'
