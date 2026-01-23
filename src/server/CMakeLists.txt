@@ -89,7 +89,7 @@ add_library(dragonfly_lib
             cluster/coordinator.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc
-            sharding.cc)
+            sharding.cc cmd_support.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)

@@ -23,6 +23,7 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
+#include "server/cmd_support.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -1129,6 +1130,33 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 
   return res;
 }
+
+ASYNC_CMD(Del) {
+  mutable atomic_uint32_t result{0};
+
+  OpStatus operator()(Transaction* t, EngineShard* es) const {
+    auto args = t->GetShardArgs(es->shard_id());
+    auto op_args = t->GetOpArgs(es);
+
+    auto res = GenericFamily::OpDel(op_args, args, false);
+    result.fetch_add(res.value_or(0), memory_order_relaxed);
+    return OpStatus::OK;
+  }
+
+  void Reply(SinkReplyBuilder * rb) {
+    uint32_t del_cnt = result.load(memory_order_relaxed);
+    if (cntx()->mc_command()) {
+      MCRender mc_render{cntx()->mc_command()->cmd_flags};
+      if (del_cnt) {
+        rb->SendSimpleString(mc_render.RenderDeleted());
+      } else {
+        rb->SendSimpleString(mc_render.RenderNotFound());
+      }
+    } else {
+      rb->SendLong(del_cnt);
+    }
+  }
+};
 
 void GenericFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
   DeleteGeneric(args, cmd_cntx, false);
@@ -2549,7 +2577,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
-      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.HFUNC(Del)
+      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.SetHandler(&CmdDel::Run)
       << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
