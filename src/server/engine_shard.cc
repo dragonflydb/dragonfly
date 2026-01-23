@@ -556,6 +556,9 @@ void EngineShard::DestroyThreadLocal() {
   mi_free(shard_);
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
+  detail::InternedString::ResetPool();
+  CleanupStatelessAllocMR();
+
   mi_heap_delete(tlh);
   VLOG(1) << "Shard reset " << shard_id;
 }
