@@ -2207,11 +2207,12 @@ error_code RdbLoader::Load(io::Source* src) {
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
       // Stub: read and ignore HNSW vector index data
-      // Format: [index_name, elements_number,
-      //          then for each node: internal_id, global_id, level,
-      //          zero_level_links_num, zero_level_links,
-      //          higher_level_links_num (only if level > 0),
-      //          higher_level_links (only if level > 0)]
+      // Binary format: [index_name, elements_number,
+      //   then for each node (little-endian):
+      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
+      //     zero_level_links_num (4 bytes), zero_level_links[] (4 bytes each),
+      //     higher_level_links_num (4 bytes, only if level > 0),
+      //     higher_level_links[] (4 bytes each, only if level > 0)]
       string index_key;
       SET_OR_RETURN(FetchGenericString(), index_key);
 
@@ -2219,26 +2220,30 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
       for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        [[maybe_unused]] uint64_t internal_id, global_id, level;
-        SET_OR_RETURN(LoadLen(nullptr), internal_id);
-        SET_OR_RETURN(LoadLen(nullptr), global_id);
-        SET_OR_RETURN(LoadLen(nullptr), level);
+        // Read fixed fields
+        [[maybe_unused]] uint32_t internal_id;
+        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
+        [[maybe_unused]] uint64_t global_id;
+        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
+        uint32_t level;
+        SET_OR_RETURN(FetchInt<uint32_t>(), level);
+        uint32_t zero_level_links_num;
+        SET_OR_RETURN(FetchInt<uint32_t>(), zero_level_links_num);
 
-        // Read zero level links
-        uint64_t zero_level_links_num;
-        SET_OR_RETURN(LoadLen(nullptr), zero_level_links_num);
-        for (uint64_t i = 0; i < zero_level_links_num; ++i) {
-          [[maybe_unused]] uint64_t link;
-          SET_OR_RETURN(LoadLen(nullptr), link);
+        // Skip zero level links (4 bytes each)
+        for (uint32_t i = 0; i < zero_level_links_num; ++i) {
+          [[maybe_unused]] uint32_t link;
+          SET_OR_RETURN(FetchInt<uint32_t>(), link);
         }
 
         // Read higher level links (only if level > 0)
         if (level > 0) {
-          uint64_t higher_level_links_num;
-          SET_OR_RETURN(LoadLen(nullptr), higher_level_links_num);
-          for (uint64_t i = 0; i < higher_level_links_num; ++i) {
-            [[maybe_unused]] uint64_t link;
-            SET_OR_RETURN(LoadLen(nullptr), link);
+          uint32_t higher_level_links_num;
+          SET_OR_RETURN(FetchInt<uint32_t>(), higher_level_links_num);
+          // Skip higher level links
+          for (uint32_t i = 0; i < higher_level_links_num; ++i) {
+            [[maybe_unused]] uint32_t link;
+            SET_OR_RETURN(FetchInt<uint32_t>(), link);
           }
         }
       }

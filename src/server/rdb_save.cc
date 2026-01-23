@@ -5,6 +5,7 @@
 #include "server/rdb_save.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
@@ -25,6 +26,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
+#include "core/search/hnsw_index.h"
 #include "core/size_tracking_channel.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -782,6 +784,50 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
   uint8_t buf[sizeof(uint64_t)];
   absl::little_endian::Store64(buf, journal_offset);
   return WriteRaw(buf);
+}
+
+error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
+                                        absl::Span<uint8_t> tmp_buf) {
+  // Binary format using little-endian encoding for efficiency:
+  // - internal_id: 4 bytes (uint32_t)
+  // - global_id: 8 bytes (uint64_t)
+  // - level: 4 bytes (int)
+  // - zero_level_links_num: 4 bytes
+  // - zero_level_links: 4 bytes each
+  // - higher_level_links_num: 4 bytes (only if level > 0)
+  // - higher_level_links: 4 bytes each (only if level > 0)
+
+  size_t total_size = node.TotalSize();
+  DCHECK_LE(total_size, tmp_buf.size());
+  uint8_t* ptr = tmp_buf.data();
+
+  // Write fixed fields
+  absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.internal_id));
+  ptr += 4;
+  absl::little_endian::Store64(ptr, node.global_id);
+  ptr += 8;
+  absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.level));
+  ptr += 4;
+  absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.zero_level_links.size()));
+  ptr += 4;
+
+  // Write zero level links
+  for (uint32_t link : node.zero_level_links) {
+    absl::little_endian::Store32(ptr, link);
+    ptr += 4;
+  }
+
+  // Write higher level links (only if level > 0)
+  if (node.level > 0) {
+    absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.higher_level_links.size()));
+    ptr += 4;
+    for (uint32_t link : node.higher_level_links) {
+      absl::little_endian::Store32(ptr, link);
+      ptr += 4;
+    }
+  }
+
+  return WriteRaw(Bytes{tmp_buf.data(), total_size});
 }
 
 error_code SerializerBase::SendFullSyncCut() {

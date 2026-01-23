@@ -29,6 +29,17 @@ struct HnswNodeData {
   int level;
   std::vector<uint32_t> zero_level_links;
   std::vector<uint32_t> higher_level_links;  // All higher level links concatenated
+
+  // Returns the total serialized size in bytes.
+  // Format: internal_id(4) + global_id(8) + level(4) + zero_links_num(4) + zero_links(4 each)
+  //         + higher_links_num(4, only if level > 0) + higher_links(4 each, only if level > 0)
+  size_t TotalSize() const {
+    size_t size = 4 + 8 + 4 + 4 + zero_level_links.size() * 4;
+    if (level > 0) {
+      size += 4 + higher_level_links.size() * 4;
+    }
+    return size;
+  }
 };
 
 struct HnswlibAdapter;
