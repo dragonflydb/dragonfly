@@ -47,13 +47,11 @@ class ListPackTest : public ::testing::Test {
   uint8_t* ptr_ = nullptr;
 };
 
-TEST_F(ListPackTest, InsertPivotNotFound) {
+TEST_F(ListPackTest, FindNotFound) {
   lp_.Push("first", QList::TAIL);
   lp_.Push("third", QList::TAIL);
 
-  // Try to insert with non-existent pivot
-  EXPECT_FALSE(lp_.Insert("notfound", "second", QList::BEFORE));
-  EXPECT_EQ(2, lp_.Size());
+  EXPECT_EQ(lp_.Find("second"), nullptr);
 }
 
 TEST_F(ListPackTest, RemoveIntegerFromHead) {
@@ -147,7 +145,9 @@ TEST_F(ListPackTest, ReplaceAtIndex) {
   lp_.Push("third", QList::TAIL);
 
   // Replace element at index 1
-  EXPECT_TRUE(lp_.Replace(1, "replaced"));
+  uint8_t* pos = lp_.Seek(1);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, "replaced");
   EXPECT_EQ(3, lp_.Size());
 
   EXPECT_EQ("first", lp_.At(0));
@@ -161,7 +161,9 @@ TEST_F(ListPackTest, ReplaceAtNegativeIndex) {
   lp_.Push("third", QList::TAIL);
 
   // Replace element at index -1 (last element)
-  EXPECT_TRUE(lp_.Replace(-1, "new_last"));
+  uint8_t* pos = lp_.Seek(-1);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, "new_last");
   EXPECT_EQ(3, lp_.Size());
 
   EXPECT_EQ("first", lp_.At(0));
@@ -174,13 +176,10 @@ TEST_F(ListPackTest, ReplaceOutOfBounds) {
   lp_.Push("second", QList::TAIL);
 
   // Replace at out-of-bounds index should return false
-  EXPECT_FALSE(lp_.Replace(5, "nope"));
-  EXPECT_FALSE(lp_.Replace(-5, "nope"));
-  EXPECT_EQ(2, lp_.Size());
-
-  // Original elements unchanged
-  EXPECT_EQ("first", lp_.At(0));
-  EXPECT_EQ("second", lp_.At(1));
+  uint8_t* pos = lp_.Seek(5);
+  EXPECT_EQ(pos, nullptr);
+  pos = lp_.Seek(-5);
+  EXPECT_EQ(pos, nullptr);
 }
 
 TEST_F(ListPackTest, ReplaceWithLargerString) {
@@ -189,7 +188,9 @@ TEST_F(ListPackTest, ReplaceWithLargerString) {
 
   // Replace with a much larger string
   string large(500, 'x');
-  EXPECT_TRUE(lp_.Replace(0, large));
+  uint8_t* pos = lp_.Seek(0);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, large);
   EXPECT_EQ(2, lp_.Size());
 
   EXPECT_EQ(large, lp_.At(0));
@@ -201,7 +202,9 @@ TEST_F(ListPackTest, ReplaceWithEmptyString) {
   lp_.Push("second", QList::TAIL);
 
   // Replace with empty string
-  EXPECT_TRUE(lp_.Replace(0, ""));
+  uint8_t* pos = lp_.Seek(0);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, "");
   EXPECT_EQ(2, lp_.Size());
 
   EXPECT_EQ("", lp_.At(0));

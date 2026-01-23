@@ -929,13 +929,18 @@ TEST_F(DflyEngineTest, DebugObject) {
   auto resp = Run({"debug", "object", "key"});
   EXPECT_THAT(resp.GetString(), HasSubstr("encoding:raw"));
   resp = Run({"debug", "object", "l1"});
-  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:quicklist"));
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
   resp = Run({"debug", "object", "s1"});
   EXPECT_THAT(resp.GetString(), HasSubstr("encoding:intset"));
   resp = Run({"debug", "object", "s2"});
   EXPECT_THAT(resp.GetString(), HasSubstr("encoding:dense_set"));
   resp = Run({"debug", "object", "z1"});
   EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+
+  // Test promotion to quicklist
+  Run({"lpush", "l1", string(3000, 'x')});
+  resp = Run({"debug", "object", "l1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:quicklist"));
 }
 
 TEST_F(DflyEngineTest, StreamMemInfo) {
