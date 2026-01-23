@@ -1,0 +1,86 @@
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+
+#include "core/json/detail/interned_string.h"
+
+namespace dfly::detail {
+
+InternedString& InternedString::operator=(const InternedString& other) {
+  if (this != &other) {
+    Release();
+    entry_ = other.entry_;
+    Acquire();
+  }
+  return *this;
+}
+
+InternedString& InternedString::operator=(InternedString&& other) noexcept {
+  if (this != &other) {
+    Release();
+    entry_ = other.entry_;
+    other.entry_ = {};
+  }
+  return *this;
+}
+
+int InternedString::compare(const InternedString& other) const {
+  return std::string_view{*this}.compare(other);
+}
+
+int InternedString::compare(std::string_view other) const {
+  return std::string_view{*this}.compare(other);
+}
+
+void InternedString::ResetPool() {
+  InternedBlobPool& pool = GetPoolRef();
+  for (InternedBlobHandle handle : pool) {
+    InternedBlobHandle::Destroy(handle);
+  }
+  pool.clear();
+}
+
+InternedBlobHandle InternedString::Intern(const std::string_view sv) {
+  if (sv.empty())
+    return {};
+
+  InternedBlobPool& pool_ref = GetPoolRef();
+  if (const auto it = pool_ref.find(sv); it != pool_ref.end()) {
+    InternedBlobHandle blob = *it;
+    blob.IncrRefCount();
+    return blob;
+  }
+
+  InternedBlobHandle handle = InternedBlobHandle::Create(sv);
+  pool_ref.emplace(handle);
+  return handle;
+}
+
+void InternedString::Acquire() {  // NOLINT
+  if (!entry_)
+    return;
+
+  entry_.IncrRefCount();
+}
+
+void InternedString::Release() {
+  if (!entry_)
+    return;
+
+  entry_.DecrRefCount();
+
+  if (entry_.RefCount() == 0) {
+    GetPoolRef().erase(entry_);
+    InternedBlobHandle::Destroy(entry_);
+  }
+}
+
+InternedBlobPool& InternedString::GetPoolRef() {
+  // Note on lifetimes: this pool is thread local and depends on the thread local memory resource
+  // defined in the stateless allocator in src/core/detail/stateless_allocator.h. Since there is no
+  // well-defined order of destruction, this pool must be manually reset before the memory resource
+  // destruction.
+  thread_local InternedBlobPool pool;
+  return pool;
+}
+
+}  // namespace dfly::detail
