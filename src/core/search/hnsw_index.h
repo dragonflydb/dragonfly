@@ -24,7 +24,7 @@ struct HnswIndexMetadata {
 
 // Node data structure for HNSW serialization
 struct HnswNodeData {
-  size_t internal_id;
+  uint32_t internal_id;
   GlobalDocId global_id;
   int level;
   std::vector<std::vector<uint32_t>> levels_links;  // Links for each level (0 to level)
