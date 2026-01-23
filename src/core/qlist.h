@@ -4,18 +4,37 @@
 
 #pragma once
 
-extern "C" {
-#include "redis/quicklist.h"
-}
-
 #include <absl/functional/function_ref.h>
 
+#include <cstdint>
 #include <string>
-#include <variant>
+
+#include "core/collection_entry.h"
+
+#define QL_FILL_BITS 16
+#define QL_COMP_BITS 16
+#define QL_BM_BITS 4
+
+/* quicklist node encodings */
+#define QUICKLIST_NODE_ENCODING_RAW 1
+#define QUICKLIST_NODE_ENCODING_LZF 2
+#define QLIST_NODE_ENCODING_LZ4 3
+
+/* quicklist node container formats */
+#define QUICKLIST_NODE_CONTAINER_PLAIN 1
+#define QUICKLIST_NODE_CONTAINER_PACKED 2
 
 namespace dfly {
 
 class PageUsage;
+
+// Heuristic: for values smaller than 2 KiB we prefer the compact listpack
+// representation. 2048 was chosen as a conservative threshold that matches
+// common quicklist usage patterns and avoids creating very large listpacks
+// that are costly to reallocate or compress.
+inline bool ShouldStoreAsListPack(size_t size) {
+  return size < 2048;
+}
 
 class QList {
  public:
@@ -30,66 +49,43 @@ class QList {
    * items). recompress: 1 bit, bool, true if node is temporary decompressed for usage.
    * attempted_compress: 1 bit, boolean, used for verifying during testing.
    * dont_compress: 1 bit, boolean, used for preventing compression of entry.
-   * extra: 9 bits, free for future use; pads out the remainder of 32 bits
    * */
 
   struct Node {
     Node* prev;
     Node* next;
     unsigned char* entry;
-    size_t sz;                           /* entry size in bytes */
-    unsigned int count : 16;             /* count of items in listpack */
-    unsigned int encoding : 2;           /* RAW==1 or LZF==2 */
-    unsigned int container : 2;          /* PLAIN==1 or PACKED==2 */
-    unsigned int recompress : 1;         /* was this node previous compressed? */
-    unsigned int attempted_compress : 1; /* node can't compress; too small */
-    unsigned int dont_compress : 1;      /* prevent compression of entry that will be used later */
-    unsigned int extra : 25;             /* more bits to steal for future usage */
+    size_t sz : 48;    /* entry size in bytes */
+    size_t count : 16; /* count of items in listpack */
+
+    uint16_t encoding : 2;           /* RAW==1 or LZF==2 */
+    uint16_t container : 2;          /* PLAIN==1 or PACKED==2 */
+    uint16_t recompress : 1;         /* was this node previous compressed? */
+    uint16_t attempted_compress : 1; /* node can't compress; too small */
+    uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
+    uint16_t reserved1 : 9;          /* reserved for future use */
+
+    uint16_t reserved2; /* more bits to steal for future usage */
+    uint32_t reserved3; /* more bits to steal for future usage */
+
+    bool IsCompressed() const {
+      return encoding != QUICKLIST_NODE_ENCODING_RAW;
+    }
+
+    size_t GetLZF(void** data) const;
   };
 
-  // Provides wrapper around the references to the listpack entries.
-  class Entry {
-    std::variant<std::string_view, int64_t> value_;
-
-   public:
-    Entry(const char* value, size_t length) : value_{std::string_view(value, length)} {
-    }
-
-    explicit Entry(int64_t longval) : value_{longval} {
-    }
-
-    // Assumes value is not int64.
-    std::string_view view() const {
-      return std::get<std::string_view>(value_);
-    }
-
-    bool is_int() const {
-      return std::holds_alternative<int64_t>(value_);
-    }
-
-    int64_t ival() const {
-      return std::get<int64_t>(value_);
-    }
-
-    bool operator==(std::string_view sv) const;
-
-    friend bool operator==(std::string_view sv, const Entry& entry) {
-      return entry == sv;
-    }
-
-    std::string to_string() const {
-      if (std::holds_alternative<int64_t>(value_)) {
-        return std::to_string(std::get<int64_t>(value_));
-      }
-      return std::string(view());
-    }
-  };
-
+  using Entry = CollectionEntry;
   class Iterator {
    public:
+    // Returns true if the iterator is valid (points to an element).
+    bool Valid() const {
+      return zi_ != nullptr;
+    }
+
     Entry Get() const;
 
-    // Returns false if no more entries.
+    // Advances to the next/prev element. Returns false if no more entries.
     bool Next();
 
    private:
@@ -156,8 +152,8 @@ class QList {
   // Returns the popped value. Precondition: list is not empty.
   std::string Pop(Where where);
 
-  void AppendListpack(unsigned char* zl);
-  void AppendPlain(unsigned char* zl, size_t sz);
+  void AppendListpack(uint8_t* zl);
+  void AppendPlain(uint8_t* zl, size_t sz);
 
   // Returns true if pivot found and elem inserted, false otherwise.
   bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
@@ -169,17 +165,17 @@ class QList {
 
   size_t MallocUsed(bool slow) const;
 
+  // Iterates over entries from start to end (inclusive).
   void Iterate(IterateFunc cb, long start, long end) const;
 
   // Returns an iterator to tail or the head of the list.
-  // To mirror the quicklist interface, the iterator is not valid until Next() is called.
-  // TODO: to fix this.
+  // result.Valid() is true if the list is not empty.
   Iterator GetIterator(Where where) const;
 
   // Returns an iterator at a specific index 'idx',
   // or Invalid iterator if index is out of range.
   // negative index - means counting from the tail.
-  // Requires calling subsequent Next() to initialize the iterator.
+  // result.Valid() is true if the index is within range.
   Iterator GetIterator(long idx) const;
 
   uint32_t node_count() const {
@@ -204,6 +200,11 @@ class QList {
   const Node* Tail() const {
     return _Tail();
   }
+
+  // Returns nullptr if quicklist does not fit the necessary requirements
+  // to be converted to listpack, and listpack otherwise. The ownership over the listpack
+  // blob is moved to the caller.
+  uint8_t* TryExtractListpack();
 
   void set_fill(int fill) {
     fill_ = fill;
@@ -260,6 +261,10 @@ class QList {
 
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
+
+  // Initializes iterator's zi_ to point to the element at offset_.
+  // Decompresses the node if needed. Assumes current_ is not null.
+  void InitIteratorEntry(Iterator* it) const;
 
   Node* head_ = nullptr;
   size_t malloc_size_ = 0;  // size of the quicklist struct

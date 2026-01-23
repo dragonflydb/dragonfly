@@ -217,13 +217,13 @@ struct GeoIndex : public BaseIndex {
 // Defragments a map like data structure. The values in the map must have a `Defragment` method.
 // Works with rax tree map and hash based maps
 template <typename Container> struct DefragmentMap {
-  using ValueType = typename Container::value_type;
-  using Iterator = typename Container::iterator;
+  using ValueType = Container::value_type;
+  using Iterator = Container::iterator;
 
   DefragmentMap(Container& container, std::string* key) : key{key} {
     if (key->empty()) {
       it = container.end();
-    } else if constexpr (std::is_same_v<Container, RaxTreeMap<ValueType>>) {
+    } else if constexpr (requires { container.lower_bound(*key); }) {
       it = container.lower_bound(*key);
     } else {
       it = container.find(*key);
@@ -245,7 +245,7 @@ template <typename Container> struct DefragmentMap {
     DefragmentResult result;
     for (; it != end; ++it) {
       const auto& [k, map] = *it;
-      if (result.Merge(DefragmentIndex(map, page_usage, 0)).quota_depleted) {
+      if (result.Merge(DefragmentIndex(map, page_usage)).quota_depleted) {
         *key = k;
         break;
       }
@@ -259,16 +259,12 @@ template <typename Container> struct DefragmentMap {
   }
 
  private:
-  template <typename T>
-  static auto DefragmentIndex(T& t, PageUsage* page_usage, int /*tag*/)
-      -> decltype(t->Defragment(page_usage)) {
-    return t->Defragment(page_usage);
-  }
-
-  template <typename T>
-  static auto DefragmentIndex(T& t, PageUsage* page_usage, char /*tag*/)
-      -> decltype(t.Defragment(page_usage)) {
-    return t.Defragment(page_usage);
+  template <typename T> static auto DefragmentIndex(T& t, PageUsage* page_usage) {
+    if constexpr (requires { t->Defragment(page_usage); }) {
+      return t->Defragment(page_usage);
+    } else {
+      return t.Defragment(page_usage);
+    }
   }
 
   std::string* key;

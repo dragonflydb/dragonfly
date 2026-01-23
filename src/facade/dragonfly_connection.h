@@ -252,10 +252,6 @@ class Connection : public util::Connection {
 
   bool IsSending() const;
 
-  bool IsIoLoopV2() const {
-    return ioloop_v2_;
-  }
-
   void Notify() {
     io_event_.notify();
   }
@@ -361,6 +357,12 @@ class Connection : public util::Connection {
   // Returns true on successful execution, false on reply builder error.
   bool ReplyMCBatch();
 
+  struct WaitEvent {
+    explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
+
+    std::optional<util::fb2::EventCount::SubKey> key;
+  };
+
   ParsedCommand* CreateParsedCommand();
   void EnqueueParsedCommand();
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
@@ -372,6 +374,7 @@ class Connection : public util::Connection {
 
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
+  std::optional<WaitEvent> current_wait_;
 
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
   size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands

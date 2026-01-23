@@ -414,6 +414,47 @@ async def test_s3_snapshot(async_client, tmp_dir):
     "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
     reason="AWS S3 snapshots bucket is not configured",
 )
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}",
+        "dbfilename": "snapshot-{{Y}}{{m}}{{d}}-{{timestamp}}",
+    }
+)
+async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
+    # this test checks that after saving to s3, stopping the server and starting a new one
+    # we can load the snapshot from s3 correctly.
+    try:
+        instance = df_factory.create()
+        instance.start()
+        async_client = instance.client()
+        seeder = DebugPopulateSeeder(key_target=10_000)
+        await seeder.run(async_client)
+        start_capture = await DebugPopulateSeeder.capture(async_client)
+        # instance stop generates snapshot on exit
+        instance.stop()
+
+        new_instance = df_factory.create()
+        new_instance.start()
+        new_async_client = new_instance.client()
+
+        await wait_available_async(new_async_client)
+
+        assert await DebugPopulateSeeder.capture(new_async_client) == start_capture
+
+    finally:
+        delete_s3_objects(
+            os.environ["DRAGONFLY_S3_BUCKET"],
+            str(tmp_dir)[1:],
+        )
+
+
+# If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
+# configured.
+@pytest.mark.skipif(
+    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
+    reason="AWS S3 snapshots bucket is not configured",
+)
 @dfly_args({**BASIC_ARGS})
 async def test_s3_save_local_dir(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)

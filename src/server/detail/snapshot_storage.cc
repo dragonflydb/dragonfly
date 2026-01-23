@@ -63,7 +63,8 @@ const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 
 std::string EscapeRegex(string_view input) {
   // List of regex special characters that need escaping
-  constexpr std::string_view chars{"\\.^$|?*+()[]{}"};
+  // We don't escape "{}" since we use them for our own placeholders.
+  constexpr std::string_view chars{"\\.^$|?*+()[]"};
   std::string escaped;
 
   // Reserve space to avoid multiple reallocations
@@ -662,8 +663,15 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
-    if (!prefix.empty())
-      request.SetPrefix(std::string(prefix));
+    if (!prefix.empty()) {
+      // Ensure prefix ends with '/' to treat it as a directory-like namespace and avoid
+      // matching objects with similar prefix names.
+      if (prefix.back() == '/') {
+        request.SetPrefix(std::string(prefix));
+      } else {
+        request.SetPrefix(std::string(prefix) + '/');
+      }
+    }
     request.SetDelimiter("/");
 
     if (!continuation_token.empty()) {

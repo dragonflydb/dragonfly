@@ -273,7 +273,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
 
   time_t expire_time = 0;
-  if (pv.HasExpire()) {
+  if (pk.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
     if (!IsValid(eit)) {
       LOG(DFATAL) << "Internal error, entry " << pk.ToString()

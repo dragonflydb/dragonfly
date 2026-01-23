@@ -79,6 +79,20 @@ TEST_F(SetFamilyTest, SUnionStore) {
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("11", "10", "1", "2", "3"));
 }
 
+// Check that SUNIONSTORE overwrites a value including resetting its expiration
+TEST_F(SetFamilyTest, SUnionStoreExpiration) {
+  Run({"sadd", "s1", "a", "b"});
+  Run({"sadd", "s2", "c", "d"});
+
+  Run({"set", "target", "some-value"});
+  EXPECT_THAT(Run({"expire", "target", "1010"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "target"}), IntArg(1010));
+
+  EXPECT_THAT(Run({"sunionstore", "target", "s1", "s2"}), IntArg(4));
+  EXPECT_THAT(Run({"scard", "target"}), IntArg(4));
+  EXPECT_THAT(Run({"ttl", "target"}), IntArg(-1));
+}
+
 TEST_F(SetFamilyTest, SDiff) {
   auto resp = Run({"sadd", "b", "1", "2", "3"});
   Run({"sadd", "c", "10", "11"});

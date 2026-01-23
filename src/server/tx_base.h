@@ -59,7 +59,7 @@ struct KeyIndex {
     return base::it::Range(*this, KeyIndex{end, end, step, std::nullopt});
   }
 
-  auto Range(cmn::ArgRange args) const {
+  auto Range(const cmn::ArgSlice& args) const {
     return base::it::Transform([args](unsigned idx) { return args[idx]; }, Range());
   }
 

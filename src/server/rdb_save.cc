@@ -35,6 +35,7 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
@@ -360,9 +361,23 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    size_t len = 1;  // 1 node
+    RETURN_ON_ERR(SaveLen(len));
+
+    // Node 1
+    RETURN_ON_ERR(SaveLen(QUICKLIST_NODE_CONTAINER_PACKED));
+    size_t lp_bytes = lpBytes(lp);
+    RETURN_ON_ERR(SaveString(lp, lp_bytes));
+
+    FlushIfNeeded(FlushState::kFlushEndEntry);
+    return error_code{};
+  }
+
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-  const quicklistNode* node = (const quicklistNode*)ql->Head();
+  const QList::Node* node = ql->Head();
   size_t len = ql->node_count();
 
   RETURN_ON_ERR(SaveLen(len));
@@ -373,10 +388,11 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
     // Use listpack encoding
     RETURN_ON_ERR(SaveLen(node->container));
-    if (quicklistNodeIsCompressed(node)) {
+    if (node->IsCompressed()) {
       void* data;
-      size_t compress_len = quicklistGetLzf(node, &data);
-
+      size_t compress_len = node->GetLZF(&data);
+      // TODO: LZ4 compression mode is not enabled for list objects yet.
+      // If it will be enabled in the future, we need to adjust here accordingly.
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
       RETURN_ON_ERR(SaveString(node->entry, node->sz));
@@ -468,9 +484,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
   DCHECK_EQ(OBJ_ZSET, pv.ObjType());
-  const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
   if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    auto* zs = static_cast<detail::SortedMap*>(pv.RObjPtr());
 
     RETURN_ON_ERR(SaveLen(zs->Size()));
     std::error_code ec;
@@ -498,7 +513,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
     });
   } else {
     CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK));
-    uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
     size_t lp_bytes = lpBytes(lp);
 
     RETURN_ON_ERR(SaveString((uint8_t*)lp, lp_bytes));
@@ -1383,9 +1398,40 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
         auto* index = indices->GetIndex(index_name);
         auto index_info = index->GetInfo();
 
-        // Save index definition
-        search_indices.emplace_back(
-            absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+        // Collect HNSW metadata for vector field (first one found)
+        for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
+          if (finfo.type == search::SchemaField::VECTOR &&
+              !(finfo.flags & search::SchemaField::NOINDEX)) {
+            if (auto hnsw_index =
+                    GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
+                hnsw_index) {
+              index_info.hnsw_metadata = hnsw_index->GetMetadata();
+              break;  // Only store first HNSW index metadata
+            }
+          }
+        }
+
+        // Save index definition as JSON with HNSW metadata
+        TmpJson index_json;
+        index_json["name"] = index_name;
+        index_json["cmd"] = index_info.BuildRestoreCommand();
+
+        if (index_info.hnsw_metadata.has_value()) {
+          const auto& meta = index_info.hnsw_metadata.value();
+          TmpJson hnsw_meta;
+          hnsw_meta["max_elements"] = meta.max_elements;
+          hnsw_meta["cur_element_count"] = meta.cur_element_count;
+          hnsw_meta["maxlevel"] = meta.maxlevel;
+          hnsw_meta["enterpoint_node"] = meta.enterpoint_node;
+          hnsw_meta["M"] = meta.M;
+          hnsw_meta["maxM"] = meta.maxM;
+          hnsw_meta["maxM0"] = meta.maxM0;
+          hnsw_meta["ef_construction"] = meta.ef_construction;
+          hnsw_meta["mult"] = meta.mult;
+          index_json["hnsw_metadata"] = std::move(hnsw_meta);
+        }
+
+        search_indices.emplace_back(index_json.to_string());
 
         // Save synonym groups to separate vector
         const auto& synonym_groups = index->GetSynonyms().GetGroups();

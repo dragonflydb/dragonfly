@@ -22,7 +22,6 @@ extern "C" {
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
-typedef struct quicklistNode quicklistNode;
 
 namespace dfly {
 

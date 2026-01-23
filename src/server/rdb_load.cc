@@ -622,7 +622,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 
   if (!config_.append) {
-    pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    // Try to convert to listpack if it's a single-node quicklist
+    if (uint8_t* lp = qlv2->TryExtractListpack()) {
+      CompactObj::DeleteMR<QList>(qlv2);
+      pv_->InitRobj(OBJ_LIST, kEncodingListPack, lp);
+    } else {
+      pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    }
   }
 }
 
@@ -680,8 +686,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (!config_.streamed && zs->Size() <= server.zset_max_listpack_entries &&
-      maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
+  if (!config_.streamed && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
+      maxelelen <= ZSET_MAX_LISTPACK_VALUE && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
     CompactObj::DeleteMR<detail::SortedMap>(zs);
@@ -2907,8 +2913,31 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  // FT.CREATE command - execute immediately during RDB load
-  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+  // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
+  if (!def.empty() && def[0] == '{') {
+    // New JSON format with HNSW metadata
+    try {
+      auto json_opt = JsonFromString(def);
+      if (!json_opt) {
+        LOG(ERROR) << "Invalid search index JSON: " << def;
+        return;
+      }
+      const auto& json = *json_opt;
+      string index_name = json["name"].as<string>();
+      string cmd = json["cmd"].as<string>();
+
+      // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
+      // Currently we just restore the index definition, HNSW graph will be rebuilt
+
+      string full_cmd = absl::StrCat(index_name, " ", cmd);
+      LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
+    }
+  } else {
+    // Old format: "index_name cmd" - for backwards compatibility
+    LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+  }
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {

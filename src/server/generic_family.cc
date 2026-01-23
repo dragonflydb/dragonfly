@@ -4,6 +4,8 @@
 
 #include "server/generic_family.h"
 
+#include <absl/strings/str_cat.h>
+
 #include <boost/operators.hpp>
 #include <optional>
 
@@ -629,7 +631,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   auto& db_slice = op_args.GetDbSlice();
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
-  if (prime_it->second.HasExpire()) {
+  if (prime_it->first.HasExpire()) {
     it = db_slice.ExpireIfNeeded(op_args.db_cntx, it).it;
     if (!IsValid(it))
       return false;
@@ -638,9 +640,9 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
     if (opts.mask == ScanOpts::Mask::Volatile) {
-      matches &= it->second.HasExpire();
+      matches &= it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Permanent) {
-      matches &= !it->second.HasExpire();
+      matches &= !it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Accessed) {
       matches &= it->first.WasTouched();
     } else if (opts.mask == ScanOpts::Mask::Untouched) {
@@ -890,7 +892,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore expire flag after std::move.
-  from_res.it->second.SetExpire(IsValid(from_res.exp_it));
+  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
 
   db_slice.Del(op_args.db_cntx, from_res.it);
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
@@ -938,12 +940,12 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore the expire flag on 'from' so we could delete it from expire table.
-  from_res.it->second.SetExpire(IsValid(from_res.exp_it));
+  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
 
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     to_res.it->second = std::move(from_obj);
-    to_res.it->second.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
+    to_res.it->first.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
 
     // It is guaranteed that UpdateExpire() call does not erase the element because then
     // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
@@ -1130,6 +1132,106 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 
 void GenericFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
   DeleteGeneric(args, cmd_cntx, false);
+}
+
+void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view key = ArgS(args, 0);
+
+  // Parse optional condition
+  enum class Condition { NONE, IFEQ, IFNE, IFDEQ, IFDNE };
+  Condition cond = Condition::NONE;
+  string_view compare_value;
+
+  if (args.size() == 1) {
+    // DELEX key - no condition, behaves like DEL
+    cond = Condition::NONE;
+  } else if (args.size() == 2) {
+    // DELEX key <something> - invalid, needs both condition and value
+    return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+  } else if (args.size() == 3) {
+    string_view opt = ArgS(args, 1);
+    compare_value = ArgS(args, 2);
+
+    if (absl::EqualsIgnoreCase(opt, "IFEQ")) {
+      cond = Condition::IFEQ;
+    } else if (absl::EqualsIgnoreCase(opt, "IFNE")) {
+      cond = Condition::IFNE;
+    } else if (absl::EqualsIgnoreCase(opt, "IFDEQ")) {
+      cond = Condition::IFDEQ;
+    } else if (absl::EqualsIgnoreCase(opt, "IFDNE")) {
+      cond = Condition::IFDNE;
+    } else {
+      return cmd_cntx->SendError(facade::UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
+    }
+  } else {
+    // args.size() > 3
+    return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+  }
+
+  // If no condition, delegate to standard DEL
+  if (cond == Condition::NONE) {
+    return Del(args, cmd_cntx);
+  }
+
+  // Execute conditional delete
+  auto cb = [key, cond, compare_value](Transaction* tx, EngineShard* es) -> OpResult<uint32_t> {
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
+
+    // Key doesn't exist
+    if (!it_res.ok()) {
+      if (it_res.status() == OpStatus::KEY_NOTFOUND)
+        return 0;
+      return it_res.status();
+    }
+
+    // Get the value
+    const PrimeValue& pv = it_res->it->second;
+    string value;
+    if (pv.IsExternal()) {
+      auto read_res = es->tiered_storage()->Read(tx->GetDbIndex(), key, pv);
+      auto result = std::move(read_res).Get();
+      if (!result)
+        // Tiered storage read failed - return generic I/O error
+        return OpStatus::IO_ERROR;
+      value = std::move(*result);
+    } else {
+      value = pv.ToString();
+    }
+
+    // Check condition
+    bool should_delete = false;
+    if (cond == Condition::IFEQ) {
+      should_delete = (value == compare_value);
+    } else if (cond == Condition::IFNE) {
+      should_delete = (value != compare_value);
+    } else if (cond == Condition::IFDEQ || cond == Condition::IFDNE) {
+      // Compute digest of stored value and compare
+      string digest = XXH3_Digest(value);
+
+      if (cond == Condition::IFDEQ) {
+        should_delete = (digest == compare_value);
+      } else {  // IFDNE
+        should_delete = (digest != compare_value);
+      }
+    }
+
+    // Delete if condition is met
+    if (should_delete) {
+      db_slice.DelMutable(tx->GetDbContext(), std::move(*it_res));
+      return 1;
+    }
+
+    return 0;
+  };
+
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+
+  if (result) {
+    cmd_cntx->SendLong(*result);
+  } else {
+    cmd_cntx->SendError(result.status());
+  }
 }
 
 void GenericFamily::Unlink(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1457,8 +1559,7 @@ template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
       return container_utils::IterateSet(pv, func);
     case OBJ_ZSET:
       return container_utils::IterateSortedSet(
-          pv.GetRobjWrapper(),
-          [&](container_utils::ContainerEntry ce, double) { return func(ce); });
+          pv, [&](container_utils::ContainerEntry ce, double) { return func(ce); });
     default:
       return false;
   }
@@ -2449,6 +2550,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.HFUNC(Del)
+      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
        * failure detection, and a loading server is considered to be

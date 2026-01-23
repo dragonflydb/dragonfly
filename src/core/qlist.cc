@@ -59,7 +59,7 @@ using namespace std;
       this->Compress(_node);                      \
   } while (0)
 
-#define QLIST_NODE_ENCODING_LZ4 3
+#define QL_NODE_IS_PLAIN(node) ((node)->container == QUICKLIST_NODE_CONTAINER_PLAIN)
 
 namespace dfly {
 
@@ -101,6 +101,44 @@ bool IsLargeElement(size_t sz, int fill) {
     return sz > SIZE_SAFETY_LIMIT;
   else
     return sz > NodeNegFillLimit(fill);
+}
+
+/* Calculate the size limit or length limit of the quicklist node
+ * based on 'fill', and is also used to limit list listpack. */
+void quicklistNodeLimit(int fill, size_t* size, unsigned int* count) {
+  *size = SIZE_MAX;
+  *count = UINT_MAX;
+
+  if (fill >= 0) {
+    /* Ensure that one node have at least one entry */
+    *count = (fill == 0) ? 1 : fill;
+  } else {
+    *size = NodeNegFillLimit(fill);
+  }
+}
+
+#define sizeMeetsSafetyLimit(sz) ((sz) <= SIZE_SAFETY_LIMIT)
+
+/* Check if the limit of the quicklist node has been reached to determine if
+ * insertions, merges or other operations that would increase the size of
+ * the node can be performed.
+ * Return 1 if exceeds the limit, otherwise 0. */
+int quicklistNodeExceedsLimit(int fill, size_t new_sz, unsigned int new_count) {
+  size_t sz_limit;
+  unsigned int count_limit;
+  quicklistNodeLimit(fill, &sz_limit, &count_limit);
+
+  if (ABSL_PREDICT_TRUE(sz_limit != SIZE_MAX)) {
+    return new_sz > sz_limit;
+  } else if (count_limit != UINT_MAX) {
+    /* when we reach here we know that the limit is a size limit (which is
+     * safe, see comments next to optimization_level and SIZE_SAFETY_LIMIT) */
+    if (!sizeMeetsSafetyLimit(new_sz))
+      return 1;
+    return new_count > count_limit;
+  }
+
+  ABSL_UNREACHABLE();
 }
 
 bool NodeAllowInsert(const QList::Node* node, const int fill, const size_t sz) {
@@ -185,6 +223,16 @@ inline ssize_t NodeSetEntry(QList::Node* node, uint8_t* entry) {
   node->sz = new_sz;
   return diff;
 }
+
+/* quicklistLZF is a 8+N byte struct holding 'sz' followed by 'compressed'.
+ * 'sz' is byte length of 'compressed' field.
+ * 'compressed' is LZF data with total (compressed) length 'sz'
+ * NOTE: uncompressed length is stored in quicklistNode->sz.
+ * When quicklistNode->entry is compressed, node->entry points to a quicklistLZF */
+using quicklistLZF = struct quicklistLZF {
+  size_t sz; /* LZF size in bytes*/
+  char compressed[];
+};
 
 inline quicklistLZF* GetLzf(QList::Node* node) {
   DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF ||
@@ -382,6 +430,13 @@ QList::Node* SplitNode(QList::Node* node, int offset, bool after, ssize_t* diff)
 
 __thread QList::Stats QList::stats;
 
+size_t QList::Node::GetLZF(void** data) const {
+  DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF || encoding == QLIST_NODE_ENCODING_LZ4);
+  quicklistLZF* lzf = (quicklistLZF*)entry;
+  *data = lzf->compressed;
+  return lzf->sz;
+}
+
 void QList::SetPackedThreshold(unsigned threshold) {
   packed_threshold = threshold;
 }
@@ -556,11 +611,13 @@ void QList::AppendPlain(unsigned char* data, size_t sz) {
 bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
   Iterator it = GetIterator(HEAD);
 
-  while (it.Next()) {
-    if (it.Get() == pivot) {
-      Insert(it, elem, opt);
-      return true;
-    }
+  if (it.Valid()) {
+    do {
+      if (it.Get() == pivot) {
+        Insert(it, elem, opt);
+        return true;
+      }
+    } while (it.Next());
   }
 
   return false;
@@ -568,7 +625,7 @@ bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt)
 
 bool QList::Replace(long index, std::string_view elem) {
   Iterator it = GetIterator(index);
-  if (it.Next()) {
+  if (it.Valid()) {
     Replace(it, elem);
     return true;
   }
@@ -576,7 +633,7 @@ bool QList::Replace(long index, std::string_view elem) {
 }
 
 size_t QList::MallocUsed(bool slow) const {
-  size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(quicklist));
+  size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(QList));
   if (slow) {
     for (Node* node = head_; node; node = node->next) {
       node_size += zmalloc_usable_size(node->entry);
@@ -595,10 +652,12 @@ void QList::Iterate(IterateFunc cb, long start, long end) const {
   if (end < 0 || end >= long(Size()))
     end = Size() - 1;
   Iterator it = GetIterator(start);
-  while (start <= end && it.Next()) {
-    if (!cb(it.Get()))
-      break;
-    start++;
+  if (it.Valid()) {
+    do {
+      if (start > end || !cb(it.Get()))
+        break;
+      start++;
+    } while (it.Next());
   }
 }
 
@@ -998,6 +1057,16 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
   return false;
 }
 
+void QList::InitIteratorEntry(Iterator* it) const {
+  DCHECK(it->current_);
+  const_cast<QList*>(this)->malloc_size_ += DecompressNodeIfNeeded(true, it->current_);
+  if (QL_NODE_IS_PLAIN(it->current_)) {
+    it->zi_ = it->current_->entry;
+  } else {
+    it->zi_ = lpSeek(it->current_->entry, it->offset_);
+  }
+}
+
 auto QList::GetIterator(Where where) const -> Iterator {
   Iterator it;
   it.owner_ = this;
@@ -1010,6 +1079,10 @@ auto QList::GetIterator(Where where) const -> Iterator {
     it.current_ = _Tail();
     it.offset_ = -1;
     it.direction_ = REV;
+  }
+
+  if (it.current_) {
+    InitIteratorEntry(&it);
   }
 
   return it;
@@ -1064,6 +1137,8 @@ auto QList::GetIterator(long idx) const -> Iterator {
     iter.offset_ = (-index) - 1 + accum;
   }
 
+  InitIteratorEntry(&iter);
+
   return iter;
 }
 
@@ -1082,10 +1157,9 @@ auto QList::Erase(Iterator it) -> Iterator {
     deleted_node = DelPackedIndex(node, it.zi_);
   }
 
-  /* after delete, the zi is now invalid for any future usage. */
-  it.zi_ = NULL;
+  it.zi_ = NULL;  // Reset current entry pointer
 
-  /* If current node is deleted, we must update iterator node and offset. */
+  // If current node is deleted, we must update iterator node and offset.
   if (deleted_node) {
     if (it.direction_ == FWD) {
       it.current_ = next;
@@ -1094,6 +1168,10 @@ auto QList::Erase(Iterator it) -> Iterator {
       it.current_ = len_ ? prev : nullptr;
       it.offset_ = -1;
     }
+  }
+
+  if (it.current_) {
+    InitIteratorEntry(&it);
   }
 
   // Sanity, should be noop in release mode.
@@ -1186,13 +1264,19 @@ bool QList::Erase(const long start, unsigned count) {
   return true;
 }
 
-bool QList::Entry::operator==(std::string_view sv) const {
-  if (std::holds_alternative<int64_t>(value_)) {
-    char buf[absl::numbers_internal::kFastToBufferSize];
-    char* end = absl::numbers_internal::FastIntToBuffer(std::get<int64_t>(value_), buf);
-    return sv == std::string_view(buf, end - buf);
+uint8_t* QList::TryExtractListpack() {
+  // TODO: enable this once we support listpack encoding for lists.
+  return nullptr;
+
+  if (len_ != 1 || QL_NODE_IS_PLAIN(head_) || !ShouldStoreAsListPack(head_->sz) ||
+      head_->IsCompressed()) {
+    return nullptr;
   }
-  return view() == sv;
+
+  uint8_t* res = std::exchange(head_->entry, nullptr);
+  DelNode(head_);
+
+  return res;
 }
 
 bool QList::Iterator::Next() {
@@ -1200,24 +1284,15 @@ bool QList::Iterator::Next() {
     return false;
 
   int plain = QL_NODE_IS_PLAIN(current_);
-  if (!zi_) {
-    /* If !zi, use current index. */
-    const_cast<QList*>(owner_)->malloc_size_ += DecompressNodeIfNeeded(true, current_);
-    if (ABSL_PREDICT_FALSE(plain))
-      zi_ = current_->entry;
-    else
-      zi_ = lpSeek(current_->entry, offset_);
-  } else if (ABSL_PREDICT_FALSE(plain)) {
+
+  // Advance to the next element in the current node.
+  if (ABSL_PREDICT_FALSE(plain)) {
     zi_ = NULL;
   } else {
-    unsigned char* (*nextFn)(unsigned char*, unsigned char*) = NULL;
-    int offset_update = 0;
+    unsigned char* (*nextFn)(unsigned char*, unsigned char*) = lpNext;
+    int offset_update = 1;
 
-    /* else, use existing iterator offset and get prev/next as necessary. */
-    if (direction_ == FWD) {
-      nextFn = lpNext;
-      offset_update = 1;
-    } else {
+    if (direction_ == REV) {
       DCHECK_EQ(REV, direction_);
       nextFn = lpPrev;
       offset_update = -1;
@@ -1229,7 +1304,7 @@ bool QList::Iterator::Next() {
   if (zi_)
     return true;
 
-  // Retry again with the next node.
+  // Move to the next node.
   const_cast<QList*>(owner_)->Compress(current_);
 
   if (direction_ == FWD) {
@@ -1243,7 +1318,11 @@ bool QList::Iterator::Next() {
     current_ = (current_ == owner_->head_) ? nullptr : current_->prev;
   }
 
-  return current_ ? Next() : false;
+  if (!current_)
+    return false;
+
+  owner_->InitIteratorEntry(this);
+  return zi_ != nullptr;
 }
 
 auto QList::Iterator::Get() const -> Entry {

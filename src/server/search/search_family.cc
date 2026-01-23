@@ -1325,7 +1325,8 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
 
   // For logging we copy the whole schema
   // TODO: Use a more efficient way for logging
-  LOG(INFO) << "Adding " << DocIndexInfo{.base_index = new_index}.BuildRestoreCommand();
+  LOG(INFO) << "Adding "
+            << DocIndexInfo{.base_index = new_index, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Merge schemas
   search::Schema& schema = index_info->schema;

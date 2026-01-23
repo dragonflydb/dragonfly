@@ -287,13 +287,16 @@ TEST_F(CompactObjectTest, Int) {
   EXPECT_EQ(cobj_, "0");
   EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
   EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
+}
 
-  cobj_.SetExpire(true);
-  cobj_.SetString("42");
-  EXPECT_EQ(8181779779123079347, cobj_.HashCode());
-  EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
-  EXPECT_EQ(2, cobj_.Size());
-  EXPECT_TRUE(cobj_.HasExpire());
+TEST_F(CompactObjectTest, Expire) {
+  CompactKey key;
+  key.SetExpire(true);
+  key.SetString("42");
+  EXPECT_EQ(8181779779123079347, key.HashCode());
+  EXPECT_EQ(OBJ_ENCODING_INT, key.Encoding());
+  EXPECT_EQ(2, key.Size());
+  EXPECT_TRUE(key.HasExpire());
 }
 
 TEST_F(CompactObjectTest, MediumString) {

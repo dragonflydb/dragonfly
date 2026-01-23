@@ -28,6 +28,7 @@ class GenericFamily {
 
  private:
   static void Del(CmdArgList args, CommandContext* cmd_cntx);
+  static void Delex(CmdArgList args, CommandContext* cmd_cntx);
   static void Unlink(CmdArgList args, CommandContext* cmd_cntx);
   static void Ping(CmdArgList args, CommandContext* cmd_cntx);
   static void Exists(CmdArgList args, CommandContext* cmd_cntx);

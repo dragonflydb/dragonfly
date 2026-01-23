@@ -188,7 +188,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
-      if (bucket_it->second.HasExpire()) {
+      if (bucket_it->first.HasExpire()) {
         string_view key = bucket_it->first.GetSlice(&scratch);
         ++checked_;
         auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(
@@ -609,7 +609,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::WRONG_TYPE;
   }
 
-  if (res.it->second.HasExpire()) {  // check expiry state
+  if (res.it->first.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       events_.misses += miss_weight;
@@ -841,7 +841,7 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
     doc_del_cb_(key, cntx, it->second);
   }
 
-  if (it->second.HasExpire()) {
+  if (it->first.HasExpire()) {
     exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
     DCHECK(!exp_it.is_done());
   }
@@ -997,15 +997,15 @@ void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {
   size_t table_before = db.expire.mem_usage();
   CHECK(db.expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
   table_memory_ += (db.expire.mem_usage() - table_before);
-  main_it->second.SetExpire(true);
+  main_it->first.SetExpire(true);
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, const Iterator& main_it) {
-  if (main_it->second.HasExpire()) {
+  if (main_it->first.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
     CHECK_EQ(1u, db.expire.Erase(main_it->first));
-    main_it->second.SetExpire(false);
+    main_it->first.SetExpire(false);
     table_memory_ += (db.expire.mem_usage() - table_before);
     return true;
   }
@@ -1018,7 +1018,7 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, const Iterator& it, uint64_t at) {
     return RemoveExpire(db_ind, it);
   }
 
-  if (!it->second.HasExpire() && at) {
+  if (!it->first.HasExpire() && at) {
     AddExpire(db_ind, it, at);
     return true;
   }
@@ -1144,7 +1144,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
   it->second = std::move(obj);
 
   if (expire_at_ms) {
-    it->second.SetExpire(true);
+    it->first.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
     if (IsValid(res.exp_it) && force_update) {
       res.exp_it->second = ExpirePeriod(delta);
@@ -1274,7 +1274,7 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) cons
 }
 
 DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
-  if (!it->second.HasExpire()) {
+  if (!it->first.HasExpire()) {
     LOG(DFATAL) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
   }
