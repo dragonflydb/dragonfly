@@ -99,7 +99,7 @@ class JsonAutoUpdater {
   }
 
   void AddDocToIndexes() {
-    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, &GetPrimeValue());
   }
 
   ~JsonAutoUpdater() {
@@ -510,7 +510,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       if (type == OBJ_JSON) {
         // We need to add the document to the indexes, because we removed it before
-        op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, updater.GetPrimeValue());
+        op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
       }
       return OpStatus::INVALID_JSON;
     }
@@ -533,7 +533,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   updater.SetJsonSize();
 
   // We need to manually run add document here
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, updater.GetPrimeValue());
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
 
   return OpStatus::OK;
 }
