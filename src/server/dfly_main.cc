@@ -50,6 +50,7 @@
 #include "server/common.h"
 #include "server/generic_family.h"
 #include "server/main_service.h"
+#include "server/server_family.h"
 #include "server/version.h"
 #include "server/version_monitor.h"
 #include "strings/human_readable.h"
@@ -216,7 +217,24 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   }
 
   const auto& bind = GetFlag(FLAGS_bind);
-  const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
+
+  // Protected mode: if no bind address is specified and no password is set,
+  // bind only to localhost to prevent unauthorized remote access.
+  // Only enabled when running under systemd (INVOCATION_ID is set) to avoid
+  // breaking containerized deployments where binding to localhost would make
+  // the service unreachable from the host.
+  // GetPassword() checks both --requirepass flag and DFLY_PASSWORD env var.
+  bool running_under_systemd = getenv("INVOCATION_ID") != nullptr;
+  bool protected_mode = running_under_systemd && bind.empty() && GetPassword().empty();
+  const char* bind_addr = nullptr;
+  if (protected_mode) {
+    bind_addr = "127.0.0.1";
+    LOG(WARNING) << "Protected mode enabled. Binding to localhost only because no password is set. "
+                 << "To accept remote connections, set a password with --requirepass or "
+                 << "specify a bind address with --bind.";
+  } else if (!bind.empty()) {
+    bind_addr = bind.c_str();
+  }
 
   int32_t port = GetFlag(FLAGS_port);
   // The reason for this code is a bit silly. We want to provide a way to
@@ -315,7 +333,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   if (mc_port > 0 && !tcp_disabled) {
     auto listener = MakeListener(Protocol::MEMCACHE, &service);
-    error_code ec = acceptor->AddListener(nullptr, mc_port, listener.get());
+    error_code ec = acceptor->AddListener(bind_addr, mc_port, listener.get());
     if (ec) {
       LOG(ERROR) << "Could not open memcached port " << mc_port << ", error: " << ec.message();
       exit(1);
