@@ -1265,9 +1265,6 @@ bool QList::Erase(const long start, unsigned count) {
 }
 
 uint8_t* QList::TryExtractListpack() {
-  // TODO: enable this once we support listpack encoding for lists.
-  return nullptr;
-
   if (len_ != 1 || QL_NODE_IS_PLAIN(head_) || !ShouldStoreAsListPack(head_->sz) ||
       head_->IsCompressed()) {
     return nullptr;
