@@ -8,6 +8,7 @@
 
 #include "facade/service_interface.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/conn_context.h"
 #include "server/journal/types.h"
 
 namespace facade {
