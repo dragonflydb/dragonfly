@@ -39,3 +39,14 @@ jobs:
           apt update
           apt install -y dragonfly
           dragonfly --version
+
+  notify-on-failure:
+    runs-on: ubuntu-latest
+    needs: [test-rpm, test-deb-ubuntu]
+    if: ${{ always() && (needs.test-rpm.result == 'failure' || needs.test-deb-ubuntu.result == 'failure') }}
+    steps:
+      - name: Notify on failure
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Package install tests failed.\nCommit: ${{ github.sha }}\nJob: ${job_link}"
+          curl -sSf -X POST -H 'Content-Type: application/json' '${{ secrets.GSPACES_BOT_DF_BUILD }}' -d '{"text": "'"${message}"'"}'

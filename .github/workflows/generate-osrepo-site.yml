@@ -81,3 +81,10 @@ jobs:
         run: |
           gcloud storage rm ${{ secrets.GCP_PACKAGES_BUCKET }}/**
           gcloud storage rsync $SiteRoot ${{ secrets.GCP_PACKAGES_BUCKET }} --recursive --delete-unmatched-destination-objects
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Package repo generation failed.\nCommit: ${{ github.sha }}\nJob: ${job_link}"
+          curl -sSf -X POST -H 'Content-Type: application/json' '${{ secrets.GSPACES_BOT_DF_BUILD }}' -d '{"text": "'"${message}"'"}'
