@@ -151,6 +151,8 @@ class PageUsageStatsTest : public ::testing::Test {
     small_string_.Free();
     qlist_->Clear();
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
+    c_obj_.Reset();
+    CleanupStatelessAllocMR();
   }
 
   MiMemoryResource m_;
