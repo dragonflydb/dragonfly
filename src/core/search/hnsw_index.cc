@@ -153,22 +153,21 @@ struct HnswlibAdapter {
       node_data.global_id = world_.getExternalLabel(internal_id);
       node_data.level = world_.element_levels_[internal_id];
 
+      // Reserve space for all levels (0 to level)
+      node_data.levels_links.resize(node_data.level + 1);
+
       // Get level 0 links
       auto* ll0 = world_.get_linklist0(internal_id);
       unsigned short link_count0 = world_.getListCount(ll0);
       auto* links0 = reinterpret_cast<uint32_t*>(ll0 + 1);
-      node_data.zero_level_links.assign(links0, links0 + link_count0);
+      node_data.levels_links[0].assign(links0, links0 + link_count0);
 
       // Get higher level links if any
-      if (node_data.level > 0) {
-        for (int level = 1; level <= node_data.level; ++level) {
-          auto* ll = world_.get_linklist(internal_id, level);
-          unsigned short link_count = world_.getListCount(ll);
-          auto* links = reinterpret_cast<uint32_t*>(ll + 1);
-          for (unsigned short i = 0; i < link_count; ++i) {
-            node_data.higher_level_links.push_back(links[i]);
-          }
-        }
+      for (int lvl = 1; lvl <= node_data.level; ++lvl) {
+        auto* ll = world_.get_linklist(internal_id, lvl);
+        unsigned short link_count = world_.getListCount(ll);
+        auto* links = reinterpret_cast<uint32_t*>(ll + 1);
+        node_data.levels_links[lvl].assign(links, links + link_count);
       }
 
       result.push_back(std::move(node_data));

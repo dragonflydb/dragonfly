@@ -2210,9 +2210,7 @@ error_code RdbLoader::Load(io::Source* src) {
       // Binary format: [index_name, elements_number,
       //   then for each node (little-endian):
       //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
-      //     zero_level_links_num (4 bytes), zero_level_links[] (4 bytes each),
-      //     higher_level_links_num (4 bytes, only if level > 0),
-      //     higher_level_links[] (4 bytes each, only if level > 0)]
+      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
       string index_key;
       SET_OR_RETURN(FetchGenericString(), index_key);
 
@@ -2227,21 +2225,13 @@ error_code RdbLoader::Load(io::Source* src) {
         SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
         uint32_t level;
         SET_OR_RETURN(FetchInt<uint32_t>(), level);
-        uint32_t zero_level_links_num;
-        SET_OR_RETURN(FetchInt<uint32_t>(), zero_level_links_num);
 
-        // Skip zero level links (4 bytes each)
-        for (uint32_t i = 0; i < zero_level_links_num; ++i) {
-          [[maybe_unused]] uint32_t link;
-          SET_OR_RETURN(FetchInt<uint32_t>(), link);
-        }
-
-        // Read higher level links (only if level > 0)
-        if (level > 0) {
-          uint32_t higher_level_links_num;
-          SET_OR_RETURN(FetchInt<uint32_t>(), higher_level_links_num);
-          // Skip higher level links
-          for (uint32_t i = 0; i < higher_level_links_num; ++i) {
+        // Read links for each level (0 to level)
+        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
+          uint32_t links_num;
+          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+          // Skip links
+          for (uint32_t i = 0; i < links_num; ++i) {
             [[maybe_unused]] uint32_t link;
             SET_OR_RETURN(FetchInt<uint32_t>(), link);
           }

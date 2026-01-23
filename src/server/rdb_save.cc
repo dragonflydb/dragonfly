@@ -792,10 +792,7 @@ error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
   // - internal_id: 4 bytes (uint32_t)
   // - global_id: 8 bytes (uint64_t)
   // - level: 4 bytes (int)
-  // - zero_level_links_num: 4 bytes
-  // - zero_level_links: 4 bytes each
-  // - higher_level_links_num: 4 bytes (only if level > 0)
-  // - higher_level_links: 4 bytes each (only if level > 0)
+  // - for each level (0 to level): links_num (4 bytes) + links (4 bytes each)
 
   size_t total_size = node.TotalSize();
   DCHECK_LE(total_size, tmp_buf.size());
@@ -808,20 +805,12 @@ error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
   ptr += 8;
   absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.level));
   ptr += 4;
-  absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.zero_level_links.size()));
-  ptr += 4;
 
-  // Write zero level links
-  for (uint32_t link : node.zero_level_links) {
-    absl::little_endian::Store32(ptr, link);
+  // Write links for each level
+  for (const auto& level_links : node.levels_links) {
+    absl::little_endian::Store32(ptr, static_cast<uint32_t>(level_links.size()));
     ptr += 4;
-  }
-
-  // Write higher level links (only if level > 0)
-  if (node.level > 0) {
-    absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.higher_level_links.size()));
-    ptr += 4;
-    for (uint32_t link : node.higher_level_links) {
+    for (uint32_t link : level_links) {
       absl::little_endian::Store32(ptr, link);
       ptr += 4;
     }
