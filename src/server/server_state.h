@@ -22,7 +22,7 @@ typedef struct mi_heap_s mi_heap_t;
 
 namespace facade {
 class Connection;
-class ConnectionStats;
+struct ConnectionStats;
 }  // namespace facade
 
 namespace util {
