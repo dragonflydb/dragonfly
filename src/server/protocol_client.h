@@ -13,7 +13,6 @@
 #include "facade/resp_parser.h"
 #include "io/io_buf.h"
 #include "server/common.h"
-#include "server/journal/types.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
