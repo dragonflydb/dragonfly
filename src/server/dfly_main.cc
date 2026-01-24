@@ -906,6 +906,9 @@ Usage: dragonfly [FLAGS]
   sigemptyset(&act.sa_mask);
   sigaction(SIGILL, &act, nullptr);
 
+  // Ignore SIGHUP to prevent termination when the parent shell exits
+  signal(SIGHUP, SIG_IGN);
+
   if (GetFlag(FLAGS_port) == 0u) {
     string usock = GetFlag(FLAGS_unixsocket);
     if (usock.length() == 0u) {
