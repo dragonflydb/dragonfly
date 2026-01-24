@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 
 #include <bitset>

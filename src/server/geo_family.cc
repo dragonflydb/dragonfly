@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/ascii.h>
+
 extern "C" {
 #include "redis/geo.h"
 #include "redis/geohash.h"
