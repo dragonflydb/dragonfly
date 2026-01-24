@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/common.h"
 #include "server/table.h"
 #include "server/tiering/common.h"

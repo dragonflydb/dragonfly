@@ -26,9 +26,10 @@
 #include <unordered_set>
 
 #include "absl/strings/ascii.h"
+#include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "server/common.h"
-#include "slowlog.h"
+#include "server/slowlog.h"
 #include "util/fibers/synchronization.h"
 
 extern "C" {
@@ -1042,7 +1043,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 
   {
     absl::InsecureBitGen eng;
-    master_replid_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
+    master_replid_ = detail::GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
     DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid_.size());
   }
 

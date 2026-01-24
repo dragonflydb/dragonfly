@@ -3,6 +3,8 @@
 //
 #include "server/debugcmd.h"
 
+#include "core/detail/gen_utils.h"
+
 #define HUF_STATIC_LINKING_ONLY
 
 extern "C" {
@@ -86,7 +88,7 @@ struct ValueCompressInfo {
 
 std::string GenerateValue(size_t val_size, bool random_value, absl::InsecureBitGen* gen) {
   if (random_value) {
-    return GetRandomHex(*gen, val_size);
+    return detail::GetRandomHex(*gen, val_size);
   } else {
     return string(val_size, 'x');
   }

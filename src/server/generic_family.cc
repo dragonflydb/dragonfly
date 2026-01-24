@@ -4,6 +4,7 @@
 
 #include "server/generic_family.h"
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
 #include <optional>
@@ -18,6 +19,7 @@ extern "C" {
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/glob_matcher.h"
 #include "core/qlist.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"

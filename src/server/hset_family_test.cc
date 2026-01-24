@@ -15,6 +15,7 @@ extern "C" {
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
@@ -71,8 +72,8 @@ TEST_F(HSetFamilyTest, HSet) {
       vector<string> cmd = {"HSET", "hash"};
       size_t new_values = 0;
       for (int i = 0; i < 20; i++) {
-        string key = GetRandomHex(gen, 3);
-        string value = GetRandomHex(gen, 20, 10);
+        string key = detail::GetRandomHex(gen, 3);
+        string value = detail::GetRandomHex(gen, 20, 10);
         new_values += mirror.contains(key) ? 0 : 1;
         mirror[key] = value;
 
