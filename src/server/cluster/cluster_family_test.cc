@@ -15,6 +15,7 @@
 #include "absl/time/time.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
@@ -437,7 +438,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 
   absl::InsecureBitGen eng;
   while (true) {
-    string random_key = GetRandomHex(eng, 40);
+    string random_key = detail::GetRandomHex(eng, 40);
     SlotId slot = KeySlot(random_key);
     if (slot > 10'000) {
       continue;
@@ -449,7 +450,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   }
 
   while (true) {
-    string random_key = GetRandomHex(eng, 40);
+    string random_key = detail::GetRandomHex(eng, 40);
     SlotId slot = KeySlot(random_key);
     if (slot <= 10'000) {
       continue;

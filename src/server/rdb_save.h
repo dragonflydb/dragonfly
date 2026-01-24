@@ -25,6 +25,9 @@ typedef struct streamCG streamCG;
 
 namespace dfly {
 
+// keys are RDB_TYPE_xxx constants.
+using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
+
 uint8_t RdbObjectType(const CompactObj& pv);
 
 class EngineShard;

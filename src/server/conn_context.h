@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"

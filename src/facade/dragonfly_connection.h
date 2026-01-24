@@ -15,6 +15,7 @@
 
 #include "common/backed_args.h"
 #include "facade/connection_ref.h"
+#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
