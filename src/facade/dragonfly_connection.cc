@@ -1102,6 +1102,13 @@ void Connection::ConnectionFlow() {
                             << " during phase " << kPhaseName[phase_] << " : " << ec << " "
                             << ec.message();
   }
+
+  // Explicitly close the socket as the final step.
+  // For TLS sockets, this forces TlsSocket to WaitForPendingIO() (handling detached
+  // TrySend/TryRecv calls) before the socket is destroyed.
+  if (is_tls_) {
+    socket_->Close();
+  }
 }
 
 void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
