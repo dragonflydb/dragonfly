@@ -2690,7 +2690,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
-    ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
+    StashPrimeValue(db_cntx.db_index, item->key, false, &res.it->second, ts);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
