@@ -131,7 +131,9 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
     TieredStorage::TResult<size_t> fut;
-    auto cb = [fut](io::Result<string> s) mutable { fut.Resolve(s.transform(&string::size)); };
+    auto cb = [fut](io::Result<string_view> s) mutable {
+      fut.Resolve(s.transform(&string_view::size));
+    };
     op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
     return {std::move(fut)};
   } else {
@@ -172,7 +174,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
 
 OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_t start,
                                   int32_t end) {
-  auto read = [start, end](std::string_view slice) mutable -> string_view {
+  auto read_cb = [start, end](std::string_view slice) mutable -> string {
     int32_t strlen = slice.size();
     if (strlen == 0)
       return "";
@@ -196,7 +198,7 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
       return "";
     }
 
-    return slice.substr(start, end - start + 1);
+    return string{slice.substr(start, end - start + 1)};
   };
 
   auto& db_slice = op_args.GetDbSlice();
@@ -210,12 +212,14 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
     fb2::Future<io::Result<std::string>> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
-        [read, fut](const io::Result<std::string>& s) mutable { fut.Resolve(string{read(*s)}); });
+        [read_cb, fut](const io::Result<std::string_view>& s) mutable {
+          fut.Resolve(read_cb(*s));
+        });
     return {std::move(fut)};
   } else {
     string tmp;
     string_view slice = co.GetSlice(&tmp);
-    return {string{read(slice)}};
+    return {read_cb(slice)};
   }
 };
 
@@ -574,7 +578,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, err, wait_bc](const io::Result<string>& v) mutable {
+      auto cb = [next, err, wait_bc](const io::Result<string_view>& v) mutable {
         if (v.has_value())
           memcpy(next, v->data(), v->size());
         else

@@ -12,7 +12,6 @@
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/entry_map.h"
-#include "server/tx_base.h"
 #include "util/fibers/future.h"
 
 #ifdef WITH_TIERING
@@ -49,13 +48,14 @@ class TieredStorage {
 
   // Enqueue read external value with generic decoder.
   template <typename D, typename F>
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+  void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
+            const D& decoder, F&& f) {
     // TODO(vlad): untangle endless callback wrapping!
     // Templates don't consider implicit conversions, so explicitly convert to std::function
     auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
       f(res.transform([](auto* d) { return static_cast<D*>(d); }));
     };
-    ReadInternal(dbid, key, value, decoder, wrapped_cb);
+    ReadInternal(dbid, key, segment, decoder, wrapped_cb);
   }
 
   // Read offloaded value. It must be of external string type
@@ -63,7 +63,7 @@ class TieredStorage {
 
   // Read offloaded value. It must be of external string type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(io::Result<std::string>)> readf);
+            std::function<void(io::Result<std::string_view>)> readf);
 
   // Apply modification to offloaded value, return generic result from callback.
   // Unlike immutable Reads - the modified value must be uploaded back to memory.
@@ -107,7 +107,7 @@ class TieredStorage {
   }
 
  private:
-  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+  void ReadInternal(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
                     std::function<void(io::Result<tiering::Decoder*>)> cb);
 
@@ -186,11 +186,12 @@ class TieredStorage {
 
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(io::Result<std::string>)> readf) {
+            std::function<void(io::Result<std::string_view>)> readf) {
   }
 
   template <typename D, typename F>
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+  void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& value, const D& decoder,
+            F&& f) {
   }
 
   template <typename T>
