@@ -12,7 +12,7 @@
 #include "server/tiering/common.h"
 #include "server/tiering/decoders.h"
 #include "server/tiering/disk_storage.h"
-#include "server/tx_base.h"
+#include "server/tiering/entry_map.h"
 #include "util/fibers/future.h"
 
 namespace dfly::tiering {
@@ -34,8 +34,7 @@ class OpManager {
   // Two separate keyspaces are provided - one for strings, one for numeric identifiers.
   // Ids can be used to track auxiliary values that don't map to real keys (like a page index).
   // Specifically, we track page indexes when serializing small-bin pages with multiple items.
-  using EntryId = std::variant<unsigned, KeyRef>;
-  using OwnedEntryId = std::variant<unsigned, std::pair<DbIndex, std::string>>;
+  using PendingId = std::variant<unsigned, KeyRef>;
 
   explicit OpManager(size_t max_size);
   virtual ~OpManager();
@@ -53,10 +52,10 @@ class OpManager {
   // Enqueue callback to be executed once value is read. Trigger read if none is pending yet for
   // this segment. Multiple entries can be obtained from a single segment, but every distinct id
   // will have it's own independent callback loop that can safely modify the underlying value
-  void Enqueue(EntryId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb);
+  void Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb);
 
-  // Delete entry with pending io
-  void Delete(EntryId id);
+  // Cancel entry with pending io
+  void CancelPending(PendingId id);
 
   // Delete offloaded entry located at the segment.
   void DeleteOffloaded(DiskSegment segment);
@@ -66,32 +65,34 @@ class OpManager {
   }
 
   // Stash value to be offloaded. It is opaque to OpManager.
-  void Stash(EntryId id, tiering::DiskSegment segment, util::fb2::UringBuf buf);
+  void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::UringBuf buf);
 
   // PrepareStash + Stash via function
   std::error_code PrepareAndStash(
-      EntryId id, size_t length,
+      PendingId id, size_t length,
       const std::function<size_t /*written*/ (io::MutableBytes)>& writer);
 
   Stats GetStats() const;
 
  protected:
+  using OwnedEntryId = std::variant<unsigned, DbKeyId>;
+
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
-  virtual void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) = 0;
+  virtual void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted from the storage.
-  virtual bool NotifyFetched(EntryId id, DiskSegment segment, Decoder*) = 0;
+  virtual bool NotifyFetched(const OwnedEntryId& id, DiskSegment segment, Decoder*) = 0;
 
   // Notify delete. Return true if the filled segment needs to be marked as free.
   virtual bool NotifyDelete(DiskSegment segment) = 0;
 
- protected:
   // Describes pending futures for a single entry
   struct EntryOps {
     EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder);
 
+    // unique identifier for the entry being read. Used to notify higher layers.
     OwnedEntryId id;
     DiskSegment segment;
     absl::InlinedVector<ReadCallback, 1> callbacks;
@@ -105,7 +106,7 @@ class OpManager {
     }
 
     // Get ops for id or create new
-    EntryOps& ForSegment(DiskSegment segment, EntryId id, const Decoder& decoder);
+    EntryOps& ForSegment(DiskSegment segment, PendingId id, const Decoder& decoder);
 
     // Find if there are operations for the given segment, return nullptr otherwise
     EntryOps* Find(DiskSegment segment);
@@ -122,14 +123,19 @@ class OpManager {
   void ProcessRead(size_t offset, io::Result<std::string_view> value);
 
   // Called once Stash finished
-  void ProcessStashed(EntryId id, unsigned version, const io::Result<DiskSegment>& segment);
+  void ProcessStashed(const OwnedEntryId& id, unsigned version,
+                      const io::Result<DiskSegment>& segment);
 
- protected:
+ private:
+  static OwnedEntryId ToOwned(PendingId id);
+  static std::string ToString(const OwnedEntryId& id);
+
   DiskStorage storage_;
 
   absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;
 
   size_t pending_stash_counter_ = 0;
+
   // todo: allow heterogeneous lookups with non owned id
   absl::flat_hash_map<OwnedEntryId, unsigned /* version */> pending_stash_ver_;
 };

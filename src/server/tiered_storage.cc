@@ -148,7 +148,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Clear IO pending flag for entry
   void ClearIoPending(OpManager::KeyRef key) {
     UnblockBackpressure(key, false);
-    if (auto pv = Find(key); pv) {
+    if (auto pv = Find(key.first, key.second); pv) {
       pv->SetStashPending(false);
       stats_.total_cancels++;
     }
@@ -167,17 +167,18 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void DeleteOffloaded(DbIndex dbid, const tiering::DiskSegment& segment);
 
  private:
-  PrimeValue* Find(OpManager::KeyRef key) {
+  PrimeValue* Find(DbIndex dbid, string_view key) {
     // TODO: Get DbContext for transaction for correct dbid and time
     // Bypass all update and stat mechanisms
-    auto it = db_slice_.GetDBTable(key.first)->prime.Find(key.second);
+    auto it = db_slice_.GetDBTable(dbid)->prime.Find(key);
     return IsValid(it) ? &it->second : nullptr;
   }
 
   // Load all values from bin by their hashes
   void Defragment(tiering::DiskSegment segment, string_view value);
 
-  void NotifyStashed(EntryId id, const io::Result<tiering::DiskSegment>& segment) override {
+  void NotifyStashed(const OwnedEntryId& id,
+                     const io::Result<tiering::DiskSegment>& segment) override {
     if (!segment) {
       VLOG(1) << "Stash failed " << segment.error().message();
       visit([this](auto id) { ClearIoPending(id); }, id);
@@ -186,7 +187,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  bool NotifyFetched(EntryId id, tiering::DiskSegment segment, tiering::Decoder* decoder) override;
+  bool NotifyFetched(const OwnedEntryId& id, tiering::DiskSegment segment,
+                     tiering::Decoder* decoder) override;
 
   bool NotifyDelete(tiering::DiskSegment segment) override;
 
@@ -216,7 +218,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     UnblockBackpressure(key, true);
-    if (auto* pv = Find(key); pv) {
+    if (auto* pv = Find(key.first, key.second); pv) {
       auto* stats = GetDbTableStats(key.first);
 
       pv->SetStashPending(false);
@@ -292,11 +294,12 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
   }
 }
 
-bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegment segment,
+bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
+                                                  tiering::DiskSegment segment,
                                                   tiering::Decoder* decoder) {
   ++stats_.total_fetches;
 
-  if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
+  if (id == OwnedEntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
     auto* bdecoder = static_cast<tiering::BareDecoder*>(decoder);
     Defragment(segment, bdecoder->slice);
     return true;  // delete
@@ -316,8 +319,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegme
   if (!should_upload)
     return false;
 
-  auto key = get<OpManager::KeyRef>(id);
-  auto* pv = Find(key);
+  const auto& key = get<tiering::DbKeyId>(id);
+  auto* pv = Find(key.first, key.second);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
     if (metrics.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
@@ -396,28 +399,30 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
-void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key,
+                                 const tiering::DiskSegment& segment,
                                  const tiering::Decoder& decoder,
                                  std::function<void(io::Result<tiering::Decoder*>)> cb) {
-  DCHECK(value.IsExternal());
-  DCHECK(!value.IsCool());
-  // TODO: imporve performance by avoiding one more function wrap
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), decoder, std::move(cb));
+  // TODO: improve performance by avoiding one more function wrap
+  op_manager_->Enqueue(KeyRef(dbid, key), segment, decoder, std::move(cb));
 }
 
 TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                                    const PrimeValue& value) {
   util::fb2::Future<io::Result<string>> fut;
-  Read(dbid, key, value, bind(&decltype(fut)::Resolve, fut, placeholders::_1));
+  auto cb = [fut](io::Result<std::string_view> res) mutable {
+    fut.Resolve(res.transform([](std::string_view sv) { return string{sv}; }));
+  };
+  Read(dbid, key, value, std::move(cb));
   return fut;
 }
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(io::Result<std::string>)> readf) {
+                         std::function<void(io::Result<std::string_view>)> readf) {
   auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
-    readf(res.transform([](auto* d) { return string{d->Read()}; }));
+    readf(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
   };
-  Read(dbid, key, value, tiering::StringDecoder{value}, std::move(cb));
+  Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
 }
 
 template <typename T>
@@ -459,7 +464,7 @@ std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, str
   auto [est_size, rep] = DetermineSerializationParams(*value);
   DCHECK_GT(est_size, 0u);
 
-  tiering::OpManager::EntryId id;
+  tiering::OpManager::PendingId id;
   error_code ec;
 
   value->SetStashPending(true);  // Optimistically set ahead, unset in case of error
@@ -519,9 +524,9 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   // TODO: Don't recompute size estimate, try-delete bin first
   size_t size = DetermineSerializationParams(*value).first;
   if (OccupiesWholePages(size)) {
-    op_manager_->Delete(KeyRef(dbid, key));
+    op_manager_->CancelPending(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
-    op_manager_->Delete(*bin);
+    op_manager_->CancelPending(*bin);
   }
   value->SetStashPending(false);
 }

@@ -31,9 +31,9 @@ struct Eq {
 };
 }  // namespace detail
 
+using DbKeyId = std::pair<DbIndex, std::string>;
+
 // Map of key (db index, string key) -> T with heterogeneous lookup
-template <typename T>
-using EntryMap =
-    absl::flat_hash_map<std::pair<DbIndex, std::string>, T, detail::Hasher, detail::Eq>;
+template <typename T> using EntryMap = absl::flat_hash_map<DbKeyId, T, detail::Hasher, detail::Eq>;
 
 }  // namespace dfly::tiering
