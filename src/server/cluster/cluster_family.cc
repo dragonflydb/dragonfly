@@ -967,10 +967,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
-  DCHECK(conn_cntx->sync_dispatch);
-  // we do this to be ignored by the dispatch tracker
-  // TODO provide a more clear approach
-  conn_cntx->sync_dispatch = false;
 
   cmd_cntx->SendOk();
 

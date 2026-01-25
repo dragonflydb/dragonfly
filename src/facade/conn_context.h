@@ -23,7 +23,6 @@ class ConnectionContext {
     replica_conn = false;
     authenticated = false;
     async_dispatch = false;
-    sync_dispatch = false;
     paused = false;
     blocked = false;
 
@@ -55,7 +54,6 @@ class ConnectionContext {
   bool replica_conn : 1;  // whether it's a replica connection on the master side.
   bool authenticated : 1;
   bool async_dispatch : 1;  // whether this connection is amid an async dispatch
-  bool sync_dispatch : 1;   // whether this connection is amid a sync dispatch
 
   bool paused = false;  // whether this connection is paused due to CLIENT PAUSE
   // whether it's blocked on blocking commands like BLPOP, needs to be addressable
