@@ -22,6 +22,8 @@ void AsyncContextInterface::RunAsync(std::unique_ptr<AsyncContextInterface> asyn
   RETURN_ON_ERR(result);
 
   auto* blocker = std::get<BlockResult>(result);
+  DCHECK(blocker);
+
   auto replier = [me = std::move(async_cntx)](facade::SinkReplyBuilder* rb) { me->Reply(rb); };
   cmd_cntx->Resolve(blocker, std::move(replier));
 }

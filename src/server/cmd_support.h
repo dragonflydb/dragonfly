@@ -42,7 +42,7 @@ template <typename C> struct SimpleContext : public AsyncContextInterface, priva
   // Automatic runner function that is async agnostic
   static void Run(ArgSlice args, CommandContext* cmd_cntx) {
     using ACI = AsyncContextInterface;
-    static_assert(std::is_base_of_v<ACI, AsyncContextInterface>);
+    static_assert(std::is_base_of_v<ACI, C>);
 
     if (cmd_cntx->IsDeferredReply()) {
       auto* async_cntx = new C{};
