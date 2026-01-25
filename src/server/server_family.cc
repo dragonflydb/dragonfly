@@ -2405,7 +2405,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return cmd_cntx->SendError(facade::kAuthRejected);
+    return cmd_cntx->SendError(facade::kAuthRejected, facade::kNoAuthErrType);
   }
 
   if (!cntx->req_auth) {
@@ -2419,7 +2419,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
     cntx->authenticated = true;
     cmd_cntx->rb()->SendOk();
   } else {
-    return cmd_cntx->SendError(facade::kAuthRejected);
+    return cmd_cntx->SendError(facade::kAuthRejected, facade::kNoAuthErrType);
   }
 }
 
@@ -3515,7 +3515,7 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmd_cntx) {
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   if (has_auth && !DoAuth(cntx, username, password)) {
-    return cmd_cntx->SendError(facade::kAuthRejected);
+    return cmd_cntx->SendError(facade::kAuthRejected, facade::kNoAuthErrType);
   }
 
   if (cntx->req_auth && !cntx->authenticated) {
@@ -3523,7 +3523,8 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmd_cntx) {
         "-NOAUTH HELLO must be called with the client already "
         "authenticated, otherwise the HELLO <proto> AUTH <user> <pass> "
         "option can be used to authenticate the client and "
-        "select the RESP protocol version at the same time");
+        "select the RESP protocol version at the same time",
+        facade::kNoAuthErrType);
     return;
   }
 
