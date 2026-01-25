@@ -4,16 +4,27 @@
 
 #include "facade/error.h"
 #include "server/conn_context.h"
+#include "server/engine_shard.h"
 #include "server/transaction.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly::cmd {
 
-// Base class of async context. Provides virtual async command interface
-struct AsyncContextBase {
-  struct BlockerSentinel {};
-  using PrepareResult = std::variant<facade::ErrorReply, BlockerSentinel>;
+// Pointer to blocker to wait for before replying
+using BlockResult = util::fb2::EmbeddedBlockingCounter*;
 
-  virtual ~AsyncContextBase() = default;
+// Handler for dispatching hops, must be part of a context
+struct HopCoordinator {
+  // Perform single hop. Callback must be kept alive until end!
+  BlockResult SingleHop(CommandContext* cntx, Transaction::RunnableType cb);
+
+  boost::intrusive_ptr<Transaction> tx_keepalive_;
+};
+
+// Base interface for async context
+struct AsyncContextInterface {
+  virtual ~AsyncContextInterface() = default;
+  using PrepareResult = std::variant<facade::ErrorReply, BlockResult>;
 
   // Prepare command. Must end with error or scheduled operation
   virtual PrepareResult Prepare(ArgSlice args, CommandContext* cntx) = 0;
@@ -21,43 +32,39 @@ struct AsyncContextBase {
   // Reply after scheduled operation was performed
   virtual void Reply(facade::SinkReplyBuilder*) = 0;
 
-  template <typename C> static void Run(ArgSlice args, CommandContext* cmd_cntx) {
-    static_assert(std::is_base_of_v<AsyncContextBase, C>);
+  static void RunSync(AsyncContextInterface* async_cntx, ArgSlice, CommandContext*);
+  static void RunAsync(std::unique_ptr<AsyncContextInterface> async_cntx, ArgSlice,
+                       CommandContext*);
+};
+
+// Basic implementation of AsyncContext providing limited interface for single hop commands
+template <typename C> struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
+  // Automatic runner function that is async agnostic
+  static void Run(ArgSlice args, CommandContext* cmd_cntx) {
+    using ACI = AsyncContextInterface;
+    static_assert(std::is_base_of_v<ACI, AsyncContextInterface>);
+
     if (cmd_cntx->IsDeferredReply()) {
-      RunAsync(std::make_unique<C>(), args, cmd_cntx);
+      auto* async_cntx = new C{};
+      async_cntx->Init(cmd_cntx);
+      ACI::RunAsync(std::unique_ptr<AsyncContextInterface>{async_cntx}, args, cmd_cntx);
     } else {
       C async_cntx{};
-      RunSync(&async_cntx, args, cmd_cntx);
+      async_cntx.Init(cmd_cntx);
+      ACI::RunSync(&async_cntx, args, cmd_cntx);
     }
   }
 
- protected:
-  // Perform single hop. Callback must live as long as context
-  BlockerSentinel SingleHop(Transaction::RunnableType cb);
-
-  CommandContext* cntx() const {
-    return cntx_;
+  // Wrapper function to shard callback to call different signatures
+  OpStatus operator()(Transaction* t, EngineShard* es) const {
+    const auto& c = *static_cast<const C*>(this);
+    return c(t->GetShardArgs(es->shard_id()), t->GetOpArgs(es));
   }
 
  private:
-  // Initializer instead of constructor to simplify inheritance
-  void Init(CommandContext* cntx) {
-    cntx_ = cntx;
+  void Init(CommandContext* cmd_cntx) {
+    this->cmd_cntx = cmd_cntx;
   }
-
-  // Init and Prepare. Return true if successful
-  static bool InitAndPrepare(AsyncContextBase* async_cntx, ArgSlice, CommandContext*);
-
-  static void RunSync(AsyncContextBase* async_cntx, ArgSlice, CommandContext*);
-  static void RunAsync(std::unique_ptr<AsyncContextBase> async_cntx, ArgSlice, CommandContext*);
-
-  CommandContext* cntx_ = nullptr;
-  boost::intrusive_ptr<Transaction> tx_keepalive_;
-};
-
-// Extension of async context with limited interface for most transactional commands
-template <typename C> struct AsyncContext : public AsyncContextBase {
-  static constexpr auto Run = AsyncContextBase::Run<C>;
 
  protected:
   // Default prepare implementation that schedules a single hop
@@ -66,11 +73,13 @@ template <typename C> struct AsyncContext : public AsyncContextBase {
   }
 
   // Run single hop. Restricted to member operator call to ensure lifetime safety
-  BlockerSentinel SingleHop() {
-    return AsyncContextBase::SingleHop(static_cast<C&>(*this));
+  BlockResult SingleHop() {
+    return HopCoordinator::SingleHop(cmd_cntx, *this);
   }
+
+  CommandContext* cmd_cntx;
 };
 
-#define ASYNC_CMD(Name) struct Cmd##Name : public ::dfly::cmd::AsyncContext<Cmd##Name>
+#define ASYNC_CMD(Name) struct Cmd##Name : public ::dfly::cmd::SimpleContext<Cmd##Name>
 
 }  // namespace dfly::cmd

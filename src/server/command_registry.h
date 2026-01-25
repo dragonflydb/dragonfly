@@ -147,7 +147,8 @@ class CommandId : public facade::CommandId {
     return can_be_monitored_;
   }
 
-  CommandId&& SetHandler(Handler f) && {
+  CommandId&& SetHandler(Handler f, bool async_support = false) && {
+    support_async_ |= async_support;
     handler_ = std::move(f);
     return std::move(*this);
   }
@@ -191,8 +192,8 @@ class CommandId : public facade::CommandId {
 
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
-  bool IsAsync() const {
-    return name() == "SET";  // Temporary
+  bool SupportsAsync() const {
+    return support_async_;
   }
 
  private:
@@ -203,6 +204,7 @@ class CommandId : public facade::CommandId {
   bool implicit_acl_;
   bool is_alias_{false};
   bool can_be_monitored_{true};
+  bool support_async_{false};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;
