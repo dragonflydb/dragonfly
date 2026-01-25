@@ -67,20 +67,6 @@ class TieredStorage : public TieredStorageBase {
     ReadInternal(dbid, key, segment, decoder, wrapped_cb);
   }
 
-  // Read offloaded value. It must be of external string type
-  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
-
-  // Read offloaded value. It must be of external string type
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(io::Result<std::string_view>)> readf);
-
-  // Apply modification to offloaded value, return generic result from callback.
-  // Unlike immutable Reads - the modified value must be uploaded back to memory.
-  // This is handled by OpManager when modf completes.
-  template <typename T>
-  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                    std::function<T(std::string*)> modf);
-
   // Returns StashDescriptor if a value should be stashed.
   std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const;
 
@@ -149,6 +135,7 @@ class TieredStorage : public TieredStorageBase {
     float upload_threshold;
     bool experimental_hash_offload;
   } config_;
+
   mutable struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
@@ -158,6 +145,37 @@ class TieredStorage : public TieredStorageBase {
     size_t cool_memory_used = 0;
   } stats_;
 };
+
+// Read offloaded value. It must be of external string type
+void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts);
+
+// Read offloaded value and apply transformation cb on the read result. Returns future of the
+// transformed result.
+template <typename T>
+TieredStorage::TResult<T> ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                     std::function<T(std::string_view)> cb, TieredStorage* ts) {
+  TieredStorage::TResult<T> fut;
+  auto read_cb = [fut, cb = std::move(cb)](io::Result<std::string_view> res) mutable {
+    fut.Resolve(res.transform([&](std::string_view sv) { return cb(sv); }));
+  };
+  ReadTiered(dbid, key, value, std::move(read_cb), ts);
+  return fut;
+}
+
+inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::string_view key,
+                                                            const PrimeValue& value,
+                                                            TieredStorage* ts) {
+  return ReadTiered<std::string>(
+      dbid, key, value, [](std::string_view val) { return std::string(val); }, ts);
+}
+
+// Reads offloaded value, and applies modifications on it and return generic result from callback.
+// Unlike with immutable Reads - the modified value will be uploaded back to memory.
+// This is handled by OpManager when modf completes.
+template <typename T>
+TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                       std::function<T(std::string*)> modf, TieredStorage* ts);
 
 std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
                                                        bool provide_bp, PrimeValue* pv,
@@ -179,10 +197,6 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void Close() {
-  }
-
-  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
-    return {};
   }
 
   // Read offloaded value. It must be of external type
@@ -254,6 +268,28 @@ class TieredStorage : public TieredStorageBase {
     return PrimeValue{};
   }
 };
+
+template <typename T>
+TieredStorage::TResult<T> ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                     std::function<T(std::string_view)> cb, TieredStorage* ts) {
+  return {};
+}
+
+inline void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                       std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts) {
+}
+
+inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::string_view key,
+                                                            const PrimeValue& value,
+                                                            TieredStorage* ts) {
+  return {};
+}
+
+template <typename T>
+TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                       std::function<T(std::string*)> modf, TieredStorage* ts) {
+  return {};
+}
 
 inline std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
                                                               bool provide_bp, PrimeValue* pv,

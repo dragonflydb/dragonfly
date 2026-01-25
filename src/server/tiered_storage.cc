@@ -415,47 +415,6 @@ void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key,
   op_manager_->Enqueue(KeyRef(dbid, key), segment, decoder, std::move(cb));
 }
 
-TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
-                                                   const PrimeValue& value) {
-  util::fb2::Future<io::Result<string>> fut;
-  auto cb = [fut](io::Result<std::string_view> res) mutable {
-    fut.Resolve(res.transform([](std::string_view sv) { return string{sv}; }));
-  };
-  Read(dbid, key, value, std::move(cb));
-  return fut;
-}
-
-void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(io::Result<std::string_view>)> readf) {
-  auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
-    readf(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
-  };
-  Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
-}
-
-template <typename T>
-TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                                const PrimeValue& value,
-                                                std::function<T(std::string*)> modf) {
-  DCHECK(value.IsExternal());
-  DCHECK_EQ(value.ObjType(), OBJ_STRING);
-
-  util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf)](io::Result<tiering::Decoder*> res) mutable {
-    future.Resolve(
-        res.transform([](auto* d) { return static_cast<tiering::StringDecoder*>(d); })  //
-            .transform([&modf](auto* d) { return modf(d->Write()); }));
-  };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
-                       std::move(cb));
-  return future;
-}
-
-// Instantiate for size_t only - used in string_family's OpExtend.
-template TieredStorage::TResult<size_t> TieredStorage::Modify(
-    DbIndex dbid, std::string_view key, const PrimeValue& value,
-    std::function<size_t(std::string*)> modf);
-
 std::optional<util::fb2::Future<bool>> TieredStorage::Stash(DbIndex dbid, string_view key,
                                                             const StashDescriptor& blobs,
                                                             bool provide_bp) {
@@ -764,5 +723,35 @@ std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string
   }
   return std::nullopt;
 }
+
+void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                function<void(io::Result<string_view>)> readf, TieredStorage* ts) {
+  auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
+    readf(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
+  };
+  ts->Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
+}
+
+template <typename T>
+TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                       std::function<T(std::string*)> modf, TieredStorage* ts) {
+  DCHECK(value.IsExternal());
+  DCHECK_EQ(value.ObjType(), OBJ_STRING);
+
+  util::fb2::Future<io::Result<T>> future;
+
+  auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
+    future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
+  };
+  ts->Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
+
+  return future;
+}
+
+// Instantiate for size_t only - used in string_family's OpExtend.
+template TieredStorage::TResult<size_t> ModifyTiered(DbIndex dbid, std::string_view key,
+                                                     const PrimeValue& value,
+                                                     std::function<size_t(std::string*)> modf,
+                                                     TieredStorage* ts);
 
 }  // namespace dfly
