@@ -15,6 +15,7 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/stacktrace.h"
@@ -111,6 +112,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
                                                          : fb2::FiberPriority::NORMAL,
                         .name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex())};
   snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal] {
+    SerializeGlobalHnswIndices();
     this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
     if (!use_snapshot_version_) {
@@ -158,6 +160,45 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
 // it also guarantees 100% coverage of all items that exists when the traversal started
 // and survived until it finished.
+
+void SliceSnapshot::SerializeGlobalHnswIndices() {
+#ifdef WITH_SEARCH
+  // Serialize HNSW global indices for shard 0 only
+  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB) {
+    return;
+  }
+
+  auto all_indices = GlobalHnswIndexRegistry::Instance().GetAll();
+
+  // Preallocate buffer for HNSW entry serialization.
+  std::vector<uint8_t> tmp_buf;
+
+  for (const auto& [index_key, index] : all_indices) {
+    // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
+    //          then for each node: binary encoded entry via SaveHNSWEntry]
+    if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec)
+      continue;
+    if (auto ec = serializer_->SaveString(index_key); ec)
+      continue;
+
+    size_t node_count = index->GetNodeCount();
+    if (auto ec = serializer_->SaveLen(node_count); ec)
+      continue;
+
+    constexpr size_t kBatchSize = 1000;
+    for (size_t i = 0; i < node_count; i += kBatchSize) {
+      size_t batch_end = std::min(i + kBatchSize, node_count);
+      auto nodes = index->GetNodesRange(i, batch_end);
+      for (const auto& node : nodes) {
+        tmp_buf.resize(node.TotalSize());
+        if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
+          break;
+      }
+      ThrottleIfNeeded();
+    }
+  }
+#endif
+}
 
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {

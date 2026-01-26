@@ -2211,6 +2211,41 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_VECTOR_INDEX) {
+      // Stub: read and ignore HNSW vector index data
+      // Binary format: [index_name, elements_number,
+      //   then for each node (little-endian):
+      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
+      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
+      string index_key;
+      SET_OR_RETURN(FetchGenericString(), index_key);
+
+      uint64_t elements_number;
+      SET_OR_RETURN(LoadLen(nullptr), elements_number);
+
+      for (uint64_t elem = 0; elem < elements_number; ++elem) {
+        [[maybe_unused]] uint32_t internal_id;
+        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
+        [[maybe_unused]] uint64_t global_id;
+        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
+        uint32_t level;
+        SET_OR_RETURN(FetchInt<uint32_t>(), level);
+
+        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
+          uint32_t links_num;
+          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+          for (uint32_t i = 0; i < links_num; ++i) {
+            [[maybe_unused]] uint32_t link;
+            SET_OR_RETURN(FetchInt<uint32_t>(), link);
+          }
+        }
+      }
+
+      VLOG(2) << "Ignoring HNSW vector index: " << index_key
+              << " elements_number=" << elements_number;
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
