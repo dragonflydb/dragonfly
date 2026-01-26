@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 
 #include "base/flags.h"
 #include "base/init.h"

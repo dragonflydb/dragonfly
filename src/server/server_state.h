@@ -22,7 +22,8 @@ typedef struct mi_heap_s mi_heap_t;
 
 namespace facade {
 class Connection;
-}
+struct ConnectionStats;
+}  // namespace facade
 
 namespace util {
 class ListenerInterface;
@@ -153,9 +154,7 @@ class ServerState {  // public struct - to allow initialization.
   // function to avoid this and access the correct thread local after the migration.
   static ServerState* __attribute__((noinline)) SafeTLocal();
 
-  static facade::ConnectionStats* tl_connection_stats() {
-    return &facade::tl_facade_stats->conn_stats;
-  }
+  static facade::ConnectionStats* tl_connection_stats();
 
   ServerState();
   ~ServerState();
@@ -214,14 +213,7 @@ class ServerState {  // public struct - to allow initialization.
     return qps_.SumTail();
   }
 
-  void RecordCmd(const bool is_main_conn) {
-    if (is_main_conn) {
-      ++tl_connection_stats()->command_cnt_main;
-    } else {
-      ++tl_connection_stats()->command_cnt_other;
-    }
-    qps_.Inc();
-  }
+  void RecordCmd(bool is_main_conn);
 
   // data heap used by zmalloc and shards.
   mi_heap_t* data_heap() {

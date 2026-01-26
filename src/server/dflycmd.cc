@@ -17,6 +17,7 @@
 #include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -294,7 +295,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
     conn_cntx->replica_conn = true;
 
     absl::InsecureBitGen gen;
-    eof_token = GetRandomHex(gen, 40);
+    eof_token = detail::GetRandomHex(gen, 40);
 
     auto& flow = replica_ptr->flows[flow_id];
     conn_cntx->replication_flow = &flow;

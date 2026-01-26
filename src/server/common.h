@@ -4,25 +4,21 @@
 
 #pragma once
 
-#include <absl/strings/ascii.h>
-#include <absl/strings/str_cat.h>
-#include <absl/types/span.h>
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
 #include <vector>
 
-#include "core/compact_object.h"
-#include "core/glob_matcher.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
-#include "helio/io/proc_reader.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
+
+using CompactObjType = unsigned;
+class GlobMatcher;
 
 // Dependent on ExpirePeriod representation of the value.
 constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;  // 8.5 years
@@ -40,9 +36,6 @@ using facade::MutableSlice;
 using facade::OpResult;
 
 using StringVec = std::vector<std::string>;
-
-// keys are RDB_TYPE_xxx constants.
-using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 
 class CommandId;
 class Transaction;
@@ -143,33 +136,6 @@ inline Namespaces* namespaces = nullptr;
 inline unsigned kernel_version = 0;
 
 const char* GlobalStateName(GlobalState gs);
-
-template <typename RandGen>
-std::string GetRandomHex(RandGen& gen, size_t len, size_t len_deviation = 0) {
-  static_assert(std::is_same<uint64_t, decltype(gen())>::value);
-  if (len_deviation) {
-    len += (gen() % len_deviation);
-  }
-
-  std::string res(len, '\0');
-  size_t indx = 0;
-
-  for (size_t i = 0; i < len / 16; ++i) {  // 2 chars per byte
-    absl::numbers_internal::FastHexToBufferZeroPad16(gen(), res.data() + indx);
-    indx += 16;
-  }
-
-  if (indx < res.size()) {
-    char buf[32];
-    absl::numbers_internal::FastHexToBufferZeroPad16(gen(), buf);
-
-    for (unsigned j = 0; indx < res.size(); indx++, j++) {
-      res[indx] = buf[j];
-    }
-  }
-
-  return res;
-}
 
 // AggregateValue is a thread safe utility to store the first
 // truthy value;
@@ -311,6 +277,13 @@ class ExecutionState {
 };
 
 struct ScanOpts {
+  ~ScanOpts();  // because of forward declaration
+  ScanOpts() = default;
+  ScanOpts(ScanOpts&& other) = default;
+
+  bool Matches(std::string_view val_name) const;
+  static OpResult<ScanOpts> TryFrom(CmdArgList args, bool allow_novalues = false);
+
   std::unique_ptr<GlobMatcher> matcher;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
@@ -325,8 +298,6 @@ struct ScanOpts {
   std::optional<Mask> mask;
   size_t min_malloc_size = 0;
   bool novalues = false;
-  bool Matches(std::string_view val_name) const;
-  static OpResult<ScanOpts> TryFrom(CmdArgList args, bool allow_novalues = false);
 };
 
 // I use relative time from Feb 1, 2023 in seconds.

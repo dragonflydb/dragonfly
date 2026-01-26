@@ -253,7 +253,8 @@ unique_ptr<char[]> CharBufFromSV(string_view sv) {
   return ptr;
 }
 
-io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter* interpreter) {
+nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
+                                                         Interpreter* interpreter) {
   char sha_buf[64];
   Interpreter::FuncSha1(body, sha_buf);
   string_view sha{sha_buf, std::strlen(sha_buf)};

@@ -9,7 +9,6 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
-#include "base/histogram.h"
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
 #include "server/detail/table.h"
@@ -18,6 +17,10 @@
 extern "C" {
 #include "redis/redis_aux.h"
 }
+namespace base {
+class Histogram;
+}
+
 namespace dfly {
 
 using PrimeKey = detail::PrimeKey;
