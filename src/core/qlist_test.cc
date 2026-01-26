@@ -409,6 +409,15 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
   ASSERT_EQ(i, total_items);
 }
 
+TEST_F(QListTest, Tiering) {
+  QList::stats.offload_requests = 0;
+  ql_.SetTieringParams(QList::TieringParams{.node_depth_threshold = 1});
+  for (int i = 0; i < 8000; i++) {
+    ql_.Push(absl::StrCat("value", i), QList::TAIL);
+  }
+  EXPECT_EQ(QList::stats.offload_requests, 9);
+}
+
 using FillCompress = tuple<int, unsigned, QList::COMPR_METHOD>;
 
 class PrintToFillCompress {

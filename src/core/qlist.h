@@ -7,11 +7,11 @@
 #include <absl/functional/function_ref.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "core/collection_entry.h"
 
-#define QL_FILL_BITS 16
 #define QL_COMP_BITS 16
 #define QL_BM_BITS 4
 
@@ -63,7 +63,8 @@ class QList {
     uint16_t recompress : 1;         /* was this node previous compressed? */
     uint16_t attempted_compress : 1; /* node can't compress; too small */
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
-    uint16_t reserved1 : 9;          /* reserved for future use */
+    uint16_t offloaded : 1;          /* node is offloaded to colder storage */
+    uint16_t reserved1 : 8;          /* reserved for future use */
 
     uint16_t reserved2; /* more bits to steal for future usage */
     uint32_t reserved3; /* more bits to steal for future usage */
@@ -92,7 +93,8 @@ class QList {
     const QList* owner_ = nullptr;
     Node* current_ = nullptr;
     unsigned char* zi_ = nullptr; /* points to the current element */
-    long offset_ = 0;             /* offset in current listpack */
+    int32_t offset_ = 0;          /* offset in current listpack */
+    int32_t node_id_ = 0;         /* node index in the list, 0 is head */
     uint8_t direction_ = 1;
 
     friend class QList;
@@ -100,6 +102,11 @@ class QList {
 
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
+
+  struct TieringParams {
+    // TODO: hook functions and params that allow qlist offloading nodes to colder storage.
+    uint32_t node_depth_threshold = 2;
+  };
 
   /**
    * fill: The number of entries allowed per internal list node can be specified
@@ -220,6 +227,8 @@ class QList {
   // Returns count of nodes reallocated to help in testing.
   size_t DefragIfNeeded(PageUsage* page_usage);
 
+  void SetTieringParams(const TieringParams& params);
+
   struct Stats {
     uint64_t compression_attempts = 0;
 
@@ -235,6 +244,10 @@ class QList {
     // how many bytes we compressed from.
     // Compressed savings are calculated as raw_compressed_bytes - compressed_bytes.
     size_t raw_compressed_bytes = 0;
+    uint64_t interior_node_reads = 0;
+    uint64_t total_node_reads = 0;
+    uint64_t offload_requests = 0;
+    uint64_t onload_requests = 0;
   };
   static __thread Stats stats;
 
@@ -248,12 +261,19 @@ class QList {
   }
 
   // Returns newly created plain node.
-  Node* InsertPlainNode(Node* old_node, std::string_view, InsertOpt insert_opt);
-  void InsertNode(Node* old_node, Node* new_node, InsertOpt insert_opt);
-  void UpdateCompression(Node* node);
+  Node* InsertPlainNode(Node* old_node, std::string_view elem, uint32_t old_node_id,
+                        InsertOpt insert_opt);
+  void InsertNode(Node* old_node, Node* new_node, uint32_t old_node_id, InsertOpt insert_opt);
+
+  // Reduces the "warmth" of the node. Current implementation can decide on
+  // compressing the node based on its position in the list.
+  void CoolOff(Node* node, uint32_t node_id);
 
   void Replace(Iterator it, std::string_view elem);
   void CompressByDepth(Node* node);
+
+  // Prepares the node for read access.
+  void AccessForReads(bool recompress, Node* node);
 
   Node* MergeNodes(Node* node);
 
@@ -268,15 +288,17 @@ class QList {
   void InitIteratorEntry(Iterator* it) const;
 
   Node* head_ = nullptr;
-  size_t malloc_size_ = 0;  // size of the quicklist struct
-  uint32_t count_ = 0;      /* total count of all entries in all listpacks */
-  uint32_t len_ = 0;        /* number of quicklistNodes */
-  int fill_ : QL_FILL_BITS; /* fill factor for individual nodes */
-  int compr_method_ : 2;    // 0 - lzf, 1 - lz4
-  int reserved1_ : 14;
+  size_t malloc_size_ = 0;    // size of the quicklist struct
+  uint32_t count_ = 0;        /* total count of all entries in all listpacks */
+  uint32_t len_ = 0;          /* number of quicklistNodes */
+  int16_t fill_;              /* fill factor for individual nodes */
+  int16_t compr_method_ : 2;  // 0 - lzf, 1 - lz4
+  int16_t reserved1_ : 14;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
+  uint32_t num_offloaded_nodes_ = 0;
+  std::unique_ptr<TieringParams> tiering_params_;
 };
 
 }  // namespace dfly
