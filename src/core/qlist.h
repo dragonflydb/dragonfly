@@ -250,9 +250,10 @@ class QList {
   // Returns newly created plain node.
   Node* InsertPlainNode(Node* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(Node* old_node, Node* new_node, InsertOpt insert_opt);
-  void Replace(Iterator it, std::string_view elem);
+  void UpdateCompression(Node* node);
 
-  void Compress(Node* node);
+  void Replace(Iterator it, std::string_view elem);
+  void CompressByDepth(Node* node);
 
   Node* MergeNodes(Node* node);
 
