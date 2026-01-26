@@ -367,8 +367,10 @@ class Connection : public util::Connection {
   void EnqueueParsedCommand(ParsedCommand* cmd);
 
   // Releases the command memory back to the pool.
-  // Set is_pipelined=true if the command was executed (to update latency/throughput stats).
-  // Set is_pipelined=false if the command is being dropped/cleaned up without execution.
+  // - Set is_pipelined=true if the command was successfully executed and should be counted
+  // in latency/throughput stats.
+  // - Set is_pipelined=false if the command is being dropped/cleaned up without execution or should
+  // not be counted in stats.
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
 
   void DestroyParsedQueue();
@@ -416,7 +418,7 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
-  unsigned parsed_cmd_q_len_ = 0;
+  size_t parsed_cmd_q_len_ = 0;
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool IsCommandsPending() const {
@@ -425,7 +427,7 @@ class Connection : public util::Connection {
 
   // Returns total count of commands pending in the parsed command queue and dispatch queue.
   size_t GetPendingCommandCount() const {
-    return static_cast<size_t>(parsed_cmd_q_len_) + dispatch_q_.size();
+    return parsed_cmd_q_len_ + dispatch_q_.size();
   }
 
   uint32_t id_;

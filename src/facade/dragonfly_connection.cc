@@ -1589,9 +1589,26 @@ void Connection::AsyncFiber() {
   QueueBackpressure& qbp = GetQueueBackpressure();
   while (!reply_builder_->GetError()) {
     DCHECK_EQ(socket()->proactor(), ProactorBase::me());
-    cnd_.wait(noop_lk,
-              [this] { return cc_->conn_closing || (IsCommandsPending() && !cc_->sync_dispatch); });
+    cnd_.wait(noop_lk, [this] {
+      if (cc_->conn_closing)
+        return true;
+
+      // If we are currently executing a synchronous dispatch (e.g. inside IoLoop),
+      // we must wait until it finishes to avoid race conditions.
+      if (cc_->sync_dispatch)
+        return false;
+
+      // For Memcache, we ONLY wake up for Admin messages (dispatch_q_).
+      // The pipeline (parsed_head_) is processed synchronously by the memcache loop.
+      // For Redis, we wake up for both.
+      if (protocol_ == Protocol::MEMCACHE) {
+        return !dispatch_q_.empty();
+      }
+      return IsCommandsPending();
+    });
+
     if (cc_->conn_closing)
+
       break;
     // We really want to have batching in the builder if possible. This is especially
     // critical in situations where Nagle's algorithm can introduce unwanted high
@@ -1646,11 +1663,11 @@ void Connection::AsyncFiber() {
         // Process Pipeline: we reach here if:
         // 1. dispatch_q is empty (Normal pipeline processing)
         // 2. OR dispatch_q has a migration but is blocked (We must clear pipeline first)
-        DCHECK(parsed_head_) << "Logic Error: Fiber woke up but no work found. "
-                             << "Context: dispatch_q_.empty()=" << dispatch_q_.empty()
-                             << ", IsCommandsPending()=" << IsCommandsPending()
-                             << ", parsed_head_=" << parsed_head_
-                             << ", parsed_to_execute_=" << parsed_to_execute_;
+        DCHECK(parsed_head_ && parsed_to_execute_)
+            << "Logic Error: Fiber woke up but no work found. "
+            << "Context: dispatch_q_.empty()=" << dispatch_q_.empty()
+            << ", IsCommandsPending()=" << IsCommandsPending() << ", parsed_head_=" << parsed_head_
+            << ", parsed_to_execute_=" << parsed_to_execute_;
         DCHECK_EQ(parsed_head_, parsed_to_execute_)
             << "Pointers diverged before dispatch decision.";
         auto* cmd{parsed_to_execute_};
@@ -1665,9 +1682,10 @@ void Connection::AsyncFiber() {
         // Transfer timestamp so wait_latency is calculated
         // from the time it entered the queue, not time it was popped.
         msg.dispatch_cycle = cmd->parsed_cycle;
-      }
 
-      stats_->pipelined_wait_latency += CycleClock::ToUsec(CycleClock::Now() - msg.dispatch_cycle);
+        stats_->pipelined_wait_latency +=
+            CycleClock::ToUsec(CycleClock::Now() - msg.dispatch_cycle);
+      }
 
       // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
@@ -2227,10 +2245,9 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   }
   parsed_tail_ = cmd;
 
-  local_stats_.dispatch_entries_added++;
   parsed_cmd_q_len_++;
-
   if (protocol_ == Protocol::MEMCACHE) {
+    local_stats_.dispatch_entries_added++;
     stats_->dispatch_queue_bytes += cmd->UsedMemory();
     stats_->dispatch_queue_entries++;
   }
