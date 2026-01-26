@@ -55,8 +55,14 @@ class RdbLoaderBase {
     std::vector<Filter> filters;
   };
 
-  using RdbVariant =
-      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>, RdbSBF>;
+  struct RdbCMS {
+    uint32_t width, depth;
+    int64_t count;
+    std::string counter_data;
+  };
+
+  using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
+                                  std::unique_ptr<LoadTrace>, RdbSBF, RdbCMS>;
 
   struct OpaqueObj {
     RdbVariant obj;
@@ -172,6 +178,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadSBFImpl(bool chunking);
   ::io::Result<OpaqueObj> ReadSBF();
   ::io::Result<OpaqueObj> ReadSBF2();
+  ::io::Result<OpaqueObj> ReadCMS();
 
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
