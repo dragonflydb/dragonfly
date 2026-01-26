@@ -21,7 +21,6 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
-#include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"

@@ -1,3 +1,7 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "server/cmd_support.h"
 
 namespace dfly::cmd {
