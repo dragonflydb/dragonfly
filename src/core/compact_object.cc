@@ -143,14 +143,14 @@ size_t streamRadixTreeMemoryUsage(rax* rax) {
 
 size_t MallocUsedStream(stream* s) {
   size_t asize = sizeof(*s);
-  asize += streamRadixTreeMemoryUsage(s->rax_tree);
+  asize += streamRadixTreeMemoryUsage(s->rax);
 
   /* Now we have to add the listpacks. The last listpack is often non
    * complete, so we estimate the size of the first N listpacks, and
    * use the average to compute the size of the first N-1 listpacks, and
    * finally add the real size of the last node. */
   raxIterator ri;
-  raxStart(&ri, s->rax_tree);
+  raxStart(&ri, s->rax);
   raxSeek(&ri, "^", NULL, 0);
   size_t lpsize = 0, samples = 0;
   while (raxNext(&ri)) {
@@ -159,12 +159,12 @@ size_t MallocUsedStream(stream* s) {
     lpsize += zmalloc_size(lp);
     samples++;
   }
-  if (s->rax_tree->numele <= samples) {
+  if (s->rax->numele <= samples) {
     asize += lpsize;
   } else {
     if (samples)
       lpsize /= samples; /* Compute the average. */
-    asize += lpsize * (s->rax_tree->numele - 1);
+    asize += lpsize * (s->rax->numele - 1);
     /* No need to check if seek succeeded, we enter this branch only
      * if there are a few elements in the radix tree. */
     raxSeek(&ri, "$", NULL, 0);
