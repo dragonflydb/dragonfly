@@ -382,11 +382,10 @@ class Connection : public util::Connection {
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
-
-  uint64_t pending_pipeline_cmd_cnt_ =
-      0;  // Count of queued Redis async commands in Parsed Commands queue
-  size_t pending_pipeline_bytes_ =
-      0;  // Total byte size of queued Redis async commands in Parsed Commands queue
+  // Count of queued Redis async commands in Parsed Commands queue
+  uint64_t pending_pipeline_cmd_cnt_ = 0;
+  // Total byte size of queued Redis async commands in Parsed Commands queue
+  size_t pending_pipeline_bytes_ = 0;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;

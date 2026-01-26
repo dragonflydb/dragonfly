@@ -1444,12 +1444,7 @@ void Connection::SquashPipeline() {
   auto exec_cmd_ptr{parsed_to_execute_};
   auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
     DCHECK(exec_cmd_ptr);
-    facade::ParsedCommand* cmd = exec_cmd_ptr;
-
-    // Note: We don't need to check for nullptr here because DispatchManyCommands
-    // is guaranteed to call this exactly 'pipeline_count' times.
-    exec_cmd_ptr = exec_cmd_ptr->next;
-    return ParsedArgs{*cmd};
+    return ParsedArgs{*std::exchange(exec_cmd_ptr, exec_cmd_ptr->next)};
   };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
@@ -1526,16 +1521,12 @@ void Connection::ClearPipelinedMessages() {
     parsed_head_ = parsed_head_->next;
     ReleaseParsedCommand(curr, false);
   }
-  parsed_head_ = nullptr;
-  parsed_tail_ = nullptr;
-  parsed_to_execute_ = nullptr;
 
   DCHECK_EQ(pending_pipeline_cmd_cnt_, 0u);
   DCHECK_EQ(parsed_cmd_q_len_, 0u);
   DCHECK_EQ(pending_pipeline_bytes_, 0u);
-  pending_pipeline_cmd_cnt_ = 0;
-  pending_pipeline_bytes_ = 0;
-  parsed_cmd_q_len_ = 0;
+  parsed_tail_ = nullptr;
+  parsed_to_execute_ = nullptr;
 
   QueueBackpressure& qbp = GetQueueBackpressure();
   qbp.pipeline_cnd.notify_all();

@@ -74,6 +74,7 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   // time when the message was parsed as reported by CycleClock::Now()
+  // Also serves as the enqueue timestamp for calculating pipeline wait latency.
   uint64_t parsed_cycle = 0;
   ParsedCommand* next = nullptr;
 
