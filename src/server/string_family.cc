@@ -1751,7 +1751,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
 
   registry->StartFamily(acl::STRING);
   *registry
-      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
+      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetHandler(CmdSet,
+                                                                                          true)
       << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)

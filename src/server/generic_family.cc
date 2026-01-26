@@ -6,7 +6,6 @@
 
 #include <absl/strings/str_cat.h>
 
-#include <boost/operators.hpp>
 #include <optional>
 
 #include "facade/cmd_arg_parser.h"
@@ -23,6 +22,7 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
+#include "server/cmd_support.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -1082,35 +1082,6 @@ io::Result<int32_t, string> ParseExpireOptionsOrReply(const CmdArgList args) {
   return flags;
 }
 
-void DeleteGeneric(CmdArgList args, CommandContext* cmd_cntx, bool async) {
-  atomic_uint32_t result{0};
-
-  auto cb = [&](const Transaction* t, EngineShard* shard) {
-    ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async);
-    result.fetch_add(res.value_or(0), memory_order_relaxed);
-
-    return OpStatus::OK;
-  };
-
-  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
-  CHECK_EQ(OpStatus::OK, status);
-
-  DVLOG(2) << "Del ts " << cmd_cntx->tx()->txid();
-
-  uint32_t del_cnt = result.load(memory_order_relaxed);
-  if (cmd_cntx->mc_command()) {
-    MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
-    if (del_cnt) {
-      cmd_cntx->SendSimpleString(mc_render.RenderDeleted());
-    } else {
-      cmd_cntx->SendSimpleString(mc_render.RenderNotFound());
-    }
-  } else {
-    cmd_cntx->SendLong(del_cnt);
-  }
-}
-
 }  // namespace
 
 OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
@@ -1131,9 +1102,32 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
   return res;
 }
 
-void GenericFamily::Del(CmdArgList args, CommandContext* cmd_cntx) {
-  DeleteGeneric(args, cmd_cntx, false);
-}
+ASYNC_CMD(Del) {
+  bool async_unlink = false;
+  mutable atomic_uint32_t result{0};
+
+  PrepareResult Prepare(ArgSlice args, CommandContext * cmd_cntx) override {
+    if (cmd_cntx->cid()->name() == "UNLINK")
+      async_unlink = absl::GetFlag(FLAGS_unlink_experimental_async);
+    return SingleHop();
+  }
+
+  OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const {
+    auto res = GenericFamily::OpDel(op_args, args, async_unlink);
+    result.fetch_add(res.value_or(0), memory_order_relaxed);
+    return OpStatus::OK;
+  }
+
+  void Reply(SinkReplyBuilder * rb) override {
+    uint32_t del_cnt = result.load(memory_order_relaxed);
+    if (cmd_cntx->mc_command()) {
+      MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
+      rb->SendSimpleString(del_cnt ? mc_render.RenderDeleted() : mc_render.RenderNotFound());
+    } else {
+      rb->SendLong(del_cnt);
+    }
+  }
+};
 
 void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
@@ -1148,6 +1142,7 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
     cond = Condition::NONE;
   } else if (args.size() == 2) {
     // DELEX key <something> - invalid, needs both condition and value
+    // TODO: include error type in error reply
     return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
   } else if (args.size() == 3) {
     string_view opt = ArgS(args, 1);
@@ -1171,7 +1166,7 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
 
   // If no condition, delegate to standard DEL
   if (cond == Condition::NONE) {
-    return Del(args, cmd_cntx);
+    return CmdDel::Run(args, cmd_cntx);
   }
 
   auto compare_str = [&](string_view val) {
@@ -1231,11 +1226,6 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
   } else {
     cmd_cntx->SendError(result.status());
   }
-}
-
-void GenericFamily::Unlink(CmdArgList args, CommandContext* cmd_cntx) {
-  bool async = absl::GetFlag(FLAGS_unlink_experimental_async);
-  DeleteGeneric(args, cmd_cntx, async);
 }
 
 void GenericFamily::Ping(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2548,7 +2538,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
-      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.HFUNC(Del)
+      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.SetHandler(CmdDel::Run, true)
       << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
@@ -2581,7 +2571,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
+      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.SetHandler(CmdDel::Run, true)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
