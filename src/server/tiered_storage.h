@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
+
 #include <boost/intrusive/list.hpp>
 #include <memory>
 #include <utility>
@@ -14,10 +16,6 @@
 #include "server/tiering/entry_map.h"
 #include "util/fibers/future.h"
 
-#ifdef WITH_TIERING
-
-#include <absl/container/flat_hash_map.h>
-
 namespace dfly {
 
 class DbSlice;
@@ -27,16 +25,27 @@ class SmallBins;
 struct Decoder;
 };  // namespace tiering
 
+struct TieredStorageBase {
+  // Min sizes of values taking up full page on their own
+  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+  struct StashDescriptor {
+    std::variant<std::array<std::string_view, 2>, uint8_t*> blob;
+    CompactObj::ExternalRep rep;
+
+    size_t EstimatedSerializedSize() const;
+    size_t Serialize(io::MutableBytes buffer) const;
+  };
+
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
+};
+
+#ifdef WITH_TIERING
+
 // Manages offloaded values
-class TieredStorage {
+class TieredStorage : public TieredStorageBase {
   class ShardOpManager;
 
  public:
-  // Min sizes of values taking up full page on their own
-  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-
-  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
-
   explicit TieredStorage(size_t max_file_size, DbSlice* db_slice);
   ~TieredStorage();  // drop forward declared unique_ptrs
 
@@ -72,10 +81,13 @@ class TieredStorage {
   TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                     std::function<T(std::string*)> modf);
 
-  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished.
-  // Returns optional future for backpressure if `provide_bp` is set and conditions are met.
-  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
-                                                  PrimeValue* value, bool provide_bp = false);
+  // Returns StashDescriptor if a value should be stashed.
+  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const;
+
+  // Stash value, returns optional future for backpressure
+  // if `provide_bp` is set and conditions are met.
+  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
+                                               const StashDescriptor& blobs, bool provide_bp);
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, PrimeValue* value);
@@ -111,9 +123,6 @@ class TieredStorage {
                     const tiering::Decoder& decoder,
                     std::function<void(io::Result<tiering::Decoder*>)> cb);
 
-  // Returns if a value should be stashed
-  bool ShouldStash(const PrimeValue& pv) const;
-
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
@@ -140,7 +149,7 @@ class TieredStorage {
     float upload_threshold;
     bool experimental_hash_offload;
   } config_;
-  struct {
+  mutable struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
     uint64_t offloading_steps = 0;
@@ -150,23 +159,15 @@ class TieredStorage {
   } stats_;
 };
 
-}  // namespace dfly
-
+std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
+                                                       bool provide_bp, PrimeValue* pv,
+                                                       TieredStorage* ts);
 #else
 
-class DbSlice;
-
-// This is a stub implementation for non-linux platforms.
-namespace dfly {
-class TieredStorage {
+class TieredStorage : public TieredStorageBase {
   class ShardOpManager;
 
  public:
-  // Min sizes of values taking up full page on their own
-  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-
-  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
-
   explicit TieredStorage(size_t max_size, DbSlice* db_slice) {
   }
 
@@ -200,8 +201,12 @@ class TieredStorage {
     return {};
   }
 
-  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
-                                                  PrimeValue* value, bool provide_bp = false) {
+  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const {
+    return {};
+  }
+
+  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
+                                               const StashDescriptor& blobs, bool provide_bp) {
     return {};
   }
 
@@ -221,10 +226,6 @@ class TieredStorage {
   }
 
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
-  }
-
-  bool ShouldStash(const PrimeValue& pv) const {
-    return false;
   }
 
   TieredStats GetStats() const {
@@ -254,6 +255,12 @@ class TieredStorage {
   }
 };
 
-}  // namespace dfly
+inline std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
+                                                              bool provide_bp, PrimeValue* pv,
+                                                              TieredStorage* ts) {
+  return {};
+}
 
 #endif  // WITH_TIERING
+
+}  // namespace dfly
