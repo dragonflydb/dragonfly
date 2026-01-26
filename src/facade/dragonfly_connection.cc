@@ -1486,7 +1486,7 @@ void Connection::SquashPipeline() {
       stats_->pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
     }
 
-    ReleaseParsedCommand(current, true /* is_pipelined */);
+    ReleaseParsedCommand(current, result.account_in_stats /* is_pipelined */);
     current = next;
   }
   parsed_head_ = current;
@@ -1637,14 +1637,19 @@ void Connection::AsyncFiber() {
       MessageHandle msg;
 
       // If the front message is a Migration Request, but we still have pipeline data
-      // (parsed_head_), we must block the migration and run the pipeline first.
-      bool is_blocked_migration{
+      // (parsed_head_), we must block the migration and process the pipeline messages first.
+      bool is_migration_req =
           !dispatch_q_.empty() &&
-          std::holds_alternative<MigrationRequestMessage>(dispatch_q_.front().handle) &&
-          (parsed_head_ != nullptr)};
+          std::holds_alternative<MigrationRequestMessage>(dispatch_q_.front().handle);
 
-      // Process Admin Queue - only if not blocked
-      if (!dispatch_q_.empty() && !is_blocked_migration) {
+      // Check if we are blocked:
+      // Blocked = It IS a migration AND we have pipeline work AND we are in Redis mode.
+      bool is_blocked =
+          is_migration_req && (parsed_head_ != nullptr) && (protocol_ == Protocol::REDIS);
+
+      /// Process Admin Queue
+      // Run if: Queue is not empty and we are not blocked.
+      if (!dispatch_q_.empty() && !is_blocked) {
         msg = std::move(dispatch_q_.front());
         dispatch_q_.pop_front();
       } else {
