@@ -262,6 +262,16 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
   return WriteRaw(Bytes{buf, enclen + 1});
 }
 
+error_code RdbSerializer::SaveGlobalId(string_view index_name, uint64_t global_id) {
+  if (auto ec = WriteOpcode(RDB_OPCODE_GLOBAL_ID); ec)
+    return ec;
+  if (auto ec = SaveString(index_name); ec)
+    return ec;
+  uint8_t buf[8];
+  absl::little_endian::Store64(buf, global_id);
+  return WriteRaw(Bytes{buf, 8});
+}
+
 // Called by snapshot
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
                                              uint64_t expire_ms, uint32_t mc_flags, DbIndex dbid) {

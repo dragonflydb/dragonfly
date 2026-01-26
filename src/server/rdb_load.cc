@@ -1948,11 +1948,15 @@ struct RdbLoader::ObjSettings {
   bool is_sticky = false;
   bool has_mc_flags = false;
 
+  // Global doc IDs for search indices (index_name -> global_id)
+  std::vector<std::pair<std::string, uint64_t>> global_ids;
+
   void Reset() {
     mc_flags = expiretime = 0;
     has_expired = false;
     is_sticky = false;
     has_mc_flags = false;
+    global_ids.clear();
   }
 
   void SetExpire(int64_t val) {
@@ -2072,6 +2076,16 @@ error_code RdbLoader::Load(io::Source* src) {
       if (!rdb_ignore_expiry_) {
         settings.SetExpire(val);
       }
+      continue; /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_GLOBAL_ID) {
+      /* GLOBAL_ID: search index global document id (index_name + global_id) */
+      string index_name;
+      SET_OR_RETURN(FetchGenericString(), index_name);
+      uint64_t global_id;
+      SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
+      settings.global_ids.emplace_back(std::move(index_name), global_id);
       continue; /* Read next opcode. */
     }
 
@@ -2719,6 +2733,15 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     db_slice->SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
   }
 
+  // Store master doc_id mappings for search indices
+  if (!item->global_ids.empty()) {
+    if (auto* search_indices = db_slice->shard_owner()->search_indices(); search_indices) {
+      for (const auto& [index_name, global_id] : item->global_ids) {
+        search_indices->SetMasterDocId(index_name, item->key, global_id);
+      }
+    }
+  }
+
   if (!override_existing_keys_ && !res.is_new) {
     LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind << " of type "
                  << res.it->second.ObjType();
@@ -2814,6 +2837,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     item->has_mc_flags = settings->has_mc_flags;
     item->mc_flags = settings->mc_flags;
     item->expire_ms = settings->expiretime;
+    item->global_ids = std::move(settings->global_ids);
 
     std::move(cleanup).Cancel();
     ShardId sid = Shard(item->key, shard_set->size());

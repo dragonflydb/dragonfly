@@ -294,6 +294,9 @@ class RdbLoader : protected RdbLoaderBase {
 
     LoadConfig load_config;
 
+    // Global doc IDs for search indices (index_name -> global_id)
+    std::vector<std::pair<std::string, uint64_t>> global_ids;
+
     friend void MPSC_intrusive_store_next(Item* dest, Item* nxt) {
       dest->next.store(nxt, std::memory_order_release);
     }

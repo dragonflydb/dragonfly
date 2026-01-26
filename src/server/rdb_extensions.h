@@ -46,6 +46,12 @@ constexpr uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
 constexpr uint32_t DF_MASK_FLAG_STICKY = (1 << 0);
 constexpr uint32_t DF_MASK_FLAG_MC_FLAGS = (1 << 1);
 
+// Opcode to store search index global_id for HASH/JSON keys.
+// Format: index_name (RDB string) + global_id (8 bytes, little-endian uint64_t)
+// Multiple entries can be present if a key is indexed by multiple indices.
+// Placed before the key type opcode, similar to RDB_OPCODE_EXPIRETIME_MS.
+constexpr uint8_t RDB_OPCODE_GLOBAL_ID = 221;
+
 // Opcode to store HNSW vector index node data for global indices
 // Format: [index_name, elements_number, internal_id, global_id, level, zero_level_links_num,
 // zero_level_links,

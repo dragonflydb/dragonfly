@@ -831,6 +831,24 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const
   }
 }
 
+void ShardDocIndices::ForEachGlobalDocId(string_view key, const DbContext& db_cntx,
+                                         const PrimeValue& pv, GlobalIdCallback cb) const {
+  if (!IsIndexedKeyType(pv)) {
+    return;
+  }
+
+  for (const auto& [index_name, index] : indices_) {
+    if (index->Matches(key, pv.ObjType())) {
+      std::optional<search::DocId> doc_id = index->GetDocId(key, db_cntx);
+      if (doc_id) {
+        search::GlobalDocId global_id =
+            search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), *doc_id);
+        cb(index_name, global_id);
+      }
+    }
+  }
+}
+
 size_t ShardDocIndices::GetUsedMemory() const {
   return local_mr_.used();
 }
@@ -850,6 +868,27 @@ search::DefragmentResult ShardDocIndices::Defragment(PageUsage* page_usage) {
   // though, so it is an acceptable anomaly.
   search::DefragmentMap dm{indices_, &next_defrag_index_};
   return dm.Defragment(page_usage);
+}
+
+void ShardDocIndices::SetMasterDocId(string_view index_name, string_view key,
+                                     search::GlobalDocId global_id) {
+  auto it = indices_.find(index_name);
+  if (it != indices_.end()) {
+    it->second->SetMasterDocId(key, global_id);
+  }
+}
+
+void ShardDocIndex::SetMasterDocId(string_view key, GlobalDocId global_id) {
+  master_doc_ids_[string(key)] = global_id;
+}
+
+ShardDocIndex::GlobalDocId ShardDocIndex::GetMasterDocId(string_view key) const {
+  auto it = master_doc_ids_.find(key);
+  return it != master_doc_ids_.end() ? it->second : 0;
+}
+
+void ShardDocIndex::ClearMasterMappings() {
+  master_doc_ids_.clear();
 }
 
 }  // namespace dfly

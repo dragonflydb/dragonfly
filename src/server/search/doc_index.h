@@ -331,11 +331,26 @@ class ShardDocIndex {
                                                     const SearchParams::SortOption& sort,
                                                     const OpArgs& op_args) const;
 
+ public:
+  // Set the master's global_id mapping for a key (used during RDB load to restore global_id
+  // mappings). The global_id is stored and can be used later to restore vector index relationships.
+  void SetMasterDocId(std::string_view key, GlobalDocId global_id);
+
+  // Get the master's global_id for a key, or 0 if not found.
+  GlobalDocId GetMasterDocId(std::string_view key) const;
+
+  // Clear all master mappings (called after index rebuild).
+  void ClearMasterMappings();
+
  private:
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
+
+  // Mapping from key to global_id received from master during replication.
+  // Used to restore vector index relationships after RDB load.
+  absl::flat_hash_map<std::string, GlobalDocId> master_doc_ids_;
 };
 
 // Stores shard doc indices by name on a specific shard.
@@ -365,6 +380,18 @@ class ShardDocIndices {
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+
+  // Callback type for ForEachGlobalDocId: (index_name, global_id) -> void
+  using GlobalIdCallback = std::function<void(std::string_view, search::GlobalDocId)>;
+
+  // Invoke callback for each (index_name, global_id) pair for a key across all matching indices.
+  // Avoids memory allocation compared to returning a vector.
+  void ForEachGlobalDocId(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv,
+                          GlobalIdCallback cb) const;
+
+  // Set master's global_id mapping for a specific index and key (used during RDB load).
+  void SetMasterDocId(std::string_view index_name, std::string_view key,
+                      search::GlobalDocId global_id);
 
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices
