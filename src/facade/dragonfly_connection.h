@@ -421,12 +421,12 @@ class Connection : public util::Connection {
   size_t parsed_cmd_q_len_ = 0;
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
-  bool IsCommandsPending() const {
+  bool HasPendingMessages() const {
     return parsed_head_ || !dispatch_q_.empty();
   }
 
   // Returns total count of commands pending in the parsed command queue and dispatch queue.
-  size_t GetPendingCommandCount() const {
+  size_t GetPendingMessageCount() const {
     return parsed_cmd_q_len_ + dispatch_q_.size();
   }
 

@@ -651,7 +651,7 @@ void Connection::OnPostMigrateThread() {
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
-  if (IsCommandsPending()) {
+  if (HasPendingMessages()) {
     LaunchAsyncFiberIfNeeded();
   }
 
@@ -1054,7 +1054,7 @@ void Connection::ConnectionFlow() {
   phase_ = PRECLOSE;
 
   ClearPipelinedMessages();
-  DCHECK(!IsCommandsPending());
+  DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
   DecreaseStatsOnClose();
@@ -1136,7 +1136,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
-  bool can_dispatch_sync = !cc_->async_dispatch && !IsCommandsPending() && cc_->subscriptions == 0;
+  bool can_dispatch_sync = !cc_->async_dispatch && !HasPendingMessages() && cc_->subscriptions == 0;
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
@@ -1152,7 +1152,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     last_interaction_ = time(nullptr);
 
     // We might have blocked the dispatch queue from processing, wake it up.
-    if (IsCommandsPending())
+    if (HasPendingMessages())
       cnd_.notify_one();
   }
 }
@@ -1411,7 +1411,7 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
     return false;
   }
 
-  if (!IsCommandsPending()) {
+  if (!HasPendingMessages()) {
     // Migration requests means we should terminate this function (and allow the fiber to
     // join), so that we can re-launch the fiber in the new thread.
     // We intentionally return and not break in order to keep the connection open.
@@ -1432,7 +1432,7 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
 }
 
 void Connection::SquashPipeline() {
-  DCHECK_EQ(GetPendingCommandCount(), pending_pipeline_cmd_cnt_);
+  DCHECK_EQ(GetPendingMessageCount(), pending_pipeline_cmd_cnt_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
   unsigned pipeline_count = std::min<uint32_t>(parsed_cmd_q_len_, pipeline_squash_limit_cached);
 
@@ -1442,8 +1442,8 @@ void Connection::SquashPipeline() {
   // This lambda advances a temporary pointer exec_cmd_ptr to feed the execution engine.
   // We do not modify parsed_to_execute_ yet, in case execution throws/fails.
   auto exec_cmd_ptr{parsed_to_execute_};
-  auto get_next_fn = [&exec_cmd_ptr]() mutable -> facade::ParsedArgs {
-    DCHECK(exec_cmd_ptr) << "exec_cmd_ptr should not be nullptr";
+  auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
+    DCHECK(exec_cmd_ptr);
     facade::ParsedCommand* cmd = exec_cmd_ptr;
 
     // Note: We don't need to check for nullptr here because DispatchManyCommands
@@ -1484,7 +1484,7 @@ void Connection::SquashPipeline() {
   }
 
   auto* current{parsed_head_};
-  for (size_t i{}; (i < num_dispatched_cmds) && current; ++i) {
+  for (size_t i = 0; (i < num_dispatched_cmds) && current; ++i) {
     auto* next{current->next};
 
     if (result.account_in_stats) {
@@ -1499,7 +1499,6 @@ void Connection::SquashPipeline() {
     parsed_tail_ = nullptr;
   }
   parsed_to_execute_ = parsed_head_;
-  DCHECK_EQ(parsed_head_, parsed_to_execute_) << "SquashPipeline: Pointers diverged.";
 
   // If interrupted due to pause, fall back to regular dispatch
   skip_next_squashing_ = (num_dispatched_cmds != pipeline_count);
@@ -1598,13 +1597,12 @@ void Connection::AsyncFiber() {
       if (cc_->sync_dispatch)
         return false;
 
-      // For Memcache, we ONLY wake up for Admin messages (dispatch_q_).
-      // The pipeline (parsed_head_) is processed synchronously by the memcache loop.
-      // For Redis, we wake up for both.
+      // For Memcache, we ONLY wake up for Admin messages (dispatch_q_) as we process
+      // parsed_head_  in the connection fiber. For RESP, we wake up for both queues.
       if (protocol_ == Protocol::MEMCACHE) {
         return !dispatch_q_.empty();
       }
-      return IsCommandsPending();
+      return HasPendingMessages();
     });
 
     if (cc_->conn_closing)
@@ -1618,7 +1616,7 @@ void Connection::AsyncFiber() {
     // wants to.
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
-    if ((parsed_cmd_q_len_ == 1) && (cur_epoch == prev_epoch)) {
+    if ((GetPendingMessageCount() == 1) && (cur_epoch == prev_epoch)) {
       if (pipeline_wait_batch_usec > 0) {
         ThisFiber::SleepFor(chrono::microseconds(pipeline_wait_batch_usec));
       } else {
@@ -1630,7 +1628,7 @@ void Connection::AsyncFiber() {
     }
     prev_epoch = cur_epoch;
 
-    reply_builder_->SetBatchMode(GetPendingCommandCount() > 1);
+    reply_builder_->SetBatchMode(GetPendingMessageCount() > 1);
 
     bool subscriber_over_limit =
         stats_->dispatch_queue_subscriber_bytes >= qbp.publish_buffer_limit;
@@ -1665,7 +1663,7 @@ void Connection::AsyncFiber() {
         DCHECK(parsed_head_ && parsed_to_execute_)
             << "Logic Error: Fiber woke up but no work found. "
             << "Context: dispatch_q_.empty()=" << dispatch_q_.empty()
-            << ", IsCommandsPending()=" << IsCommandsPending() << ", parsed_head_=" << parsed_head_
+            << ", IsCommandsPending()=" << HasPendingMessages() << ", parsed_head_=" << parsed_head_
             << ", parsed_to_execute_=" << parsed_to_execute_;
         DCHECK_EQ(parsed_head_, parsed_to_execute_)
             << "Pointers diverged before dispatch decision.";
@@ -1690,7 +1688,7 @@ void Connection::AsyncFiber() {
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
       // migrate), we have to flush manually.
       bool is_replying = msg.IsReplying();
-      if (!IsCommandsPending() && !is_replying) {
+      if (!HasPendingMessages() && !is_replying) {
         reply_builder_->Flush();
       }
 
@@ -1700,7 +1698,7 @@ void Connection::AsyncFiber() {
           ReleaseParsedCommand(ptr_ref.release(), false);
         } else
           RecycleMessage(std::move(msg));
-        CHECK(!IsCommandsPending()) << DebugInfo();
+        CHECK(!HasPendingMessages()) << DebugInfo();
         qbp.pipeline_cnd.notify_all();
         return;  // don't set conn closing flag
       }
@@ -1711,7 +1709,7 @@ void Connection::AsyncFiber() {
       cc_->async_dispatch = false;
       // If last msg in queue was replying but nothing was replied during dispatch
       // (i.e. pubsub message was discarded) we have to manually flush now.
-      if (!IsCommandsPending() && is_replying &&
+      if (!HasPendingMessages() && is_replying &&
           (replies_recorded_before == reply_builder_->RepliesRecorded())) {
         reply_builder_->Flush();
       }
@@ -1724,7 +1722,7 @@ void Connection::AsyncFiber() {
     }
 
     if (!qbp.IsPipelineBufferOverLimit(pending_pipeline_bytes_, pending_pipeline_cmd_cnt_) ||
-        !IsCommandsPending()) {
+        !HasPendingMessages()) {
       qbp.pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }
 
@@ -1875,7 +1873,7 @@ void Connection::SendAsync(MessageHandle msg) {
   // pipeline. Checking pipeline stats here would be incorrect as they might be
   // zero for a Monitor connection, bypassing this safety check.
   if (msg.IsMonitor() &&
-      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, GetPendingCommandCount())) {
+      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, GetPendingMessageCount())) {
     cc_->conn_closing = true;
     request_shutdown_ = true;
     // We don't shutdown here. The reason is that TLS socket is preemptive
@@ -1920,8 +1918,16 @@ void Connection::SendAsync(MessageHandle msg) {
     dispatch_q_.push_back(std::move(msg));
   }
 
-  // Don't notify if a sync dispatch is in progress, it will wake after finishing.
-  if (GetPendingCommandCount() == 1 && !cc_->sync_dispatch) {
+  // Pipeline path: Notify if this is the ONLY work pending.
+  // If other work exists, the fiber is already awake/scheduled
+  //
+  // Admin/Control Path:
+  // - For Memcache: Must notify if dispatch_q_ became non-empty (0 -> 1).
+  // - RESP: Also safe to notify if dispatch_q_ became non-empty,
+  // even if parsed_q has items (redundant notify is cheap/harmless).
+  bool should_notify =
+      msg.IsPipelineMsg() ? (GetPendingMessageCount() == 1) : (dispatch_q_.size() == 1);
+  if (should_notify && !cc_->sync_dispatch) {
     cnd_.notify_one();
   }
 }
