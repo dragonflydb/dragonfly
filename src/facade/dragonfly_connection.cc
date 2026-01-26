@@ -1608,8 +1608,8 @@ void Connection::AsyncFiber() {
     });
 
     if (cc_->conn_closing)
-
       break;
+
     // We really want to have batching in the builder if possible. This is especially
     // critical in situations where Nagle's algorithm can introduce unwanted high
     // latencies. However we can only batch if we're sure that there are more commands
@@ -1641,8 +1641,7 @@ void Connection::AsyncFiber() {
     // consists only of commands (no pubsub or monitor messages)
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
-    bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == GetPendingCommandCount();
-    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_ &&
+    if (squashing_enabled && threshold_reached && dispatch_q_.empty() && !skip_next_squashing_ &&
         !IsReplySizeOverLimit()) {
       SquashPipeline();
     } else {
