@@ -1121,11 +1121,7 @@ ASYNC_CMD(Del) {
     uint32_t del_cnt = result.load(memory_order_relaxed);
     if (cmd_cntx->mc_command()) {
       MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
-      if (del_cnt) {
-        rb->SendSimpleString(mc_render.RenderDeleted());
-      } else {
-        rb->SendSimpleString(mc_render.RenderNotFound());
-      }
+      rb->SendSimpleString(del_cnt ? mc_render.RenderDeleted() : mc_render.RenderNotFound());
     } else {
       rb->SendLong(del_cnt);
     }
