@@ -351,7 +351,7 @@ void ServerState::UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::Chan
   channel_store_ = replacement;
 }
 
-void ServerState::RecordCmd(const bool is_main_conn) {
+void ServerState::RecordCmd(bool is_main_conn) {
   if (is_main_conn) {
     ++tl_connection_stats()->command_cnt_main;
   } else {
