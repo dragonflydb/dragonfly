@@ -846,9 +846,8 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   }
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
-  size_t cmd_pending_count{CommandsPendingCount()};
-  if (cmd_pending_count > 0) {
-    absl::StrAppend(&after, " pipeline=", cmd_pending_count);
+  if (parsed_cmd_q_len_ > 0) {
+    absl::StrAppend(&after, " pipeline=", parsed_cmd_q_len_);
     absl::StrAppend(&after, " pbuf=", pending_pipeline_bytes_);
   }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
@@ -1110,17 +1109,18 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   bool optimize_for_async = has_more;
   QueueBackpressure& qbp = GetQueueBackpressure();
   if (optimize_for_async &&
-      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, CommandsPendingCount())) {
+      qbp.IsPipelineBufferOverLimit(pending_pipeline_bytes_, pending_pipeline_cmd_cnt_)) {
     stats_->pipeline_throttle_count++;
-    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit: pipeline_bytes "
-                             << stats_->dispatch_queue_bytes << " queue_size "
-                             << CommandsPendingCount()
+    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit: pipeline bytes: "
+                             << pending_pipeline_bytes_
+                             << ", queue size: " << pending_pipeline_cmd_cnt_
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
     fb2::NoOpLock noop;
     qbp.pipeline_cnd.wait(noop, [this, &qbp] {
       bool over_limits =
-          qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, CommandsPendingCount());
-      return !over_limits || (!IsCommandsPending() && !cc_->async_dispatch) || cc_->conn_closing;
+          qbp.IsPipelineBufferOverLimit(pending_pipeline_bytes_, pending_pipeline_cmd_cnt_);
+      bool pipeline_idle = (pending_pipeline_cmd_cnt_ == 0);
+      return !over_limits || (pipeline_idle && !cc_->async_dispatch) || cc_->conn_closing;
     });
 
     if (cc_->conn_closing) {
@@ -1432,7 +1432,7 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
 }
 
 void Connection::SquashPipeline() {
-  DCHECK_EQ(CommandsPendingCount(), pending_pipeline_cmd_cnt_);
+  DCHECK_EQ(GetPendingCommandCount(), pending_pipeline_cmd_cnt_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
   unsigned pipeline_count = std::min<uint32_t>(parsed_cmd_q_len_, pipeline_squash_limit_cached);
 
@@ -1442,14 +1442,14 @@ void Connection::SquashPipeline() {
   // This lambda advances a temporary pointer exec_cmd_ptr to feed the execution engine.
   // We do not modify parsed_to_execute_ yet, in case execution throws/fails.
   auto exec_cmd_ptr{parsed_to_execute_};
-  auto get_next_fn = [&exec_cmd_ptr]() mutable -> facade::ParsedCommand& {
+  auto get_next_fn = [&exec_cmd_ptr]() mutable -> facade::ParsedArgs {
     DCHECK(exec_cmd_ptr) << "exec_cmd_ptr should not be nullptr";
     facade::ParsedCommand* cmd = exec_cmd_ptr;
 
     // Note: We don't need to check for nullptr here because DispatchManyCommands
     // is guaranteed to call this exactly 'pipeline_count' times.
     exec_cmd_ptr = exec_cmd_ptr->next;
-    return *cmd;
+    return ParsedArgs{*cmd};
   };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
@@ -1601,19 +1601,19 @@ void Connection::AsyncFiber() {
     // wants to.
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
-    if ((CommandsPendingCount() == 1) && (cur_epoch == prev_epoch)) {
+    if ((parsed_cmd_q_len_ == 1) && (cur_epoch == prev_epoch)) {
       if (pipeline_wait_batch_usec > 0) {
         ThisFiber::SleepFor(chrono::microseconds(pipeline_wait_batch_usec));
       } else {
         ThisFiber::Yield();
       }
-      DVLOG(2) << "After yielding to producer, CommandsPendingCount=" << CommandsPendingCount();
+      DVLOG(2) << "After yielding to producer, parsed_cmd_q_len_=" << parsed_cmd_q_len_;
       if (cc_->conn_closing)
         break;
     }
     prev_epoch = cur_epoch;
 
-    reply_builder_->SetBatchMode(CommandsPendingCount() > 1);
+    reply_builder_->SetBatchMode(GetPendingCommandCount() > 1);
 
     bool subscriber_over_limit =
         stats_->dispatch_queue_subscriber_bytes >= qbp.publish_buffer_limit;
@@ -1624,7 +1624,7 @@ void Connection::AsyncFiber() {
     // consists only of commands (no pubsub or monitor messages)
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
-    bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == CommandsPendingCount();
+    bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == GetPendingCommandCount();
     if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_ &&
         !IsReplySizeOverLimit()) {
       SquashPipeline();
@@ -1706,7 +1706,7 @@ void Connection::AsyncFiber() {
       }
     }
 
-    if (!qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, CommandsPendingCount()) ||
+    if (!qbp.IsPipelineBufferOverLimit(pending_pipeline_bytes_, pending_pipeline_cmd_cnt_) ||
         !IsCommandsPending()) {
       qbp.pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }
@@ -1853,8 +1853,12 @@ void Connection::SendAsync(MessageHandle msg) {
   QueueBackpressure& qbp = GetQueueBackpressure();
 
   // Close MONITOR connection if we overflow pipeline limits
+  // Note: We check 'dispatch_queue_bytes' (global stats) instead of the pipeline-specific
+  // counters because Monitor messages are stored in 'dispatch_q_', not the parsed command
+  // pipeline. Checking pipeline stats here would be incorrect as they might be
+  // zero for a Monitor connection, bypassing this safety check.
   if (msg.IsMonitor() &&
-      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, CommandsPendingCount())) {
+      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, GetPendingCommandCount())) {
     cc_->conn_closing = true;
     request_shutdown_ = true;
     // We don't shutdown here. The reason is that TLS socket is preemptive
@@ -1900,7 +1904,7 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.
-  if (CommandsPendingCount() == 1 && !cc_->sync_dispatch) {
+  if (GetPendingCommandCount() == 1 && !cc_->sync_dispatch) {
     cnd_.notify_one();
   }
 }
@@ -2246,7 +2250,7 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
   DCHECK_GT(parsed_cmd_q_len_, 0u);
   stats_->dispatch_queue_bytes -= used_mem;
   --stats_->dispatch_queue_entries;
-  --parsed_cmd_q_len_;
+  parsed_cmd_q_len_--;
   if (is_pipelined) {
     stats_->pipelined_cmd_cnt++;
     stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);

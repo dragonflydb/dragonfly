@@ -381,8 +381,10 @@ class Connection : public util::Connection {
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
 
-  uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
-  size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
+  uint64_t pending_pipeline_cmd_cnt_ =
+      0;  // Count of queued Redis async commands in Parsed Commands queue
+  size_t pending_pipeline_bytes_ =
+      0;  // Total byte size of queued Redis async commands in Parsed Commands queue
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
@@ -422,7 +424,7 @@ class Connection : public util::Connection {
   }
 
   // Returns total count of commands pending in the parsed command queue and dispatch queue.
-  size_t CommandsPendingCount() const {
+  size_t GetPendingCommandCount() const {
     return static_cast<size_t>(parsed_cmd_q_len_) + dispatch_q_.size();
   }
 
