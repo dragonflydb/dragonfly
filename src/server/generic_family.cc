@@ -320,7 +320,8 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
   io::StringSink sink;
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
-    auto res = op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv).Get();
+    auto res =
+        ReadTieredString(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage()).Get();
     if (!res.has_value())
       return OpStatus::IO_ERROR;
 
@@ -1138,7 +1139,7 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   // Parse optional condition
-  enum class Condition { NONE, IFEQ, IFNE, IFDEQ, IFDNE };
+  enum class Condition : uint8_t { NONE, IFEQ, IFNE, IFDEQ, IFDNE };
   Condition cond = Condition::NONE;
   string_view compare_value;
 
@@ -1173,8 +1174,18 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
     return Del(args, cmd_cntx);
   }
 
+  auto compare_str = [&](string_view val) {
+    bool is_digest = (cond == Condition::IFDEQ || cond == Condition::IFDNE);
+
+    if (is_digest) {
+      string dig = XXH3_Digest(val);
+      return (dig == compare_value) == (cond == Condition::IFDEQ);
+    }
+    return (val == compare_value) == (cond == Condition::IFEQ);
+  };
+
   // Execute conditional delete
-  auto cb = [key, cond, compare_value](Transaction* tx, EngineShard* es) -> OpResult<uint32_t> {
+  auto cb = [key, compare_str](Transaction* tx, EngineShard* es) -> OpResult<uint32_t> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
 
@@ -1187,33 +1198,21 @@ void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Get the value
     const PrimeValue& pv = it_res->it->second;
-    string value;
+    // Check condition
+    bool should_delete = false;
+
     if (pv.IsExternal()) {
-      auto read_res = es->tiered_storage()->Read(tx->GetDbIndex(), key, pv);
-      auto result = std::move(read_res).Get();
+      util::fb2::Future<io::Result<bool>> fut = ReadTiered<bool>(
+          tx->GetDbIndex(), key, pv, [&](string_view val) { return compare_str(val); },
+          es->tiered_storage());
+
+      auto result = fut.Get();
       if (!result)
         // Tiered storage read failed - return generic I/O error
         return OpStatus::IO_ERROR;
-      value = std::move(*result);
+      should_delete = *result;
     } else {
-      value = pv.ToString();
-    }
-
-    // Check condition
-    bool should_delete = false;
-    if (cond == Condition::IFEQ) {
-      should_delete = (value == compare_value);
-    } else if (cond == Condition::IFNE) {
-      should_delete = (value != compare_value);
-    } else if (cond == Condition::IFDEQ || cond == Condition::IFDNE) {
-      // Compute digest of stored value and compare
-      string digest = XXH3_Digest(value);
-
-      if (cond == Condition::IFDEQ) {
-        should_delete = (digest == compare_value);
-      } else {  // IFDNE
-        should_delete = (digest != compare_value);
-      }
+      should_delete = compare_str(pv.ToString());
     }
 
     // Delete if condition is met

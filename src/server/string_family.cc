@@ -57,7 +57,7 @@ template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 using StringResult = TResultOrT<string>;
 
 StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
-  return pv.IsExternal() ? StringResult{es->tiered_storage()->Read(dbid, key, pv)}
+  return pv.IsExternal() ? StringResult{ReadTieredString(dbid, key, pv, es->tiered_storage())}
                          : StringResult{pv.ToString()};
 }
 
@@ -130,11 +130,10 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   // TODO(vlad): Optimize to return co.Size() if no modify operations are present
   // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
-    TieredStorage::TResult<size_t> fut;
-    auto cb = [fut](io::Result<string_view> s) mutable {
-      fut.Resolve(s.transform(&string_view::size));
-    };
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
+    auto cb = [](string_view s) { return s.size(); };
+
+    TieredStorage::TResult<size_t> fut = ReadTiered<size_t>(
+        op_args.db_cntx.db_index, key, co, std::move(cb), op_args.shard->tiered_storage());
     return {std::move(fut)};
   } else {
     return {co.Size()};
@@ -155,11 +154,12 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
   auto& res = *op_res;
 
   if (res.it->second.IsExternal()) {
-    return {op_args.shard->tiered_storage()->Modify<size_t>(
+    return {ModifyTiered<size_t>(
         op_args.db_cntx.db_index, key, res.it->second,
         [start = start, range = string(range)](std::string* s) {
           return SetRangeInternal(s, start, range);
-        })};
+        },
+        op_args.shard->tiered_storage())};
   } else {
     string value;
 
@@ -208,19 +208,18 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
   }
   RETURN_ON_BAD_STATUS(it_res);
 
-  if (const PrimeValue& co = it_res.value()->second; co.IsExternal()) {
-    fb2::Future<io::Result<std::string>> fut;
-    op_args.shard->tiered_storage()->Read(
+  const PrimeValue& co = it_res.value()->second;
+  if (co.IsExternal()) {
+    fb2::Future<io::Result<string>> fut = ReadTiered<string>(
         op_args.db_cntx.db_index, key, co,
-        [read_cb, fut](const io::Result<std::string_view>& s) mutable {
-          fut.Resolve(read_cb(*s));
-        });
+        [read_cb](std::string_view sv) mutable { return read_cb(sv); },
+        op_args.shard->tiered_storage());
     return {std::move(fut)};
-  } else {
-    string tmp;
-    string_view slice = co.GetSlice(&tmp);
-    return {read_cb(slice)};
   }
+
+  string tmp;
+  string_view slice = co.GetSlice(&tmp);
+  return {read_cb(slice)};
 };
 
 // TODO: Don't copy whole value just to append
@@ -585,7 +584,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
           *err = v.error();
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
+      ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
     } else {
       value.GetString(next);
     }
@@ -635,8 +634,8 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
-                                                    std::move(modf))};
+    return {ModifyTiered<size_t>(op_args.db_cntx.db_index, key, pv, std::move(modf),
+                                 shard->tiered_storage())};
   } else {
     return {ExtendExisting(it_res->it, key, value, prepend)};
   }
