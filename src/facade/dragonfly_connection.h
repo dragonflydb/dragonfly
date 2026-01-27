@@ -122,7 +122,7 @@ class Connection : public util::Connection {
       return std::holds_alternative<MonitorMessage>(handle);
     }
 
-    bool IsReplying() const;  // control messges don't reply, messages carrying data do
+    bool IsReplying() const;  // control messages don't reply, messages carrying data do
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MigrationRequestMessage,
                  CheckpointMessage, InvalidationMessage>
@@ -364,8 +364,15 @@ class Connection : public util::Connection {
   };
 
   ParsedCommand* CreateParsedCommand();
-  void EnqueueParsedCommand();
+  void EnqueueParsedCommand(ParsedCommand* cmd);
+
+  // Releases the command memory back to the pool.
+  // - Set is_pipelined=true if the command was successfully executed and should be counted
+  // in latency/throughput stats.
+  // - Set is_pipelined=false if the command is being dropped/cleaned up without execution or should
+  // not be counted in stats.
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+
   void DestroyParsedQueue();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
@@ -375,9 +382,10 @@ class Connection : public util::Connection {
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
-
-  uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
-  size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
+  // Count of queued Redis async commands in Parsed Commands queue
+  uint64_t pending_pipeline_cmd_cnt_ = 0;
+  // Total byte size of queued Redis async commands in Parsed Commands queue
+  size_t pending_pipeline_bytes_ = 0;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
@@ -409,7 +417,17 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
-  unsigned parsed_cmd_q_len_ = 0;
+  size_t parsed_cmd_q_len_ = 0;
+
+  // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
+  bool HasPendingMessages() const {
+    return parsed_head_ || !dispatch_q_.empty();
+  }
+
+  // Returns total count of commands pending in the parsed command queue and dispatch queue.
+  size_t GetPendingMessageCount() const {
+    return parsed_cmd_q_len_ + dispatch_q_.size();
+  }
 
   uint32_t id_;
   Protocol protocol_;
