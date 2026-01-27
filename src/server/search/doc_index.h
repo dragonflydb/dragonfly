@@ -347,7 +347,7 @@ class ShardDocIndex {
   DocKeyIndex key_index_;
   Synonyms synonyms_;
 
-  // Mapping from key to global_id received from master during replication.
+  // Mapping from key to master global_id received from master during replication.
   // Used to restore vector index relationships after RDB load.
   absl::flat_hash_map<std::string, GlobalDocId> master_doc_ids_;
 };
@@ -380,11 +380,10 @@ class ShardDocIndices {
   void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
-  // Callback type for ForEachGlobalDocId: (index_name, global_id) -> void
+  // Callback type for ForEachGlobalDocId: (index_name, global_id)
   using GlobalIdCallback = std::function<void(std::string_view, search::GlobalDocId)>;
 
   // Invoke callback for each (index_name, global_id) pair for a key across all matching indices.
-  // Avoids memory allocation compared to returning a vector.
   void ForEachGlobalDocId(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv,
                           GlobalIdCallback cb) const;
 
@@ -392,10 +391,9 @@ class ShardDocIndices {
   void SetMasterDocId(std::string_view index_name, std::string_view key,
                       search::GlobalDocId global_id);
 
-  // Clear all master mappings across all indices (called after stable sync transition).
+  // Clear all master mappings across all indices (called before stable sync transition).
   void ClearMasterMappings();
 
-  // Check if all master mappings are empty (used for validation).
   bool AreMasterMappingsEmpty() const;
 
   size_t GetUsedMemory() const;
