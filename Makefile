@@ -14,8 +14,20 @@ LINKER_FLAGS=-lz
 
 # equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
 # Override HELIO_MARCH_OPT via environment: make HELIO_MARCH_OPT="-march=native"
+#
+# Universal cloud-optimized compiler flags:
+# - x86-64-v3: Modern baseline for all current cloud instances (2013+ Haswell)
+#              Includes: SSE4.2, POPCNT, AVX, AVX2, FMA, BMI1, BMI2, F16C
+# - neoverse-n1: Optimized for all current ARM cloud instances (ARMv8.2-A)
+#                 Includes: fp16, dotprod, crypto, CRC32 (great for vector ops)
+#                 Compatible with Graviton 2/3/4, Azure Ampere, GCloud T2A
 ifneq (, $(filter $(BUILD_ARCH),x86_64 amd64))
-HELIO_MARCH_OPT ?= -march=core2 -msse4.1 -mpopcnt -mtune=skylake
+HELIO_MARCH_OPT ?= -march=x86-64-v3 -mtune=generic
+endif
+
+# ARM/aarch64 optimization for cloud deployments (AWS Graviton, Azure Ampere, GCloud T2A)
+ifneq (, $(filter $(BUILD_ARCH),aarch64 arm64))
+HELIO_MARCH_OPT ?= -march=neoverse-n1 -mtune=neoverse-n1
 endif
 
 # For release builds we link statically libstdc++ and libgcc. Currently,
