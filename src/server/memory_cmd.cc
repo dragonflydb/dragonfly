@@ -238,6 +238,7 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
   shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
     mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_cmd_cache_bytes;
     mems[index].pipelined_bytes += tl_facade_stats->conn_stats.dispatch_queue_bytes;
+    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_queue_bytes;
   });
 
   ConnectionMemoryUsage mem;
