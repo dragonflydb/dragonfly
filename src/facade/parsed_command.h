@@ -131,10 +131,6 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString("OK");
   }
 
-  void SendNotFound() {  // For MC only.
-    SendSimpleString(MCRender{mc_cmd_->cmd_flags}.RenderNotFound());
-  }
-
   // TODO: remove
   void SendLong(long val);
   void SendNull();
