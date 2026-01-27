@@ -882,9 +882,9 @@ void ShardDocIndex::SetMasterDocId(string_view key, GlobalDocId global_id) {
   master_doc_ids_[string(key)] = global_id;
 }
 
-ShardDocIndex::GlobalDocId ShardDocIndex::GetMasterDocId(string_view key) const {
+std::optional<ShardDocIndex::GlobalDocId> ShardDocIndex::GetMasterDocId(string_view key) const {
   auto it = master_doc_ids_.find(key);
-  return it != master_doc_ids_.end() ? it->second : 0;
+  return it != master_doc_ids_.end() ? it->second : std::optional<ShardDocIndex::GlobalDocId>();
 }
 
 void ShardDocIndex::ClearMasterMappings() {

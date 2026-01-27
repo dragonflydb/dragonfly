@@ -336,8 +336,7 @@ class ShardDocIndex {
   // mappings). The global_id is stored and can be used later to restore vector index relationships.
   void SetMasterDocId(std::string_view key, GlobalDocId global_id);
 
-  // Get the master's global_id for a key, or 0 if not found.
-  GlobalDocId GetMasterDocId(std::string_view key) const;
+  std::optional<GlobalDocId> GetMasterDocId(std::string_view key) const;
 
   // Clear all master mappings (called after index rebuild).
   void ClearMasterMappings();
