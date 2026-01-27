@@ -737,7 +737,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     ::memcpy(copy_lp, lp, data.size());
     /* Insert the key in the radix tree. */
     int retval =
-        raxTryInsert(s->rax_tree, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
+        raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
     if (!retval) {
       zfree(copy_lp);
       LOG(ERROR) << "Listpack re-added with existing key";
@@ -817,8 +817,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
        * consumer. */
       for (const auto& rawid : cons.nack_arr) {
         uint8_t* ptr = const_cast<uint8_t*>(rawid.data());
-        streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, ptr, rawid.size());
-        if (nack == raxNotFound) {
+        streamNACK* nack = nullptr;
+        int fres = raxFind(cgroup->pel, ptr, rawid.size(), (void**)&nack);
+        if (fres == 0) {
           LOG(ERROR) << "Consumer entry not found in group global PEL";
           ec_ = RdbError(errc::rdb_file_corrupted);
           return;
