@@ -392,6 +392,12 @@ class ShardDocIndices {
   void SetMasterDocId(std::string_view index_name, std::string_view key,
                       search::GlobalDocId global_id);
 
+  // Clear all master mappings across all indices (called after stable sync transition).
+  void ClearMasterMappings();
+
+  // Check if all master mappings are empty (used for validation).
+  bool AreMasterMappingsEmpty() const;
+
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices
 

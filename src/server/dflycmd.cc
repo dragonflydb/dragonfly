@@ -30,6 +30,7 @@
 #include "server/main_service.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
+#include "server/search/doc_index.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
@@ -437,6 +438,7 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
             << replica_ptr->listening_port;
 
   replica_ptr->replica_state = SyncState::STABLE_SYNC;
+
   return cmd_cntx->SendOk();
 }
 
@@ -732,6 +734,12 @@ OpStatus DflyCmd::StopFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   // Reset cleanup and saver
   flow->cleanup = []() {};
   flow->saver.reset();
+
+  // Clear master doc ID mappings as they're no longer needed after full sync.
+  if (auto* indices = shard->search_indices()) {
+    indices->ClearMasterMappings();
+  }
+
   return OpStatus::OK;
 }
 
@@ -739,6 +747,12 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   // Create streamer for shard flows.
   DCHECK(shard);
   DCHECK(flow->conn);
+
+  // Verify that master doc ID mappings were cleared after full sync.
+  if (auto* indices = shard->search_indices()) {
+    DCHECK(indices->AreMasterMappingsEmpty())
+        << "Master doc ID mappings should be empty when starting stable sync";
+  }
 
   LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
   JournalStreamer::Config config{

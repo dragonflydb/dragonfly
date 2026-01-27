@@ -878,6 +878,21 @@ void ShardDocIndices::SetMasterDocId(string_view index_name, string_view key,
   }
 }
 
+void ShardDocIndices::ClearMasterMappings() {
+  for (auto& [name, index] : indices_) {
+    index->ClearMasterMappings();
+  }
+}
+
+bool ShardDocIndices::AreMasterMappingsEmpty() const {
+  for (const auto& [name, index] : indices_) {
+    if (!index->master_doc_ids_.empty()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void ShardDocIndex::SetMasterDocId(string_view key, GlobalDocId global_id) {
   master_doc_ids_[string(key)] = global_id;
 }
