@@ -301,7 +301,7 @@ class ShardDocIndex {
   }
 
   void AddDocToGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
-                                 const DbContext& db_cntx, const PrimeValue& pv);
+                                 const DbContext& db_cntx, PrimeValue* pv);
   void RemoveDocFromGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
                                       const DbContext& db_cntx, const PrimeValue& pv);
   void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
@@ -363,7 +363,7 @@ class ShardDocIndices {
   std::vector<std::string> GetIndexNames() const;
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
-  void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+  void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
   size_t GetUsedMemory() const;
