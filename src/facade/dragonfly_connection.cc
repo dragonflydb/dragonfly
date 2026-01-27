@@ -1111,7 +1111,7 @@ void Connection::ConnectionFlow() {
   }
 }
 
-bool Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
+void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
                                 absl::FunctionRef<void()> enqueue_cmd_cb) {
   bool optimize_for_async = has_more;
   QueueBackpressure& qbp = GetQueueBackpressure();
@@ -1137,7 +1137,7 @@ bool Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       if (request_shutdown_) {
         ShutdownSelfBlocking();
       }
-      return false;
+      return;
     }
 
     // prefer synchronous dispatching to save memory.
@@ -1154,11 +1154,6 @@ bool Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       LaunchAsyncFiberIfNeeded();
     }
     enqueue_cmd_cb();
-
-    // enqueue_cmd_cb() may enqueue or drain pipeline commands. We only request the caller
-    // to yield/continue interleaving with async dispatch when there are still pending
-    // pipeline commands after this callback completes.
-    return pending_pipeline_cmd_cnt_ > 0;
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
@@ -1173,7 +1168,6 @@ bool Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     if (HasPendingMessages())
       cnd_.notify_one();
   }
-  return false;
 }
 
 Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
@@ -1216,10 +1210,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
         LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
-      bool should_yield = DispatchSingle(has_more, dispatch_sync, dispatch_async);
-      if (should_yield) {
-        ThisFiber::Yield();
-      }
+      DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
