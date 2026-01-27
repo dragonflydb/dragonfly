@@ -1113,6 +1113,12 @@ void Connection::ConnectionFlow() {
 
 void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
                                 absl::FunctionRef<void()> enqueue_cmd_cb) {
+  // Unconditional return when closing:
+  // else, non-throttled connections skip the check below and enqueue data even if they are closing.
+  // No one will read that data anyway.
+  if (cc_->conn_closing)
+    return;
+
   bool optimize_for_async = has_more;
   QueueBackpressure& qbp = GetQueueBackpressure();
   size_t global_pipeline_bytes = qbp.pipeline_bytes.load(std::memory_order_relaxed);
@@ -1150,9 +1156,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
-    if (!cc_->conn_closing) {
-      LaunchAsyncFiberIfNeeded();
-    }
+    LaunchAsyncFiberIfNeeded();
     enqueue_cmd_cb();
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
