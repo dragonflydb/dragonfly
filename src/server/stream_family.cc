@@ -2380,22 +2380,23 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
   }
   return cmd_cntx->SendError(result.status());
 }
+
 // Valkey 7.2.11:
 // --------------
-// If the consumer was created but nothing was read the consumer is *not* deleted,
-// and XINFO should show it. However, they decided that this state is not replicated, so
-// XINFO on replica won't show the consumer. On blocking flow, after a wake up XCLAIM
-// is used as redis the consumer appears on the replica side as well alongside PEL info.
+// If the consumer was created but nothing was read the consumer is *not* deleted
+// and XINFO should show it (does not affect replication).
+// Just like redis, it only replicates the side effects of xgroupread:
+// * without noack -> xclaim + xgroup setid
+// * with noack -> xgroup setid
 //
 // Redis 7.0.15:
 // --------------
 // Redis instead deletes the consumer in case the stream is empty and nothing
-// was read or if the command blocks. On the later case, after unblocking the consumer
-// is created again (if it doesn't exist because some other command from a different client
-// created it). This is when the newly created consumer is *also replicated* as a side effect
-// of XCLAIM command.
+// was read even if the command blocks. On the later case, after unblocking the consumer
+// is created again and its side effects are replicated similar to what described above.
 //
-// Dragonfly follows Valkey semantics.
+// Dragonfly follows Valkey behaviour (the consumer is not deleted and this does not affect
+// replication).
 void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const RecordVec& records,
                                std::string_view key) {
   if (!op_args.shard->journal()) {
