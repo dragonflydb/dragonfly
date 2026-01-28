@@ -14,7 +14,7 @@ constexpr size_t kHeaderSize = sizeof(uint32_t) * 2;
 
 namespace dfly::detail {
 
-BlobPtr MakeBlobPtr(std::string_view sv) {
+InternedBlobHandle InternedBlobHandle::Create(std::string_view sv) {
   constexpr uint32_t ref_count = 1;
   DCHECK_LE(sv.size(), std::numeric_limits<uint32_t>::max());
 
@@ -30,7 +30,7 @@ BlobPtr MakeBlobPtr(std::string_view sv) {
 
   // null terminate so jsoncons can directly access the char* as string
   blob[kHeaderSize + str_len] = '\0';
-  return blob + kHeaderSize;
+  return InternedBlobHandle{blob + kHeaderSize};
 }
 
 uint32_t InternedBlobHandle::Size() const {

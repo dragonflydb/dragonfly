@@ -17,16 +17,13 @@ namespace dfly::detail {
 //     ^-8      ^- 4         ^blob_
 using BlobPtr = char*;
 
-BlobPtr MakeBlobPtr(std::string_view sv);
-
 // A lightweight handle around a blob pointer, used to wrap the blob data when storing it in hashset
 // and also within interned strings. Does not handle lifetime of the data. Only provides convenience
 // methods to change state inside the blob and "view" style methods to access the string inside the
 // blob. Multiple handles can point to the same blob.
 class InternedBlobHandle {
  public:
-  explicit InternedBlobHandle(BlobPtr blob) : blob_{blob} {
-  }
+  static InternedBlobHandle Create(std::string_view sv);
 
   uint32_t Size() const;
 
@@ -61,7 +58,10 @@ class InternedBlobHandle {
   operator std::string_view() const;  // NOLINT (non-explicit operator for easier comparisons)
 
  private:
-  BlobPtr blob_;
+  explicit InternedBlobHandle(BlobPtr blob) : blob_{blob} {
+  }
+
+  BlobPtr blob_{nullptr};
 };
 
 struct BlobHash {
