@@ -1318,4 +1318,11 @@ TEST_F(StreamFamilyTest, XDelNonExistentId) {
   EXPECT_THAT(resp, IntArg(0));  // Nothing deleted
 }
 
+// Minimal test to reproduce stale iterator bug (issue #6409)
+// After raxStop(), code at line 539 uses stale ri.key causing segfault.
+TEST_F(StreamFamilyTest, StaleIteratorBug) {
+  Run({"xadd", "s", "*", "f", "v1"});  // Creates first entry
+  Run({"xadd", "s", "*", "f", "v2"});  // Bug: uses ri.key after raxStop()
+}
+
 }  // namespace dfly

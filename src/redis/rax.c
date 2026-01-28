@@ -1787,6 +1787,10 @@ int raxCompare(raxIterator *iter, const char *op, unsigned char *key, size_t key
 void raxStop(raxIterator *it) {
     if (it->key != it->key_static_string) rax_free(it->key);
     raxStackFree(&it->stack);
+
+    /* TEMPORARY: Poison pointers to detect use-after-stop bugs (issue #6409) */
+    it->key = NULL;
+    it->data = NULL;
 }
 
 /* Return if the iterator is in an EOF state. This happens when raxSeek()
