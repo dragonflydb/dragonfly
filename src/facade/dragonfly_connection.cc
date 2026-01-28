@@ -629,6 +629,12 @@ void Connection::OnPreMigrateThread() {
 
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
+
+  // Decrement connection counter on the old thread before migration.
+  // This balances the IncrNumConns() that was called in ConnectionFlow().
+  // OnPostMigrateThread() will increment it again on the new thread.
+  DecrNumConns();
+  stats_->read_buf_capacity -= io_buf_.Capacity();
 }
 
 void Connection::OnPostMigrateThread() {
