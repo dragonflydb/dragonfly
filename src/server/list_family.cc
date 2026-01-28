@@ -61,6 +61,8 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
+ABSL_FLAG(unsigned, list_tiering_threshold, 0,
+          "Tiering threshold for lists. Default - no tiering.");
 
 namespace dfly {
 
@@ -99,6 +101,10 @@ class ListWrapper {
     if (ShouldPromoteToQL(lp.GetPointer(), value.size())) {
       QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                                 GetFlag(FLAGS_list_compress_depth));
+      if (GetFlag(FLAGS_list_tiering_threshold) > 0) {
+        ql->SetTieringParams(
+            QList::TieringParams{.node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold)});
+      }
       if (lp.Size() > 0) {
         ql->AppendListpack(lp.GetPointer());
       } else {

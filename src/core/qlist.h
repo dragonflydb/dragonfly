@@ -248,6 +248,8 @@ class QList {
     uint64_t total_node_reads = 0;
     uint64_t offload_requests = 0;
     uint64_t onload_requests = 0;
+
+    Stats& operator+=(const Stats& other);
   };
   static __thread Stats stats;
 
