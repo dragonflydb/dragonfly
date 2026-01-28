@@ -367,6 +367,7 @@ class RdbLoader : protected RdbLoaderBase {
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
   // Map of currently streamed big values
+  util::fb2::Mutex now_streamed_mu_;
   std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
 };
 
