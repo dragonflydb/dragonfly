@@ -8,22 +8,25 @@
 #include <string_view>
 
 namespace dfly::detail {
-// The blob class simply holds a size, a ref-count and some characters, followed by the
-// nul-character. It is intended to hold reference counted strings with quick size access. The blob
-// does not manage its own reference count but provides an API for this. There are checks to see if
-// the ref-count does not over or underflow.
-class InternedBlob {
-  static constexpr auto kHeaderSize = sizeof(uint32_t) * 2;
 
+// Layout is: 4 bytes size, 4 bytes refcount, char data, followed by nul-char.
+// The trailing nul-char is required because jsoncons needs to access c_str/data without a
+// size. The blob_ itself points directly to the data, so that callers do not have to perform
+// pointer arithmetic for c_str() and data() calls:
+//     [size:4] [refcount:4] [string] [\0]
+//     ^-8      ^- 4         ^blob_
+using BlobPtr = char*;
+
+BlobPtr MakeBlobPtr(std::string_view sv);
+
+// A lightweight handle around a blob pointer, used to wrap the blob data when storing it in hashset
+// and also within interned strings. Does not handle lifetime of the data. Only provides convenience
+// methods to change state inside the blob and "view" style methods to access the string inside the
+// blob. Multiple handles can point to the same blob.
+class InternedBlobHandle {
  public:
-  explicit InternedBlob(std::string_view sv);
-  ~InternedBlob();
-
-  InternedBlob(const InternedBlob& other) = delete;
-  InternedBlob& operator=(const InternedBlob& other) = delete;
-
-  InternedBlob(InternedBlob&& other) noexcept;
-  InternedBlob& operator=(InternedBlob&& other) noexcept;
+  explicit InternedBlobHandle(BlobPtr blob) : blob_{blob} {
+  }
 
   uint32_t Size() const;
 
@@ -32,7 +35,16 @@ class InternedBlob {
   std::string_view View() const;
 
   // Returns nul terminated string
-  const char* Data() const;
+  const char* Data() const {
+    return blob_;
+  }
+
+  // The refcount methods are explicitly part of the public API and not tied to the handle lifetime
+  // to keep control over exactly when we modify data in the blob ptr. We do not want to increase
+  // ref count on each handle creation and conversely decrease it when a handle is destroyed, eg on
+  // every hash table lookup etc. The ref count is only increased or decreased at the InternedString
+  // API level, when a new string is created, and when a string is destroyed. This allows us to
+  // avoid writing to memory unless absolutely necessary, making the handle cheap.
 
   // Increment ref count, asserts if count grows over type max limit
   void IncrRefCount();
@@ -45,16 +57,11 @@ class InternedBlob {
   // Returns bytes used, including string, header and trailing byte
   size_t MemUsed() const;
 
- private:
+  // Convenience method to deallocate storage. Not for use in destructor.
   void Destroy();
 
-  // Layout is: 4 bytes size, 4 bytes refcount, char data, followed by nul-char.
-  // The trailing nul-char is required because jsoncons needs to access c_str/data without a
-  // size. The blob_ itself points directly to the data, so that callers do not have to perform
-  // pointer arithmetic for c_str() and data() calls:
-  //     [size:4] [refcount:4] [string] [\0]
-  //     ^-8      ^- 4         ^blob_
-  char* blob_ = nullptr;
+ private:
+  BlobPtr blob_;
 };
 
 // Custom hash/eq operators allow only checking the string part of the blob. They also allow direct
@@ -64,25 +71,25 @@ struct BlobHash {
   // allow heterogeneous lookup, so there are no conversions from string_view to InternedBlob:
   // https://abseil.io/tips/144
   using is_transparent = void;
-  size_t operator()(const InternedBlob*) const;
+  size_t operator()(const InternedBlobHandle&) const;
   size_t operator()(std::string_view) const;
 };
 
 struct BlobEq {
   using is_transparent = void;
-  bool operator()(const InternedBlob* a, const InternedBlob* b) const;
-  bool operator()(const InternedBlob* a, std::string_view b) const;
-  bool operator()(std::string_view a, const InternedBlob* b) const;
+  bool operator()(const InternedBlobHandle& a, const InternedBlobHandle& b) const;
+  bool operator()(const InternedBlobHandle& a, std::string_view b) const;
+  bool operator()(std::string_view a, const InternedBlobHandle& b) const;
 };
 
-// This pool holds blob pointers and is used by InternedString to manage string access. It would be
+// This pool holds blob handles and is used by InternedString to manage string access. It would be
 // nice to keep this on the mimalloc heap by using StatelessAllocator. However, JSON memory usage is
 // estimated by comparing mimalloc usage before and after creating an object. If we keep this pool
 // on mimalloc, it can introduce variations such as resizing of its internal store when adding a new
 // object. This results in non-deterministic memory usage, which introduces incorrectness in tests
 // and the memory usage command. To keep memory estimation per object accurate, the pool is
 // allocated on the default heap.
-using InternedBlobPool = absl::flat_hash_set<InternedBlob*, BlobHash, BlobEq>;
-static_assert(sizeof(InternedBlob) == sizeof(char*));
+using InternedBlobPool = absl::flat_hash_set<InternedBlobHandle, BlobHash, BlobEq>;
+static_assert(sizeof(InternedBlobHandle) == sizeof(char*));
 
 }  // namespace dfly::detail
