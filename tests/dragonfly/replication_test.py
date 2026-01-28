@@ -3771,3 +3771,44 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     assert len(lines) == 0
     lines = replica3.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
     assert len(lines) == 0
+
+
+@pytest.mark.slow
+async def test_issue_6414_replica_reconnection_leaks_connections(df_factory: DflyInstanceFactory):
+    """
+    Regression test for issue #6414: connected_clients counter leak on replica reconnections.
+
+    Bug: When replica connection migrates and closes, IncrNumConns() is called
+    but DecrNumConns() is never called, leaking ~2-3 connections per reconnect cycle.
+    """
+    master = df_factory.create(proactor_threads=4, port=6379)
+    replica = df_factory.create(proactor_threads=4, port=6380)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    info = await c_master.info("clients")
+    baseline = info["connected_clients"]
+
+    # Simulate unstable replica connections with multiple reconnect cycles
+    num_cycles = 20
+    for i in range(num_cycles):
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await asyncio.sleep(0.1)
+        await c_replica.execute_command("REPLICAOF NO ONE")
+        await asyncio.sleep(0.1)
+
+    await asyncio.sleep(1.0)
+
+    info = await c_master.info("clients")
+    final_count = info["connected_clients"]
+    leaked = final_count - baseline
+
+    assert leaked == 0, (
+        f"connected_clients leaked {leaked} connections after {num_cycles} reconnect cycles. "
+        f"Expected {baseline}, got {final_count}"
+    )
+
+    await c_master.aclose()
+    await c_replica.aclose()
