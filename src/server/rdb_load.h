@@ -11,6 +11,7 @@ extern "C" {
 
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
+#include "base/spinlock.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
@@ -366,9 +367,11 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
+  base::SpinLock now_streamed_mu_;
+
   // Map of currently streamed big values
-  util::fb2::Mutex now_streamed_mu_;
-  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
+  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_
+      ABSL_GUARDED_BY(now_streamed_mu_);
 };
 
 }  // namespace dfly
