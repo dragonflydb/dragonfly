@@ -427,7 +427,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
 
   /* Add the new entry. */
   raxIterator ri;
-  raxStart(&ri, s->rax_tree);
+  raxStart(&ri, s->rax);
   raxSeek(&ri, "$", NULL, 0);
 
   size_t lp_bytes = 0;      /* Total bytes in the tail listpack. */
@@ -502,7 +502,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
       /* Shrink extra pre-allocated memory */
       lp = lpShrinkToFit(lp);
       if (ri.data != lp)
-        raxInsert(s->rax_tree, ri.key, ri.key_len, lp, NULL);
+        raxInsert(s->rax, ri.key, ri.key_len, lp, NULL);
       lp = NULL;
     }
   }
@@ -530,7 +530,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
       lp = lpAppend(lp, SafePtr(field), field.size());
     }
     lp = lpAppendInteger(lp, 0); /* Master entry zero terminator. */
-    raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+    raxInsert(s->rax, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
     // TODO remove this check
     CHECK_GT(lpBytes(lp), 0U);
     /* The first entry we insert, has obviously the same fields of the
@@ -618,7 +618,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
 
   /* Insert back into the tree in order to update the listpack pointer. */
   if (ri.data != lp) {
-    raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+    raxInsert(s->rax, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
     // TODO remove this
     CHECK_GT(lpBytes(lp), 0U);
   }
@@ -845,8 +845,8 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
        * or update it if the consumer is the same as before. */
       if (group_inserted == 0) {
         streamFreeNACK(nack);
-        nack = static_cast<streamNACK*>(raxFind(opts.group->pel, buf, sizeof(buf)));
-        DCHECK(nack != raxNotFound);
+        int fres = raxFind(opts.group->pel, buf, sizeof(buf), (void**)&nack);
+        DCHECK(fres);
         raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
         LOG_IF(DFATAL, nack->consumer->pel->numnodes == 0) << "Invalid rax state";
 
@@ -1126,8 +1126,8 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   StreamInfo sinfo;
   sinfo.length = s->length;
 
-  sinfo.radix_tree_keys = raxSize(s->rax_tree);
-  sinfo.radix_tree_nodes = s->rax_tree->numnodes;
+  sinfo.radix_tree_keys = raxSize(s->rax);
+  sinfo.radix_tree_nodes = s->rax->numnodes;
   sinfo.last_generated_id = s->last_id;
   sinfo.max_deleted_entry_id = s->max_deleted_entry_id;
   sinfo.entries_added = s->entries_added;
@@ -1374,9 +1374,10 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
     std::array<uint8_t, sizeof(streamID)> buf;
     StreamEncodeID(buf.begin(), &id);
 
-    streamNACK* nack = (streamNACK*)raxFind(cgr_res->cg->pel, buf.begin(), sizeof(buf));
+    streamNACK* nack = nullptr;
+    int fres = raxFind(cgr_res->cg->pel, buf.begin(), sizeof(buf), (void**)&nack);
     if (!streamEntryExists(cgr_res->s, &id)) {
-      if (nack != raxNotFound) {
+      if (fres) {
         /* Release the NACK */
         raxRemove(cgr_res->cg->pel, buf.begin(), sizeof(buf), nullptr);
         raxRemove(nack->consumer->pel, buf.begin(), sizeof(buf), nullptr);
@@ -1388,14 +1389,14 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 
     // We didn't find a nack but the FORCE option is given.
     // Create the NACK forcefully.
-    if ((opts.flags & kClaimForce) && nack == raxNotFound) {
+    if ((opts.flags & kClaimForce) && fres == 0) {
       /* Create the NACK. */
       nack = StreamCreateNACK(nullptr, now_ms);
       raxInsert(cgr_res->cg->pel, buf.begin(), sizeof(buf), nack, nullptr);
     }
 
     // We found the nack, continue.
-    if (nack != raxNotFound) {
+    if (nack) {
       // First check if the entry id exceeds the `min_idle_time`.
       if (nack->consumer && opts.min_idle_time) {
         mstime_t this_idle = now_ms - nack->delivery_time;
@@ -1633,8 +1634,9 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
     // Lookup the ID in the group PEL: it will have a reference to the
     // NACK structure that will have a reference to the consumer, so that
     // we are able to remove the entry from both PELs.
-    streamNACK* nack = (streamNACK*)raxFind(res->cg->pel, buf, sizeof(buf));
-    if (nack != raxNotFound) {
+    streamNACK* nack = nullptr;
+    int fres = raxFind(res->cg->pel, buf, sizeof(buf), (void**)&nack);
+    if (fres) {
       raxRemove(res->cg->pel, buf, sizeof(buf), nullptr);
       raxRemove(nack->consumer->pel, buf, sizeof(buf), nullptr);
       streamFreeNACK(nack);

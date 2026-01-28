@@ -180,7 +180,7 @@ template <typename V> struct RaxTreeMap {
   }
 
   FindIterator find(std::string_view key) const {
-    if (void* ptr = raxFind(tree_, to_key_ptr(key), key.size()); ptr != raxNotFound)
+    if (void* ptr = nullptr; raxFind(tree_, to_key_ptr(key), key.size(), &ptr))
       return FindIterator{std::pair<std::string, V&>(std::string(key), *reinterpret_cast<V*>(ptr))};
 
     return FindIterator{std::nullopt};

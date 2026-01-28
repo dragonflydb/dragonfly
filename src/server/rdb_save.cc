@@ -526,9 +526,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
 error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
   /* Store how many listpacks we have inside the radix tree. */
   stream* s = (stream*)pv.RObjPtr();
-  rax* rax = s->rax_tree;
-
-  const size_t rax_size = raxSize(rax);
+  const size_t rax_size = raxSize(s->rax);
 
   RETURN_ON_ERR(SaveLen(rax_size));
 
@@ -536,7 +534,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
    * when loading back, we'll use the first entry of each listpack
    * to insert it back into the radix tree. */
   raxIterator ri;
-  raxStart(&ri, rax);
+  raxStart(&ri, s->rax);
   raxSeek(&ri, "^", NULL, 0);
 
   auto stop_listpacks_rax = absl::MakeCleanup([&] { raxStop(&ri); });
