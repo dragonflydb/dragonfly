@@ -744,7 +744,7 @@ void IncrByGeneric(string_view key, int64_t val, CommandContext* cmd_cntx) {
       cmd_cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      cmd_cntx->SendNotFound();
+      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderNotFound());
       break;
     default:
       cmd_cntx->SendError(result.status());
