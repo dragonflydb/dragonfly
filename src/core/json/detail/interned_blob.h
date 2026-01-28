@@ -32,8 +32,6 @@ class InternedBlobHandle {
 
   uint32_t RefCount() const;
 
-  std::string_view View() const;
-
   // Returns nul terminated string
   const char* Data() const {
     return blob_;
@@ -58,28 +56,30 @@ class InternedBlobHandle {
   size_t MemUsed() const;
 
   // Convenience method to deallocate storage. Not for use in destructor.
-  void Destroy();
+  static void Destroy(InternedBlobHandle& handle);
+
+  operator std::string_view() const;  // NOLINT (non-explicit operator for easier comparisons)
 
  private:
   BlobPtr blob_;
 };
 
-// Custom hash/eq operators allow only checking the string part of the blob. They also allow direct
-// comparison with string views, so intermediate objects need not be created in application code
-// using the blob.
 struct BlobHash {
-  // allow heterogeneous lookup, so there are no conversions from string_view to InternedBlob:
-  // https://abseil.io/tips/144
   using is_transparent = void;
-  size_t operator()(const InternedBlobHandle&) const;
-  size_t operator()(std::string_view) const;
+  size_t operator()(std::string_view sv) const {
+    return std::hash<std::string_view>{}(sv);
+  }
 };
 
 struct BlobEq {
   using is_transparent = void;
-  bool operator()(const InternedBlobHandle& a, const InternedBlobHandle& b) const;
-  bool operator()(const InternedBlobHandle& a, std::string_view b) const;
-  bool operator()(std::string_view a, const InternedBlobHandle& b) const;
+  bool operator()(const InternedBlobHandle& a, const InternedBlobHandle& b) const {
+    return a.Data() == b.Data();
+  }
+
+  bool operator()(std::string_view a, std::string_view b) const {
+    return a == b;
+  }
 };
 
 // This pool holds blob handles and is used by InternedString to manage string access. It would be

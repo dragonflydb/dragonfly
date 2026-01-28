@@ -34,113 +34,110 @@ class InternedBlobTest : public testing::Test {
 using detail::BlobPtr;
 using detail::InternedBlobHandle;
 
-// Convenience class to handle memory cleanup
-struct TestHandle {
-  BlobPtr ptr;
-  InternedBlobHandle handle;
-
-  explicit TestHandle(std::string_view sv) : ptr{detail::MakeBlobPtr(sv)}, handle{ptr} {
-  }
-
-  ~TestHandle() {
-    if (handle.Data())
-      handle.Destroy();
-  }
-
-  InternedBlobHandle* operator->() {
-    return &handle;
-  }
-};
-
 TEST_F(InternedBlobTest, MemoryUsage) {
   const auto* mr = MemoryResource();
   const auto usage_before = mr->used();
   {
-    TestHandle blob{"1234567"};
+    BlobPtr p = detail::MakeBlobPtr("1234567");
+    InternedBlobHandle blob{p};
     const auto usage_after = mr->used();
-    const auto expected_delta = blob->MemUsed();
+    const auto expected_delta = blob.MemUsed();
     EXPECT_EQ(usage_before + expected_delta, usage_after);
-    blob->Destroy();
+    InternedBlobHandle::Destroy(blob);
   }
   const auto usage_after = mr->used();
   EXPECT_EQ(usage_before, usage_after);
 }
 
-void CheckBlob(TestHandle& blob, std::string_view expected, uint32_t ref_cnt = 1) {
-  EXPECT_EQ(blob->View(), expected);
-  EXPECT_EQ(blob->Size(), expected.size());
-  EXPECT_EQ(blob->RefCount(), ref_cnt);
+void CheckBlob(InternedBlobHandle& blob, std::string_view expected, uint32_t ref_cnt = 1) {
+  EXPECT_EQ(blob, expected);
+  EXPECT_EQ(blob.Size(), expected.size());
+  EXPECT_EQ(blob.RefCount(), ref_cnt);
 }
 
 TEST_F(InternedBlobTest, Ctors) {
   {
-    TestHandle blob{""};
-    EXPECT_EQ(blob->Size(), 0);
+    BlobPtr p = detail::MakeBlobPtr("");
+    InternedBlobHandle blob{p};
+    EXPECT_EQ(blob.Size(), 0);
+    InternedBlobHandle::Destroy(blob);
   }
 
   {
-    TestHandle src{"foobar"};
-    TestHandle dest{src};
+    BlobPtr p = detail::MakeBlobPtr("foobar");
+    InternedBlobHandle src{p};
+    InternedBlobHandle dest{src};
     CheckBlob(dest, "foobar");
     CheckBlob(src, "foobar");
+    InternedBlobHandle::Destroy(dest);
   }
 
   std::string data(100000, 'x');
-  TestHandle blob{data};
-  EXPECT_EQ(blob->Size(), data.length());
+  BlobPtr p = detail::MakeBlobPtr(data);
+  InternedBlobHandle blob{p};
+  EXPECT_EQ(blob.Size(), data.length());
+  InternedBlobHandle::Destroy(blob);
 }
 
 TEST_F(InternedBlobTest, Comparison) {
-  const TestHandle blob{"foobar"};
+  BlobPtr p = detail::MakeBlobPtr("foobar");
+  InternedBlobHandle blob{p};
   const detail::BlobEq blob_eq;
 
-  EXPECT_TRUE(blob_eq(blob.handle, "foobar"));
-  EXPECT_TRUE(blob_eq("foobar", blob.handle));
+  EXPECT_TRUE(blob_eq(blob, "foobar"));
+  EXPECT_TRUE(blob_eq("foobar", blob));
 
-  TestHandle second{"foobar"};
-  second->SetRefCount(2000);
+  InternedBlobHandle second{p};
+  second.SetRefCount(2000);
 
-  EXPECT_TRUE(blob_eq(blob.handle, second.handle));
+  EXPECT_TRUE(blob_eq(blob, second));
+  InternedBlobHandle::Destroy(blob);
 }
 
 TEST_F(InternedBlobTest, Accessors) {
-  TestHandle blob{"1234567"};
-  EXPECT_EQ(blob->Size(), 7);
-  EXPECT_STREQ(blob->Data(), "1234567");
-  EXPECT_EQ(blob->View(), "1234567"sv);
+  BlobPtr p = detail::MakeBlobPtr("1234567");
+  InternedBlobHandle blob{p};
+  EXPECT_EQ(blob.Size(), 7);
+  EXPECT_STREQ(blob.Data(), "1234567");
+  EXPECT_EQ(blob, "1234567"sv);
+  InternedBlobHandle::Destroy(blob);
 }
 
 TEST_F(InternedBlobTest, RefCounts) {
-  TestHandle blob{"1234567"};
-  EXPECT_EQ(blob->RefCount(), 1);
-  blob->IncrRefCount();
-  blob->IncrRefCount();
-  blob->IncrRefCount();
-  EXPECT_EQ(blob->RefCount(), 4);
-  blob->DecrRefCount();
-  blob->DecrRefCount();
-  blob->DecrRefCount();
-  blob->DecrRefCount();
-  EXPECT_EQ(blob->RefCount(), 0);
-  EXPECT_DEBUG_DEATH(blob->DecrRefCount(), "Attempt to decrease zero refcount");
-  blob->SetRefCount(std::numeric_limits<uint32_t>::max());
-  EXPECT_DEBUG_DEATH(blob->IncrRefCount(), "Attempt to increase max refcount");
+  BlobPtr p = detail::MakeBlobPtr("1234567");
+  InternedBlobHandle blob{p};
+  EXPECT_EQ(blob.RefCount(), 1);
+  blob.IncrRefCount();
+  blob.IncrRefCount();
+  blob.IncrRefCount();
+  EXPECT_EQ(blob.RefCount(), 4);
+  blob.DecrRefCount();
+  blob.DecrRefCount();
+  blob.DecrRefCount();
+  blob.DecrRefCount();
+  EXPECT_EQ(blob.RefCount(), 0);
+  EXPECT_DEBUG_DEATH(blob.DecrRefCount(), "Attempt to decrease zero refcount");
+  blob.SetRefCount(std::numeric_limits<uint32_t>::max());
+  EXPECT_DEBUG_DEATH(blob.IncrRefCount(), "Attempt to increase max refcount");
+  InternedBlobHandle::Destroy(blob);
 }
 
 TEST_F(InternedBlobTest, Pool) {
   detail::InternedBlobPool pool{};
-  TestHandle b1("foo");
-  pool.emplace(b1.handle);
+  BlobPtr p = detail::MakeBlobPtr("foo");
+  InternedBlobHandle b1(p);
+  pool.emplace(b1);
 
   // search by string view
   EXPECT_TRUE(pool.contains("foo"));
 
   // increment the refcount. The blob is still found because the hasher only looks at the string
-  b1->IncrRefCount();
-  b1->IncrRefCount();
-  b1->IncrRefCount();
+  b1.IncrRefCount();
+  b1.IncrRefCount();
+  b1.IncrRefCount();
 
   EXPECT_TRUE(pool.contains("foo"));
+  InternedBlobHandle::Destroy(b1);
 }
 
 void BM_Getters(benchmark::State& state) {
@@ -150,9 +147,9 @@ void BM_Getters(benchmark::State& state) {
   for (auto _ : state) {
     benchmark::DoNotOptimize(b.Size());
     benchmark::DoNotOptimize(b.RefCount());
-    benchmark::DoNotOptimize(b.View());
+    benchmark::DoNotOptimize(std::string_view{b});
   }
-  b.Destroy();
+  InternedBlobHandle::Destroy(b);
 }
 
 BENCHMARK(BM_Getters);
@@ -167,7 +164,7 @@ void BM_Setters(benchmark::State& state) {
     b.DecrRefCount();
     benchmark::ClobberMemory();
   }
-  b.Destroy();
+  InternedBlobHandle::Destroy(b);
 }
 
 BENCHMARK(BM_Setters);
@@ -180,7 +177,7 @@ void BM_Hash(benchmark::State& state) {
   for (auto _ : state) {
     benchmark::DoNotOptimize(hasher(b));
   }
-  b.Destroy();
+  InternedBlobHandle::Destroy(b);
 }
 BENCHMARK(BM_Hash);
 
@@ -195,7 +192,7 @@ void BM_PoolLookup(benchmark::State& state) {
     benchmark::DoNotOptimize(pool.find("foobar!!!"));
   }
 
-  blob.Destroy();
+  InternedBlobHandle::Destroy(blob);
 }
 BENCHMARK(BM_PoolLookup);
 
@@ -210,6 +207,6 @@ void BM_LookupMiss(benchmark::State& state) {
     benchmark::DoNotOptimize(pool.find("!!!foobar"));
   }
 
-  blob.Destroy();
+  InternedBlobHandle::Destroy(blob);
 }
 BENCHMARK(BM_LookupMiss);

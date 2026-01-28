@@ -47,11 +47,6 @@ uint32_t InternedBlobHandle::RefCount() const {
   return ref_count;
 }
 
-std::string_view InternedBlobHandle::View() const {
-  DCHECK(blob_) << "Called View() on empty blob";
-  return {blob_, Size()};
-}
-
 void InternedBlobHandle::IncrRefCount() {  // NOLINT - non-const, mutates via ptr
   const uint32_t ref_count = RefCount();
   DCHECK_LT(ref_count, std::numeric_limits<uint32_t>::max()) << "Attempt to increase max refcount";
@@ -74,32 +69,17 @@ size_t InternedBlobHandle::MemUsed() const {
   return blob_ ? Size() + kHeaderSize + 1 : 0;
 }
 
-void InternedBlobHandle::Destroy() {
-  if (blob_) {
-    const size_t to_destroy = kHeaderSize + Size() + 1;
-    StatelessAllocator<char>{}.deallocate(blob_ - kHeaderSize, to_destroy);
-    blob_ = nullptr;
+void InternedBlobHandle::Destroy(InternedBlobHandle& handle) {
+  if (handle.blob_) {
+    const size_t to_destroy = kHeaderSize + handle.Size() + 1;
+    StatelessAllocator<char>{}.deallocate(handle.blob_ - kHeaderSize, to_destroy);
+    handle.blob_ = nullptr;
   }
 }
 
-size_t BlobHash::operator()(const InternedBlobHandle& b) const {
-  return std::hash<std::string_view>{}(b.View());
-}
-
-size_t BlobHash::operator()(std::string_view sv) const {
-  return std::hash<std::string_view>{}(sv);
-}
-
-bool BlobEq::operator()(const InternedBlobHandle& a, const InternedBlobHandle& b) const {
-  return a.View() == b.View();
-}
-
-bool BlobEq::operator()(const InternedBlobHandle& a, std::string_view b) const {
-  return a.View() == b;
-}
-
-bool BlobEq::operator()(std::string_view a, const InternedBlobHandle& b) const {
-  return a == b.View();
+InternedBlobHandle::operator std::string_view() const {
+  DCHECK(blob_) << "Attempt to convert empty blob to string_view";
+  return {blob_, Size()};
 }
 
 }  // namespace dfly::detail
