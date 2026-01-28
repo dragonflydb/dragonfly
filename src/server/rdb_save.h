@@ -249,6 +249,11 @@ class RdbSerializer : public SerializerBase {
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                                 uint32_t mc_flags, DbIndex dbid);
 
+  // Write a single global_id entry for search-indexed keys.
+  // Format: RDB_OPCODE_GLOBAL_ID + index_name (string) + global_id (8 bytes).
+  // Call this before SaveEntry for each index that contains the key.
+  std::error_code SaveGlobalId(std::string_view index_name, uint64_t global_id);
+
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
   // this by finding the key. This function is used

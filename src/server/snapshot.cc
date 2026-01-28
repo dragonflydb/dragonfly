@@ -13,8 +13,10 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -332,6 +334,20 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
     SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
+    // Save global_ids for search-indexed HASH/JSON objects before the entry
+#ifdef WITH_SEARCH
+    if (pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON) {
+      if (auto* search_indices = db_slice_->shard_owner()->search_indices(); search_indices) {
+        string key_str;
+        string_view key = pk.GetSlice(&key_str);
+        DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_indx, GetCurrentTimeMs()};
+        search_indices->ForEachGlobalDocId(key, db_cntx, pv,
+                                           [this](string_view idx_name, uint64_t gid) {
+                                             CHECK(!serializer_->SaveGlobalId(idx_name, gid));
+                                           });
+      }
+    }
+#endif
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
