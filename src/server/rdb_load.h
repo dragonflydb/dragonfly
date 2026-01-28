@@ -367,11 +367,9 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
-  base::SpinLock now_streamed_mu_;
-
   // Map of currently streamed big values
-  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_
-      ABSL_GUARDED_BY(now_streamed_mu_);
+  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
+  base::SpinLock now_streamed_mu_;  // guards now_streamed_
 };
 
 }  // namespace dfly
