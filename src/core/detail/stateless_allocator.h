@@ -11,7 +11,7 @@ namespace dfly {
 
 namespace detail {
 inline thread_local PMR_NS::memory_resource* tl_mr = nullptr;
-}
+}  // namespace detail
 
 template <typename T, typename Impl> class StatelessAllocatorBase {
  public:
@@ -65,6 +65,10 @@ bool operator!=(const StatelessAllocator<T>&, const StatelessAllocator<U>&) noex
 
 inline void InitTLStatelessAllocMR(PMR_NS::memory_resource* mr) {
   detail::tl_mr = mr;
+}
+
+inline void CleanupStatelessAllocMR() {
+  detail::tl_mr = nullptr;
 }
 
 }  // namespace dfly
