@@ -292,22 +292,23 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       }
       size_t size = getListCount((linklistsizeint*)data);
       tableint* datal = (tableint*)(data + 1);
-#ifdef USE_SSE
-      _mm_prefetch((char*)(visited_array + *(data + 1)), _MM_HINT_T0);
-      _mm_prefetch((char*)(visited_array + *(data + 1) + 64), _MM_HINT_T0);
-      _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
-      _mm_prefetch(getDataByInternalId(*(datal + 1)), _MM_HINT_T0);
-#endif
+
+      __builtin_prefetch((char*)(visited_array + *(data + 1)), 0, 3);
+      __builtin_prefetch((char*)(visited_array + *(data + 1) + 64), 0, 3);
+      __builtin_prefetch(getDataByInternalId(*datal), 0, 3);
 
       for (size_t j = 0; j < size; j++) {
         tableint candidate_id = *(datal + j);
-//                    if (candidate_id == 0) continue;
-#ifdef USE_SSE
-        if (j + 1 < size) {
-          _mm_prefetch((char*)(visited_array + *(datal + j + 1)), _MM_HINT_T0);
-          _mm_prefetch(getDataByInternalId(*(datal + j + 1)), _MM_HINT_T0);
+        //                    if (candidate_id == 0) continue;
+
+        // Request prefetching of max 32 next vectors
+        if (!(j % 32)) {
+          size_t builtin_prefetch_limit = std::min(size - j, (size_t)32);
+          for (size_t k = 0; k + 1 < builtin_prefetch_limit; k++) {
+            __builtin_prefetch(getDataByInternalId(*(datal + j + k + 1)), 0, 3);
+          }
         }
-#endif
+
         if (visited_array[candidate_id] == visited_array_tag)
           continue;
         visited_array[candidate_id] = visited_array_tag;
@@ -316,9 +317,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         dist_t dist1 = fstdistfunc_(data_point, currObj1, dist_func_param_);
         if (top_candidates.size() < ef_construction_ || lowerBound > dist1) {
           candidateSet.emplace(-dist1, candidate_id);
-#ifdef USE_SSE
-          _mm_prefetch(getDataByInternalId(candidateSet.top().second), _MM_HINT_T0);
-#endif
+
+          __builtin_prefetch(getDataByInternalId(candidateSet.top().second), 0, 3);
 
           if (!isMarkedDeleted(candidate_id))
             top_candidates.emplace(dist1, candidate_id);
@@ -401,25 +401,23 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         metric_distance_computations += size;
       }
 
-#ifdef USE_SSE
-      _mm_prefetch((char*)(visited_array + *(data + 1)), _MM_HINT_T0);
-      _mm_prefetch((char*)(visited_array + *(data + 1) + 64), _MM_HINT_T0);
-      _mm_prefetch(data_level0_memory_ + (*(data + 1)) * size_data_per_element_ + offsetData_,
-                   _MM_HINT_T0);
-      _mm_prefetch((char*)(data + 2), _MM_HINT_T0);
-#endif
+      __builtin_prefetch((char*)(visited_array + *(data + 1)), 0, 3);
+      __builtin_prefetch((char*)(visited_array + *(data + 1) + 64), 0, 3);
+      __builtin_prefetch(getDataByInternalId(*(data + 1)), 0, 3);
+      __builtin_prefetch((char*)(data + 2), 0, 3);
 
       for (size_t j = 1; j <= size; j++) {
         int candidate_id = *(data + j);
-//                    if (candidate_id == 0) continue;
-#ifdef USE_SSE
-        if (j + 1 < size) {
-          _mm_prefetch((char*)(visited_array + *(data + j + 1)), _MM_HINT_T0);
-          _mm_prefetch(
-              data_level0_memory_ + (*(data + j + 1)) * size_data_per_element_ + offsetData_,
-              _MM_HINT_T0);  ////////////
+        //                    if (candidate_id == 0) continue;
+
+        // Request prefetching of max 32 next vectors
+        if (!(j % 32)) {
+          size_t builtin_prefetch_limit = std::min(size - j, (size_t)32);
+          for (size_t k = 0; k + 1 < builtin_prefetch_limit; k++) {
+            __builtin_prefetch(getDataByInternalId(*(data + j + k + 1)), 0, 3);
+          }
         }
-#endif
+
         if (!(visited_array[candidate_id] == visited_array_tag)) {
           visited_array[candidate_id] = visited_array_tag;
 
@@ -435,11 +433,11 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
           if (flag_consider_candidate) {
             candidate_set.emplace(-dist, candidate_id);
-#ifdef USE_SSE
-            _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
-                             offsetLevel0_,  ///////////
-                         _MM_HINT_T0);       ////////////////////////
-#endif
+
+            __builtin_prefetch(data_level0_memory_ +
+                                   candidate_set.top().second * size_data_per_element_ +
+                                   offsetLevel0_,  ///////////
+                               0, 3);              ////////////////////////
 
             if (bare_bone_search ||
                 (!isMarkedDeleted(candidate_id) &&
@@ -1152,13 +1150,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           data = get_linklist_at_level(currObj, level);
           int size = getListCount(data);
           tableint* datal = (tableint*)(data + 1);
-#ifdef USE_SSE
-          _mm_prefetch(getDataByInternalId(*datal), _MM_HINT_T0);
-#endif
+
+          __builtin_prefetch(getDataByInternalId(*datal), 0, 3);
+
           for (int i = 0; i < size; i++) {
-#ifdef USE_SSE
-            _mm_prefetch(getDataByInternalId(*(datal + i + 1)), _MM_HINT_T0);
-#endif
+            if (i + 1 < size) {
+              __builtin_prefetch(getDataByInternalId(*(datal + i + 1)), 1, 3);
+            }
+
             tableint cand = datal[i];
             dist_t d = fstdistfunc_(dataPoint, getDataByInternalId(cand), dist_func_param_);
             if (d < curdist) {
