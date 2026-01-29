@@ -27,11 +27,11 @@ class InternedBlobHandle {
 
   [[nodiscard]] static InternedBlobHandle Create(std::string_view sv);
 
-  [[nodiscard]] uint32_t Size() const;
+  uint32_t Size() const;
 
-  [[nodiscard]] uint32_t RefCount() const;
+  uint32_t RefCount() const;
 
-  [[nodiscard]] const char* Data() const {
+  const char* Data() const {
     return blob_;
   }
 
@@ -49,7 +49,7 @@ class InternedBlobHandle {
   void DecrRefCount();
 
   // Returns bytes used, including string, header and trailing byte
-  [[nodiscard]] size_t MemUsed() const;
+  size_t MemUsed() const;
 
   // Convenience method to deallocate storage. Not for use in destructor.
   static void Destroy(InternedBlobHandle& handle);

@@ -23,14 +23,6 @@ InternedString& InternedString::operator=(InternedString&& other) noexcept {
   return *this;
 }
 
-int InternedString::compare(const InternedString& other) const {
-  return std::string_view{*this}.compare(other);
-}
-
-int InternedString::compare(std::string_view other) const {
-  return std::string_view{*this}.compare(other);
-}
-
 void InternedString::ResetPool() {
   InternedBlobPool& pool = GetPoolRef();
   for (InternedBlobHandle handle : pool) {

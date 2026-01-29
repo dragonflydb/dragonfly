@@ -52,11 +52,11 @@ class InternedString {
     return entry_;
   }
 
-  [[nodiscard]] const char* data() const {
+  const char* data() const {
     return entry_ ? entry_.Data() : "";
   }
 
-  [[nodiscard]] const char* c_str() const {
+  const char* c_str() const {
     return data();
   }
 
@@ -64,16 +64,21 @@ class InternedString {
     std::swap(entry_, other.entry_);
   }
 
-  [[nodiscard]] size_t length() const {
+  size_t length() const {
     return size();
   }
 
-  [[nodiscard]] size_t size() const {
+  size_t size() const {
     return entry_.Size();
   }
 
-  [[nodiscard]] int compare(const InternedString& other) const;
-  [[nodiscard]] int compare(std::string_view) const;
+  int compare(const InternedString& other) const {
+    return std::string_view{*this}.compare(other);
+  }
+
+  int compare(std::string_view other) const {
+    return std::string_view{*this}.compare(other);
+  }
 
   // lex. comparison
   auto operator<=>(const InternedString& other) const {
@@ -90,7 +95,7 @@ class InternedString {
   static void ResetPool();
   static InternedBlobPool& GetPoolRef();
 
-  [[nodiscard]] size_t MemUsed() const {
+  size_t MemUsed() const {
     return entry_.MemUsed();
   }
 
