@@ -785,32 +785,33 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
 
 error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
                                         absl::Span<uint8_t> tmp_buf) {
-  // Binary format using little-endian encoding for efficiency:
-  // - internal_id: 4 bytes (uint32_t)
-  // - global_id: 8 bytes (uint64_t)
-  // - level: 4 bytes (int)
-  // - for each level (0 to level): links_num (4 bytes) + links (4 bytes each)
+  // Binary format:
+  // - key: variable length string (RDB string format with length prefix)
+  // - internal_id: 4 bytes (int32_t, little-endian)
+  // - level: 4 bytes (int, little-endian)
+  // - for each level (0 to level): links_num (4 bytes) + links (4 bytes each, little-endian)
 
-  size_t total_size = node.TotalSize();
-  DCHECK_LE(total_size, tmp_buf.size());
+  RETURN_ON_ERR(SaveString(node.key));
+
   uint8_t* ptr = tmp_buf.data();
 
   absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.internal_id));
   ptr += 4;
-  absl::little_endian::Store64(ptr, node.global_id);
-  ptr += 8;
   absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.level));
   ptr += 4;
 
   for (const auto& level_links : node.levels_links) {
     absl::little_endian::Store32(ptr, static_cast<uint32_t>(level_links.size()));
     ptr += 4;
+
     for (uint32_t link : level_links) {
       absl::little_endian::Store32(ptr, link);
       ptr += 4;
     }
   }
 
+  size_t total_size = ptr - tmp_buf.data();
+  DCHECK_LE(total_size, tmp_buf.size());
   return WriteRaw(Bytes{tmp_buf.data(), total_size});
 }
 

@@ -149,8 +149,8 @@ struct HnswlibAdapter {
 
     for (size_t internal_id = start; internal_id < end; ++internal_id) {
       HnswNodeData node_data;
-      node_data.internal_id = internal_id;
-      node_data.global_id = world_.getExternalLabel(internal_id);
+      node_data.key = std::to_string(world_.getExternalLabel(internal_id));
+      node_data.internal_id = static_cast<int32_t>(internal_id);
       node_data.level = world_.element_levels_[internal_id];
 
       node_data.levels_links.resize(node_data.level + 1);

@@ -175,7 +175,7 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
 
   for (const auto& [index_key, index] : all_indices) {
     // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
-    //          then for each node: binary encoded entry via SaveHNSWEntry]
+    //          then for each node: key, internal_id, level, links per level]
     if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec)
       continue;
     if (auto ec = serializer_->SaveString(index_key); ec)

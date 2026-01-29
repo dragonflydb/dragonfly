@@ -2215,9 +2215,10 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_VECTOR_INDEX) {
       // Stub: read and ignore HNSW vector index data
       // Binary format: [index_name, elements_number,
-      //   then for each node (little-endian):
-      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
-      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
+      //   then for each node:
+      //     key (variable length string), internal_id (4 bytes), level (4 bytes),
+      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each, all
+      //     little-endian)]
       string index_key;
       SET_OR_RETURN(FetchGenericString(), index_key);
 
@@ -2225,10 +2226,10 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
       for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        [[maybe_unused]] uint32_t internal_id;
-        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
-        [[maybe_unused]] uint64_t global_id;
-        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
+        [[maybe_unused]] string key;
+        SET_OR_RETURN(FetchGenericString(), key);
+        [[maybe_unused]] int32_t internal_id;
+        SET_OR_RETURN(FetchInt<int32_t>(), internal_id);
         uint32_t level;
         SET_OR_RETURN(FetchInt<uint32_t>(), level);
 
