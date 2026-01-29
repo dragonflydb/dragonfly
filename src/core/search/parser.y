@@ -25,6 +25,7 @@
 
 // Added to cc file
 %code {
+#include <absl/strings/ascii.h>
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
 
@@ -61,10 +62,6 @@ double toDouble(string_view src);
   KNN         "KNN"
   AS          "AS"
   EF_RUNTIME  "EF_RUNTIME"
-  GEOUNIT_M   "GEOUNIT_M"
-  GEOUNIT_KM  "GEOUNIT_KM"
-  GEOUNIT_MI  "GEOUNIT_MI"
-  GEOUNIT_FT  "GEOUNIT_FT"
 ;
 
 %token AND_OP
@@ -209,10 +206,16 @@ bracket_filter_expr:
   | DOUBLE DOUBLE DOUBLE geounit               { $$ = AstGeoNode(toDouble($1), toDouble($2), toDouble($3), std::move($4)); }
 
 geounit:
-  GEOUNIT_M     { $$ = "M"; }
-  | GEOUNIT_KM  { $$ = "KM"; }
-  | GEOUNIT_MI  { $$ = "MI"; }
-  | GEOUNIT_FT  { $$ = "FT"; }
+  TERM
+  {
+    std::string unit = $1;
+    absl::AsciiStrToUpper(&unit);
+    if ((unit == "M") || (unit == "KM") || (unit == "MI") || (unit == "FT")) {
+        $$ = unit;
+    } else {
+        YYABORT;
+    }
+  }
 
 field_cond_expr:
   field_unary_expr { $$ = std::move($1); }
