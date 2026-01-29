@@ -2566,6 +2566,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       auto& db_slice = op_args.GetDbSlice();
       key = *wake_key;
       auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+      DCHECK(it);
       if (it && tracker)
         tracker->UpdateStreamSize(it->it->second);
 
