@@ -284,8 +284,7 @@ class Connection : public util::Connection {
   // `has_more` should indicate whether the io buffer has more commands
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
-  // Returns true if an asynchronous dispatch occurred and the caller might want to yield.
-  bool DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
+  void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
                       absl::FunctionRef<void()> enqueue_cmd_cb);
 
   // Handles events from the dispatch queue.
