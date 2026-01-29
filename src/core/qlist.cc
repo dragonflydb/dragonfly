@@ -925,7 +925,8 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
             OffloadNode(fw);
           }
 
-          if (rev->offloaded == 0) {
+          // Avoid offloading the same node twice when fw and rev meet in the middle.
+          if (rev != fw && rev->offloaded == 0) {
             OffloadNode(rev);
           }
         }
