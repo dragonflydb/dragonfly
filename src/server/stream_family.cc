@@ -777,7 +777,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   // It's write because we add a NACK. Relevant to XReadGroup only
-  const bool is_write_command = opts.group && !opts.noack;
+  const bool is_write_command = opts.group;
   auto& db_slice = op_args.GetDbSlice();
   DbSlice::ItAndUpdater it;
   const CompactObj* cobj;
@@ -835,7 +835,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     result.push_back(std::move(rec));
 
     // Only relevant for XREADGROUP flow. Should not trigger on XREAD which is READ only.
-    if (is_write_command) {
+    if (is_write_command && !opts.noack) {
       /* TODO memory tracking here */
       unsigned char buf[sizeof(streamID)];
       StreamEncodeID(buf, &id);
@@ -2629,7 +2629,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
       if (read_group) {
         size_t index = 0;
         for (auto key : tx->GetShardArgs(sid)) {
-          JournalXReadGroupIfNeeded(op_args, *opts, xread_resp[sid][index], key);
+          JournalXReadGroupIfNeeded(op_args, *opts, xread_resp[sid][index++], key);
         }
       }
       return OpStatus::OK;

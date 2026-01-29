@@ -802,10 +802,10 @@ async def test_rewrites(df_factory):
         # XREADGROUP without NOACK should journal XCLAIM + XGROUP SETID
         await c_master.execute_command("XREADGROUP GROUP mygroup consumer1 STREAMS mystream >")
         # Expect XCLAIM for the message + XGROUP SETID with ENTRIESREAD
-        await is_match_rsp(
+        assert await is_match_rsp(
             r"XCLAIM mystream mygroup consumer1 0 (.*?) TIME \d+ RETRYCOUNT 1 FORCE JUSTID LASTID (.*?)"
         )
-        await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 1")
+        assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 1")
 
         # Check XREADGROUP with NOACK only journals XGROUP SETID
         await c_master.execute_command("XADD mystream * field2 value2")
@@ -814,7 +814,7 @@ async def test_rewrites(df_factory):
             "XREADGROUP GROUP mygroup consumer1 NOACK STREAMS mystream >"
         )
         # With NOACK, only XGROUP SETID should be journaled (no XCLAIM)
-        await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 2")
+        assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 2")
 
 
 """
