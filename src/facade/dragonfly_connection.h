@@ -286,7 +286,7 @@ class Connection : public util::Connection {
   // has_more is true, otherwise uses synchronous dispatch.
   // Returns true if an asynchronous dispatch occurred and the caller might want to yield.
   bool DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
-                      absl::FunctionRef<void()> cmd_msg_cb);
+                      absl::FunctionRef<void()> enqueue_cmd_cb);
 
   // Handles events from the dispatch queue.
   void AsyncFiber();
