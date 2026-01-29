@@ -4,7 +4,6 @@
 
 #include "server/stream_family.h"
 
-#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {
@@ -777,21 +776,30 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 }
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
+  // It's write because we add a NACK. Relevant to XReadGroup only
+  const bool is_write_command = opts.group && !opts.noack;
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  DbSlice::ItAndUpdater it;
+  const CompactObj* cobj;
+  if (is_write_command) {
+    auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+    if (!res)
+      return res.status();
+    it = std::move(*res);
+    cobj = &it.it->second;
+  } else {
+    auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
+    if (!res)
+      return res.status();
+    cobj = &(*res)->second;
+  }
 
   RecordVec result;
-
-  if (opts.count == 0)
-    return result;
 
   streamIterator si;
   int64_t numfields;
   streamID id;
-  const CompactObj& cobj = (*res_it)->second;
-  stream* s = (stream*)cobj.RObjPtr();
+  stream* s = (stream*)cobj->RObjPtr();
   streamID sstart = opts.start.val, send = opts.end.val;
 
   streamIteratorStart(&si, s, &sstart, &send, opts.is_rev);
@@ -826,7 +834,8 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
     result.push_back(std::move(rec));
 
-    if (opts.group && !opts.noack) {
+    // Only relevant for XREADGROUP flow. Should not trigger on XREAD which is READ only.
+    if (is_write_command) {
       /* TODO memory tracking here */
       unsigned char buf[sizeof(streamID)];
       StreamEncodeID(buf, &id);
@@ -942,11 +951,13 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
   unsigned index = 0;
   for (string_view key : shard_args) {
     const auto& sitem = opts.stream_ids.at(key);
+    auto& dest = response[index++];
+
+    // We skip, group can be empty after waking up from a blocked read
     if (!sitem.group && opts.read_group) {
       continue;
     }
 
-    auto& dest = response[index++];
     range_opts.start = sitem.id;
     range_opts.group = sitem.group;
     range_opts.consumer = sitem.consumer;
@@ -1281,7 +1292,6 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
 }
 
 // Try to get the consumer. If not found, create a new one.
-// consumer_created is set to true only if the consumer is created.
 streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_ms) {
   // Try to get the consumer. If not found, create a new one.
   auto cname = WrapSds(name);
@@ -2535,6 +2545,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       range_opts.noack = opts->noack;
 
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
+      key = *wake_key;
       if (result) {
         JournalXReadGroupIfNeeded(t->GetOpArgs(shard), *opts, *result, *wake_key);
       }
@@ -2587,6 +2598,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
         if (read_group) {
           size_t index = 0;
           for (auto key : tx->GetShardArgs(es->shard_id())) {
+            // We can batch here to improve journal writes -- I leave it unoptized for now
             JournalXReadGroupIfNeeded(op_args, *opts, fastread_prefetched[index++], key);
           }
         }
@@ -2612,7 +2624,14 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
     xread_resp.resize(shard_set->size());
     auto read_cb = [&](Transaction* t, EngineShard* shard) {
       ShardId sid = shard->shard_id();
-      xread_resp[sid] = OpRead(t->GetOpArgs(shard), t->GetShardArgs(sid), *opts);
+      auto op_args = tx->GetOpArgs(shard);
+      xread_resp[sid] = OpRead(op_args, t->GetShardArgs(sid), *opts);
+      if (read_group) {
+        size_t index = 0;
+        for (auto key : tx->GetShardArgs(sid)) {
+          JournalXReadGroupIfNeeded(op_args, *opts, xread_resp[sid][index], key);
+        }
+      }
       return OpStatus::OK;
     };
     tx->Execute(std::move(read_cb), true);
@@ -3294,19 +3313,35 @@ void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
 // and we are on the fast path.
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
                                               ReadOpts* opts) {
+  const bool is_write_command = opts->read_group;
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
-  if (!res_it) {
+
+  DbSlice::ItAndUpdater it;
+  const CompactObj* cobj;
+
+  auto error = [&](auto res_it) -> variant<bool, facade::ErrorReply> {
     if (res_it.status() == OpStatus::WRONG_TYPE)
       return facade::ErrorReply{res_it.status()};
     else if (res_it.status() == OpStatus::KEY_NOTFOUND && opts->read_group)
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
     return false;
+  };
+
+  if (is_write_command) {
+    auto res = db_slice.FindMutable(op_args.db_cntx, skey, OBJ_STREAM);
+    if (!res)
+      return error(std::move(res));
+    it = std::move(*res);
+    cobj = &it.it->second;
+  } else {
+    auto res = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
+    if (!res)
+      return error(res);
+    cobj = &(*res)->second;
   }
 
-  const CompactObj& cobj = (*res_it)->second;
-  stream* s = GetReadOnlyStream(cobj);
+  stream* s = GetReadOnlyStream(*cobj);
 
   // Fetch last id
   streamID last_id = s->last_id;
@@ -3319,7 +3354,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   // Look up group consumer if needed
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
-  if (opts->read_group) {
+  if (is_write_command) {
     group = streamLookupCG(s, WrapSds(opts->group_name));
     if (!group)
       return facade::ErrorReply{
