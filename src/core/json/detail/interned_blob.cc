@@ -66,10 +66,6 @@ void InternedBlobHandle::DecrRefCount() {  // NOLINT - non-const, mutates via pt
   std::memcpy(blob_ - kUint32Size, &updated_count, kUint32Size);
 }
 
-void InternedBlobHandle::SetRefCount(uint32_t ref_count) {  // NOLINT - non-const, mutates via ptr
-  std::memcpy(blob_ - kUint32Size, &ref_count, kUint32Size);
-}
-
 size_t InternedBlobHandle::MemUsed() const {
   return blob_ ? Size() + kHeaderSize + 1 : 0;
 }

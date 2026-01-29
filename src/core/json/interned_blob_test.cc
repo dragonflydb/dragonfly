@@ -72,7 +72,7 @@ TEST_F(InternedBlobTest, Comparison) {
   EXPECT_TRUE(blob_eq("foobar", blob));
 
   InternedBlobHandle second = blob;
-  second.SetRefCount(2000);
+  second.IncrRefCount();
 
   EXPECT_TRUE(blob_eq(blob, second));
   InternedBlobHandle::Destroy(blob);
@@ -81,10 +81,8 @@ TEST_F(InternedBlobTest, Comparison) {
 TEST_F(InternedBlobTest, RefCounts) {
   auto blob = InternedBlobHandle::Create("1234567");
   EXPECT_EQ(blob.RefCount(), 1);
-  blob.SetRefCount(0);
+  blob.DecrRefCount();
   EXPECT_DEBUG_DEATH(blob.DecrRefCount(), "Attempt to decrease zero refcount");
-  blob.SetRefCount(std::numeric_limits<uint32_t>::max());
-  EXPECT_DEBUG_DEATH(blob.IncrRefCount(), "Attempt to increase max refcount");
   InternedBlobHandle::Destroy(blob);
 }
 

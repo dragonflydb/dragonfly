@@ -48,8 +48,6 @@ class InternedBlobHandle {
   // Decrement ref count, asserts if count falls below 0
   void DecrRefCount();
 
-  void SetRefCount(uint32_t ref_count);
-
   // Returns bytes used, including string, header and trailing byte
   [[nodiscard]] size_t MemUsed() const;
 
