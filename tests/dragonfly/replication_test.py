@@ -796,7 +796,7 @@ async def test_rewrites(df_factory):
 
         # Check XREADGROUP turns into XGROUP SETID + XCLAIM (for non-NOACK)
         await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
-        await skip_cmds(2)
+        await skip_cmd()
         await c_master.execute_command("XADD mystream * field1 value1")
         await skip_cmd()
         # XREADGROUP without NOACK should journal XCLAIM + XGROUP SETID

@@ -2022,7 +2022,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   while (parser->HasNext()) {
     if (parser->Check("ENTRIESREAD") && parser->HasAtLeast(1)) {
       entries_read = parser->Next<int64>();
-      if (*entries_read == 0) {
+      if (*entries_read <= 0) {
         return cmd_cntx->SendError(kSyntaxErr);
       }
     } else {
