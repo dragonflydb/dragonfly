@@ -54,6 +54,7 @@ void CheckBlob(InternedBlobHandle& blob, std::string_view expected, uint32_t ref
 TEST_F(InternedBlobTest, Ctors) {
   auto blob = InternedBlobHandle::Create("");
   EXPECT_EQ(blob.Size(), 0);
+  EXPECT_FALSE(blob);
   InternedBlobHandle::Destroy(blob);
 
   InternedBlobHandle src = InternedBlobHandle::Create("foobar");

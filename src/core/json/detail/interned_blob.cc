@@ -15,6 +15,10 @@ constexpr size_t kHeaderSize = sizeof(uint32_t) * 2;
 namespace dfly::detail {
 
 InternedBlobHandle InternedBlobHandle::Create(std::string_view sv) {
+  if (sv.empty()) {
+    return InternedBlobHandle{nullptr};
+  }
+
   constexpr uint32_t ref_count = 1;
   DCHECK_LE(sv.size(), std::numeric_limits<uint32_t>::max());
 
@@ -34,7 +38,8 @@ InternedBlobHandle InternedBlobHandle::Create(std::string_view sv) {
 }
 
 uint32_t InternedBlobHandle::Size() const {
-  DCHECK(blob_) << "Called Size() on empty blob";
+  if (!blob_)
+    return 0;
   uint32_t size;
   std::memcpy(&size, blob_ - kHeaderSize, kUint32Size);
   return size;
@@ -78,8 +83,7 @@ void InternedBlobHandle::Destroy(InternedBlobHandle& handle) {
 }
 
 InternedBlobHandle::operator std::string_view() const {
-  DCHECK(blob_) << "Attempt to convert empty blob to string_view";
-  return {blob_, Size()};
+  return blob_ ? std::string_view{blob_, Size()} : "";
 }
 
 }  // namespace dfly::detail
