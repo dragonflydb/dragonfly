@@ -2885,7 +2885,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context) {
+                              string_view error_context, bool ignore_exists_error = false) {
   facade::CapturingReplyBuilder crb;
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
@@ -2936,6 +2936,12 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
+    // Ignore "Index already exists" errors when loading from per-shard DFS files
+    // since multiple shards may try to create the same index
+    if (ignore_exists_error && absl::StrContains(err->first, "already exists")) {
+      VLOG(1) << "Ignoring duplicate " << error_context << ": " << err->first;
+      return;
+    }
     LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
   }
 }
@@ -2954,7 +2960,7 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
   if (!def.empty() && def[0] == '{') {
-    // New JSON format with HNSW metadata
+    // New JSON format with HNSW metadata (from summary file)
     try {
       auto json_opt = JsonFromString(def);
       if (!json_opt) {
@@ -2969,13 +2975,17 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
       // Currently we just restore the index definition, HNSW graph will be rebuilt
 
       string full_cmd = absl::StrCat(index_name, " ", cmd);
-      LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+      // Ignore "already exists" errors since index may have been created by another shard file
+      LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition",
+                               /*ignore_exists_error=*/true);
     } catch (const std::exception& e) {
       LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
     }
   } else {
-    // Old format: "index_name cmd" - for backwards compatibility
-    LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+    // Simple format: "index_name cmd" - from per-shard DFS files or old format
+    // Ignore "already exists" errors since multiple shards may try to create the same index
+    LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition",
+                             /*ignore_exists_error=*/true);
   }
 }
 
