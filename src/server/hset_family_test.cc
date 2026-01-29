@@ -751,4 +751,15 @@ TEST_F(HSetFamilyTest, HRandFieldRespFormat) {
   }
 }
 
+// Make sure no "Zombie Key": HEXPIRE with TTL 0 must delete the key
+// if the hash becomes empty. If the key remains (zombie), saving the RDB will crash
+// and EXISTS
+TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
+  Run({"HSET", "zombie", "f", "v"});
+  auto resp = Run({"HEXPIRE", "zombie", "0", "FIELDS", "1", "f"});
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "zombie"}));
+  EXPECT_EQ(Run({"SAVE", "RDB", "zombie_test.rdb"}), "OK");
+}
+
 }  // namespace dfly
