@@ -262,8 +262,10 @@ TEST_F(SearchParserTest, Parse) {
 
   // Geo units
   EXPECT_EQ(0, Parse("@t:{km}"));
+  EXPECT_EQ(0, Parse("@t:{Km|M}"));
   EXPECT_EQ(0, Parse("@t:{ft|mi}"));
   EXPECT_EQ(0, Parse("@location:[0.0 0.0 1 m]"));
+  EXPECT_EQ(0, Parse("@location:[0.0 0.0 1 Km]"));
   EXPECT_EQ(1, Parse("@location:[0.0 0.0 1 yd]"));
 }
 

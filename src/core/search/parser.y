@@ -25,6 +25,7 @@
 
 // Added to cc file
 %code {
+#include <absl/strings/ascii.h>
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
 
@@ -208,12 +209,12 @@ geounit:
   TERM
   {
     std::string unit = $1;
-    std::transform(unit.begin(), unit.end(), unit.begin(), ::toupper);
-    if(unit == "M") $$ = "M";
-    else if(unit == "KM") $$ = "KM";
-    else if(unit == "MI") $$ = "MI";
-    else if(unit == "FT") $$ = "FT";
-    else YYABORT;
+    absl::AsciiStrToUpper(&unit);
+    if ((unit == "M") || (unit == "KM") || (unit == "MI") || (unit == "FT")) {
+        $$ = unit;
+    } else {
+        YYABORT;
+    }
   }
 
 field_cond_expr:
