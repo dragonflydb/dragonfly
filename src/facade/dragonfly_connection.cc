@@ -629,6 +629,8 @@ void Connection::OnPreMigrateThread() {
 
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
+
+  DecreaseConnStats();
 }
 
 void Connection::OnPostMigrateThread() {
@@ -656,8 +658,7 @@ void Connection::OnPostMigrateThread() {
   }
 
   stats_ = &tl_facade_stats->conn_stats;
-  IncrNumConns();
-  stats_->read_buf_capacity += io_buf_.Capacity();
+  IncreaseConnStats();
 }
 
 void Connection::OnConnectionStart() {
@@ -998,9 +999,8 @@ io::Result<bool> Connection::CheckForHttpProto() {
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
 
-  IncrNumConns();
+  IncreaseConnStats();
   ++stats_->conn_received_cnt;
-  stats_->read_buf_capacity += io_buf_.Capacity();
 
   ++local_stats_.read_cnt;
   local_stats_.net_bytes_in += io_buf_.InputLen();
@@ -1057,7 +1057,7 @@ void Connection::ConnectionFlow() {
   DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
-  DecreaseStatsOnClose();
+  DecreaseConnStats();
 
   if (ioloop_v2_) {
     socket_->ResetOnRecvHook();
@@ -1293,8 +1293,6 @@ void Connection::HandleMigrateRequest() {
 
     stats_->num_migrations++;
     migration_request_ = nullptr;
-
-    DecreaseStatsOnClose();
 
     // We need to return early as the socket is closing and IoLoop will clean up.
     // The reason that this is true is because of the following DCHECK
@@ -2041,9 +2039,20 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
   };
 }
 
-void Connection::DecreaseStatsOnClose() {
+void Connection::IncreaseConnStats() {
+  if (IsMainOrMemcache())
+    ++stats_->num_conns_main;
+  else
+    ++stats_->num_conns_other;
+  stats_->read_buf_capacity += io_buf_.Capacity();
+}
+
+void Connection::DecreaseConnStats() {
+  if (IsMainOrMemcache())
+    --stats_->num_conns_main;
+  else
+    --stats_->num_conns_other;
   stats_->read_buf_capacity -= io_buf_.Capacity();
-  DecrNumConns();
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -2053,20 +2062,6 @@ void Connection::BreakOnce(uint32_t ev_mask) {
     DCHECK(!breaker_cb_);
     fun(ev_mask);
   }
-}
-
-void Connection::IncrNumConns() {
-  if (IsMainOrMemcache())
-    ++stats_->num_conns_main;
-  else
-    ++stats_->num_conns_other;
-}
-
-void Connection::DecrNumConns() {
-  if (IsMainOrMemcache())
-    --stats_->num_conns_main;
-  else
-    --stats_->num_conns_other;
 }
 
 bool Connection::IsReplySizeOverLimit() const {
