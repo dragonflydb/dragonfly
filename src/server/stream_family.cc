@@ -350,9 +350,9 @@ void StreamNextID(uint64_t now_ms, const streamID* last_id, streamID* new_id) {
 
 /* Convert the specified stream entry ID as a 128 bit big endian number, so
  * that the IDs can be sorted lexicographically. */
-inline void StreamEncodeID(uint8_t* buf, streamID* id) {
-  absl::big_endian::Store64(buf, id->ms);
-  absl::big_endian::Store64(buf + 8, id->seq);
+inline void StreamEncodeID(uint8_t* buf, const streamID& id) {
+  absl::big_endian::Store64(buf, id.ms);
+  absl::big_endian::Store64(buf + 8, id.seq);
 }
 
 /* Adds a new item into the stream 's' having the specified number of
@@ -428,19 +428,20 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   size_t lp_bytes = 0;      /* Total bytes in the tail listpack. */
   unsigned char* lp = NULL; /* Tail listpack pointer. */
 
-  if (!raxEOF(&ri)) {
-    /* Get a reference to the tail node listpack. */
-    lp = (uint8_t*)ri.data;
-    lp_bytes = lpBytes(lp);
-    CHECK_GT(lp_bytes, 0U);
-  }
-  raxStop(&ri);
-
   /* We have to add the key into the radix tree in lexicographic order,
    * to do so we consider the ID as a single 128 bit number written in
    * big endian, so that the most significant bytes are the first ones. */
   uint8_t rax_key[16]; /* Key in the radix tree containing the listpack.*/
   streamID master_id;  /* ID of the master entry in the listpack. */
+
+  if (!raxEOF(&ri)) {
+    /* Get a reference to the tail node listpack. */
+    lp = (uint8_t*)ri.data;
+    lp_bytes = lpBytes(lp);
+    CHECK_GT(lp_bytes, 0U);
+    DCHECK(ri.key_len == sizeof(rax_key));
+    memcpy(rax_key, ri.key, sizeof(rax_key));
+  }
 
   /* Create a new listpack and radix tree node if needed. Note that when
    * a new listpack is created, we populate it with a "master entry". This
@@ -496,6 +497,9 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     if (new_node) {
       /* Shrink extra pre-allocated memory */
       lp = lpShrinkToFit(lp);
+      if (ri.key_len != sizeof(rax_key) || memcmp(ri.key, rax_key, sizeof(rax_key)) != 0) {
+        LOG(DFATAL) << "StreamAppendItem: Key mismatch";
+      }
       if (ri.data != lp)
         raxInsert(s->rax_tree, ri.key, ri.key_len, lp, NULL);
       lp = NULL;
@@ -504,9 +508,10 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
 
   int flags = 0;
   unsigned numfields = fields.size() / 2;
+  uint8_t* old_lp = lp;
   if (lp == NULL) {
     master_id = id;
-    StreamEncodeID(rax_key, &id);
+    StreamEncodeID(rax_key, id);
     /* Create the listpack having the master entry ID and fields.
      * Pre-allocate some bytes when creating listpack to avoid realloc on
      * every XADD. Since listpack.c uses malloc_size, it'll grow in steps,
@@ -526,14 +531,14 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
     }
     lp = lpAppendInteger(lp, 0); /* Master entry zero terminator. */
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
-    // TODO remove this check
-    CHECK_GT(lpBytes(lp), 0U);
+    old_lp = lp;
     /* The first entry we insert, has obviously the same fields of the
      * master entry. */
     flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
-  } else {
-    serverAssert(ri.key_len == sizeof(rax_key));
-    memcpy(rax_key, ri.key, sizeof(rax_key));
+  } else {  // lp != NULL
+    if (ri.key_len != sizeof(rax_key) || memcmp(ri.key, rax_key, sizeof(rax_key)) != 0) {
+      LOG(DFATAL) << "StreamAppendItem: Key mismatch";
+    }
 
     /* Read the master ID from the radix tree key. */
     streamDecodeID(rax_key, &master_id);
@@ -612,14 +617,19 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   lp = lpAppendInteger(lp, lp_count);
 
   /* Insert back into the tree in order to update the listpack pointer. */
-  if (ri.data != lp) {
+  if (old_lp != lp) {
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
-    // TODO remove this
-    CHECK_GT(lpBytes(lp), 0U);
   }
   s->length++;
   s->entries_added++;
   s->last_id = id;
+
+  // Must find the last entry as we just inserted it.
+  CHECK_EQ(1, raxSeek(&ri, "$", NULL, 0));
+  lp_bytes = lpBytes((uint8_t*)ri.data);
+  CHECK_GT(lp_bytes, 0U);
+  raxStop(&ri);
+
   if (s->length == 1)
     s->first_id = id;
   if (added_id)
@@ -823,7 +833,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
     if (opts.group && !opts.noack) {
       unsigned char buf[sizeof(streamID)];
-      StreamEncodeID(buf, &id);
+      StreamEncodeID(buf, id);
       uint64_t now_ms = op_args.db_cntx.time_now_ms;
 
       /* Try to add a new NACK. Most of the time this will work and
@@ -877,8 +887,8 @@ OpResult<RecordVec> OpRangeFromConsumerPEL(const OpArgs& op_args, string_view ke
   auto sstart = opts.start.val;
   auto send = opts.end.val;
 
-  StreamEncodeID(start_key, &sstart);
-  StreamEncodeID(end_key, &send);
+  StreamEncodeID(start_key, sstart);
+  StreamEncodeID(end_key, send);
   raxIterator ri;
 
   raxStart(&ri, opts.consumer->pel);
@@ -1357,7 +1367,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 
   for (streamID id : ids) {
     std::array<uint8_t, sizeof(streamID)> buf;
-    StreamEncodeID(buf.begin(), &id);
+    StreamEncodeID(buf.begin(), id);
 
     streamNACK* nack = (streamNACK*)raxFind(cgr_res->cg->pel, buf.begin(), sizeof(buf));
     if (!streamEntryExists(cgr_res->s, &id)) {
@@ -1547,6 +1557,17 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
   }
 
   stream_inst->last_id = sid;
+  raxIterator ri;
+  raxStart(&ri, stream_inst->rax_tree);
+  raxSeek(&ri, "$", NULL, 0);
+
+  if (!raxEOF(&ri)) {
+    /* Get a reference to the tail node listpack. */
+    size_t lp_bytes = lpBytes((uint8_t*)ri.data);
+    CHECK_GT(lp_bytes, 0U);
+  }
+  raxStop(&ri);
+
   if (entries_added != -1)
     stream_inst->entries_added = entries_added;
   if (!streamIDEqZero(&max_xdel_id))
@@ -1618,7 +1639,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
   StreamMemTracker mem_tracker;
   for (auto& id : ids) {
     unsigned char buf[sizeof(streamID)];
-    streamEncodeID(buf, &id);
+    StreamEncodeID(buf, id);
 
     // From Redis' xackCommand's implemenation
     // Lookup the ID in the group PEL: it will have a reference to the
@@ -1657,7 +1678,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
 
   unsigned char start_key[sizeof(streamID)];
   streamID start_id = opts.start;
-  streamEncodeID(start_key, &start_id);
+  StreamEncodeID(start_key, start_id);
   raxIterator ri;
   raxStart(&ri, group->pel);
   raxSeek(&ri, ">=", start_key, sizeof(start_key));
@@ -1805,8 +1826,8 @@ PendingExtendedResultList GetPendingExtendedResult(uint64_t now_ms, streamCG* cg
   unsigned char end_key[sizeof(streamID)];
   raxIterator ri;
 
-  StreamEncodeID(start_key, &sstart);
-  StreamEncodeID(end_key, &send);
+  StreamEncodeID(start_key, sstart);
+  StreamEncodeID(end_key, send);
   raxStart(&ri, pel);
   raxSeek(&ri, ">=", start_key, sizeof(start_key));
 
