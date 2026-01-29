@@ -917,7 +917,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
       uint32_t traverse_node_id = 0;
 
       // Traverse from both ends towards the middle as we expect more offloads towards the ends
-      // due to usuall access patterns of adding items via lpush/rpush.
+      // due to usual access patterns of adding items via lpush/rpush.
       while (traverse_node_id <= len_ / 2 &&
              (num_offloaded_nodes_ + 2 * tiering_params_->node_depth_threshold) < len_) {
         if (traverse_node_id >= tiering_params_->node_depth_threshold) {
