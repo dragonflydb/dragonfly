@@ -806,6 +806,9 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
   RecordVec result;
 
+  if (opts.count == 0)
+    return result;
+
   streamIterator si;
   int64_t numfields;
   streamID id;
@@ -1525,7 +1528,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
 }
 
 OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, string_view id,
-                 std::optional<size_t> entries_read) {
+                 std::optional<int64_t> entries_read) {
   auto cgr_res = FindGroup(op_args, key, gname);
   RETURN_ON_BAD_STATUS(cgr_res);
 
@@ -2014,11 +2017,11 @@ void DelConsumer(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
 
 void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   auto [key, gname, id] = parser->Next<string_view, string_view, string_view>();
-  std::optional<size_t> entries_read;
+  std::optional<int64_t> entries_read;
 
   while (parser->HasNext()) {
     if (parser->Check("ENTRIESREAD") && parser->HasAtLeast(1)) {
-      entries_read = parser->Next<size_t>();
+      entries_read = parser->Next<int64>();
       if (*entries_read == 0) {
         return cmd_cntx->SendError(kSyntaxErr);
       }
@@ -2441,26 +2444,18 @@ void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const Recor
       if (!records.empty()) {
         const auto& sitem = opts.stream_ids.at(key);
         auto id = absl::StrCat(records.back().id.ms, "-", records.back().id.seq);
-        CmdArgVec journal_args = {"SETID", key,           opts.group_name,
-                                  id,      "ENTRIESREAD", absl::StrCat(sitem.group->entries_read)};
+        auto entries_read = absl::StrCat(sitem.group->entries_read);
+        CmdArgVec journal_args = {"SETID", key, opts.group_name, id, "ENTRIESREAD", entries_read};
         RecordJournal(op_args, "XGROUP"sv, journal_args);
       }
     };
     for (auto& record : records) {
       if (!opts.noack) {
         auto id = absl::StrCat(record.id.ms, "-", record.id.seq);
-        CmdArgVec journal_args = {key,
-                                  opts.group_name,
-                                  opts.consumer_name,
-                                  "0",
-                                  id,
-                                  "TIME",
-                                  absl::StrCat(record.delivery_time),
-                                  "RETRYCOUNT",
-                                  "1",
-                                  "FORCE",
-                                  "JUSTID",
-                                  "LASTID",
+        auto deliv_time = absl::StrCat(record.delivery_time);
+        CmdArgVec journal_args = {key, opts.group_name, opts.consumer_name, "0",
+                                  id,  "TIME",          deliv_time,         "RETRYCOUNT",
+                                  "1", "FORCE",         "JUSTID",           "LASTID",
                                   id};
 
         RecordJournal(op_args, "XCLAIM"sv, journal_args);
@@ -2620,7 +2615,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
         if (read_group) {
           size_t index = 0;
           for (auto key : tx->GetShardArgs(es->shard_id())) {
-            // We can batch here to improve journal writes -- I leave it unoptized for now
+            // We can batch here to improve journal writes -- I leave it unoptimized for now
             JournalXReadGroupIfNeeded(op_args, *opts, fastread_prefetched[index++], key);
           }
         }
@@ -3330,9 +3325,8 @@ void CmdXRevRange(CmdArgList args, CommandContext* cmd_cntx) {
   XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx);
 }
 
-// If consumer field of ReadOpts is set, this is a WRITE, we create the consumer.
-// We don't however need JOURNAL it yet. Only in case, there is a data available
-// and we are on the fast path.
+// If opts.read_group is true then this is a WRITE command. We don't however journal the consumer
+// creation, only the side effects later on from the scheduled callbacks.
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
                                               ReadOpts* opts) {
   const bool is_write_command = opts->read_group;
