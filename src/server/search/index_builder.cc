@@ -6,14 +6,18 @@
 namespace dfly::search {
 
 void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complete) {
-  fiber_ = util::fb2::Fiber{[this, &op_args, on_complete = std::move(on_complete)] {
-    auto prime_table = op_args.GetDbSlice().CopyDBTablePtr(op_args.db_cntx.db_index);
+  using namespace util::fb2;
+  auto table = op_args.GetDbSlice().CopyDBTablePtr(op_args.db_cntx.db_index);
+  DCHECK(table.get());
 
-    MainLoopFb(prime_table.get(), op_args.db_cntx);
+  auto cb = [this, table, db_cntx = op_args.db_cntx, on_complete = std::move(on_complete)] {
+    MainLoopFb(table.get(), db_cntx);
 
     fiber_.Detach();  // Detach self to be safely deletable
     on_complete();
-  }};
+  };
+
+  fiber_ = Fiber{std::move(cb)};
 }
 
 void IndexBuilder::MainLoopFb(dfly::DbTable* table, DbContext db_cntx) {
