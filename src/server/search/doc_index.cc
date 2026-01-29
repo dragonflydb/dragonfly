@@ -18,6 +18,7 @@
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/search/index_builder.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -270,22 +271,22 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
     : base_{std::move(index)}, key_index_{} {
 }
 
+ShardDocIndex::~ShardDocIndex() {
+}
+
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
-  auto cb = [this](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
-    auto doc = GetAccessor(db_cntx, pv);
-    DocId id = key_index_.Add(key);
-    if (!indices_->Add(id, *doc)) {
-      key_index_.Remove(id);
-    }
-  };
+  // Create builder and start serialization
+  builder_ = std::make_unique<search::IndexBuilder>(this);
+  builder_->Start(op_args, [this] { builder_.reset(); });
 
-  TraverseAllMatching(*base_, op_args, cb);
+  // This PR is limited to using the builder synchronously
+  while (builder_)
+    util::ThisFiber::SleepFor(100us);
 
   indices_->FinalizeInitialization();
-
   VLOG(1) << "Indexed " << key_index_.Size()
           << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
 }
@@ -356,6 +357,10 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::AddDoc(string_view key, const
 
   // Only index documents from database 0
   if (db_cntx.db_index != 0)
+    return std::nullopt;
+
+  // Don't add document again if it exists. TODO: Try add?
+  if (key_index_.Find(key))
     return std::nullopt;
 
   auto accessor = GetAccessor(db_cntx, pv);

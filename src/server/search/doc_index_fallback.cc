@@ -36,5 +36,8 @@ search::DefragmentResult ShardDocIndices::Defragment(PageUsage*) {
   return search::DefragmentResult{};
 }
 
+ShardDocIndex::~ShardDocIndex() {
+}
+
 }  // namespace dfly
 #endif
