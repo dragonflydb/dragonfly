@@ -33,7 +33,8 @@ struct AsyncContextInterface {
   virtual ~AsyncContextInterface() = default;
   using PrepareResult = std::variant<facade::ErrorReply, JustReplySentinel, BlockResult>;
 
-  // Prepare command. Must end with error or scheduled operation
+  // Prepare command. Must return either an error, JustReplySentinel (immediate reply),
+  // or BlockResult (scheduled operation)
   virtual PrepareResult Prepare(ArgSlice args, CommandContext* cntx) = 0;
 
   // Reply after scheduled operation was performed
@@ -89,7 +90,7 @@ struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
   // Don't run transaction, just Reply()
   JustReplySentinel JustReply() {
     return JustReplySentinel{};
-  };
+  }
 
   CommandContext* cmd_cntx;
 };

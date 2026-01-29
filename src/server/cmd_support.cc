@@ -33,7 +33,7 @@ void AsyncContextInterface::RunAsync(std::unique_ptr<AsyncContextInterface> asyn
     DCHECK(blocker);
     cmd_cntx->Resolve(blocker, std::move(replier));
   } else {
-    // TOOD: use nullptr blocker or captures once ReplyWith was removed
+    // TODO: use nullptr blocker or captures once ReplyWith was removed
     cmd_cntx->ReplyWith(std::move(replier));
   }
 }
