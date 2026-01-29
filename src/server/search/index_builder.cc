@@ -1,3 +1,7 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "server/search/index_builder.h"
 
 #include "server/db_slice.h"

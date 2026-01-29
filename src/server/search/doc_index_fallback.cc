@@ -6,6 +6,7 @@
 #include "core/page_usage/page_usage_stats.h"
 #include "core/search/base.h"
 #include "server/search/doc_index.h"
+#include "server/search/index_builder.h"
 
 namespace dfly {
 
