@@ -16,7 +16,8 @@ void AsyncContextInterface::RunSync(AsyncContextInterface* async_cntx, ArgSlice 
   auto result = async_cntx->Prepare(args, cmd_cntx);
   RETURN_ON_ERR(result);
 
-  DCHECK(std::get<BlockResult>(result) == nullptr);  // Nothing to await
+  DCHECK(std::holds_alternative<JustReplySentinel>(result) ||
+         std::get<BlockResult>(result) == nullptr);  // Nothing to await
   async_cntx->Reply(cmd_cntx->rb());
 }
 
@@ -25,11 +26,17 @@ void AsyncContextInterface::RunAsync(std::unique_ptr<AsyncContextInterface> asyn
   auto result = async_cntx->Prepare(args, cmd_cntx);
   RETURN_ON_ERR(result);
 
-  auto* blocker = std::get<BlockResult>(result);
-  DCHECK(blocker);
-
   auto replier = [me = std::move(async_cntx)](facade::SinkReplyBuilder* rb) { me->Reply(rb); };
-  cmd_cntx->Resolve(blocker, std::move(replier));
+
+  if (std::holds_alternative<BlockResult>(result)) {
+    auto* blocker = std::get<BlockResult>(result);
+    DCHECK(blocker);
+    cmd_cntx->Resolve(blocker, std::move(replier));
+  } else {
+    DCHECK(std::holds_alternative<JustReplySentinel>(result));
+    // TODO: use nullptr blocker or captures once ReplyWith was removed
+    cmd_cntx->ReplyWith(std::move(replier));
+  }
 }
 
 BlockResult HopCoordinator::SingleHop(CommandContext* cmd_cntx, Transaction::RunnableType cb) {

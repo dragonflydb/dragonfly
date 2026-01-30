@@ -17,6 +17,9 @@ namespace dfly::cmd {
 // Pointer to blocker to wait for before replying
 using BlockResult = util::fb2::EmbeddedBlockingCounter*;
 
+// No execution was performed, the command is ready to reply
+struct JustReplySentinel {};
+
 // Handler for dispatching hops, must be part of a context
 struct HopCoordinator {
   // Perform single hop. Callback must be kept alive until end!
@@ -28,9 +31,10 @@ struct HopCoordinator {
 // Base interface for async context
 struct AsyncContextInterface {
   virtual ~AsyncContextInterface() = default;
-  using PrepareResult = std::variant<facade::ErrorReply, BlockResult>;
+  using PrepareResult = std::variant<facade::ErrorReply, JustReplySentinel, BlockResult>;
 
-  // Prepare command. Must end with error or scheduled operation
+  // Prepare command. Must return either an error, JustReplySentinel (immediate reply),
+  // or BlockResult (scheduled operation)
   virtual PrepareResult Prepare(ArgSlice args, CommandContext* cntx) = 0;
 
   // Reply after scheduled operation was performed
@@ -81,6 +85,11 @@ struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
   // Run single hop. Restricted to member operator call to ensure lifetime safety
   BlockResult SingleHop() {
     return HopCoordinator::SingleHop(cmd_cntx, *this);
+  }
+
+  // Don't run transaction, just Reply()
+  JustReplySentinel JustReply() {
+    return JustReplySentinel{};
   }
 
   CommandContext* cmd_cntx;
