@@ -5,21 +5,8 @@
 
 namespace dfly::detail {
 
-InternedString& InternedString::operator=(const InternedString& other) {
-  if (this != &other) {
-    Release();
-    entry_ = other.entry_;
-    Acquire();
-  }
-  return *this;
-}
-
-InternedString& InternedString::operator=(InternedString&& other) noexcept {
-  if (this != &other) {
-    Release();
-    entry_ = other.entry_;
-    other.entry_ = {};
-  }
+InternedString& InternedString::operator=(InternedString other) {
+  swap(other);
   return *this;
 }
 

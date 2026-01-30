@@ -41,8 +41,7 @@ class InternedString {
     other.entry_ = {};
   }
 
-  InternedString& operator=(const InternedString& other);
-  InternedString& operator=(InternedString&& other) noexcept;
+  InternedString& operator=(InternedString other);
 
   ~InternedString() {
     Release();
