@@ -1411,6 +1411,7 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   }
   int_arg = std::max<int64_t>(int_arg, -1);
 
+  // to be more compatible with redis, we silently cap the expire time to kMaxExpireDeadlineSec
   if (int_arg > kMaxExpireDeadlineMs) {
     int_arg = kMaxExpireDeadlineMs;
   }

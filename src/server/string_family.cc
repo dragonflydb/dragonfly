@@ -1058,8 +1058,6 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
         return ttl_ms < 0 ? NegativeExpire{} : facade::ErrorReply{InvalidExpireTime("set")};
       }
 
-      DbSlice::ExpireParams expiry{.ms_timestamp = abs_ms,
-                                   .expire_options = expire_options.value()};
       sparams.expire_after_ms = ttl_ms;
 
     } else if (parser.Check("_MCFLAGS")) {
@@ -1172,8 +1170,6 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   if (abs_ms < 0) {
     return cmd_cntx->SendError(InvalidExpireTime("set"));
   }
-
-  DbSlice::ExpireParams expiry{.ms_timestamp = abs_ms};
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
@@ -1325,11 +1321,10 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
       }
 
       if (!is_absolute) {
-        exp_params.ms_timestamp += GetCurrentTimeMs();  // relative → absolute
+        exp_params.ms_timestamp += GetCurrentTimeMs();
       }
 
       defined = true;
-
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
     } else {
@@ -1357,7 +1352,7 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
-        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
+        int64_t abs_time = exp_params.ms_timestamp;
         auto abs_time_str = absl::StrCat(abs_time);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
