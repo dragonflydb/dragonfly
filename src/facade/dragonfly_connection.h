@@ -325,7 +325,8 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
-  void DecreaseStatsOnClose();
+  void IncreaseConnStats();
+  void DecreaseConnStats();
   void BreakOnce(uint32_t ev_mask);
 
   // The read buffer with read data that needs to be parsed and processed.
@@ -340,9 +341,6 @@ class Connection : public util::Connection {
       slice.remove_prefix(len);
     }
   };
-
-  void IncrNumConns();
-  void DecrNumConns();
 
   bool IsReplySizeOverLimit() const;
 
