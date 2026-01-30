@@ -4,6 +4,7 @@
 #include "core/json/detail/interned_blob.h"
 
 #include <glog/logging.h>
+#include <mimalloc.h>
 
 #include "core/detail/stateless_allocator.h"
 
@@ -67,7 +68,7 @@ void InternedBlobHandle::DecrRefCount() {  // NOLINT - non-const, mutates via pt
 }
 
 size_t InternedBlobHandle::MemUsed() const {
-  return blob_ ? Size() + kHeaderSize + 1 : 0;
+  return blob_ ? mi_usable_size(blob_ - kHeaderSize) : 0;
 }
 
 void InternedBlobHandle::Destroy(InternedBlobHandle& handle) {
