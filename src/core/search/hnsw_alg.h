@@ -621,33 +621,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           data[sz_link_list_other] = cur_c;
           setListCount(ll_other, sz_link_list_other + 1);
         } else {
-          // finding the "weakest" element to replace it with the new one
-          dist_t d_max =
-              fstdistfunc_(getDataByInternalId(cur_c), getDataByInternalId(selectedNeighbors[idx]),
-                           dist_func_param_);
-          // Heuristic:
-          std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>,
-                              CompareByFirst>
-              candidates;
-          candidates.emplace(d_max, cur_c);
-
-          for (size_t j = 0; j < sz_link_list_other; j++) {
-            candidates.emplace(
-                fstdistfunc_(getDataByInternalId(data[j]),
-                             getDataByInternalId(selectedNeighbors[idx]), dist_func_param_),
-                data[j]);
-          }
-
-          getNeighborsByHeuristic2(candidates, Mcurmax);
-
-          int indx = 0;
-          while (candidates.size() > 0) {
-            data[indx] = candidates.top().second;
-            candidates.pop();
-            indx++;
-          }
-
-          setListCount(ll_other, indx);
+          size_t random_link = rand() % Mcurmax;
+          data[random_link] = cur_c;
           // Nearest K:
           /*int indx = -1;
           for (int j = 0; j < sz_link_list_other; j++) {
