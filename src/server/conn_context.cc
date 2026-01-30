@@ -40,7 +40,7 @@ StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyM
   args_ = facade::ParsedArgs{*backed_};
 }
 
-CmdArgList StoredCmd::ArgList(CmdArgVec* scratch) const {
+CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
   return args_.ToSlice(scratch);
 }
 

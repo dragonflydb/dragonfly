@@ -683,7 +683,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
       // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
         CmdArgVec arg_vec{};
-        auto args = scmd.ArgList(&arg_vec);
+        auto args = scmd.Slice(&arg_vec);
         auto keys = DetermineKeys(scmd.Cid(), args);
         transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
@@ -1491,16 +1491,23 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         return DispatchResult::WOULD_BLOCK;
       [[fallthrough]];
     case AsyncPreference::PREFER_ASYNC:
-      if (cid->SupportsAsync())
-        parsed_cmd->SetDeferredReply();
+      if (!cid->SupportsAsync())
+        break;
+
+      parsed_cmd->SetDeferredReply();
       break;
   };
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
 
-  CmdArgVec tmp_vec;
-  ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
+  ArgSlice tail_args;
+  if (cmd_cntx->IsDeferredReply()) {
+    args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
+    tail_args = cmd_cntx->arg_slice_backing;
+  } else {
+    tail_args = args_no_cmd.ToSlice(&cmd_cntx->arg_slice_backing);
+  }
 
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
@@ -2408,7 +2415,7 @@ template <typename F> void IterateAllKeys(const ConnectionState::ExecInfo* exec_
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    auto args = scmd.ArgList(&arg_vec);
+    auto args = scmd.Slice(&arg_vec);
     auto key_res = DetermineKeys(scmd.Cid(), args);
     if (!key_res.ok())
       continue;
@@ -2514,7 +2521,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
       DCHECK_EQ(cmd_cntx->cid(), exec_cid_);
 
       for (const auto& scmd : exec_info.body) {
-        CmdArgList args = scmd.ArgList(&arg_vec);
+        CmdArgList args = scmd.Slice(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
           cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
