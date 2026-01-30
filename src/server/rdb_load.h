@@ -275,7 +275,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Performs post load procedures while still remaining in global LOADING state.
   // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
-  static void PerformPostLoad(Service* service);
+  static void PerformPostLoad(Service* service, bool is_error = false);
 
   uint32_t shard_id() const {
     return shard_id_;

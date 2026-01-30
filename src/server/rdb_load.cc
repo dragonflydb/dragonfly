@@ -3012,7 +3012,7 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
   pending_synonym_cmds_.push_back(std::move(def));
 }
 
-void RdbLoader::PerformPostLoad(Service* service) {
+void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
     return;
@@ -3023,6 +3023,10 @@ void RdbLoader::PerformPostLoad(Service* service) {
     created_search_indices_.clear();
   }
 
+  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  if (is_error)
+    return;
+
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     es->search_indices()->RebuildAllIndices(
@@ -3030,7 +3034,6 @@ void RdbLoader::PerformPostLoad(Service* service) {
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
-  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

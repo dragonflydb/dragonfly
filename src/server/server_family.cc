@@ -1389,6 +1389,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     }
 
     if (aggregated_result->first_error) {
+      RdbLoader::PerformPostLoad(&service_, true);
       LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
     } else {
       RdbLoader::PerformPostLoad(&service_);
