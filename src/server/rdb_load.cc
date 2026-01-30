@@ -2885,7 +2885,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context, bool ignore_exists_error = false) {
+                              string_view error_context) {
   facade::CapturingReplyBuilder crb;
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
@@ -2936,12 +2936,6 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    // Ignore "Index already exists" errors when loading from per-shard DFS files
-    // since multiple shards may try to create the same index
-    if (ignore_exists_error && absl::StrContains(err->first, "already exists")) {
-      VLOG(1) << "Ignoring duplicate " << error_context << ": " << err->first;
-      return;
-    }
     LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
   }
 }
@@ -2958,6 +2952,9 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  string index_name;
+  string full_cmd;
+
   // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
   if (!def.empty() && def[0] == '{') {
     // New JSON format with HNSW metadata (from summary file)
@@ -2968,25 +2965,39 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
         return;
       }
       const auto& json = *json_opt;
-      string index_name = json["name"].as<string>();
+      index_name = json["name"].as<string>();
       string cmd = json["cmd"].as<string>();
 
       // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
       // Currently we just restore the index definition, HNSW graph will be rebuilt
 
-      string full_cmd = absl::StrCat(index_name, " ", cmd);
-      // Ignore "already exists" errors since index may have been created by another shard file
-      LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition",
-                               /*ignore_exists_error=*/true);
+      full_cmd = absl::StrCat(index_name, " ", cmd);
     } catch (const std::exception& e) {
       LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
+      return;
     }
   } else {
     // Simple format: "index_name cmd" - from per-shard DFS files or old format
-    // Ignore "already exists" errors since multiple shards may try to create the same index
-    LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition",
-                             /*ignore_exists_error=*/true);
+    // Extract index name (first token before space)
+    size_t space_pos = def.find(' ');
+    if (space_pos == string::npos) {
+      LOG(ERROR) << "Invalid search index definition: " << def;
+      return;
+    }
+    index_name = def.substr(0, space_pos);
+    full_cmd = std::move(def);
   }
+
+  // Check if index already exists (may have been created by another shard file)
+  bool exists = shard_set->Await(
+      0, [&] { return EngineShard::tlocal()->search_indices()->GetIndex(index_name) != nullptr; });
+
+  if (exists) {
+    VLOG(1) << "Index already exists, skipping: " << index_name;
+    return;
+  }
+
+  LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
