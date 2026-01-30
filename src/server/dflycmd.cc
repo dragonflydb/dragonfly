@@ -699,9 +699,11 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   error_code ec;
   RdbSaver* saver = flow->saver.get();
   if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
-    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service()));
+    // Full sync summary - include all global data
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service(), true));
   } else {
-    ec = saver->SaveHeader({});
+    // Per-shard - include only search index restore commands
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service(), false));
   }
   if (ec) {
     exec_st->ReportError(ec);
