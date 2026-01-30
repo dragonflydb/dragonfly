@@ -160,26 +160,33 @@ class OAHSet {  // Open Addressing Hash Set
     assert(new_size < entries_.size());
 
     size_t prev_size = entries_.size();
-    uint32_t prev_capacity_log = capacity_log_;
     capacity_log_ = absl::bit_width(new_size) - 1;
 
     // Process from low to high (opposite of Grow/Rehash).
     for (size_t i = 0; i < prev_size; ++i) {
-      ShrinkBucket(i, prev_capacity_log);
+      ShrinkBucket(i);
     }
 
     entries_.resize(new_size);
+    entries_.shrink_to_fit();
   }
 
   // it is inefficient for now,
-  // TODO predict new position by current poisition and extended hash
-  void ShrinkBucket(uint32_t bucket_id, uint32_t prev_capacity_log) {
+  // TODO predict new position by current position and extended hash
+  void ShrinkBucket(uint32_t bucket_id) {
     auto bucket = std::move(entries_[bucket_id]);
     if (bucket.Empty())
       return;
 
     for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
       if (bucket[pos]) {
+        // Check for TTL expiration during shrink - skip expired elements
+        if (bucket[pos].HasExpiry() && bucket[pos].GetExpiry() <= time_now_) {
+          obj_alloc_used_ -= bucket[pos].AllocSize();
+          --size_;
+          continue;
+        }
+
         auto hash = Hash(bucket[pos].Key());
         auto new_bucket_id = BucketId(hash, capacity_log_);
         bucket[pos].SetHash(hash, capacity_log_, kShiftLog);
