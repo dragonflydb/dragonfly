@@ -78,8 +78,4 @@ void InternedBlobHandle::Destroy(InternedBlobHandle& handle) {
   }
 }
 
-InternedBlobHandle::operator std::string_view() const {
-  return blob_ ? std::string_view{blob_, Size()} : "";
-}
-
 }  // namespace dfly::detail
