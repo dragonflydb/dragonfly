@@ -1332,6 +1332,7 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
+
   int64_t abs_ms = int_arg * 1000;
   if (abs_ms > kMaxExpireDeadlineMs)
     abs_ms = kMaxExpireDeadlineMs;
@@ -1410,7 +1411,6 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   }
   int_arg = std::max<int64_t>(int_arg, -1);
 
-  // to be more compatible with redis, we silently cap the expire time to kMaxExpireDeadlineSec
   if (int_arg > kMaxExpireDeadlineMs) {
     int_arg = kMaxExpireDeadlineMs;
   }
