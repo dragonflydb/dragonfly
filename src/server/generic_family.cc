@@ -1308,7 +1308,7 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{.value = int_arg, .expire_options = expire_options.value()};
+  DbSlice::ExpireParams params{.expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1332,8 +1332,12 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{
-      .value = int_arg, .absolute = true, .expire_options = expire_options.value()};
+
+  int64_t abs_ms = int_arg * 1000;
+  if (abs_ms > kMaxExpireDeadlineMs)
+    abs_ms = kMaxExpireDeadlineMs;
+
+  DbSlice::ExpireParams params{.ms_timestamp = abs_ms, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1383,10 +1387,7 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{.value = int_arg,
-                               .unit = TimeUnit::MSEC,
-                               .absolute = true,
-                               .expire_options = expire_options.value()};
+  DbSlice::ExpireParams params{.ms_timestamp = int_arg, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1419,8 +1420,14 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{
-      .value = int_arg, .unit = TimeUnit::MSEC, .expire_options = expire_options.value()};
+
+  int64_t ttl_ms = int_arg;
+  if (ttl_ms > kMaxExpireDeadlineMs)
+    ttl_ms = kMaxExpireDeadlineMs;
+
+  int64_t now_ms = GetCurrentTimeMs();
+  DbSlice::ExpireParams params{.ms_timestamp = now_ms + ttl_ms,
+                               .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);

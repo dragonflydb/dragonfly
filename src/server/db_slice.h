@@ -204,27 +204,17 @@ class DbSlice {
       std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
 
   struct ExpireParams {
+    int64_t ms_timestamp = 0;
+    bool persist = false;
+    int32_t expire_options = 0;
+
     bool IsDefined() const {
-      return persist || value > INT64_MIN;
+      return ms_timestamp != 0;
     }
 
-    static int64_t Cap(int64_t value, TimeUnit unit);
-
-    // Calculate relative and absolue timepoints.
-    std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
-
-    // Return true if relative expiration is in the past
     bool IsExpired(uint64_t now_msec) const {
-      return Calculate(now_msec, false).first < 0;
+      return ms_timestamp > 0 && ms_timestamp <= now_msec;
     }
-
-   public:
-    int64_t value = INT64_MIN;  // undefined
-    TimeUnit unit = TimeUnit::SEC;
-
-    bool absolute = false;
-    bool persist = false;        // persist means remove all expiry
-    int32_t expire_options = 0;  // ExpireFlags
   };
 
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
