@@ -4,6 +4,7 @@
 
 #include "server/stream_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {
@@ -707,6 +708,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   auto& it = add_res.it;
 
   StreamMemTracker mem_tracker;
+  absl::Cleanup on_exit([it, &mem_tracker]() mutable { mem_tracker.UpdateStreamSize(it->second); });
 
   if (add_res.is_new) {
     stream* s = streamNew();
@@ -735,8 +737,6 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     VLOG(2) << "Trimmed " << deleted_items_number << " items from stream " << key
             << " during the XADD command";
   }
-
-  mem_tracker.UpdateStreamSize(it->second);
 
   if (op_args.shard->journal()) {
     std::string result_id_as_string = StreamsIdToString(result_id);
@@ -2565,13 +2565,11 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
         }
       }
 
+      key = *wake_key;
+
       if (tracker) {
-        // We make one extra lookup for the tracker. StreamTracker is used mostly to track
-        // changes that also include the call to FindOrAddConsumer (so the tracking has
-        // larget scope). Worth looking on how to localize tracking from within FindOrAddConsumer.
         auto op_args = t->GetOpArgs(shard);
         auto& db_slice = op_args.GetDbSlice();
-        key = *wake_key;
         auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
         DCHECK(it);
         if (it) {
