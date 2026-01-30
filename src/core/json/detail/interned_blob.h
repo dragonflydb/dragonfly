@@ -1,4 +1,4 @@
-// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 
 #pragma once
@@ -23,13 +23,14 @@ using BlobPtr = char*;
 // blob. Multiple handles can point to the same blob.
 class InternedBlobHandle {
  public:
-  static InternedBlobHandle Create(std::string_view sv);
+  InternedBlobHandle() = default;
+
+  [[nodiscard]] static InternedBlobHandle Create(std::string_view sv);
 
   uint32_t Size() const;
 
   uint32_t RefCount() const;
 
-  // Returns nul terminated string
   const char* Data() const {
     return blob_;
   }
@@ -47,8 +48,6 @@ class InternedBlobHandle {
   // Decrement ref count, asserts if count falls below 0
   void DecrRefCount();
 
-  void SetRefCount(uint32_t ref_count);
-
   // Returns bytes used, including string, header and trailing byte
   size_t MemUsed() const;
 
@@ -56,6 +55,13 @@ class InternedBlobHandle {
   static void Destroy(InternedBlobHandle& handle);
 
   operator std::string_view() const;  // NOLINT (non-explicit operator for easier comparisons)
+
+  auto operator<=>(const InternedBlobHandle& other) const = default;
+  bool operator==(const InternedBlobHandle& other) const = default;
+
+  explicit operator bool() const {
+    return blob_;
+  }
 
  private:
   explicit InternedBlobHandle(BlobPtr blob) : blob_{blob} {
