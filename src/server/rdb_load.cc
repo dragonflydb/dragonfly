@@ -2944,6 +2944,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
+// Static synchronization for thread-safe search index creation
+base::SpinLock RdbLoader::search_index_mu_;
+absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
 
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
@@ -2988,13 +2991,16 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     full_cmd = std::move(def);
   }
 
-  // Check if index already exists (may have been created by another shard file)
-  bool exists = shard_set->Await(
-      0, [&] { return EngineShard::tlocal()->search_indices()->GetIndex(index_name) != nullptr; });
-
-  if (exists) {
-    VLOG(1) << "Index already exists, skipping: " << index_name;
-    return;
+  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
+  // We track which indices we've already attempted to create to avoid race conditions where
+  // multiple threads see the index doesn't exist and all try to create it.
+  {
+    std::lock_guard lk(search_index_mu_);
+    auto [it, inserted] = created_search_indices_.insert(index_name);
+    if (!inserted) {
+      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
+      return;
+    }
   }
 
   LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
@@ -3010,6 +3016,12 @@ void RdbLoader::PerformPostLoad(Service* service) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
     return;
+
+  // Clear the created indices tracking set for next load
+  {
+    std::lock_guard lk(search_index_mu_);
+    created_search_indices_.clear();
+  }
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {

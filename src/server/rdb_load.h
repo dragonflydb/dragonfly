@@ -9,6 +9,8 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <absl/container/flat_hash_set.h>
+
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
 #include "base/spinlock.h"
@@ -339,6 +341,8 @@ class RdbLoader : protected RdbLoaderBase {
 
   Service* service_;
   static std::vector<std::string> pending_synonym_cmds_;
+  static base::SpinLock search_index_mu_;  // guards created_search_indices_
+  static absl::flat_hash_set<std::string> created_search_indices_;
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
