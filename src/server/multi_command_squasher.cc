@@ -115,7 +115,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
     return SquashResult::NOT_SQUASHED;
   }
 
-  auto args = cmd->ArgList(&tmp_keylist_);
+  auto args = cmd->Slice(&tmp_keylist_);
   if (args.empty())
     return SquashResult::NOT_SQUASHED;
 
@@ -152,7 +152,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
 bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  auto args = cmd->ArgList(&tmp_keylist_);
+  auto args = cmd->Slice(&tmp_keylist_);
 
   if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(*cmd->Cid(), args, *cntx_); err) {
@@ -195,7 +195,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   };
 
   for (auto& dispatched : sinfo.dispatched) {
-    auto args = dispatched.cmd->ArgList(&arg_vec);
+    auto args = dispatched.cmd->Slice(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(*dispatched.cmd->Cid(), args, *cntx_); err) {

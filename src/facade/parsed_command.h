@@ -52,16 +52,8 @@ class ParsedCommand : public cmn::BackedArguments {
 
   ParsedCommand() = default;
 
-  template <typename T> struct ArgumentExtractor;
-
-  // limited to lambdas with one argument as this is what we need here
-  template <typename C, typename Arg> struct ArgumentExtractor<void (C::*)(Arg) const> {
-    using type = Arg;
-  };
-
-  // extracts the type of the first argument of a callable lambda F
-  template <typename F>
-  using first_arg_t = typename ArgumentExtractor<decltype(&std::decay_t<F>::operator())>::type;
+  // Helper function to get the only argument type
+  template <typename C, typename Arg> static Arg OnlyArgType(void (C::*)(Arg) const);
 
  public:
   using ReplyFunc = fu2::function_base<true, false, fu2::capacity_fixed<16, 8>, false, false,
@@ -139,14 +131,13 @@ class ParsedCommand : public cmn::BackedArguments {
 
   // TODO: remove
   template <typename F> void ReplyWith(F&& func) {
+    using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
     if (is_deferred_reply_) {
       reply_ = [func = std::forward<F>(func)](SinkReplyBuilder* builder) {
-        auto* rb = static_cast<first_arg_t<F>>(builder);
-        func(rb);
+        func(static_cast<RbType>(builder));
       };
     } else {
-      auto* rb = static_cast<first_arg_t<F>>(rb_);
-      func(rb);
+      func(static_cast<RbType>(rb_));
     }
   }
 
