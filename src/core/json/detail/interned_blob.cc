@@ -1,4 +1,4 @@
-// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 
 #include "core/json/detail/interned_blob.h"
