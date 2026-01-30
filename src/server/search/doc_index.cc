@@ -278,7 +278,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
-  // Create builder and start serialization
+  // Create builder and start indexing
   builder_ = std::make_unique<search::IndexBuilder>(this);
   builder_->Start(op_args, [this] { builder_.reset(); });
 

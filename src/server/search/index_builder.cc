@@ -25,13 +25,11 @@ void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complet
 }
 
 void IndexBuilder::MainLoopFb(dfly::DbTable* table, DbContext db_cntx) {
-  const auto doc_index = index_->GetInfo().base_index;
-
-  auto cb = [this, doc_index, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
+  auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
     std::string_view key = it->first.GetSlice(&scratch);
 
-    if (doc_index.Matches(key, pv.ObjType()))
+    if (index_->Matches(key, pv.ObjType()))
       index_->AddDoc(key, db_cntx, pv);
   };
 
