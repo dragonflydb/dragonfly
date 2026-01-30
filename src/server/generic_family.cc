@@ -1425,7 +1425,8 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
   if (ttl_ms > kMaxExpireDeadlineMs)
     ttl_ms = kMaxExpireDeadlineMs;
 
-  DbSlice::ExpireParams params{.ms_timestamp = cntx.time_now_ms + ttl_ms,
+  int64_t now_ms = GetCurrentTimeMs();
+  DbSlice::ExpireParams params{.ms_timestamp = now_ms + ttl_ms,
                                .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

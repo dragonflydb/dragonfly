@@ -1070,7 +1070,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   int64_t abs_msec = params.ms_timestamp;
-  if (abs_msec < cntx.time_now_ms || (abs_msec - cntx.time_now_ms) > kMaxExpireDeadlineMs) {
+  int64_t rel_msec = abs_msec - cntx.time_now_ms;
+  if (rel_msec <= 0 || rel_msec > kMaxExpireDeadlineMs) {
     return OpStatus::OUT_OF_RANGE;
   }
 
@@ -1091,6 +1092,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::SKIPPED;
 
   // If we update and the new value is already expired, delete the key
+
   if (rel_msec <= 0) {
     Del(cntx, prime_it);
     return -1;

@@ -1052,10 +1052,14 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
 
       int64_t now_ms = GetCurrentTimeMs();
       int64_t abs_ms = is_absolute ? ms_value : now_ms + ms_value;
-      int64_t ttl_ms = abs_ms - now_ms;
 
-      if (abs_ms < 0 || ttl_ms < 0) {
-        return ttl_ms < 0 ? NegativeExpire{} : facade::ErrorReply{InvalidExpireTime("set")};
+      if (abs_ms < 0) {
+        return facade::ErrorReply{InvalidExpireTime("set")};
+      }
+
+      int64_t ttl_ms = abs_ms - now_ms;
+      if (ttl_ms < 0) {
+        return NegativeExpire{};
       }
 
       sparams.expire_after_ms = ttl_ms;
