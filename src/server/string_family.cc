@@ -57,7 +57,7 @@ template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 using StringResult = TResultOrT<string>;
 
 StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
-  return pv.IsExternal() ? StringResult{es->tiered_storage()->Read(dbid, key, pv)}
+  return pv.IsExternal() ? StringResult{ReadTieredString(dbid, key, pv, es->tiered_storage())}
                          : StringResult{pv.ToString()};
 }
 
@@ -130,9 +130,10 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   // TODO(vlad): Optimize to return co.Size() if no modify operations are present
   // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
-    TieredStorage::TResult<size_t> fut;
-    auto cb = [fut](io::Result<string> s) mutable { fut.Resolve(s.transform(&string::size)); };
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
+    auto cb = [](string_view s) { return s.size(); };
+
+    TieredStorage::TResult<size_t> fut = ReadTiered<size_t>(
+        op_args.db_cntx.db_index, key, co, std::move(cb), op_args.shard->tiered_storage());
     return {std::move(fut)};
   } else {
     return {co.Size()};
@@ -153,11 +154,12 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
   auto& res = *op_res;
 
   if (res.it->second.IsExternal()) {
-    return {op_args.shard->tiered_storage()->Modify<size_t>(
+    return {ModifyTiered<size_t>(
         op_args.db_cntx.db_index, key, res.it->second,
         [start = start, range = string(range)](std::string* s) {
           return SetRangeInternal(s, start, range);
-        })};
+        },
+        op_args.shard->tiered_storage())};
   } else {
     string value;
 
@@ -172,7 +174,7 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
 
 OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_t start,
                                   int32_t end) {
-  auto read = [start, end](std::string_view slice) mutable -> string_view {
+  auto read_cb = [start, end](std::string_view slice) mutable -> string {
     int32_t strlen = slice.size();
     if (strlen == 0)
       return "";
@@ -196,7 +198,7 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
       return "";
     }
 
-    return slice.substr(start, end - start + 1);
+    return string{slice.substr(start, end - start + 1)};
   };
 
   auto& db_slice = op_args.GetDbSlice();
@@ -206,17 +208,18 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
   }
   RETURN_ON_BAD_STATUS(it_res);
 
-  if (const PrimeValue& co = it_res.value()->second; co.IsExternal()) {
-    fb2::Future<io::Result<std::string>> fut;
-    op_args.shard->tiered_storage()->Read(
+  const PrimeValue& co = it_res.value()->second;
+  if (co.IsExternal()) {
+    fb2::Future<io::Result<string>> fut = ReadTiered<string>(
         op_args.db_cntx.db_index, key, co,
-        [read, fut](const io::Result<std::string>& s) mutable { fut.Resolve(string{read(*s)}); });
+        [read_cb](std::string_view sv) mutable { return read_cb(sv); },
+        op_args.shard->tiered_storage());
     return {std::move(fut)};
-  } else {
-    string tmp;
-    string_view slice = co.GetSlice(&tmp);
-    return {string{read(slice)}};
   }
+
+  string tmp;
+  string_view slice = co.GetSlice(&tmp);
+  return {read_cb(slice)};
 };
 
 // TODO: Don't copy whole value just to append
@@ -574,14 +577,14 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, err, wait_bc](const io::Result<string>& v) mutable {
+      auto cb = [next, err, wait_bc](const io::Result<string_view>& v) mutable {
         if (v.has_value())
           memcpy(next, v->data(), v->size());
         else
           *err = v.error();
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
+      ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
     } else {
       value.GetString(next);
     }
@@ -631,8 +634,8 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
-                                                    std::move(modf))};
+    return {ModifyTiered<size_t>(op_args.db_cntx.db_index, key, pv, std::move(modf),
+                                 shard->tiered_storage())};
   } else {
     return {ExtendExisting(it_res->it, key, value, prepend)};
   }
@@ -741,7 +744,7 @@ void IncrByGeneric(string_view key, int64_t val, CommandContext* cmd_cntx) {
       cmd_cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      cmd_cntx->SendNotFound();
+      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderNotFound());
       break;
     default:
       cmd_cntx->SendError(result.status());
@@ -932,9 +935,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
-  // If we are beyond the offloading threshold, TryStash might return a backpressure future.
+  // If we are beyond the offloading threshold, StashPrimeValue might return a backpressure future.
   if (auto* ts = shard->tiered_storage(); ts) {
-    auto bp = ts->TryStash(op_args_.db_cntx.db_index, key, pv, true);
+    auto bp = StashPrimeValue(op_args_.db_cntx.db_index, key, true, pv, ts);
     if (bp && params.backpressure)
       *params.backpressure = std::move(*bp);
   }
@@ -1748,7 +1751,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
 
   registry->StartFamily(acl::STRING);
   *registry
-      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
+      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetHandler(CmdSet,
+                                                                                          true)
       << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)

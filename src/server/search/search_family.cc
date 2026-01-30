@@ -1266,8 +1266,8 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
     if (field_info.type == search::SchemaField::VECTOR &&
         !(field_info.flags & search::SchemaField::NOINDEX)) {
       const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-      if (vparams.use_hnsw &&
-          !GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name, vparams)) {
+      if (vparams.use_hnsw && !GlobalHnswIndexRegistry::Instance().Create(
+                                  idx_name, field_info.short_name, vparams, idx_ptr->type)) {
         cmd_cntx->tx()->Conclude();
         return builder->SendError("Index already exists");
       }

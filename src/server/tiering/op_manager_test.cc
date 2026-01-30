@@ -56,7 +56,7 @@ struct OpManagerTest : PoolTestBase, OpManager {
     OpManager::Close();
   }
 
-  util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {
+  util::fb2::Future<std::string> Read(PendingId id, DiskSegment segment) {
     util::fb2::Future<std::string> future;
     Enqueue(id, segment, TestDecoder{}, [future](io::Result<tiering::Decoder*> res) mutable {
       auto* decoder = static_cast<TestDecoder*>(*res);
@@ -65,14 +65,14 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return future;
   }
 
-  void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) override {
+  void NotifyStashed(const OwnedEntryId& id, const io::Result<DiskSegment>& segment) override {
     VLOG(1) << std::get<0>(id) << " stashed";
     ASSERT_TRUE(segment);
     auto [it, inserted] = stashed_.emplace(id, *segment);
     ASSERT_TRUE(inserted);
   }
 
-  bool NotifyFetched(EntryId id, DiskSegment segment, Decoder* decoder) override {
+  bool NotifyFetched(const OwnedEntryId& id, DiskSegment segment, Decoder* decoder) override {
     auto* tdecoder = static_cast<TestDecoder*>(decoder);
     fetched_[id] = std::move(tdecoder->value);
     return false;
@@ -82,15 +82,15 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return true;
   }
 
-  std::error_code Stash(EntryId id, std::string_view value) {
+  std::error_code Stash(PendingId id, std::string_view value) {
     return PrepareAndStash(id, value.size(), [=](io::MutableBytes bytes) {
       memcpy(bytes.data(), value.data(), value.size());
       return value.size();
     });
   }
 
-  absl::flat_hash_map<EntryId, std::string> fetched_;
-  absl::flat_hash_map<EntryId, DiskSegment> stashed_;
+  absl::flat_hash_map<OwnedEntryId, std::string> fetched_;
+  absl::flat_hash_map<OwnedEntryId, DiskSegment> stashed_;
 };
 
 TEST_F(OpManagerTest, SimpleStashesWithReads) {
@@ -176,7 +176,7 @@ TEST_F(OpManagerTest, Modify) {
   pp_->at(0)->Await([this] {
     Open();
 
-    Stash(0u, "D");
+    std::ignore = Stash(0u, "D");
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 

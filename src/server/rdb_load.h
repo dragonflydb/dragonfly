@@ -9,8 +9,11 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <absl/container/flat_hash_set.h>
+
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
+#include "base/spinlock.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
@@ -272,7 +275,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Performs post load procedures while still remaining in global LOADING state.
   // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
-  static void PerformPostLoad(Service* service);
+  static void PerformPostLoad(Service* service, bool is_error = false);
 
   uint32_t shard_id() const {
     return shard_id_;
@@ -338,6 +341,8 @@ class RdbLoader : protected RdbLoaderBase {
 
   Service* service_;
   static std::vector<std::string> pending_synonym_cmds_;
+  static base::SpinLock search_index_mu_;  // guards created_search_indices_
+  static absl::flat_hash_set<std::string> created_search_indices_;
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
@@ -368,6 +373,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Map of currently streamed big values
   std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
+  base::SpinLock now_streamed_mu_;  // guards now_streamed_
 };
 
 }  // namespace dfly

@@ -151,6 +151,26 @@ class OAHSet {  // Open Addressing Hash Set
     assert(Capacity() >= kDisplacementSize);
   }
 
+  // Shrinks the table to the specified size. The new_size must be a power of 2,
+  // >= kMinCapacity (which is 1 << kMinCapacityLog), and >= current number of elements.
+  // This method should be called explicitly when memory reclamation is needed.
+  void Shrink(size_t new_size) {
+    assert(absl::has_single_bit(new_size));
+    assert(new_size >= (1u << kMinCapacityLog));
+    assert(new_size < entries_.size());
+
+    size_t prev_size = entries_.size();
+    capacity_log_ = absl::bit_width(new_size) - 1;
+
+    // Process from low to high (opposite of Grow/Rehash).
+    for (size_t i = 0; i < prev_size; ++i) {
+      ShrinkBucket(i);
+    }
+
+    entries_.resize(new_size);
+    entries_.shrink_to_fit();
+  }
+
   void Clear() {
     capacity_log_ = 0;
     entries_.resize(0);
@@ -409,6 +429,35 @@ class OAHSet {  // Open Addressing Hash Set
       }
       if (bucket.IsVector())
         ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
+    }
+  }
+
+  // it is inefficient for now,
+  // TODO predict new position by current position and extended hash
+  void ShrinkBucket(uint32_t bucket_id) {
+    auto bucket = std::move(entries_[bucket_id]);
+    if (bucket.Empty())
+      return;
+
+    for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
+      if (bucket[pos]) {
+        // Check for TTL expiration during shrink - skip expired elements
+        if (bucket[pos].HasExpiry() && bucket[pos].GetExpiry() <= time_now_) {
+          obj_alloc_used_ -= bucket[pos].AllocSize();
+          --size_;
+          continue;
+        }
+
+        auto hash = Hash(bucket[pos].Key());
+        auto new_bucket_id = BucketId(hash, capacity_log_);
+        bucket[pos].SetHash(hash, capacity_log_, kShiftLog);
+        new_bucket_id = FindEmptyAround(new_bucket_id);
+        ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
+      }
+    }
+
+    if (bucket.IsVector()) {
+      ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
     }
   }
 

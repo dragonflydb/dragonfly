@@ -75,17 +75,15 @@ vector<uint32_t> ListPack::Pos(string_view element, uint32_t rank, uint32_t coun
   return matches;
 }
 
-bool ListPack::Insert(string_view pivot, string_view elem, QList::InsertOpt insert_opt) {
+uint8_t* ListPack::Find(std::string_view elem) const {
   uint8_t* p = lpFirst(lp_);
   while (p) {
-    if (GetEntry(p) == pivot) {
-      int where = (insert_opt == QList::BEFORE) ? LP_BEFORE : LP_AFTER;
-      lp_ = lpInsertString(lp_, (unsigned char*)elem.data(), elem.size(), p, where, nullptr);
-      return true;
+    if (GetEntry(p) == elem) {
+      return p;
     }
     p = lpNext(lp_, p);
   }
-  return false;
+  return nullptr;
 }
 
 unsigned ListPack::Remove(const CollectionEntry& elem, unsigned count, QList::Where where) {
@@ -124,14 +122,6 @@ unsigned ListPack::Remove(const CollectionEntry& elem, unsigned count, QList::Wh
   }
 
   return removed;
-}
-
-bool ListPack::Replace(long index, string_view elem) {
-  uint8_t* p = lpSeek(lp_, index);
-  if (!p)
-    return false;
-  lp_ = lpReplace(lp_, &p, (unsigned char*)elem.data(), elem.size());
-  return true;
 }
 
 }  // namespace detail

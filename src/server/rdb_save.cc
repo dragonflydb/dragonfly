@@ -25,6 +25,7 @@ extern "C" {
 #include "core/bloom.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
+#include "core/search/hnsw_index.h"
 #include "core/size_tracking_channel.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -525,9 +526,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
 error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
   /* Store how many listpacks we have inside the radix tree. */
   stream* s = (stream*)pv.RObjPtr();
-  rax* rax = s->rax_tree;
-
-  const size_t rax_size = raxSize(rax);
+  const size_t rax_size = raxSize(s->rax);
 
   RETURN_ON_ERR(SaveLen(rax_size));
 
@@ -535,7 +534,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
    * when loading back, we'll use the first entry of each listpack
    * to insert it back into the radix tree. */
   raxIterator ri;
-  raxStart(&ri, rax);
+  raxStart(&ri, s->rax);
   raxSeek(&ri, "^", NULL, 0);
 
   auto stop_listpacks_rax = absl::MakeCleanup([&] { raxStop(&ri); });
@@ -782,6 +781,37 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
   uint8_t buf[sizeof(uint64_t)];
   absl::little_endian::Store64(buf, journal_offset);
   return WriteRaw(buf);
+}
+
+error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
+                                        absl::Span<uint8_t> tmp_buf) {
+  // Binary format using little-endian encoding for efficiency:
+  // - internal_id: 4 bytes (uint32_t)
+  // - global_id: 8 bytes (uint64_t)
+  // - level: 4 bytes (int)
+  // - for each level (0 to level): links_num (4 bytes) + links (4 bytes each)
+
+  size_t total_size = node.TotalSize();
+  DCHECK_LE(total_size, tmp_buf.size());
+  uint8_t* ptr = tmp_buf.data();
+
+  absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.internal_id));
+  ptr += 4;
+  absl::little_endian::Store64(ptr, node.global_id);
+  ptr += 8;
+  absl::little_endian::Store32(ptr, static_cast<uint32_t>(node.level));
+  ptr += 4;
+
+  for (const auto& level_links : node.levels_links) {
+    absl::little_endian::Store32(ptr, static_cast<uint32_t>(level_links.size()));
+    ptr += 4;
+    for (uint32_t link : level_links) {
+      absl::little_endian::Store32(ptr, link);
+      ptr += 4;
+    }
+  }
+
+  return WriteRaw(Bytes{tmp_buf.data(), total_size});
 }
 
 error_code SerializerBase::SendFullSyncCut() {
@@ -1379,10 +1409,89 @@ error_code RdbSaver::Impl::FlushSerializer() {
   return ec;
 }
 
-RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
-  StringVec script_bodies, search_indices, search_synonyms;
+namespace {
 
+// Collect search index definitions. If as_json is true, collects JSON with HNSW metadata
+// and synonyms (for summary file). Otherwise collects simple restore commands (for per-shard).
+void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
+                          [[maybe_unused]] StringVec* search_indices,
+                          [[maybe_unused]] StringVec* search_synonyms,
+                          [[maybe_unused]] bool is_summary) {
+#ifdef WITH_SEARCH
+  auto* indices = shard->search_indices();
+  for (const auto& index_name : indices->GetIndexNames()) {
+    auto* index = indices->GetIndex(index_name);
+    auto index_info = index->GetInfo();
+
+    if (!is_summary) {
+      std::string restore_cmd = absl::StrCat(index_name, " ", index_info.BuildRestoreCommand());
+      search_indices->emplace_back(std::move(restore_cmd));
+      continue;
+    }
+
+    // Collect HNSW metadata for vector field (first one found)
+    for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
+      if (finfo.type == search::SchemaField::VECTOR &&
+          !(finfo.flags & search::SchemaField::NOINDEX)) {
+        if (auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
+            hnsw_index) {
+          index_info.hnsw_metadata = hnsw_index->GetMetadata();
+          break;
+        }
+      }
+    }
+
+    // Save index definition as JSON with HNSW metadata
+    TmpJson index_json;
+    index_json["name"] = index_name;
+    index_json["cmd"] = index_info.BuildRestoreCommand();
+
+    if (index_info.hnsw_metadata.has_value()) {
+      const auto& meta = index_info.hnsw_metadata.value();
+      TmpJson hnsw_meta;
+      hnsw_meta["max_elements"] = meta.max_elements;
+      hnsw_meta["cur_element_count"] = meta.cur_element_count;
+      hnsw_meta["maxlevel"] = meta.maxlevel;
+      hnsw_meta["enterpoint_node"] = meta.enterpoint_node;
+      hnsw_meta["M"] = meta.M;
+      hnsw_meta["maxM"] = meta.maxM;
+      hnsw_meta["maxM0"] = meta.maxM0;
+      hnsw_meta["ef_construction"] = meta.ef_construction;
+      hnsw_meta["mult"] = meta.mult;
+      index_json["hnsw_metadata"] = std::move(hnsw_meta);
+    }
+
+    search_indices->emplace_back(index_json.to_string());
+
+    // Save synonym groups
+    const auto& synonym_groups = index->GetSynonyms().GetGroups();
+    for (const auto& [group_id, terms] : synonym_groups) {
+      if (!terms.empty()) {
+        std::string syn_cmd =
+            absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
+        search_synonyms->emplace_back(std::move(syn_cmd));
+      }
+    }
+  }
+#endif
+}
+
+}  // namespace
+
+RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_summary) {
+  StringVec script_bodies, search_indices, search_synonyms;
+  size_t table_mem_result = 0;
+
+  if (!is_summary) {
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+      if (shard->shard_id() == 0)
+        CollectSearchIndices(shard, &search_indices, &search_synonyms, is_summary);
+    });
+    return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
+                                std::move(search_synonyms), table_mem_result};
+  }
   {
+    // For summary file: collect all global data
     auto scripts = service->script_mgr()->GetAll();
     script_bodies.reserve(scripts.size());
     for (auto& [sha, data] : scripts)
@@ -1391,66 +1500,13 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
 
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-#ifdef WITH_SEARCH
-    if (shard->shard_id() == 0) {
-      auto* indices = shard->search_indices();
-      for (const auto& index_name : indices->GetIndexNames()) {
-        auto* index = indices->GetIndex(index_name);
-        auto index_info = index->GetInfo();
+    if (shard->shard_id() == 0)
+      CollectSearchIndices(shard, &search_indices, &search_synonyms, is_summary);
 
-        // Collect HNSW metadata for vector field (first one found)
-        for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
-          if (finfo.type == search::SchemaField::VECTOR &&
-              !(finfo.flags & search::SchemaField::NOINDEX)) {
-            if (auto hnsw_index =
-                    GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
-                hnsw_index) {
-              index_info.hnsw_metadata = hnsw_index->GetMetadata();
-              break;  // Only store first HNSW index metadata
-            }
-          }
-        }
-
-        // Save index definition as JSON with HNSW metadata
-        TmpJson index_json;
-        index_json["name"] = index_name;
-        index_json["cmd"] = index_info.BuildRestoreCommand();
-
-        if (index_info.hnsw_metadata.has_value()) {
-          const auto& meta = index_info.hnsw_metadata.value();
-          TmpJson hnsw_meta;
-          hnsw_meta["max_elements"] = meta.max_elements;
-          hnsw_meta["cur_element_count"] = meta.cur_element_count;
-          hnsw_meta["maxlevel"] = meta.maxlevel;
-          hnsw_meta["enterpoint_node"] = meta.enterpoint_node;
-          hnsw_meta["M"] = meta.M;
-          hnsw_meta["maxM"] = meta.maxM;
-          hnsw_meta["maxM0"] = meta.maxM0;
-          hnsw_meta["ef_construction"] = meta.ef_construction;
-          hnsw_meta["mult"] = meta.mult;
-          index_json["hnsw_metadata"] = std::move(hnsw_meta);
-        }
-
-        search_indices.emplace_back(index_json.to_string());
-
-        // Save synonym groups to separate vector
-        const auto& synonym_groups = index->GetSynonyms().GetGroups();
-        for (const auto& [group_id, terms] : synonym_groups) {
-          if (!terms.empty()) {
-            // Format: "index_name group_id term1 term2 term3"
-            std::string syn_cmd =
-                absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
-            search_synonyms.emplace_back(std::move(syn_cmd));
-          }
-        }
-      }
-    }
-#endif
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     size_t shard_table_mem = 0;
     for (size_t db_id = 0; db_id < db_slice.db_array_size(); ++db_id) {
       auto* db_table = db_slice.GetDBTable(db_id);
-
       if (db_table) {
         shard_table_mem += db_table->table_memory();
       }
@@ -1595,12 +1651,11 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     if (!glob_state.search_indices.empty())
       LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
   } else {
-    // Search index definitions are not tied to shards and are saved in the summary file
-    DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
+    // Search index definitions (JSON for summary, simple restore cmd for per-shard)
     for (const string& s : glob_state.search_indices)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
 
-    // Save synonyms in separate aux fields
+    // Save synonyms only in summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());
     for (const string& s : glob_state.search_synonyms)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-synonyms", s));

@@ -198,7 +198,8 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
+                                 std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -239,7 +240,7 @@ template <typename F> auto WrapW(F&& f) {
     if (hw.Length() == 0)
       DeleteHw(hw, op_args, key);
     else
-      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
     return res;
   };
@@ -338,7 +339,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   }
 
   hw.Launder(pv);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   return OpStatus::OK;
 }
@@ -494,10 +495,11 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     }
   }
 
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
-  if (auto* ts = op_args.shard->tiered_storage(); ts)
-    ts->TryStash(op_args.db_cntx.db_index, key, &pv);
+  if (auto* ts = op_args.shard->tiered_storage(); ts) {
+    StashPrimeValue(op_args.db_cntx.db_index, key, false, &pv, ts);
+  }
 
   return created;
 }
@@ -1149,7 +1151,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
   vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }
 

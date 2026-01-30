@@ -6,6 +6,7 @@
 #include "base/logging.h"
 #include "core/collection_entry.h"
 #include "core/compact_object.h"
+#include "facade/op_status.h"
 #include "server/table.h"
 
 extern "C" {
@@ -61,9 +62,9 @@ using BlockingResultCb =
 // Block until a any key of the transaction becomes non-empty and executes the callback.
 // If multiple keys are non-empty when this function is called, the callback is executed
 // immediately with the first key listed in the tx arguments.
-OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
-                                                   BlockingResultCb cb, unsigned limit_ms,
-                                                   bool* block_flag, bool* pause_flag);
+facade::OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
+                                                           BlockingResultCb cb, unsigned limit_ms,
+                                                           bool* block_flag, bool* pause_flag);
 
 };  // namespace container_utils
 

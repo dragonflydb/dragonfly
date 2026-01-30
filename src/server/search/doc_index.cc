@@ -18,6 +18,7 @@
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/search/index_builder.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -36,14 +37,13 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
 
   string scratch;
   auto cb = [&](PrimeTable::iterator it) {
-    const PrimeValue& pv = it->second;
+    PrimeValue& pv = it->second;
     string_view key = it->first.GetSlice(&scratch);
 
     if (!index.Matches(key, pv.ObjType()))
       return;
 
-    auto accessor = GetAccessor(op_args.db_cntx, pv);
-    f(key, *accessor);
+    f(key, op_args.db_cntx, pv);
   };
 
   PrimeTable::Cursor cursor;
@@ -271,21 +271,22 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
     : base_{std::move(index)}, key_index_{} {
 }
 
+ShardDocIndex::~ShardDocIndex() {
+}
+
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
-  auto cb = [this](string_view key, const BaseAccessor& doc) {
-    DocId id = key_index_.Add(key);
-    if (!indices_->Add(id, doc)) {
-      key_index_.Remove(id);
-    }
-  };
+  // Create builder and start indexing
+  builder_ = std::make_unique<search::IndexBuilder>(this);
+  builder_->Start(op_args, [this] { builder_.reset(); });
 
-  TraverseAllMatching(*base_, op_args, cb);
+  // This PR is limited to using the builder synchronously
+  while (builder_)
+    util::ThisFiber::SleepFor(100us);
 
   indices_->FinalizeInitialization();
-
   VLOG(1) << "Indexed " << key_index_.Size()
           << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
 }
@@ -358,6 +359,10 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::AddDoc(string_view key, const
   if (db_cntx.db_index != 0)
     return std::nullopt;
 
+  // Don't add document again if it exists. TODO: Try add?
+  if (key_index_.Find(key))
+    return std::nullopt;
+
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Add(key);
   if (!indices_->Add(id, *accessor)) {
@@ -376,8 +381,8 @@ void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeVal
 
 void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
                                               ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
-                                              const PrimeValue& pv) {
-  auto accessor = GetAccessor(db_cntx, pv);
+                                              PrimeValue* pv) {
+  auto accessor = GetAccessor(db_cntx, *pv);
 
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
@@ -386,7 +391,10 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
         !(field_info.flags & search::SchemaField::NOINDEX)) {
       if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
           index) {
-        index->Add(global_id, *accessor, field_ident);
+        bool added = index->Add(global_id, *accessor, field_ident);
+        if (added && !index->IsVectorCopied()) {
+          pv->SetOmitDefrag(true);
+        }
       }
     }
   }
@@ -410,11 +418,13 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
 }
 
 void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
-  auto cb = [this, index_name](string_view key, const BaseAccessor& doc) {
+  auto cb = [this, index_name](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
     auto local_id = key_index_.Find(key);
 
     if (!local_id)
       return;
+
+    auto doc = GetAccessor(db_cntx, pv);
 
     GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), *local_id);
 
@@ -423,7 +433,10 @@ void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, cons
           !(field_info.flags & search::SchemaField::NOINDEX)) {
         if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
             index) {
-          index->Add(global_id, doc, field_ident);
+          bool added = index->Add(global_id, *doc, field_ident);
+          if (added && !index->IsVectorCopied()) {
+            pv.SetOmitDefrag(true);
+          }
         }
       }
     }
@@ -806,11 +819,11 @@ vector<string> ShardDocIndices::GetIndexNames() const {
   return names;
 }
 
-void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
-  DCHECK(IsIndexedKeyType(pv));
+void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeValue* pv) {
+  DCHECK(IsIndexedKeyType(*pv));
   for (auto& [index_name, index] : indices_) {
-    if (index->Matches(key, pv.ObjType())) {
-      std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, pv);
+    if (index->Matches(key, pv->ObjType())) {
+      std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, *pv);
       if (doc_id) {
         index->AddDocToGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
       }

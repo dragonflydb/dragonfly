@@ -6,6 +6,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <cassert>
 #include <deque>
 #include <numeric>
 
@@ -32,7 +33,7 @@ class PendingBuf {
   }
 
   void Push(std::string str) {
-    DCHECK(!bufs_.empty());
+    assert(!bufs_.empty());
     if (bufs_.back().buf.size() == Buf::kMaxBufSize) {
       bufs_.emplace_back();
     }
@@ -56,7 +57,7 @@ class PendingBuf {
 
   // should be called when the buf from PrepareSendingBuf() method was sent
   void Pop() {
-    DCHECK(bufs_.size() >= 2);
+    assert(bufs_.size() >= 2);
     bufs_.pop_front();
   }
 

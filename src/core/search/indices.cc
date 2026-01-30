@@ -492,16 +492,19 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
 }
 
 bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field);
+  auto vector = doc.GetVector(field, dim_);
+
   if (!vector)
     return false;
 
-  auto& [ptr, size] = vector.value();
-  if (ptr && size != dim_) {
-    return false;
+  if (std::holds_alternative<OwnedFtVector>(*vector)) {
+    const auto& owned_vector = std::get<OwnedFtVector>(*vector);
+    AddVector(id, owned_vector.first.get());
+  } else {
+    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector);
+    AddVector(id, borrowed_vector);
   }
 
-  AddVector(id, ptr);
   return true;
 }
 
@@ -512,14 +515,14 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
   entries_.reserve(params.capacity * params.dim);
 }
 
-void FlatVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
+void FlatVectorIndex::AddVector(DocId id, const void* vector) {
   DCHECK_LE(id * dim_, entries_.size());
   if (id * dim_ == entries_.size())
     entries_.resize((id + 1) * dim_);
 
   // TODO: Let get vector write to buf itself
   if (vector) {
-    memcpy(&entries_[id * dim_], vector.get(), dim_ * sizeof(float));
+    memcpy(&entries_[id * dim_], vector, dim_ * sizeof(float));
   }
 }
 

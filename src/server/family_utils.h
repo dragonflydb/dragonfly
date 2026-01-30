@@ -82,7 +82,7 @@ streamConsumer* StreamCreateConsumer(streamCG* cg, std::string_view name, uint64
 
 /* Use these methods to add or remove documents from the indexes for generic commands when the key
  * being modified could potentially be of type HSET or JSON. */
-void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv,
+void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
                              EngineShard* shard);
 void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
                                   const PrimeValue& pv, EngineShard* shard);
@@ -113,10 +113,10 @@ inline std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList valu
   return res;
 }
 
-inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
-                                    const PrimeValue& pv, EngineShard* shard) {
+inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
+                                    EngineShard* shard) {
   if (IsIndexedKeyType(pv)) {
-    shard->search_indices()->AddDoc(key, db_cntx, pv);
+    shard->search_indices()->AddDoc(key, db_cntx, &pv);
   }
 }
 

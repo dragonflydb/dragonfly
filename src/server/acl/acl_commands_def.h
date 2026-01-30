@@ -8,8 +8,6 @@
 #include "absl/container/flat_hash_set.h"
 #include "base/logging.h"
 #include "facade/acl_commands_def.h"
-#include "server/command_registry.h"
-#include "server/conn_context.h"
 
 namespace dfly::acl {
 

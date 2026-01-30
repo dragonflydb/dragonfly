@@ -24,7 +24,7 @@ class GlobalHnswIndexRegistry {
   static GlobalHnswIndexRegistry& Instance();
 
   bool Create(std::string_view index_name, std::string_view field_name,
-              const search::SchemaField::VectorParams& params);
+              const search::SchemaField::VectorParams& params, DocIndex::DataType data_type);
 
   bool Remove(std::string_view index_name, std::string_view field_name);
 
@@ -32,6 +32,11 @@ class GlobalHnswIndexRegistry {
                                                std::string_view field_name) const;
 
   bool Exist(std::string_view index_name, std::string_view field_name) const;
+
+  absl::flat_hash_map<std::string, std::shared_ptr<search::HnswVectorIndex>> GetAll() const {
+    std::shared_lock<std::shared_mutex> lock(registry_mutex_);
+    return indices_;
+  }
 
   void Reset();
 

@@ -63,11 +63,11 @@ struct MockedDocument : public DocumentAccessor {
     return GetStrings(field);
   }
 
-  std::optional<VectorInfo> GetVector(string_view field) const override {
+  std::optional<VectorInfo> GetVector(string_view field, size_t dim) const override {
     auto strings_list = GetStrings(field);
     if (!strings_list)
       return std::nullopt;
-    return !strings_list->empty() ? BytesToFtVectorSafe(strings_list->front()) : VectorInfo{};
+    return !strings_list->empty() ? BytesToFtVectorSafe(strings_list->front()) : OwnedFtVector{};
   }
 
   std::optional<NumsList> GetNumbers(std::string_view field) const override {

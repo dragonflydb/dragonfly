@@ -639,15 +639,51 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, CommandContext* cmd_
   parser.ExpectTag("SLOTS");
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  vector<std::pair<SlotId, SlotStats>> slots_stats;
-  do {
-    auto sid = parser.Next<uint32_t>();
-    if (sid > kMaxSlotNum)
-      return cmd_cntx->SendError("Invalid slot id");
-    slots_stats.emplace_back(sid, SlotStats{});
-  } while (parser.HasNext());
-
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  vector<std::pair<SlotId, SlotStats>> slots_stats;
+  while (parser.HasNext()) {
+    auto arg = parser.Next<std::string_view>();
+    // Check if argument contains a dash for range notation (e.g., "1-100")
+    size_t dash_pos = arg.find('-');
+    if (dash_pos != std::string_view::npos && dash_pos > 0) {
+      // Parse as range: start-end
+      std::string_view start_str = arg.substr(0, dash_pos);
+      std::string_view end_str = arg.substr(dash_pos + 1);
+
+      uint32_t start_slot, end_slot;
+      if (!absl::SimpleAtoi(start_str, &start_slot) || !absl::SimpleAtoi(end_str, &end_slot)) {
+        return cmd_cntx->SendError("Invalid slot range format");
+      }
+
+      if (start_slot > kMaxSlotNum || end_slot > kMaxSlotNum) {
+        return cmd_cntx->SendError("Invalid slot id");
+      }
+
+      // Swap if range is specified in reverse order (e.g., "100-0")
+      if (start_slot > end_slot) {
+        std::swap(start_slot, end_slot);
+      }
+
+      for (uint32_t sid = start_slot; sid <= end_slot; ++sid) {
+        slots_stats.emplace_back(sid, SlotStats{});
+      }
+    } else {
+      // Parse as single slot id
+      uint32_t sid;
+      if (!absl::SimpleAtoi(arg, &sid)) {
+        return cmd_cntx->SendError(kInvalidIntErr);
+      }
+      if (sid > kMaxSlotNum) {
+        return cmd_cntx->SendError("Invalid slot id");
+      }
+      slots_stats.emplace_back(sid, SlotStats{});
+    }
+  }
+
+  if (slots_stats.empty()) {
+    return cmd_cntx->SendError(kSyntaxErr);
+  }
 
   fb2::Mutex mu;
 

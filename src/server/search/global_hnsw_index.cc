@@ -29,7 +29,8 @@ GlobalHnswIndexRegistry& GlobalHnswIndexRegistry::Instance() {
 }
 
 bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_view field_name,
-                                     const search::SchemaField::VectorParams& params) {
+                                     const search::SchemaField::VectorParams& params,
+                                     DocIndex::DataType data_type) {
   std::string key = MakeKey(index_name, field_name);
 
   std::unique_lock<std::shared_mutex> lock(registry_mutex_);
@@ -39,7 +40,9 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
   if (it != indices_.end())
     return false;
 
-  indices_[key] = std::make_shared<search::HnswVectorIndex>(params);
+  const bool copy_vector = (data_type != DocIndex::HASH);
+
+  indices_[key] = std::make_shared<search::HnswVectorIndex>(params, copy_vector);
 
   return true;
 }

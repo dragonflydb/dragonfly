@@ -26,6 +26,10 @@
 
 namespace dfly {
 
+namespace search {
+struct IndexBuilder;
+}  // namespace search
+
 struct BaseAccessor;
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
@@ -247,7 +251,9 @@ class ShardDocIndex {
 
  public:
   // Index must be rebuilt at least once after intialization
-  ShardDocIndex(std::shared_ptr<const DocIndex> index);
+  explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
+
+  ~ShardDocIndex();  // To use forward declarations
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -301,7 +307,7 @@ class ShardDocIndex {
   }
 
   void AddDocToGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
-                                 const DbContext& db_cntx, const PrimeValue& pv);
+                                 const DbContext& db_cntx, PrimeValue* pv);
   void RemoveDocFromGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
                                       const DbContext& db_cntx, const PrimeValue& pv);
   void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
@@ -336,6 +342,8 @@ class ShardDocIndex {
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
+
+  std::unique_ptr<search::IndexBuilder> builder_;
 };
 
 // Stores shard doc indices by name on a specific shard.
@@ -363,7 +371,7 @@ class ShardDocIndices {
   std::vector<std::string> GetIndexNames() const;
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
-  void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+  void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
   size_t GetUsedMemory() const;

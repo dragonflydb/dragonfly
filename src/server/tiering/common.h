@@ -7,8 +7,6 @@
 #include <memory>
 #include <optional>
 
-#include "util/fibers/synchronization.h"
-
 namespace dfly::tiering {
 
 inline namespace literals {
@@ -27,10 +25,6 @@ constexpr size_t kPageSize = 4_KB;
 
 // Location on the offloaded blob, measured in bytes
 struct DiskSegment {
-  DiskSegment ContainingPages() const {
-    return {offset / kPageSize * kPageSize, (length + kPageSize - 1) / kPageSize * kPageSize};
-  }
-
   DiskSegment() = default;
   DiskSegment(size_t offset, size_t length) : offset{offset}, length{length} {
   }
@@ -39,6 +33,10 @@ struct DiskSegment {
 
   bool operator==(const DiskSegment& other) const {
     return offset == other.offset && length == other.length;
+  }
+
+  DiskSegment ContainingPages() const {
+    return {offset / kPageSize * kPageSize, (length + kPageSize - 1) / kPageSize * kPageSize};
   }
 
   size_t offset = 0, length = 0;

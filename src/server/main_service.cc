@@ -211,7 +211,8 @@ constexpr size_t kMaxThreadSize = 1024;
 void UnwatchAllKeys(Namespace* ns, ConnectionState::ExecInfo* exec_info) {
   if (!exec_info->watched_keys.empty()) {
     auto cb = [&](EngineShard* shard) {
-      ns->GetDbSlice(shard->shard_id()).UnregisterConnectionWatches(exec_info);
+      ns->GetDbSlice(shard->shard_id())
+          .UnregisterConnectionWatches(exec_info->watched_keys, &exec_info->watched_dirty);
     };
     shard_set->RunBriefInParallel(std::move(cb));
   }
@@ -1410,7 +1411,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
-      return ErrorReply{"-NOAUTH Authentication required."};
+      return ErrorReply{"-NOAUTH Authentication required.", facade::kNoAuthErrType};
     }
   }
 
@@ -1486,11 +1487,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     case AsyncPreference::ONLY_SYNC:
       break;
     case AsyncPreference::ONLY_ASYNC:
-      if (!cid->IsAsync())
+      if (!cid->SupportsAsync())
         return DispatchResult::WOULD_BLOCK;
       [[fallthrough]];
     case AsyncPreference::PREFER_ASYNC:
-      if (cid->IsAsync())
+      if (cid->SupportsAsync())
         parsed_cmd->SetDeferredReply();
       break;
   };
@@ -1978,7 +1979,7 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
     ShardId shard_id = shard->shard_id();
     ShardArgs largs = t->GetShardArgs(shard_id);
     for (auto k : largs) {
-      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info);
+      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info.watched_dirty);
     }
 
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);

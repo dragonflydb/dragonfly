@@ -743,7 +743,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     ::memcpy(copy_lp, lp, data.size());
     /* Insert the key in the radix tree. */
     int retval =
-        raxTryInsert(s->rax_tree, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
+        raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
     if (!retval) {
       zfree(copy_lp);
       LOG(ERROR) << "Listpack re-added with existing key";
@@ -823,8 +823,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
        * consumer. */
       for (const auto& rawid : cons.nack_arr) {
         uint8_t* ptr = const_cast<uint8_t*>(rawid.data());
-        streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, ptr, rawid.size());
-        if (nack == raxNotFound) {
+        streamNACK* nack = nullptr;
+        int fres = raxFind(cgroup->pel, ptr, rawid.size(), (void**)&nack);
+        if (fres == 0) {
           LOG(ERROR) << "Consumer entry not found in group global PEL";
           ec_ = RdbError(errc::rdb_file_corrupted);
           return;
@@ -2211,6 +2212,41 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_VECTOR_INDEX) {
+      // Stub: read and ignore HNSW vector index data
+      // Binary format: [index_name, elements_number,
+      //   then for each node (little-endian):
+      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
+      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
+      string index_key;
+      SET_OR_RETURN(FetchGenericString(), index_key);
+
+      uint64_t elements_number;
+      SET_OR_RETURN(LoadLen(nullptr), elements_number);
+
+      for (uint64_t elem = 0; elem < elements_number; ++elem) {
+        [[maybe_unused]] uint32_t internal_id;
+        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
+        [[maybe_unused]] uint64_t global_id;
+        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
+        uint32_t level;
+        SET_OR_RETURN(FetchInt<uint32_t>(), level);
+
+        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
+          uint32_t links_num;
+          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+          for (uint32_t i = 0; i < links_num; ++i) {
+            [[maybe_unused]] uint32_t link;
+            SET_OR_RETURN(FetchInt<uint32_t>(), link);
+          }
+        }
+      }
+
+      VLOG(2) << "Ignoring HNSW vector index: " << index_key
+              << " elements_number=" << elements_number;
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -2246,6 +2282,8 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   if (EngineShard* es = EngineShard::tlocal(); es) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
+
+  now_streamed_.clear();
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -2610,8 +2648,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   LoadConfig config_copy = item->load_config;
   if (item->load_config.streamed && item->load_config.append) {
+    std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
-      pv_ptr = &*now_streamed_[item->key];
+      pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
@@ -2644,12 +2683,12 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
     stop_early_ = true;
-    now_streamed_.clear();
     return;
   }
 
   if (item->load_config.streamed) {
-    if (now_streamed_.find(item->key) == now_streamed_.end())
+    std::unique_lock lk{now_streamed_mu_};
+    if (!now_streamed_.contains(item->key))
       now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
@@ -2690,7 +2729,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
-    ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
+    StashPrimeValue(db_cntx.db_index, item->key, false, &res.it->second, ts);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
@@ -2905,6 +2944,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
+// Static synchronization for thread-safe search index creation
+base::SpinLock RdbLoader::search_index_mu_;
+absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
 
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
@@ -2913,9 +2955,12 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  string index_name;
+  string full_cmd;
+
   // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
   if (!def.empty() && def[0] == '{') {
-    // New JSON format with HNSW metadata
+    // New JSON format with HNSW metadata (from summary file)
     try {
       auto json_opt = JsonFromString(def);
       if (!json_opt) {
@@ -2923,21 +2968,42 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
         return;
       }
       const auto& json = *json_opt;
-      string index_name = json["name"].as<string>();
+      index_name = json["name"].as<string>();
       string cmd = json["cmd"].as<string>();
 
       // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
       // Currently we just restore the index definition, HNSW graph will be rebuilt
 
-      string full_cmd = absl::StrCat(index_name, " ", cmd);
-      LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+      full_cmd = absl::StrCat(index_name, " ", cmd);
     } catch (const std::exception& e) {
       LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
+      return;
     }
   } else {
-    // Old format: "index_name cmd" - for backwards compatibility
-    LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+    // Simple format: "index_name cmd" - from per-shard DFS files or old format
+    // Extract index name (first token before space)
+    size_t space_pos = def.find(' ');
+    if (space_pos == string::npos) {
+      LOG(ERROR) << "Invalid search index definition: " << def;
+      return;
+    }
+    index_name = def.substr(0, space_pos);
+    full_cmd = std::move(def);
   }
+
+  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
+  // We track which indices we've already attempted to create to avoid race conditions where
+  // multiple threads see the index doesn't exist and all try to create it.
+  {
+    std::lock_guard lk(search_index_mu_);
+    auto [it, inserted] = created_search_indices_.insert(index_name);
+    if (!inserted) {
+      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
+      return;
+    }
+  }
+
+  LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
@@ -2946,9 +3012,19 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
   pending_synonym_cmds_.push_back(std::move(def));
 }
 
-void RdbLoader::PerformPostLoad(Service* service) {
+void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+    return;
+
+  // Clear the created indices tracking set for next load
+  {
+    std::lock_guard lk(search_index_mu_);
+    created_search_indices_.clear();
+  }
+
+  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  if (is_error)
     return;
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
@@ -2958,7 +3034,6 @@ void RdbLoader::PerformPostLoad(Service* service) {
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
-  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

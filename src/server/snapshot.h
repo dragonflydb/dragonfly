@@ -99,6 +99,9 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void ThrottleIfNeeded();
 
  private:
+  // Serialize HNSW global indices for shard 0 only
+  void SerializeGlobalHnswIndices();
+
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(bool send_full_sync_cut);

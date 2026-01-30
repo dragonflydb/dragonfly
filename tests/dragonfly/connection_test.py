@@ -1420,6 +1420,48 @@ async def test_client_migrate(df_server: DflyInstance):
     assert resp == 1  # migrated successfully
 
 
+async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
+    admin = df_server.client()
+    resp = await admin.execute_command("DFLY THREAD")
+    num_threads = resp[1]
+
+    # Create multiple clients and migrate them all to the same thread.
+    # If DecreaseConnStats is called twice per migration (double-decrement bug),
+    # the source threads' uint32 counters are invalid.
+    num_clients = 20
+    clients = []
+    client_ids = []
+    dest_tid = 0
+    for _ in range(num_clients):
+        c = df_server.client()
+        clients.append(c)
+        client_ids.append(await c.client_id())
+
+    info = await admin.info("clients")
+    baseline = info["connected_clients"]
+
+    for c, cid in zip(clients, client_ids):
+        r = await c.execute_command("DFLY THREAD")
+        if r[0] != dest_tid:
+            await admin.execute_command("CLIENT", "MIGRATE", cid, dest_tid)
+
+    # Wait for all migrations to complete by polling each client's thread
+    for c in clients:
+        async for r, breaker in tick_timer(lambda c=c: c.execute_command("DFLY THREAD")):
+            with breaker:
+                assert r[0] == dest_tid
+
+    # After all migrations complete, connected_clients must stay the same
+    info = await admin.info("clients")
+    assert (
+        info["connected_clients"] == baseline
+    ), f"connected_clients changed from {baseline} to {info['connected_clients']} after migrations"
+
+    for c in clients:
+        await c.aclose()
+    await admin.aclose()
+
+
 async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
     """
     Regression test for #5931
