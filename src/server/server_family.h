@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 
+#include "core/qlist.h"
 #include "facade/dragonfly_listener.h"
 #include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
@@ -22,7 +23,6 @@
 namespace util {
 
 class AcceptServer;
-class ListenerInterface;
 class HttpListenerBase;
 
 }  // namespace util
@@ -86,6 +86,7 @@ struct Metrics {
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
+  QList::Stats qlist_stats;
 
   size_t qps = 0;
 

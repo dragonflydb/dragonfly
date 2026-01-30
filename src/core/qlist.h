@@ -248,6 +248,8 @@ class QList {
     uint64_t total_node_reads = 0;
     uint64_t offload_requests = 0;
     uint64_t onload_requests = 0;
+
+    Stats& operator+=(const Stats& other);
   };
   static __thread Stats stats;
 
@@ -282,6 +284,7 @@ class QList {
 
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
+  void OffloadNode(Node* node);
 
   // Initializes iterator's zi_ to point to the element at offset_.
   // Decompresses the node if needed. Assumes current_ is not null.
