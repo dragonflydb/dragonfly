@@ -34,6 +34,10 @@ void IndexBuilder::Cancel() {
   util::fb2::Fiber{std::move(fiber_)}.JoinIfNeeded();  // steal and wait for finish
 }
 
+util::fb2::Fiber IndexBuilder::Worker() {
+  return std::move(fiber_);
+}
+
 void IndexBuilder::MainLoopFb(dfly::DbTable* table, DbContext db_cntx) {
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;

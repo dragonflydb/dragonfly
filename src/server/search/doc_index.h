@@ -333,7 +333,7 @@ class ShardDocIndex {
 
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool sync = false);
 
   // Cancel builder if in progress
   void CancelBuilder();
@@ -375,7 +375,7 @@ class ShardDocIndices {
   void DropAllIndices();
 
   // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args);
+  void RebuildAllIndices(const OpArgs& op_args, bool sync = false);
 
   std::vector<std::string> GetIndexNames() const;
 

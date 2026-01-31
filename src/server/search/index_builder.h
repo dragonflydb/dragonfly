@@ -28,6 +28,9 @@ struct IndexBuilder {
   // TODO: Maybe implement nonblocking version?
   void Cancel();
 
+  // Get fiber reference. Temporary to polyfill sync constuction places
+  util::fb2::Fiber Worker();
+
  private:
   // Main fiber function
   void MainLoopFb(DbTable* table, DbContext db_cntx);

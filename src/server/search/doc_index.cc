@@ -275,7 +275,7 @@ ShardDocIndex::~ShardDocIndex() {
   CancelBuilder();
 }
 
-void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool sync) {
   CancelBuilder();
 
   key_index_ = DocKeyIndex{};
@@ -289,6 +289,11 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
             << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
     builder_.reset();
   });
+
+  // Temporary. In the future rdb loader will construct indices at the start
+  if (sync) {
+    builder_->Worker().JoinIfNeeded();
+  }
 }
 
 void ShardDocIndex::CancelBuilder() {
@@ -815,9 +820,9 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
     JsonAccessor::RemoveFieldFromCache(fident);
 }
 
-void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool sync) {
   for (auto& [index_name, ptr] : indices_) {
-    ptr->Rebuild(op_args, &local_mr_);
+    ptr->Rebuild(op_args, &local_mr_, sync);
     ptr->RebuildGlobalVectorIndices(index_name, op_args);
   }
 }
