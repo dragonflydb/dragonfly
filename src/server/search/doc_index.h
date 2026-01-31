@@ -201,8 +201,8 @@ struct DocIndex {
   bool Matches(std::string_view key, unsigned obj_code) const;
 
   search::Schema schema;
-  search::IndicesOptions options{};
-  std::vector<std::string> prefixes{};
+  search::IndicesOptions options;
+  std::vector<std::string> prefixes;
   DataType type{HASH};
 };
 
@@ -210,7 +210,11 @@ struct DocIndexInfo {
   DocIndex base_index;
   size_t num_docs = 0;
 
+  bool indexing = false;
+  float percent_indexed = 1;
+
   // HNSW metadata for vector index (if present)
+  // TODO: move to schema
   std::optional<search::HnswIndexMetadata> hnsw_metadata = std::nullopt;
 
   // Build original ft.create command that can be used to re-create this index
@@ -253,7 +257,8 @@ class ShardDocIndex {
   // Index must be rebuilt at least once after intialization
   explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
 
-  ~ShardDocIndex();  // To use forward declarations
+  // Possibly blocking to stop indexing job
+  ~ShardDocIndex();
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -302,6 +307,7 @@ class ShardDocIndex {
                        const std::vector<std::string_view>& terms);
 
   // Public access to key index for direct operations (e.g., when dropping index with DD)
+  // TODO: replac with keys() view
   const DocKeyIndex& key_index() const {
     return key_index_;
   }
@@ -328,6 +334,9 @@ class ShardDocIndex {
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+
+  // Cancel builder if in progress
+  void CancelBuilder();
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
