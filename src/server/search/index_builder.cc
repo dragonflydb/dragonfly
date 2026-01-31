@@ -20,7 +20,7 @@ void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complet
     // Finish by clearing the fiber reference and calling on_complete as its last action
     {
       util::FiberAtomicGuard guard{};  // preserve cancellation
-      fiber_.Detach();                 // safely deleteable
+      fiber_.Detach();                 // builder is now safely deleteable
       if (!state_.IsCancelled())
         on_complete();
     }

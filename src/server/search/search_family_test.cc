@@ -330,11 +330,27 @@ TEST_F(SearchFamilyTest, Indexing) {
   // Create documents
   constexpr size_t kNumDocs = 10'000;
   for (size_t i = 0; i < kNumDocs; i++) {
-    Run({"hset", absl::StrCat("doc-", i), "t", absl::StrCat("some long text at ", i), "v",
-         absl::StrCat(i / 10)});
+    Run({"hset", absl::StrCat("doc-", i), "t", absl::StrCat("some long text at ", i), "v1",
+         absl::StrCat(i / 10), "v2", absl::StrCat(i / 1000)});
   }
 
-  Run({"ft.create", "i1", "schema", "v", "numeric", "t", "text"});
+  string_view create_cmd[] = {"ft.create", "i1", "schema", "v1", "numeric", "t", "text"};
+
+  // Drop immediately to check cancel
+  {
+    Run(create_cmd);
+    for (size_t i = 0; i < 3; i++)
+      ThisFiber::Yield();
+    Run({"ft.dropindex", "i1"});
+  }
+
+  // Update with ft.alter to check restart
+  {
+    Run(create_cmd);
+    for (size_t i = 0; i < 5; i++)
+      ThisFiber::Yield();
+    Run({"ft.alter", "i1", "schema", "add", "v2", "numeric"});
+  }
 
   // loop and wait for index construction
   size_t iterations = 0;
@@ -364,7 +380,7 @@ TEST_F(SearchFamilyTest, Indexing) {
     EXPECT_NE(*percent_indexed, "1");  // change once we have estimations
 
     // Check search doesn't return any errors
-    resp = Run({"ft.search", "i1", "@v:[10 20]"});
+    resp = Run({"ft.search", "i1", "@v1:[10 20]"});
     EXPECT_THAT(resp, Not(ErrArg("")));
 
     iterations++;
@@ -372,8 +388,12 @@ TEST_F(SearchFamilyTest, Indexing) {
 
   EXPECT_GT(iterations, 5u);  // some reasonable amount
 
-  auto resp = Run({"ft.search", "i1", "@v:[10 20]", "LIMIT", "0", "0"});
+  auto resp = Run({"ft.search", "i1", "@v1:[10 20]", "LIMIT", "0", "0"});
   EXPECT_THAT(resp, IntArg(110));
+
+  // check added with alter field v2 is fully indexed
+  resp = Run({"ft.search", "i1", "@v2:[0 10000]", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, IntArg(kNumDocs));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
