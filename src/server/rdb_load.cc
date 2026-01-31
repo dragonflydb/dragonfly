@@ -3029,8 +3029,9 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    es->search_indices()->RebuildAllIndices(
-        OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    es->search_indices()->RebuildAllIndices(op_args, true);
   });
 
   // Now execute all pending synonym commands after indices are rebuilt

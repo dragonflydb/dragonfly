@@ -17,11 +17,25 @@ void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complet
   auto cb = [this, table, db_cntx = op_args.db_cntx, on_complete = std::move(on_complete)] {
     MainLoopFb(table.get(), db_cntx);
 
-    fiber_.Detach();  // Detach self to be safely deletable
-    on_complete();
+    // Finish by clearing the fiber reference and calling on_complete as its last action
+    {
+      util::FiberAtomicGuard guard{};  // preserve cancellation
+      fiber_.Detach();                 // builder is now safely deleteable
+      if (!state_.IsCancelled())
+        on_complete();
+    }
   };
 
   fiber_ = Fiber{std::move(cb)};
+}
+
+void IndexBuilder::Cancel() {
+  state_.Cancel();
+  util::fb2::Fiber{std::move(fiber_)}.JoinIfNeeded();  // steal and wait for finish
+}
+
+util::fb2::Fiber IndexBuilder::Worker() {
+  return std::move(fiber_);
 }
 
 void IndexBuilder::MainLoopFb(dfly::DbTable* table, DbContext db_cntx) {
@@ -38,6 +52,6 @@ void IndexBuilder::MainLoopFb(dfly::DbTable* table, DbContext db_cntx) {
     cursor = table->prime.Traverse(cursor, cb);
     if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
       util::ThisFiber::Yield();
-  } while (cursor);
+  } while (cursor && state_.IsRunning());
 }
 }  // namespace dfly::search

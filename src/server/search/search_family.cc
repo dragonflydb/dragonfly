@@ -1431,14 +1431,19 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
 
+  bool indexing = false;
+  float percent_indexed = 1.0;
   size_t total_num_docs = 0;
-  for (const auto& info : infos)
+  for (const auto& info : infos) {
     total_num_docs += info.num_docs;
+    indexing |= info.indexing;
+    percent_indexed = std::min(percent_indexed, info.percent_indexed);
+  }
 
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(5, CollectionType::MAP);
+  rb->StartCollection(7, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
@@ -1488,6 +1493,12 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("num_docs");
   rb->SendLong(total_num_docs);
+
+  rb->SendSimpleString("indexing");
+  rb->SendLong(indexing ? 1 : 0);
+
+  rb->SendSimpleString("percent_indexed");
+  rb->SendDouble(percent_indexed);
 }
 
 void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2255,7 +2266,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
 }
 
 void SearchFamily::Shutdown() {
-  GlobalHnswIndexRegistry::Instance().Reset();
+  shard_set->RunBlockingInParallel([](EngineShard* es) { es->search_indices()->DropAllIndices(); });
 }
 
 }  // namespace dfly
