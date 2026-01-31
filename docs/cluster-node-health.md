@@ -1,5 +1,10 @@
 # Cluster Node Health
 
+**Node health is passive metadata provided by the cluster manager (control plane) via the
+`DFLYCLUSTER CONFIG` command.** Dragonfly nodes do not actively determine their own health status;
+instead, the cluster orchestrator monitors node states and communicates health information to each
+node through the cluster configuration.
+
 Dragonfly supports node health status reporting for cluster configurations, providing
 Valkey-compatible behavior for cluster management commands. This feature allows the cluster
 manager to track the health state of each node and communicate it to clients through various
@@ -24,7 +29,7 @@ Dragonfly supports four health states for cluster nodes:
 | `online`  | Node is fully operational and ready to serve requests                                    | All commands        |
 | `loading` | Node is still loading data (e.g., during initial sync or restart)                       | `CLUSTER SHARDS`, `CLUSTER NODES` |
 | `fail`    | Node has failed or is unreachable                                                        | `CLUSTER SHARDS`, `CLUSTER NODES` |
-| `hidden`  | Node exists but should not be exposed to clients (internal use by cluster manager)       | None                |
+| `hidden`  | Replica exists but should not be exposed to clients (internal use by cluster manager)   | Masters: all commands; Replicas: none |
 
 ### Default State
 
@@ -233,11 +238,12 @@ When a node fails or becomes unreachable, the cluster manager can mark it as `fa
 provides visibility in `CLUSTER SHARDS` and `CLUSTER NODES` while excluding it from
 `CLUSTER SLOTS` responses.
 
-### 3. Internal Nodes
+### 3. Internal Replicas
 
-The `hidden` health status is useful for nodes that are managed internally by the cluster
-orchestrator but should not be visible to external clients. These nodes are completely filtered
-out from all cluster commands.
+The `hidden` health status is useful for replica nodes that are managed internally by the cluster
+orchestrator but should not be visible to external clients. Hidden replicas are filtered out from
+all cluster commands (`CLUSTER SHARDS`, `CLUSTER SLOTS`, and `CLUSTER NODES`). Note that masters
+marked as `hidden` are still visible in all commands; the filtering only applies to replicas.
 
 ### 4. Valkey Compatibility
 
@@ -257,9 +263,12 @@ For developers interested in the implementation:
 
 3. **Command Handlers**: The cluster commands in `src/server/cluster/cluster_family.cc` implement
    filtering logic based on health status:
-   - `ClusterShardsImpl`: Filters out `HIDDEN` nodes
-   - `ClusterSlotsImpl`: Filters out `HIDDEN`, `FAIL`, and `LOADING` replicas
-   - `ClusterNodesImpl`: Filters out `HIDDEN` nodes and maps health to connection state
+   - `ClusterShards`: Filters out replicas with `HIDDEN` health before calling `ClusterShardsImpl`
+     (masters are still included even if marked `HIDDEN`)
+   - `ClusterSlotsImpl`: Filters out `HIDDEN`, `FAIL`, and `LOADING` replicas (masters are always
+     included)
+   - `ClusterNodesImpl`: Filters out replicas with `HIDDEN` health when listing replicas (masters
+     with `HIDDEN` health are still included) and maps health to connection state
 
 4. **Default Value**: When not specified in configuration, nodes default to `ONLINE` state as
    defined in `ClusterExtendedNodeInfo`.
