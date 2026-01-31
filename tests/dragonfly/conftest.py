@@ -35,13 +35,137 @@ FAILED_PATH = "/tmp/failed/"
 LAST_LOGS = "/tmp/last_test_log_dir.txt"
 
 
+def _download_minio_binary(dest: Path):
+    """Download MinIO binary to dest if not already cached.
+
+    Downloads to a temporary file first, then renames atomically to avoid
+    leaving a corrupt binary on interrupted downloads.
+    """
+    import platform
+    import urllib.request
+
+    system = platform.system().lower()
+    arch = platform.machine()
+    arch_map = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+    arch = arch_map.get(arch, arch)
+    url = f"https://dl.min.io/server/minio/release/{system}-{arch}/minio"
+    logging.info(f"Downloading MinIO binary from {url}")
+    tmp_dest = dest.with_suffix(".tmp")
+    try:
+        urllib.request.urlretrieve(url, tmp_dest)
+        tmp_dest.chmod(0o755)
+        tmp_dest.rename(dest)
+    except Exception:
+        tmp_dest.unlink(missing_ok=True)
+        raise
+
+
+def _start_minio_server(endpoint):
+    """Start MinIO subprocess and configure env vars for S3 tests."""
+    import boto3
+    from urllib.parse import urlparse
+
+    cache_dir = Path.home() / ".cache" / "dragonfly-tests"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    minio_bin = cache_dir / "minio"
+
+    if not minio_bin.exists():
+        _download_minio_binary(minio_bin)
+
+    # Normalize scheme-less values (e.g. "localhost:9000") so urlparse
+    # correctly populates hostname/port instead of treating it as a path.
+    to_parse = endpoint if "://" in endpoint else "http://" + endpoint
+    parsed = urlparse(to_parse)
+    address = f":{parsed.port or 9000}"
+    endpoint = f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 9000}"
+
+    data_dir = Path(mkdtemp(prefix="minio_data_"))
+    minio_log = data_dir / "minio.log"
+    log_file = open(minio_log, "w")
+    proc = subprocess.Popen(
+        [str(minio_bin), "server", str(data_dir), "--address", address],
+        env={**os.environ, "MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+
+    bucket = "dragonfly-test"
+    try:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id="minioadmin",
+            aws_secret_access_key="minioadmin",
+            region_name="us-east-1",
+        )
+
+        for attempt in range(30):
+            try:
+                s3.create_bucket(Bucket=bucket)
+                break
+            except Exception:
+                if proc.poll() is not None:
+                    logs = minio_log.read_text()
+                    raise RuntimeError(
+                        f"MinIO process exited with code {proc.returncode}.\nLogs:\n{logs}"
+                    )
+                time.sleep(1)
+        else:
+            logs = minio_log.read_text()
+            raise RuntimeError(f"MinIO did not become ready in time.\nLogs:\n{logs}")
+    except Exception:
+        proc.terminate()
+        log_file.close()
+        shutil.rmtree(data_dir, ignore_errors=True)
+        raise
+
+    log_file.close()
+    os.environ["DRAGONFLY_S3_BUCKET"] = bucket
+    os.environ["AWS_ACCESS_KEY_ID"] = "minioadmin"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "minioadmin"
+    os.environ["AWS_ENDPOINT_URL"] = endpoint
+    # Remove any existing session token (e.g. from OIDC auth) as MinIO doesn't support it
+    os.environ.pop("AWS_SESSION_TOKEN", None)
+
+    return proc, data_dir
+
+
+_minio_proc = None
+_minio_data_dir = None
+
+
 # runs on pytest start
 def pytest_configure(config):
+    global _minio_proc, _minio_data_dir
+
     # clean everything
     if os.path.exists(FAILED_PATH):
         shutil.rmtree(FAILED_PATH)
     if os.path.exists(BASE_LOG_DIR):
         shutil.rmtree(BASE_LOG_DIR)
+
+    # Start MinIO if MINIO_S3_ENDPOINT is set (must happen before test collection
+    # so that @pytest.mark.skipif checking DRAGONFLY_S3_BUCKET sees it)
+    endpoint = os.environ.get("MINIO_S3_ENDPOINT")
+    if endpoint:
+        _minio_proc, _minio_data_dir = _start_minio_server(endpoint)
+
+
+def pytest_unconfigure(config):
+    global _minio_proc, _minio_data_dir
+
+    if _minio_proc is not None:
+        _minio_proc.terminate()
+        try:
+            _minio_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _minio_proc.kill()
+            _minio_proc.wait()
+        _minio_proc = None
+
+    if _minio_data_dir is not None:
+        shutil.rmtree(_minio_data_dir, ignore_errors=True)
+        _minio_data_dir = None
 
 
 @pytest.fixture(scope="class")

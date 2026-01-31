@@ -439,6 +439,22 @@ class DflyInstanceFactory:
         if version >= 1.26:
             args.setdefault("fiber_safety_margin=4096")
 
+        # When a custom S3 endpoint is configured (e.g. MinIO), pass it to Dragonfly
+        s3_endpoint = os.environ.get("MINIO_S3_ENDPOINT")
+        if s3_endpoint:
+            from urllib.parse import urlparse
+
+            # Normalize scheme-less values (e.g. "localhost:9000") so urlparse
+            # correctly populates hostname/port instead of treating it as a path.
+            to_parse = s3_endpoint if "://" in s3_endpoint else "http://" + s3_endpoint
+            parsed = urlparse(to_parse)
+            endpoint_host = parsed.hostname or ""
+            if parsed.port:
+                endpoint_host = f"{endpoint_host}:{parsed.port}"
+            if endpoint_host:
+                args.setdefault("s3_endpoint", endpoint_host)
+                args.setdefault("s3_use_https", "false" if parsed.scheme == "http" else "true")
+
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
 

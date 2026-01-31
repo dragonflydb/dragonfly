@@ -74,6 +74,24 @@ runs:
         echo "===================After freeing up space ============================================"
         df -h
 
+    - name: Install Python test requirements
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/tests
+        pip3 install -r dragonfly/requirements.txt
+
+    - name: Run S3 snapshot tests with MinIO
+      if: inputs.s3-bucket != ''
+      shell: bash
+      run: |
+        echo "=== Running S3 snapshot tests with local MinIO ==="
+        cd ${GITHUB_WORKSPACE}/tests
+
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+
+        # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
+        MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py --log-cli-level=INFO -v
+
     - name: Run PyTests
       id: main
       shell: bash
@@ -81,7 +99,6 @@ runs:
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
-        pip3 install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
