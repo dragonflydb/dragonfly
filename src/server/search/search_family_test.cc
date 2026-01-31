@@ -353,6 +353,7 @@ TEST_F(SearchFamilyTest, Indexing) {
   }
 
   // loop and wait for index construction
+  absl::Time deadline = absl::Now() + absl::Seconds(10);
   size_t iterations = 0;
   bool seen_full = false;
   while (true) {
@@ -384,6 +385,8 @@ TEST_F(SearchFamilyTest, Indexing) {
     EXPECT_THAT(resp, Not(ErrArg("")));
 
     iterations++;
+    ThisFiber::Yield();
+    EXPECT_LE(absl::Now(), deadline);
   }
 
   EXPECT_GT(iterations, 5u);  // some reasonable amount
