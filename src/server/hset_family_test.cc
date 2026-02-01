@@ -765,7 +765,7 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
   auto resp = Run({"HEXPIRE", "zombie", "0", "FIELDS", "1", "f"});
   EXPECT_THAT(resp, IntArg(2));
   EXPECT_EQ(0, CheckedInt({"EXISTS", "zombie"}));
-  EXPECT_EQ(Run({"SAVE", "RDB", "zombie_test.rdb"}), "OK");
+  EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }
 
 }  // namespace dfly
