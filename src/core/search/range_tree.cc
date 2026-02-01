@@ -73,11 +73,8 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
 
 }  // namespace
 
-RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size,
-                     bool enable_splitting)
-    : max_range_block_size_(max_range_block_size),
-      entries_(mr),
-      enable_splitting_(enable_splitting) {
+RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
+    : max_range_block_size_(max_range_block_size), entries_(mr) {
   // The tree has at least always a block with a negative infinity bound, so that any new insertion
   // goes at least somewhere
   CreateEmptyBlock(-std::numeric_limits<double>::infinity());
@@ -90,8 +87,7 @@ void RangeTree::Add(DocId id, double value) {
   auto& [lower_bound, block] = *it;
 
   // Don't disrupt large monovalue blocks, instead create new nextafter block
-  if (enable_splitting_ && block.Size() >= max_range_block_size_ &&
-      lower_bound == block.max_seen /* monovalue */ &&
+  if (block.Size() >= max_range_block_size_ && lower_bound == block.max_seen /* monovalue */ &&
       value != lower_bound /* but new value is different*/
   ) {
     // We use nextafter as the lower bound to "catch" all other possible inserts into the block,
@@ -104,11 +100,8 @@ void RangeTree::Add(DocId id, double value) {
   auto insert_result = block.Insert({id, value});
   LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
-  if (!enable_splitting_ || block.Size() <= max_range_block_size_)
-    return;
-
-  // Large monovalue block, not reducable by splitting
-  if (lower_bound == block.max_seen)
+  // Small block or large monovalue block, not reducable by splitting
+  if (block.Size() <= max_range_block_size_ || lower_bound == block.max_seen)
     return;
 
   SplitBlock(it);
@@ -174,38 +167,6 @@ absl::InlinedVector<const RangeTree::RangeBlock*, 5> RangeTree::GetAllBlocks() c
   }
 
   return blocks;
-}
-
-void RangeTree::FinalizeInitialization() {
-  DCHECK(!enable_splitting_);
-  DCHECK_EQ(entries_.size(), 1u);
-
-  auto& block = entries_.begin()->second;
-  std::vector<Entry> entries(block.Size());
-  std::copy(block.begin(), block.end(), entries.begin());  // avoid std::distance call
-
-  enable_splitting_ = true;
-  block.Clear();
-  block.max_seen = -std::numeric_limits<double>::infinity();  // reset right bound
-
-  std::sort(entries.begin(), entries.end(),
-            [](const auto& a, const auto& b) { return a.second < b.second; });
-
-  // Add sorted elements in batches
-  for (size_t idx = 0; idx < entries.size();) {
-    // Select existing leftmost block for first batch, otherwise create new empty block
-    RangeBlock* range_block = idx ? &CreateEmptyBlock(entries[idx].second)->second : &block;
-
-    while (idx < entries.size()) {
-      // Stop if we filled a block and a new value started (equal value must be in same block)
-      if (range_block->Size() >= max_range_block_size_ &&
-          entries[idx - 1].second != entries[idx].second)
-        break;
-
-      range_block->Insert(entries[idx]);
-      idx++;
-    }
-  }
 }
 
 RangeTree::Map::iterator RangeTree::FindRangeBlock(double value) {
@@ -328,6 +289,46 @@ std::vector<DocId> RangeResult::Take() {
   };
 
   return std::visit(cb, result_);
+}
+
+void RangeTree::Builder::Add(DocId id, double value) {
+  bool inserted = entries_.emplace(id, value).second;
+  DCHECK(inserted);
+}
+
+void RangeTree::Builder::Remove(DocId id, double value) {
+  entries_.erase({id, value});
+}
+
+void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
+  // Sort all elements
+  std::vector<Entry> sorted_entries(entries_.begin(), entries_.end());
+  std::ranges::sort(sorted_entries, {}, &Entry::second);
+  quota.Check();
+
+  // Add sorted elements in batches
+  RangeBlock* block = &tree->entries_.begin()->second;
+  for (size_t idx = 0; idx < sorted_entries.size();) {
+    // Create new block for each insertion batch (first goes into only first block)
+    if (idx)
+      block = &tree->CreateEmptyBlock(sorted_entries[idx].second)->second;
+
+    // Insert until we filled a block and a new value started (equal value must be in same block)
+    while (idx < sorted_entries.size()) {
+      if (block->Size() >= tree->max_range_block_size_ &&
+          sorted_entries[idx - 1].second != sorted_entries[idx].second)
+        break;
+
+      block->Insert(sorted_entries[idx]);
+      idx++;
+    }
+
+    quota.Check();  // Yield if needed
+  }
+
+  // Insert entries accumulated during yields
+  for (auto entry : entries_)
+    tree->Add(entry.first, entry.second);
 }
 
 }  // namespace dfly::search
