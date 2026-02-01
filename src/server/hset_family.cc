@@ -535,7 +535,18 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
-  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
+  auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
+
+  // If it is a hash which became empty after expiring fields, we must delete the key safely.
+  // We use DelMutable which consumes the iterator/updater to prevent the crash.
+  if (pv->Encoding() == kEncodingStrMap2) {
+    auto* sm = static_cast<StringMap*>(pv->RObjPtr());
+    if (sm->UpperBoundSize() == 0) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+    }
+  }
+
+  return res;
 }
 
 // HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...

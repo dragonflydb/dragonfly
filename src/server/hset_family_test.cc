@@ -4,6 +4,10 @@
 
 #include "server/hset_family.h"
 
+#include <absl/cleanup/cleanup.h>
+
+#include <tuple>
+
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/sds.h"
@@ -713,6 +717,19 @@ TEST_F(HSetFamilyTest, HRandFieldRespFormat) {
     EXPECT_THAT(vec[i], AnyOf("a", "b", "c"));
     EXPECT_THAT(vec[i + 1], expected[vec[i].GetView()]);
   }
+}
+
+// Make sure no "Zombie Key": HEXPIRE with TTL 0 must delete the key
+// if the hash becomes empty. If the key remains (zombie), saving the RDB or running
+// commands like EXISTS against it may lead to crashes or other incorrect behavior.
+TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
+  constexpr auto kRdbFile = "zombie_test.rdb";
+  auto cleanup = absl::MakeCleanup([kRdbFile] { std::ignore = remove(kRdbFile); });
+  Run({"HSET", "zombie", "f", "v"});
+  auto resp = Run({"HEXPIRE", "zombie", "0", "FIELDS", "1", "f"});
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "zombie"}));
+  EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }
 
 }  // namespace dfly
