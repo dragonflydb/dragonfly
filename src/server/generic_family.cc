@@ -250,13 +250,23 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
 }
 
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
-  if (HasExpiration()) {
-    int64_t ttl = abs_time_ ? expiration_ - now_msec : expiration_;
-    if (ttl > kMaxExpireDeadlineMs)
-      ttl = kMaxExpireDeadlineMs;
+  if (!HasExpiration())
+    return true;
 
-    expiration_ = ttl < 0 ? -1 : ttl + now_msec;
+  int64_t ttl_ms;
+  if (abs_time_) {
+    if (expiration_ <= now_msec) {
+      expiration_ = 0;  // Already expired
+      return true;
+    }
+    ttl_ms = expiration_ - now_msec;
+  } else {
+    ttl_ms = expiration_;
+    if (ttl_ms > kMaxExpireDeadlineMs)
+      ttl_ms = kMaxExpireDeadlineMs;
   }
+
+  expiration_ = now_msec + ttl_ms;
   return true;
 }
 
@@ -269,6 +279,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
 OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
   RestoreArgs out_args;
   string cur_arg{ArgS(args, 1)};  // extract ttl
+
   if (!absl::SimpleAtoi(cur_arg, &out_args.expiration_) || (out_args.expiration_ < 0)) {
     return OpStatus::INVALID_INT;
   }
@@ -1298,17 +1309,20 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
-
+  int64_t ttl_ms = int_arg * 1000;
   // silently cap the expire time to kMaxExpireDeadlineSec which is more than 8 years.
-  if (int_arg > kMaxExpireDeadlineSec) {
-    int_arg = kMaxExpireDeadlineSec;
+  if (ttl_ms > kMaxExpireDeadlineMs) {
+    ttl_ms = kMaxExpireDeadlineMs;
   }
 
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-  DbSlice::ExpireParams params{.expire_options = expire_options.value()};
+  int64_t now_ms = GetCurrentTimeMs();
+
+  DbSlice::ExpireParams params{.ms_timestamp = now_ms + ttl_ms,
+                               .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1410,20 +1424,16 @@ void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, -1);
-
+  int64_t ttl_ms = int_arg;
   // to be more compatible with redis, we silently cap the expire time to kMaxExpireDeadlineSec
-  if (int_arg > kMaxExpireDeadlineMs) {
-    int_arg = kMaxExpireDeadlineMs;
+  if (ttl_ms > kMaxExpireDeadlineMs) {
+    ttl_ms = kMaxExpireDeadlineMs;
   }
 
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2));
   if (!expire_options) {
     return cmd_cntx->SendError(expire_options.error());
   }
-
-  int64_t ttl_ms = int_arg;
-  if (ttl_ms > kMaxExpireDeadlineMs)
-    ttl_ms = kMaxExpireDeadlineMs;
 
   int64_t now_ms = GetCurrentTimeMs();
   DbSlice::ExpireParams params{.ms_timestamp = now_ms + ttl_ms,

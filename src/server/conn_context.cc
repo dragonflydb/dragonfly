@@ -40,7 +40,7 @@ StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyM
   args_ = facade::ParsedArgs{*backed_};
 }
 
-CmdArgList StoredCmd::ArgList(CmdArgVec* scratch) const {
+CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
   return args_.ToSlice(scratch);
 }
 
@@ -270,6 +270,7 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;
+  arg_slice_backing.clear();
   start_time_ns = 0;
   exec_body_len = 0;
 }

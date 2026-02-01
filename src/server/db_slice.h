@@ -204,16 +204,20 @@ class DbSlice {
       std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
 
   struct ExpireParams {
-    int64_t ms_timestamp = 0;
+    int64_t ms_timestamp = INT64_MIN;
     bool persist = false;
     int32_t expire_options = 0;
 
     bool IsDefined() const {
-      return ms_timestamp != 0;
+      return ms_timestamp != INT64_MIN;
     }
 
-    bool IsExpired(uint64_t now_msec) const {
-      return ms_timestamp > 0 && ms_timestamp <= now_msec;
+    bool IsExpired(int64_t now_msec) const {
+      return ms_timestamp != INT64_MIN && ms_timestamp <= now_msec;
+    }
+
+    bool IsAbsolute(int64_t now_ms) const {
+      return ms_timestamp > now_ms + kMaxExpireDeadlineMs;
     }
   };
 

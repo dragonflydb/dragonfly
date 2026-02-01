@@ -1068,10 +1068,13 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     RemoveExpire(cntx.db_index, prime_it);
     return kPersistValue;
   }
-
   int64_t abs_msec = params.ms_timestamp;
+  if (abs_msec <= 0 || static_cast<uint64_t>(abs_msec) <= cntx.time_now_ms) {
+    return OpStatus::OUT_OF_RANGE;  // No expiry or already expired
+  }
+
   int64_t rel_msec = abs_msec - cntx.time_now_ms;
-  if (rel_msec <= 0 || rel_msec > kMaxExpireDeadlineMs) {
+  if (rel_msec > kMaxExpireDeadlineMs) {
     return OpStatus::OUT_OF_RANGE;
   }
 

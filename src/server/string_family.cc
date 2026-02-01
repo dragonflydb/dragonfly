@@ -862,8 +862,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   EngineShard* shard = op_args_.shard;
 
   auto& db_slice = op_args_.GetDbSlice();
-  uint64_t at_ms =
-      params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
+  int64_t at_ms = params.expire_after_ms;
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
@@ -914,8 +913,7 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
   it->second = PrimeValue{value};
 
   if (params.expire_after_ms) {
-    db_slice.AddExpire(op_args_.db_cntx.db_index, it,
-                       params.expire_after_ms + op_args_.db_cntx.time_now_ms);
+    db_slice.AddExpire(op_args_.db_cntx.db_index, it, params.expire_after_ms);
   }
 
   if (params.memcache_flags) {
@@ -952,7 +950,7 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
 
   std::string exp_str;
   if (params.flags & SET_EXPIRE_AFTER_MS) {
-    exp_str = absl::StrCat(params.expire_after_ms + op_args_.db_cntx.time_now_ms);
+    exp_str = absl::StrCat(params.expire_after_ms);
     cmds.insert(cmds.end(), {"PXAT", exp_str});
   } else if (params.flags & SET_KEEP_EXPIRE) {
     cmds.push_back("KEEPTTL");
@@ -1047,22 +1045,33 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
       if (!is_absolute && *exp_type != ExpT::PX) {
         ms_value *= 1000;
       }
-      if (ms_value > kMaxExpireDeadlineMs)
-        ms_value = kMaxExpireDeadlineMs;
 
       int64_t now_ms = GetCurrentTimeMs();
-      int64_t abs_ms = is_absolute ? ms_value : now_ms + ms_value;
+      int64_t abs_ms;
 
-      if (abs_ms < 0) {
+      if (!is_absolute) {
+        // Cap relative TTLs
+        if (ms_value > static_cast<int64_t>(kMaxExpireDeadlineMs))
+          ms_value = kMaxExpireDeadlineMs;
+        abs_ms = now_ms + ms_value;
+      } else {
+        // For absolute timestamps, only check if it's already expired
+        abs_ms = ms_value;
+      }
+
+      if (abs_ms <= now_ms) {
         return facade::ErrorReply{InvalidExpireTime("set")};
       }
 
-      int64_t ttl_ms = abs_ms - now_ms;
-      if (ttl_ms < 0) {
-        return NegativeExpire{};
+      // Only check TTL for relative expiry (not absolute)
+      if (!is_absolute) {
+        int64_t ttl_ms = abs_ms - now_ms;
+        if (ttl_ms > kMaxExpireDeadlineMs) {
+          return NegativeExpire{};
+        }
       }
 
-      sparams.expire_after_ms = ttl_ms;
+      sparams.expire_after_ms = abs_ms;
 
     } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
@@ -1171,13 +1180,9 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t now_ms = GetCurrentTimeMs();
   int64_t abs_ms = now_ms + ttl_ms;
 
-  if (abs_ms < 0) {
-    return cmd_cntx->SendError(InvalidExpireTime("set"));
-  }
-
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  sparams.expire_after_ms = ttl_ms;  // relative TTL
+  sparams.expire_after_ms = abs_ms;
 
   cmd_cntx->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
 }
@@ -1313,20 +1318,26 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
         return cmd_cntx->SendError(InvalidExpireTime("getex"));
       }
 
-      exp_params.ms_timestamp = int_arg;
+      int64_t abs_timestamp = int_arg;
       bool is_absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
 
       if (!is_absolute && *exp_type != ExpT::PX) {
-        exp_params.ms_timestamp *= 1000;  // SEC → MSEC
-      }
-
-      if (exp_params.ms_timestamp > kMaxExpireDeadlineMs) {
-        exp_params.ms_timestamp = kMaxExpireDeadlineMs;
+        abs_timestamp *= 1000;  // SEC → MSEC
       }
 
       if (!is_absolute) {
-        exp_params.ms_timestamp += GetCurrentTimeMs();
+        if (abs_timestamp > kMaxExpireDeadlineMs) {
+          abs_timestamp = kMaxExpireDeadlineMs;
+        }
+        abs_timestamp += GetCurrentTimeMs();
       }
+
+      int64_t now_ms = GetCurrentTimeMs();
+      if (abs_timestamp <= now_ms) {
+        return cmd_cntx->SendError(InvalidExpireTime("getex"));
+      }
+
+      exp_params.ms_timestamp = abs_timestamp;
 
       defined = true;
     } else if (parser.Check("PERSIST")) {
