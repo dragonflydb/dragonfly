@@ -1,4 +1,3 @@
-# These tests are disabled until Dragonfly works well with BullMQ.
 name: bullmq-tests
 on:
   workflow_dispatch:
@@ -10,62 +9,65 @@ jobs:
   build:
     runs-on: ubuntu-latest
     name: Build
-
     timeout-minutes: 60
 
-    # TODO: Build Dragonfly instead of using a container, see below
-    services:
-      dragonflydb:
-        image: ghcr.io/dragonflydb/dragonfly-weekly:latest
-        env:
-          DFLY_cluster_mode: emulated
-          DFLY_lock_on_hashtags: true
-          HEALTHCHECK_PORT: 6379
-        ports:
-          - 6379:6379
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
 
-      - name: Install NodeJs
+      - name: Build Dragonfly
+        run: |
+          cmake -B ${GITHUB_WORKSPACE}/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_AWS=OFF \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
+            -GNinja \
+            -L
+          cd ${GITHUB_WORKSPACE}/build && ninja dragonfly
+
+      - name: Install Node.js
         run: |
           wget -q https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
           tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
-          sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
-          sudo apt install yarn jq
+          cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
+          apt-get update && apt-get install -y jq
+          npm install -g yarn
           node --version
-          npm --version
           yarn --version
-          mkdir -p $GITHUB_WORKSPACE/build
 
-#      - name: Build Dragonfly
-#        run: |
-#          mkdir $GITHUB_WORKSPACE/build
-#          cd $GITHUB_WORKSPACE/build
-#          cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
-#          ninja dragonfly
-#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+      - name: Start Dragonfly
+        run: |
+          ${GITHUB_WORKSPACE}/build/dragonfly \
+            --alsologtostderr \
+            --cluster_mode=emulated \
+            --lock_on_hashtags \
+            --default_lua_flags=allow-undeclared-keys \
+            --dbfilename= \
+            --port 6379 &
+          sleep 3
+          redis-cli -p 6379 PING
 
       - name: Build BullMQ
         run: |
-          mkdir -p $GITHUB_WORKSPACE/../bullmq
-          cd $GITHUB_WORKSPACE/../bullmq
-          # TODO: Use BullMQ latest release instead of our fork:
-          # DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
-          # echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
-          # wget -O bullmq.tar.gz ${DOWNLOAD_URL}
-          # tar -zxvf bullmq.tar.gz
-          # mv taskforcesh-bullmq-* bullmq
+          mkdir -p /tmp/bullmq && cd /tmp/bullmq
           git clone https://github.com/dragonflydb/bullmq
           cd bullmq
-          pwd
           yarn install
           yarn build
 
       - name: Run BullMQ tests
         run: |
-          cd $GITHUB_WORKSPACE/../bullmq/bullmq
+          cd /tmp/bullmq/bullmq
           BULLMQ_TEST_PREFIX={b} yarn test
 
       - name: Upload logs on failure

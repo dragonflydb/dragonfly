@@ -1565,3 +1565,63 @@ async def test_issue_6165_squash_invalid_syntax(async_client):
     res = await pip.execute(raise_on_error=False)
     assert res[0] == True  # SET key1
     assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX
+
+
+@dfly_args({"proactor_threads": "2", "pipeline_squash": 1})
+async def test_quit_in_pipeline(df_server: DflyInstance):
+    """
+    Regression test: when QUIT is pipelined together with other commands
+    (e.g. DEL DEL ... DEL QUIT), the server must flush all preceding replies
+    before closing the connection. Previously QUIT's ShutdownSelfBlocking()
+    closed the socket before SquashPipeline could flush the buffered DEL
+    responses, causing the client to see "Connection is closed".
+
+    This reproduces the BullMQ removeAllQueueData() pattern: scanStream +
+    pipeline DEL + client.quit() where pipeline.exec() is not awaited.
+    """
+
+    def resp_encode(*args):
+        parts = [f"*{len(args)}\r\n"]
+        for a in args:
+            a = str(a)
+            parts.append(f"${len(a)}\r\n{a}\r\n")
+        return "".join(parts)
+
+    NUM_KEYS = 9
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("127.0.0.1", df_server.port))
+    s.settimeout(2)
+
+    # Setup: create NUM_KEYS keys
+    setup = ""
+    for i in range(NUM_KEYS):
+        setup += resp_encode("SET", f"{{b}}:pqt:k{i}", "v")
+    s.sendall(setup.encode())
+
+    # Read all +OK responses
+    data = b""
+    while data.count(b"+OK") < NUM_KEYS:
+        data += s.recv(4096)
+
+    # Send DEL for all keys + QUIT in one TCP write (pipeline)
+    pipeline = ""
+    for i in range(NUM_KEYS):
+        pipeline += resp_encode("DEL", f"{{b}}:pqt:k{i}")
+    pipeline += resp_encode("QUIT")
+    s.sendall(pipeline.encode())
+
+    # Read all responses: NUM_KEYS ":1\r\n" for DELs + "+OK\r\n" for QUIT
+    data = b""
+    try:
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        pass
+
+    s.close()
+
+    assert data.count(b":1\r\n") == NUM_KEYS, f"Expected {NUM_KEYS} DEL replies, got: {data!r}"
+    assert b"+OK\r\n" in data, f"Expected QUIT OK reply, got: {data!r}"

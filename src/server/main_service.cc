@@ -1567,7 +1567,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmd_cntx->SendError("Internal Error");
-    cmd_cntx->rb()->CloseConnection();
+    dfly_cntx->conn()->MarkForClose();
   }
 
   return res;
@@ -1948,11 +1948,9 @@ void Service::Quit(CmdArgList args, CommandContext* cmd_cntx) {
   if (cmd_cntx->rb()->GetProtocol() == Protocol::REDIS)
     cmd_cntx->rb()->SendOk();
 
-  cmd_cntx->rb()->CloseConnection();
-
   auto* cntx = cmd_cntx->server_conn_cntx();
   DeactivateMonitoring(cntx);
-  cntx->conn()->ShutdownSelfBlocking();
+  cmd_cntx->conn()->MarkForClose();
 }
 
 void Service::Multi(CmdArgList args, CommandContext* cmd_cntx) {
