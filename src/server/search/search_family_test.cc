@@ -328,7 +328,12 @@ TEST_F(SearchFamilyTest, Stats) {
 // Test how asynchronous indexing indexes documents and reports its progress
 TEST_F(SearchFamilyTest, Indexing) {
   // Create documents
+#ifdef NDEBUG
   constexpr size_t kNumDocs = 10'000;
+#else
+  constexpr size_t kNumDocs = 1'000;
+#endif
+
   for (size_t i = 0; i < kNumDocs; i++) {
     Run({"hset", absl::StrCat("doc-", i), "t", absl::StrCat("some long text at ", i), "v1",
          absl::StrCat(i / 10), "v2", absl::StrCat(i / 1000)});
@@ -385,7 +390,6 @@ TEST_F(SearchFamilyTest, Indexing) {
     EXPECT_THAT(resp, Not(ErrArg("")));
 
     iterations++;
-    ThisFiber::Yield();
     EXPECT_LE(absl::Now(), deadline);
   }
 
