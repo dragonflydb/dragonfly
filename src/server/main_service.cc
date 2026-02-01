@@ -1177,11 +1177,6 @@ void Service::Shutdown() {
 
   // to shutdown all the runtime components that depend on EngineShard
   cluster_family_.Shutdown();
-
-#ifdef WITH_SEARCH
-  SearchFamily::Shutdown();
-#endif
-
   server_family_.Shutdown();
 
   shutdown_watchdog.emplace(pp_);
