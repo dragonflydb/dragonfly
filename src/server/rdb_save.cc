@@ -37,7 +37,6 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
-#include "server/search/global_hnsw_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
@@ -1424,53 +1423,56 @@ void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
     auto* index = indices->GetIndex(index_name);
     auto index_info = index->GetInfo();
 
-        // Collect HNSW metadata for vector field (first one found)
-        for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
-          if (finfo.type == search::SchemaField::VECTOR &&
-              !(finfo.flags & search::SchemaField::NOINDEX)) {
-            if (auto hnsw_index =
-                    GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
-                hnsw_index) {
-              index_info.hnsw_metadata = hnsw_index->GetMetadata();
-              break;  // Only store first HNSW index metadata
-            }
-          }
-        }
+    if (!is_summary) {
+      std::string restore_cmd = absl::StrCat(index_name, " ", index_info.BuildRestoreCommand());
+      search_indices->emplace_back(std::move(restore_cmd));
+      continue;
+    }
 
-        // Save index definition as JSON with HNSW metadata
-        TmpJson index_json;
-        index_json["name"] = index_name;
-        index_json["cmd"] = index_info.BuildRestoreCommand();
-
-        if (index_info.hnsw_metadata.has_value()) {
-          const auto& meta = index_info.hnsw_metadata.value();
-          TmpJson hnsw_meta;
-          hnsw_meta["max_elements"] = meta.max_elements;
-          hnsw_meta["cur_element_count"] = meta.cur_element_count;
-          hnsw_meta["maxlevel"] = meta.maxlevel;
-          hnsw_meta["enterpoint_node"] = meta.enterpoint_node;
-          hnsw_meta["M"] = meta.M;
-          hnsw_meta["maxM"] = meta.maxM;
-          hnsw_meta["maxM0"] = meta.maxM0;
-          hnsw_meta["ef_construction"] = meta.ef_construction;
-          hnsw_meta["mult"] = meta.mult;
-          index_json["hnsw_metadata"] = std::move(hnsw_meta);
-        }
-
-        search_indices.emplace_back(index_json.to_string());
-
-        // Save synonym groups to separate vector
-        const auto& synonym_groups = index->GetSynonyms().GetGroups();
-        for (const auto& [group_id, terms] : synonym_groups) {
-          if (!terms.empty()) {
-            // Format: "index_name group_id term1 term2 term3"
-            std::string syn_cmd =
-                absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
-            search_synonyms.emplace_back(std::move(syn_cmd));
-          }
+    // Collect HNSW metadata for vector field (first one found)
+    for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
+      if (finfo.type == search::SchemaField::VECTOR &&
+          !(finfo.flags & search::SchemaField::NOINDEX)) {
+        if (auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
+            hnsw_index) {
+          index_info.hnsw_metadata = hnsw_index->GetMetadata();
+          break;
         }
       }
     }
+
+    // Save index definition as JSON with HNSW metadata
+    TmpJson index_json;
+    index_json["name"] = index_name;
+    index_json["cmd"] = index_info.BuildRestoreCommand();
+
+    if (index_info.hnsw_metadata.has_value()) {
+      const auto& meta = index_info.hnsw_metadata.value();
+      TmpJson hnsw_meta;
+      hnsw_meta["max_elements"] = meta.max_elements;
+      hnsw_meta["cur_element_count"] = meta.cur_element_count;
+      hnsw_meta["maxlevel"] = meta.maxlevel;
+      hnsw_meta["enterpoint_node"] = meta.enterpoint_node;
+      hnsw_meta["M"] = meta.M;
+      hnsw_meta["maxM"] = meta.maxM;
+      hnsw_meta["maxM0"] = meta.maxM0;
+      hnsw_meta["ef_construction"] = meta.ef_construction;
+      hnsw_meta["mult"] = meta.mult;
+      index_json["hnsw_metadata"] = std::move(hnsw_meta);
+    }
+
+    search_indices->emplace_back(index_json.to_string());
+
+    // Save synonym groups
+    const auto& synonym_groups = index->GetSynonyms().GetGroups();
+    for (const auto& [group_id, terms] : synonym_groups) {
+      if (!terms.empty()) {
+        std::string syn_cmd =
+            absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
+        search_synonyms->emplace_back(std::move(syn_cmd));
+      }
+    }
+  }
 #endif
 }
 
