@@ -1601,6 +1601,11 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
 }
 
 TEST_F(SearchFamilyTest, WrongVectorFieldType) {
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
+           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
   Run({"JSON.SET", "j1", ".",
        R"({"vector_field": [0.1, 0.2, 0.3], "name": "doc_with_correct_dim"})"});
   Run({"JSON.SET", "j2", ".", R"({"vector_field": [0.1, 0.2], "name": "doc_with_small_dim"})"});
@@ -1619,24 +1624,19 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
        R"({"vector_field":[true, false, true], "name": "doc_with_booleans"})"});
   Run({"JSON.SET", "j12", ".", R"({"vector_field":1, "name": "doc_with_int"})"});
 
-  auto resp =
-      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
-           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
-  EXPECT_EQ(resp, "OK");
-
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4", "j8"));
 }
 
 // Test that FT.AGGREGATE prints only needed fields
 TEST_F(SearchFamilyTest, AggregateResultFields) {
-  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
-  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
-  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
-
   auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT", "SORTABLE",
                    "$.b", "AS", "b", "TEXT", "$.c", "AS", "c", "TEXT"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
+  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
+  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
 
   resp = Run({"FT.AGGREGATE", "i1", "*"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
