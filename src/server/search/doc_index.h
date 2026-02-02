@@ -245,9 +245,6 @@ class ShardDocIndex {
     // Serialization: returns pairs of (key, doc_id) for all active mappings
     std::vector<std::pair<std::string, DocId>> Serialize() const;
 
-    // Deserialization: restores the key index from serialized data
-    void Deserialize(const std::vector<std::pair<std::string, DocId>>& data);
-
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -336,11 +333,6 @@ class ShardDocIndex {
     return key_index_.Serialize();
   }
 
-  // Deserialize the key-to-DocId mapping from persistence
-  void DeserializeKeyIndex(const std::vector<std::pair<std::string, DocId>>& data) {
-    key_index_.Deserialize(data);
-  }
-
   // Check if key index has been pre-populated (e.g., from deserialization)
   bool HasPreloadedKeyIndex() const {
     return key_index_.Size() > 0;
@@ -349,9 +341,6 @@ class ShardDocIndex {
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
-
-  // Rebuild using pre-loaded key index mapping (preserves DocIds for HNSW consistency)
-  void RebuildWithPreloadedMapping(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
@@ -391,10 +380,6 @@ class ShardDocIndices {
 
   // Rebuild all indices
   void RebuildAllIndices(const OpArgs& op_args);
-
-  // Apply pre-loaded key-to-DocId mapping to a specific index
-  void ApplyKeyIndexMapping(std::string_view index_name,
-                            const std::vector<std::pair<std::string, search::DocId>>& mappings);
 
   std::vector<std::string> GetIndexNames() const;
 

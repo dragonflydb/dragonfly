@@ -2270,12 +2270,9 @@ error_code RdbLoader::Load(io::Source* src) {
         mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      // Store the mapping to be applied after index creation (thread-safe)
-      {
-        std::lock_guard lk(search_index_mu_);
-        pending_index_mappings_.emplace_back(PendingIndexMapping{
-            static_cast<uint32_t>(shard_id), std::move(index_name), std::move(mappings)});
-      }
+      // Store the mapping to be applied after index creation
+      pending_index_mappings_.emplace_back(PendingIndexMapping{
+          static_cast<uint32_t>(shard_id), std::move(index_name), std::move(mappings)});
 
       VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
               << " entries";
@@ -2979,11 +2976,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-// Static synchronization for thread-safe search index creation and mappings
+// Static synchronization for thread-safe search index creation
 base::SpinLock RdbLoader::search_index_mu_;
 absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
-// Static storage for index mappings collected from all RdbLoader instances
-std::vector<RdbLoader::PendingIndexMapping> RdbLoader::pending_index_mappings_;
 
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
@@ -3049,46 +3044,6 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
   pending_synonym_cmds_.push_back(std::move(def));
 }
 
-void RdbLoader::ApplyPendingIndexMappings() {
-#ifdef WITH_SEARCH
-  // Take the mappings under lock
-  std::vector<PendingIndexMapping> mappings_to_apply;
-  {
-    std::lock_guard lk(search_index_mu_);
-    if (pending_index_mappings_.empty()) {
-      return;
-    }
-    mappings_to_apply.swap(pending_index_mappings_);
-  }
-
-  // Group mappings by shard_id for efficient dispatch
-  absl::flat_hash_map<uint32_t, std::vector<const PendingIndexMapping*>> mappings_by_shard;
-  for (const auto& mapping : mappings_to_apply) {
-    mappings_by_shard[mapping.shard_id].push_back(&mapping);
-  }
-
-  // Apply mappings on each shard
-  for (const auto& [shard_id, shard_mappings] : mappings_by_shard) {
-    if (shard_id >= shard_set->size()) {
-      LOG(WARNING) << "Skipping index mappings for invalid shard_id: " << shard_id;
-      continue;
-    }
-
-    shard_set->Add(shard_id, [&shard_mappings]() {
-      auto* indices = EngineShard::tlocal()->search_indices();
-      for (const auto* mapping : shard_mappings) {
-        indices->ApplyKeyIndexMapping(mapping->index_name, mapping->mappings);
-      }
-    });
-  }
-
-  // Wait for all shards to complete
-  shard_set->RunBlockingInParallel([](EngineShard*) {});
-
-  VLOG(1) << "Applied " << mappings_to_apply.size() << " pending index mappings";
-#endif
-}
-
 void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
@@ -3101,9 +3056,6 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   }
 
   std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
-
-  // Apply pending index key-to-DocId mappings before rebuild (even on error, to clear static state)
-  ApplyPendingIndexMappings();
 
   if (is_error)
     return;
