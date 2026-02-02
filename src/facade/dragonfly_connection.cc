@@ -1150,7 +1150,6 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       // 2) Can dispatch synchronously.
       // 3) Not over limits (for an async dispatch).
       bool can_dispatch_sync = can_dispatch_sync_fn();
-      !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
       if (can_dispatch_sync)
         return true;
       bool over_limits =
