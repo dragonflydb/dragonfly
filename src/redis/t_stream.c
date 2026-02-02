@@ -849,11 +849,6 @@ int streamRangeHasTombstones(stream *s, streamID *start, streamID *end) {
         return 0;
     }
 
-    if (streamCompareID(&s->first_id,&s->max_deleted_entry_id) > 0) {
-        /* The latest tombstone is before the first entry. */
-        return 0;
-    }
-
     if (start) {
         start_id = *start;
     } else {
@@ -913,7 +908,12 @@ long long streamEstimateDistanceFromFirstEverEntry(stream *s, streamID *id) {
         return s->entries_added;
     }
 
-    int cmp_last = streamCompareID(id,&s->last_id);
+    if (!streamIDEqZero(id) && streamCompareID(id, &s->max_deleted_entry_id) < 0) {
+        /* The ID is before the last tombstone, so the counter is unknown. */
+        return SCG_INVALID_ENTRIES_READ;
+    }
+
+    int cmp_last = streamCompareID(id, &s->last_id);
     if (cmp_last == 0) {
         /* Return the exact counter of the last entry in the stream. */
         return s->entries_added;
