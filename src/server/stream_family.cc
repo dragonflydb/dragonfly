@@ -4,6 +4,7 @@
 
 #include "server/stream_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {
@@ -707,6 +708,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   auto& it = add_res.it;
 
   StreamMemTracker mem_tracker;
+  absl::Cleanup on_exit([it, &mem_tracker]() mutable { mem_tracker.UpdateStreamSize(it->second); });
 
   if (add_res.is_new) {
     stream* s = streamNew();
@@ -735,8 +737,6 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     VLOG(2) << "Trimmed " << deleted_items_number << " items from stream " << key
             << " during the XADD command";
   }
-
-  mem_tracker.UpdateStreamSize(it->second);
 
   if (op_args.shard->journal()) {
     std::string result_id_as_string = StreamsIdToString(result_id);
@@ -822,9 +822,10 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     rec.kv_arr.reserve(numfields);
     if (opts.group && streamCompareID(&id, &opts.group->last_id) > 0) {
       if (opts.group->entries_read != SCG_INVALID_ENTRIES_READ &&
-          !streamRangeHasTombstones(s, &id, NULL)) {
-        /* A valid counter and no future tombstones mean we can
-         * increment the read counter to keep tracking the group's
+          streamCompareID(&opts.group->last_id, &s->first_id) >= 0 &&
+          !streamRangeHasTombstones(s, &opts.group->last_id, NULL)) {
+        /* A valid counter and no tombstones in the group's last-delivered-id and the stream's
+         * last-generated-id, we can increment the read counter to keep tracking the group's
          * progress. */
         opts.group->entries_read++;
       } else if (s->entries_added) {
@@ -849,7 +850,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
     // Only relevant for XREADGROUP flow. Should not trigger on XREAD which is READ only.
     if (is_write_command && !opts.noack) {
-      /* TODO memory tracking here */
+      StreamMemTracker mem_track;
       unsigned char buf[sizeof(streamID)];
       StreamEncodeID(buf, id);
       uint64_t now_ms = op_args.db_cntx.time_now_ms;
@@ -884,6 +885,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
       }
       opts.consumer->active_time = now_ms;
       result.back().delivery_time = now_ms;
+      mem_track.UpdateStreamSize(it.it->second);
     }
     if (opts.count == result.size())
       break;
@@ -2080,10 +2082,10 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const Trim
     return res_it.status();
   }
 
-  StreamMemTracker mem_tracker;
-
   PrimeValue& pv = res_it->it->second;
   stream* s = (stream*)pv.RObjPtr();
+
+  StreamMemTracker mem_tracker;
 
   int64_t deleted_items_number = TrimStream(opts, s);
 
@@ -2543,7 +2545,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       range_opts.group = sitem.group;
 
       // Update consumer, only for XReadGroup path
+      std::optional<StreamMemTracker> tracker;
       if (sitem.group) {
+        tracker = {};
         range_opts.consumer =
             FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
         sitem.consumer = range_opts.consumer;
@@ -2559,10 +2563,21 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
         }
       }
 
+      key = *wake_key;
+
+      if (tracker) {
+        auto op_args = t->GetOpArgs(shard);
+        auto& db_slice = op_args.GetDbSlice();
+        auto it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+        DCHECK(it);
+        if (it) {
+          tracker->UpdateStreamSize(it->it->second);
+        }
+      }
+
       range_opts.noack = opts->noack;
 
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
-      key = *wake_key;
       if (result) {
         JournalXReadGroupIfNeeded(t->GetOpArgs(shard), *opts, *result, *wake_key);
       }
@@ -3376,7 +3391,9 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
+    StreamMemTracker tracker;
     consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
+    tracker.UpdateStreamSize(it.it->second);
 
     requested_sitem.group = group;
     requested_sitem.consumer = consumer;
