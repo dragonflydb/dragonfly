@@ -1320,46 +1320,46 @@ TEST_F(StreamFamilyTest, XDelNonExistentId) {
 
 // Test consumer group lag when tombstone created after last_id
 TEST_F(StreamFamilyTest, ConsumerGroupLagWithTombstoneAfterLastId) {
-  Run({"DEL", "x"});
-  Run({"XADD", "x", "1-0", "data", "a"});
-  Run({"XADD", "x", "2-0", "data", "b"});
-  Run({"XADD", "x", "3-0", "data", "c"});
-  Run({"XADD", "x", "4-0", "data", "d"});
-  Run({"XADD", "x", "5-0", "data", "e"});
-  Run({"XADD", "x", "6-0", "data", "f"});
-  Run({"XDEL", "x", "3-0"});
-  Run({"XGROUP", "CREATE", "x", "g1", "0"});
+  Run("DEL x");
+  Run("XADD x 1-0 data a");
+  Run("XADD x 2-0 data b");
+  Run("XADD x 3-0 data c");
+  Run("XADD x 4-0 data d");
+  Run("XADD x 5-0 data e");
+  Run("XADD x 6-0 data f");
+  Run("XDEL x 3-0");
+  Run("XGROUP CREATE x g1 0");
 
   // Read all messages (5 actual entries since 3-0 was deleted, but entries_added is 6)
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "10", "STREAMS", "x", ">"});
-  auto resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 10 STREAMS x >");
+  auto resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "6-0", "entries-read", IntArg(6),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
 
   // Add more messages
-  Run({"XADD", "x", "7-0", "data", "g"});
-  Run({"XADD", "x", "8-0", "data", "h"});
-  Run({"XADD", "x", "9-0", "data", "i"});
-  Run({"XADD", "x", "10-0", "data", "j"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XADD x 7-0 data g");
+  Run("XADD x 8-0 data h");
+  Run("XADD x 9-0 data i");
+  Run("XADD x 10-0 data j");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "6-0", "entries-read", IntArg(6),
                           "lag", IntArg(4), "pel-count", _, "pending", _, "consumers", _));
 
   // Read 3 more messages (COUNT 3 will read 7-0, 8-0, 9-0)
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "3", "STREAMS", "x", ">"});
-  Run({"XDEL", "x", "9-0"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 3 STREAMS x >");
+  Run("XDEL x 9-0");
   // Now there is a tombstone in the stream after the consumer group last_id
   // so the lag can't be calculated
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "9-0", "entries-read", IntArg(9),
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
   // Read one more message to catch up
-  Run({"XREADGROUP", "GROUP", "g1", "c12", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c12 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "10-0", "entries-read", IntArg(10),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
@@ -1367,57 +1367,57 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithTombstoneAfterLastId) {
 
 // Test consumer group lag with XTRIM
 TEST_F(StreamFamilyTest, ConsumerGroupLagWithXTrim) {
-  Run({"DEL", "x"});
-  Run({"XADD", "x", "1-0", "data", "a"});
-  Run({"XADD", "x", "2-0", "data", "b"});
-  Run({"XADD", "x", "3-0", "data", "c"});
-  Run({"XADD", "x", "4-0", "data", "d"});
-  Run({"XADD", "x", "5-0", "data", "e"});
-  Run({"XDEL", "x", "3-0"});
-  Run({"XGROUP", "CREATE", "x", "g1", "0"});
-  Run({"XGROUP", "CREATE", "x", "g2", "0"});
+  Run("DEL x");
+  Run("XADD x 1-0 data a");
+  Run("XADD x 2-0 data b");
+  Run("XADD x 3-0 data c");
+  Run("XADD x 4-0 data d");
+  Run("XADD x 5-0 data e");
+  Run("XDEL x 3-0");
+  Run("XGROUP CREATE x g1 0");
+  Run("XGROUP CREATE x g2 0");
 
-  auto resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  auto resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "0-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
   // Read messages one by one
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "1-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "2-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "4-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "5-0", "entries-read", IntArg(5),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
 
   // Add more messages
-  Run({"XADD", "x", "6-0", "data", "f"});
-  Run({"XADD", "x", "7-0", "data", "g"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XADD x 6-0 data f");
+  Run("XADD x 7-0 data g");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "5-0", "entries-read", IntArg(5),
                           "lag", IntArg(2), "pel-count", _, "pending", _, "consumers", _));
 
   // XTRIM
-  Run({"XTRIM", "x", "MINID", "=", "7-0"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XTRIM x MINID = 7-0");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "5-0", "entries-read", IntArg(5),
                           "lag", IntArg(2), "pel-count", _, "pending", _, "consumers", _));
@@ -1426,8 +1426,8 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithXTrim) {
                           "lag", IntArg(1), "pel-count", _, "pending", _, "consumers", _));
 
   // Read all remaining with g1
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "7-0", "entries-read", IntArg(7),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
@@ -1435,57 +1435,57 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithXTrim) {
 
 // Test consumer group lag with XADD trimming
 TEST_F(StreamFamilyTest, ConsumerGroupLagWithXAddTrimming) {
-  Run({"DEL", "x"});
-  Run({"XADD", "x", "1-0", "data", "a"});
-  Run({"XADD", "x", "2-0", "data", "b"});
-  Run({"XADD", "x", "3-0", "data", "c"});
-  Run({"XADD", "x", "4-0", "data", "d"});
-  Run({"XADD", "x", "5-0", "data", "e"});
-  Run({"XDEL", "x", "3-0"});
-  Run({"XGROUP", "CREATE", "x", "g1", "0"});
-  Run({"XGROUP", "CREATE", "x", "g2", "0"});
+  Run("DEL x");
+  Run("XADD x 1-0 data a");
+  Run("XADD x 2-0 data b");
+  Run("XADD x 3-0 data c");
+  Run("XADD x 4-0 data d");
+  Run("XADD x 5-0 data e");
+  Run("XDEL x 3-0");
+  Run("XGROUP CREATE x g1 0");
+  Run("XGROUP CREATE x g2 0");
 
-  auto resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  auto resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "0-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
   // Read messages one by one
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "1-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "2-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "4-0", "entries-read", kMatchNil,
                           "lag", kMatchNil, "pel-count", _, "pending", _, "consumers", _));
 
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "COUNT", "1", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 COUNT 1 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "5-0", "entries-read", IntArg(5),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
 
   // Add more messages
-  Run({"XADD", "x", "6-0", "data", "f"});
-  Run({"XADD", "x", "7-0", "data", "g"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XADD x 6-0 data f");
+  Run("XADD x 7-0 data g");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "5-0", "entries-read", IntArg(5),
                           "lag", IntArg(2), "pel-count", _, "pending", _, "consumers", _));
 
   // XADD with MINID trimming
-  Run({"XADD", "x", "MINID", "=", "7-0", "8-0", "data", "h"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XADD x MINID = 7-0 8-0 data h");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "5-0", "entries-read", IntArg(5),
                           "lag", IntArg(3), "pel-count", _, "pending", _, "consumers", _));
@@ -1494,15 +1494,15 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithXAddTrimming) {
                           "lag", IntArg(2), "pel-count", _, "pending", _, "consumers", _));
 
   // Read all remaining with g1
-  Run({"XREADGROUP", "GROUP", "g1", "c11", "STREAMS", "x", ">"});
-  resp = Run({"XINFO", "STREAM", "x", "FULL"});
+  Run("XREADGROUP GROUP g1 c11 STREAMS x >");
+  resp = Run("XINFO STREAM x FULL");
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
               ElementsAre("name", "g1", "last-delivered-id", "8-0", "entries-read", IntArg(8),
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
 }
 
 TEST_F(StreamFamilyTest, XTrimCrashWithMallocUsedZero) {
-  auto resp = Run({"xadd", "mystream", "0-0", "field1", "value1"});
+  auto resp = Run("xadd mystream 0-0 field1 value1");
   EXPECT_THAT(
       resp, ErrArg("The ID specified in XADD is equal or smaller than the target stream top item"));
 
