@@ -324,7 +324,8 @@ struct QueueBackpressure {
   // 'q_len' should be the length of the pipeline queue for the current connection.
   //
   // Returns true if EITHER:
-  // 1. Thread-Global memory limit is exceeded (protects server from OOM).
+  // 1. Thread-local: memory limit (on all thread's connections) is exceeded (protects server from
+  // OOM).
   // 2. Per-Connection queue length limit is exceeded (protects against single-client abuse).
   bool IsPipelineBufferOverLimit(size_t size, uint32_t q_len) const {
     return size >= (pipeline_buffer_limit) || (q_len > pipeline_queue_max_len);
@@ -1126,10 +1127,11 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   // No one will read that data anyway.
   if (cc_->conn_closing)
     return;
-
+  auto can_dispatch_sync_fn = [this]() {
+    return !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
+  };
   bool optimize_for_async = has_more;
-  bool can_dispatch_sync =
-      !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
+  bool can_dispatch_sync = can_dispatch_sync_fn();
   QueueBackpressure& qbp = GetQueueBackpressure();
   if ((optimize_for_async || !can_dispatch_sync) &&
       qbp.IsPipelineBufferOverLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_)) {
@@ -1142,13 +1144,13 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
                              << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
     fb2::NoOpLock noop;
-    qbp.pipeline_cnd.wait(noop, [this, &qbp] {
+    qbp.pipeline_cnd.wait(noop, [this, &qbp, &can_dispatch_sync_fn] {
       // Wait until at least one is true:
       // 1) Connection is closing.
       // 2) Can dispatch synchronously.
       // 3) Not over limits (for an async dispatch).
-      bool can_dispatch_sync =
-          !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
+      bool can_dispatch_sync = can_dispatch_sync_fn();
+      !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
       if (can_dispatch_sync)
         return true;
       bool over_limits =
@@ -1169,7 +1171,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
-  can_dispatch_sync = !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
+  can_dispatch_sync = can_dispatch_sync_fn();
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
