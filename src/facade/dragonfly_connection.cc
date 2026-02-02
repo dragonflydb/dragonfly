@@ -1115,18 +1115,20 @@ bool Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
                                 absl::FunctionRef<void()> enqueue_cmd_cb) {
   bool optimize_for_async = has_more;
   QueueBackpressure& qbp = GetQueueBackpressure();
+  size_t global_pipeline_bytes = qbp.pipeline_bytes.load(std::memory_order_relaxed);
   if (optimize_for_async &&
-      qbp.IsPipelineBufferOverLimit(qbp.pipeline_bytes.load(std::memory_order_relaxed),
-                                    pending_pipeline_cmd_cnt_)) {
+      qbp.IsPipelineBufferOverLimit(global_pipeline_bytes, pending_pipeline_cmd_cnt_)) {
     stats_->pipeline_throttle_count++;
-    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit: pipeline bytes: "
-                             << pending_pipeline_bytes_
-                             << ", queue size: " << pending_pipeline_cmd_cnt_
+    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit. Thread global bytes: "
+                             << global_pipeline_bytes
+                             << ", Connection local bytes: " << pending_pipeline_bytes_
+                             << ", Connection queue size: " << pending_pipeline_cmd_cnt_
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
     fb2::NoOpLock noop;
     qbp.pipeline_cnd.wait(noop, [this, &qbp] {
+      size_t current_global_bytes = qbp.pipeline_bytes.load(std::memory_order_relaxed);
       bool over_limits =
-          qbp.IsPipelineBufferOverLimit(pending_pipeline_bytes_, pending_pipeline_cmd_cnt_);
+          qbp.IsPipelineBufferOverLimit(current_global_bytes, pending_pipeline_cmd_cnt_);
       bool pipeline_idle = (pending_pipeline_cmd_cnt_ == 0);
       return !over_limits || (pipeline_idle && !cc_->async_dispatch) || cc_->conn_closing;
     });
@@ -1148,6 +1150,9 @@ bool Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
+    if (!cc_->conn_closing) {
+      LaunchAsyncFiberIfNeeded();
+    }
     enqueue_cmd_cb();
 
     // enqueue_cmd_cb() may enqueue or drain pipeline commands. We only request the caller
