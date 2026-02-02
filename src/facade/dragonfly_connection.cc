@@ -1936,25 +1936,23 @@ void Connection::SendAsync(MessageHandle msg) {
 
 void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
   size_t mem = msg.UsedMemory();
-  ssize_t count_delta = add ? 1 : -1;
+  auto& qbp = GetQueueBackpressure();
   if (add) {
     stats_->dispatch_queue_entries++;
     stats_->dispatch_queue_bytes += mem;
     if (msg.IsPubMsg()) {
-      GetQueueBackpressure().subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
+      qbp.subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
       stats_->dispatch_queue_subscriber_bytes += mem;
     }
   } else {
     DCHECK_GT(stats_->dispatch_queue_entries, 0u);
     DCHECK_GE(stats_->dispatch_queue_bytes, mem);
-    if (msg.IsPubMsg()) {
-      DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, mem);
-    }
     stats_->dispatch_queue_entries--;
     stats_->dispatch_queue_bytes -= mem;
     if (msg.IsPubMsg()) {
-      GetQueueBackpressure().subscriber_bytes.fetch_add(-static_cast<ssize_t>(mem),
-                                                        std::memory_order_relaxed);
+      DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, mem);
+      DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), mem);
+      qbp.subscriber_bytes.fetch_sub(mem, std::memory_order_relaxed);
       stats_->dispatch_queue_subscriber_bytes -= mem;
     }
   }
