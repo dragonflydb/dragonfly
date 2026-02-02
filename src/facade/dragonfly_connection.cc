@@ -1755,7 +1755,8 @@ void Connection::AsyncFiber() {
     }
 
     // Backpressure Notification
-    if (!qbp.IsPipelineBufferOverLimit(pending_pipeline_bytes_, pending_pipeline_cmd_cnt_) ||
+    size_t global_pipeline_bytes = qbp.pipeline_bytes.load(std::memory_order_relaxed);
+    if (!qbp.IsPipelineBufferOverLimit(global_pipeline_bytes, pending_pipeline_cmd_cnt_) ||
         !HasPendingMessages()) {
       qbp.pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }
@@ -1904,19 +1905,22 @@ void Connection::SendAsync(MessageHandle msg) {
 
   QueueBackpressure& qbp = GetQueueBackpressure();
 
-  // Close MONITOR connection if we overflow pipeline limits
-  // Note: We check 'dispatch_queue_bytes' (global stats) instead of the pipeline-specific
-  // counters because Monitor messages are stored in 'dispatch_q_', not the parsed command
-  // pipeline. Checking pipeline stats here would be incorrect as they might be
-  // zero for a Monitor connection, bypassing this safety check.
-  if (msg.IsMonitor() &&
-      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, GetPendingMessageCount())) {
-    cc_->conn_closing = true;
-    request_shutdown_ = true;
-    // We don't shutdown here. The reason is that TLS socket is preemptive
-    // and SendAsync is atomic.
-    cnd_.notify_one();
-    return;
+  // Close MONITOR connection if we overflow pipeline limits.
+  // We check the combined global memory of both the Redis Data Pipeline (pipeline_bytes)
+  // and the Admin/Control Queue (dispatch_queue_bytes).
+  // This ensures we throttle Monitor connections if the thread is overloaded by
+  // EITHER massive Redis pipelines OR a backlog of Monitor/PubSub messages.
+  if (msg.IsMonitor()) {
+    size_t global_pipeline_bytes =
+        qbp.pipeline_bytes.load(std::memory_order_relaxed) + stats_->dispatch_queue_bytes;
+    if (qbp.IsPipelineBufferOverLimit(global_pipeline_bytes, GetPendingMessageCount())) {
+      cc_->conn_closing = true;
+      request_shutdown_ = true;
+      // We don't shutdown here. The reason is that TLS socket is preemptive
+      // and SendAsync is atomic.
+      cnd_.notify_one();
+      return;
+    }
   }
 
   size_t used_mem = msg.UsedMemory();
@@ -2308,9 +2312,15 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
     parsed_cmd_ = cmd;
     parsed_cmd_->ResetForReuse();
   } else {
-    // TODO: limit pipeline_cmd_cache_bytes.
-    stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*cmd);
-    pipeline_req_pool_.emplace_back(cmd);
+    // If we are over the limit, destroy the command instead of caching it.
+    size_t cmd_mem = UsedMemoryInternal(*cmd);
+    QueueBackpressure& qbp = GetQueueBackpressure();
+    if (stats_->pipeline_cmd_cache_bytes + cmd_mem <= qbp.pipeline_cache_limit) {
+      stats_->pipeline_cmd_cache_bytes += cmd_mem;
+      pipeline_req_pool_.emplace_back(cmd);
+    } else {
+      delete cmd;
+    }
   }
 }
 
