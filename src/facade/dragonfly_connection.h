@@ -299,8 +299,10 @@ class Connection : public util::Connection {
 
   void SendAsync(MessageHandle msg);
 
-  // Updates memory stats and pooling, must be called for all used messages
-  void RecycleMessage(MessageHandle msg);
+  // Updates Control Path statistics and backpressure counters for administrative
+  // events, monitor messages, and PubSub notifications.
+  // If add is true, stats are incremented, otherwise decremented.
+  void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
@@ -414,11 +416,10 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
+  // Total number of commands in parsed command queue
   size_t parsed_cmd_q_len_ = 0;
-  // Count of queued Redis async commands in Parsed Commands queue
-  uint64_t pending_pipeline_cmd_cnt_ = 0;
-  // Total byte size of queued Redis async commands in Parsed Commands queue
-  size_t pending_pipeline_bytes_ = 0;
+  // Total bytes used by commands in parsed command queue
+  size_t parsed_cmd_q_bytes_ = 0;
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool HasPendingMessages() const {

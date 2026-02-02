@@ -154,17 +154,16 @@ inline std::string_view ArgS(ArgSlice args, size_t i) {
 
 struct ConnectionStats {
   size_t read_buf_capacity = 0;  // total capacity of input buffers
-  // Count of pending messages in dispatch queue (Redis: count admin only, Memcache: count all)
+  // Count of pending messages in dispatch queue
   uint64_t dispatch_queue_entries = 0;
-  // Memory used by pending messages in dispatch queue (Redis: count admin only, Memcache: count
-  // all)
+  // Memory used by pending messages in dispatch queue
   size_t dispatch_queue_bytes = 0;
   // Count of pending Redis pipeline commands (Data Path)
   uint64_t pipeline_queue_entries = 0;
   // Memory used by pending Redis pipeline commands (Data Path)
   size_t pipeline_queue_bytes = 0;
-  size_t dispatch_queue_subscriber_bytes = 0;  // total size of all publish messages
-                                               // (subset of dispatch_queue_bytes)
+  // total size of all publish messages (subset of dispatch_queue_bytes)
+  size_t dispatch_queue_subscriber_bytes = 0;
 
   size_t pipeline_cmd_cache_bytes = 0;
 
