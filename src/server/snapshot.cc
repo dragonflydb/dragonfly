@@ -162,6 +162,29 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // it also guarantees 100% coverage of all items that exists when the traversal started
 // and survived until it finished.
 
+void SliceSnapshot::SerializeIndexMapping(
+    uint32_t shard_id, std::string_view index_name,
+    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  // Format: [RDB_OPCODE_SHARD_DOC_INDEX, shard_id, index_name, mapping_count,
+  //          then for each mapping: key_string, doc_id]
+  if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_SHARD_DOC_INDEX); ec)
+    return;
+  if (auto ec = serializer_->SaveLen(shard_id); ec)
+    return;
+  if (auto ec = serializer_->SaveString(index_name); ec)
+    return;
+  if (auto ec = serializer_->SaveLen(mappings.size()); ec)
+    return;
+
+  for (const auto& [key, doc_id] : mappings) {
+    if (auto ec = serializer_->SaveString(key); ec)
+      break;
+    if (auto ec = serializer_->SaveLen(doc_id); ec)
+      break;
+  }
+  ThrottleIfNeeded();
+}
+
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
   // Skip for legacy RDB format
@@ -183,24 +206,7 @@ void SliceSnapshot::SerializeIndexMappings() {
       continue;
     }
 
-    // Format: [RDB_OPCODE_SHARD_DOC_INDEX, shard_id, index_name, mapping_count,
-    //          then for each mapping: key_string, doc_id]
-    if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_SHARD_DOC_INDEX); ec)
-      continue;
-    if (auto ec = serializer_->SaveLen(shard_id); ec)
-      continue;
-    if (auto ec = serializer_->SaveString(index_name); ec)
-      continue;
-    if (auto ec = serializer_->SaveLen(mappings.size()); ec)
-      continue;
-
-    for (const auto& [key, doc_id] : mappings) {
-      if (auto ec = serializer_->SaveString(key); ec)
-        break;
-      if (auto ec = serializer_->SaveLen(doc_id); ec)
-        break;
-    }
-    ThrottleIfNeeded();
+    SerializeIndexMapping(shard_id, index_name, mappings);
   }
 #endif
 }

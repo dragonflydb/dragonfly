@@ -2250,32 +2250,29 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_SHARD_DOC_INDEX) {
       // Load ShardDocIndex key-to-DocId mapping
       // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
-      uint64_t shard_id;
-      SET_OR_RETURN(LoadLen(nullptr), shard_id);
+      PendingIndexMapping pim;
+      SET_OR_RETURN(LoadLen(nullptr), pim.shard_id);
 
       string index_name;
-      SET_OR_RETURN(FetchGenericString(), index_name);
+      SET_OR_RETURN(FetchGenericString(), pim.index_name);
 
       uint64_t mapping_count;
       SET_OR_RETURN(LoadLen(nullptr), mapping_count);
-
-      std::vector<std::pair<std::string, search::DocId>> mappings;
-      mappings.reserve(mapping_count);
+      pim.mappings.reserve(mapping_count);
 
       for (uint64_t i = 0; i < mapping_count; ++i) {
         string key;
         SET_OR_RETURN(FetchGenericString(), key);
         uint64_t doc_id;
         SET_OR_RETURN(LoadLen(nullptr), doc_id);
-        mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+        pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      // Store the mapping to be applied after index creation
-      pending_index_mappings_.emplace_back(PendingIndexMapping{
-          static_cast<uint32_t>(shard_id), std::move(index_name), std::move(mappings)});
-
-      VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
+      VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
               << " entries";
+
+      // Store the mapping to be applied after index creation
+      pending_index_mappings_.emplace_back(std::move(pim));
       continue;
     }
 
@@ -3056,12 +3053,10 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   }
 
   std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
-
   if (is_error)
     return;
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
-  // If index mappings were applied, Rebuild will use the pre-loaded DocIds
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     es->search_indices()->RebuildAllIndices(
         OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
