@@ -142,7 +142,7 @@ class OAHSet {  // Open Addressing Hash Set
 
   void Reserve(size_t sz) {
     sz = absl::bit_ceil(sz);
-    if (sz > BucketCount()) {
+    if (sz > entries_.size()) {
       auto prev_capacity_log = capacity_log_;
       capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
       size_t prev_size = entries_.size();
@@ -342,11 +342,11 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   std::uint32_t BucketCount() const {
-    return 1 << capacity_log_;
+    return entries_.empty() ? 0 : (1 << capacity_log_);
   }
 
   std::uint32_t Capacity() const {
-    return BucketCount() + kDisplacementSize - 1;
+    return (1 << capacity_log_) + kDisplacementSize - 1;
   }
 
   // set an abstract time that allows expiry.
