@@ -110,10 +110,6 @@ class Connection : public util::Connection {
       return std::holds_alternative<CheckpointMessage>(handle);
     }
 
-    bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle);
-    }
-
     bool IsPubMsg() const {
       return std::holds_alternative<PubMessagePtr>(handle);
     }
@@ -124,8 +120,8 @@ class Connection : public util::Connection {
 
     bool IsReplying() const;  // control messages don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MigrationRequestMessage,
-                 CheckpointMessage, InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, MigrationRequestMessage, CheckpointMessage,
+                 InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -288,11 +284,19 @@ class Connection : public util::Connection {
   // `has_more` should indicate whether the io buffer has more commands
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
-  void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
-                      absl::FunctionRef<MessageHandle()> cmd_msg_cb);
+  // Returns true if an asynchronous dispatch occurred and the caller might want to yield.
+  bool DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
+                      absl::FunctionRef<void()> cmd_msg_cb);
 
   // Handles events from the dispatch queue.
   void AsyncFiber();
+
+  // Processes a single Admin/Control message from dispatch_q_.
+  // Returns true if the fiber should terminate (e.g. Migration).
+  bool ProcessAdminMessage(MessageHandle msg, AsyncOperations& async_op);
+
+  // Processes the next Pipeline command from parsed_head_.
+  void ProcessPipelineCommand();
 
   void SendAsync(MessageHandle msg);
 
@@ -380,10 +384,6 @@ class Connection : public util::Connection {
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
-  // Count of queued Redis async commands in Parsed Commands queue
-  uint64_t pending_pipeline_cmd_cnt_ = 0;
-  // Total byte size of queued Redis async commands in Parsed Commands queue
-  size_t pending_pipeline_bytes_ = 0;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
@@ -416,6 +416,10 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
   size_t parsed_cmd_q_len_ = 0;
+  // Count of queued Redis async commands in Parsed Commands queue
+  uint64_t pending_pipeline_cmd_cnt_ = 0;
+  // Total byte size of queued Redis async commands in Parsed Commands queue
+  size_t pending_pipeline_bytes_ = 0;
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool HasPendingMessages() const {
