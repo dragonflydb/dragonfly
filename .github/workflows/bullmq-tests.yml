@@ -5,6 +5,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: "22.12.0"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -37,10 +40,10 @@ jobs:
 
       - name: Install Node.js
         run: |
-          wget -q https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
-          tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
-          cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
-          apt-get update && apt-get install -y jq
+          wget -q https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64-glibc-217.tar.xz
+          tar -xf node-v${NODE_VERSION}-linux-x64-glibc-217.tar.xz
+          cp -r node-v${NODE_VERSION}-linux-x64-glibc-217/* /usr/local/
+          apt-get update && apt-get install -y jq redis-tools
           npm install -g yarn
           node --version
           yarn --version
@@ -54,12 +57,11 @@ jobs:
             --default_lua_flags=allow-undeclared-keys \
             --dbfilename= \
             --port 6379 &
-          sleep 3
-          redis-cli -p 6379 PING
+          timeout 15s bash -c 'until redis-cli -p 6379 PING 2>/dev/null | grep -q PONG; do sleep 0.1; done'
 
       - name: Build BullMQ
         run: |
-          mkdir -p /tmp/bullmq && cd /tmp/bullmq
+          cd ${GITHUB_WORKSPACE}
           git clone https://github.com/dragonflydb/bullmq
           cd bullmq
           yarn install
@@ -67,7 +69,7 @@ jobs:
 
       - name: Run BullMQ tests
         run: |
-          cd /tmp/bullmq/bullmq
+          cd ${GITHUB_WORKSPACE}/bullmq
           BULLMQ_TEST_PREFIX={b} yarn test
 
       - name: Upload logs on failure
