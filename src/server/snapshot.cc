@@ -183,7 +183,7 @@ void SliceSnapshot::SerializeIndexMapping(
     if (auto ec = serializer_->SaveLen(doc_id); ec)
       return;
   }
-  ThrottleIfNeeded();
+  PushSerialized(false);
 }
 
 void SliceSnapshot::SerializeIndexMappings() {
@@ -192,10 +192,14 @@ void SliceSnapshot::SerializeIndexMappings() {
     return;
   }
 
+  // Get all HNSW index names from the global registry
+  absl::flat_hash_set<std::string> hnsw_index_names =
+      GlobalHnswIndexRegistry::Instance().GetIndexNames();
+
   auto* indices = db_slice_->shard_owner()->search_indices();
   uint32_t shard_id = db_slice_->shard_owner()->shard_id();
 
-  for (const auto& index_name : indices->GetIndexNames()) {
+  for (const auto& index_name : hnsw_index_names) {
     auto* index = indices->GetIndex(index_name);
     if (!index) {
       continue;
@@ -244,7 +248,7 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
         if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
           break;
       }
-      ThrottleIfNeeded();
+      PushSerialized(false);
     }
   }
 #endif
