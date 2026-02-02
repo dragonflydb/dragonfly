@@ -44,7 +44,7 @@ class StoredCmd {
     return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
   }
 
-  facade::CmdArgList ArgList(CmdArgVec* scratch) const;
+  facade::ArgSlice Slice(CmdArgVec* scratch) const;
   std::string FirstArg() const;
 
   const CommandId* Cid() const {
@@ -385,11 +385,6 @@ class CommandContext : public facade::ParsedCommand {
     return sizeof(CommandContext);
   }
 
-  uint64_t start_time_ns = 0;
-
-  // number of commands in the last exec body.
-  unsigned exec_body_len = 0;
-
   ConnectionContext* server_conn_cntx() const {
     return static_cast<ConnectionContext*>(conn_cntx_);
   }
@@ -411,6 +406,14 @@ class CommandContext : public facade::ParsedCommand {
   const CommandId* cid() const {
     return cid_;
   }
+
+  uint64_t start_time_ns = 0;
+
+  // number of commands in the last exec body.
+  unsigned exec_body_len = 0;
+
+  // Stores backing array for tail args slice
+  CmdArgVec arg_slice_backing;
 
  protected:
   void ReuseInternal() final;

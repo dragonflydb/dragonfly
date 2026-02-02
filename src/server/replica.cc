@@ -666,8 +666,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     sync_block->Wait();
 
     // Check if we woke up due to cancellation.
-    if (!exec_st_.IsRunning())
+    if (!exec_st_.IsRunning()) {
+      RdbLoader::PerformPostLoad(&service_, true);
       return exec_st_.GetError();
+    }
 
     RdbLoader::PerformPostLoad(&service_);
   }

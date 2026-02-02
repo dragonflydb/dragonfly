@@ -417,6 +417,24 @@ QList::Node* SplitNode(QList::Node* node, int offset, bool after, ssize_t* diff)
 
 __thread QList::Stats QList::stats;
 
+QList::Stats& QList::Stats::operator+=(const Stats& other) {
+#define ADD_FIELD(field) this->field += other.field;
+
+  ADD_FIELD(compression_attempts);
+  ADD_FIELD(bad_compression_attempts);
+  ADD_FIELD(decompression_calls);
+  ADD_FIELD(compressed_bytes);
+  ADD_FIELD(raw_compressed_bytes);
+  ADD_FIELD(interior_node_reads);
+  ADD_FIELD(total_node_reads);
+  ADD_FIELD(offload_requests);
+  ADD_FIELD(onload_requests);
+
+#undef ADD_FIELD
+
+  return *this;
+}
+
 size_t QList::Node::GetLZF(void** data) const {
   DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF || encoding == QLIST_NODE_ENCODING_LZ4);
   quicklistLZF* lzf = (quicklistLZF*)entry;
@@ -485,9 +503,9 @@ QList& QList::operator=(QList&& other) noexcept {
     compress_ = other.compress_;
     bookmark_count_ = other.bookmark_count_;
     tiering_params_ = std::move(other.tiering_params_);
-
+    num_offloaded_nodes_ = other.num_offloaded_nodes_;
     other.head_ = nullptr;
-    other.len_ = other.count_ = 0;
+    other.len_ = other.count_ = other.num_offloaded_nodes_ = 0;
   }
   return *this;
 }
@@ -701,7 +719,7 @@ void QList::InsertNode(Node* old_node, Node* new_node, uint32_t old_node_id, Ins
 
   // Calculate final positions AFTER all linkage and len_ updates are complete.
   uint32_t new_node_id;
-  if (insert_opt == AFTER) {
+  if (insert_opt == AFTER && old_node) {
     new_node_id = old_node_id + 1;  // new_node inserted after, old_node position unchanged
   } else {
     new_node_id = old_node_id;  // new_node takes old_node's position
@@ -888,12 +906,34 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     if (node_id >= tiering_params_->node_depth_threshold &&
         node_id + tiering_params_->node_depth_threshold < len_) {
       if (!node->offloaded) {
-        num_offloaded_nodes_++;
-        stats.offload_requests++;
-        node->offloaded = 1;
+        OffloadNode(node);
       }
-    } else if (len_ > num_offloaded_nodes_ * 2 + tiering_params_->node_depth_threshold * 2) {
-      // TBD.
+    } else if (num_offloaded_nodes_ * 2 + tiering_params_->node_depth_threshold * 2 < len_) {
+      // We check `num_offloaded_nodes_ * 2` above to avoid frequent traversals.
+      // So only when the gap between offloaded and non-offloaded nodes is large enough,
+      // we do a traversal to offload more nodes.
+      auto* fw = head_;
+      auto* rev = head_->prev;
+      uint32_t traverse_node_id = 0;
+
+      // Traverse from both ends towards the middle as we expect more offloads towards the ends
+      // due to usual access patterns of adding items via lpush/rpush.
+      while (traverse_node_id <= len_ / 2 &&
+             (num_offloaded_nodes_ + 2 * tiering_params_->node_depth_threshold) < len_) {
+        if (traverse_node_id >= tiering_params_->node_depth_threshold) {
+          if (fw->offloaded == 0) {
+            OffloadNode(fw);
+          }
+
+          // Avoid offloading the same node twice when fw and rev meet in the middle.
+          if (rev != fw && rev->offloaded == 0) {
+            OffloadNode(rev);
+          }
+        }
+        fw = fw->next;
+        rev = rev->prev;
+        traverse_node_id++;
+      }
     }
   }
 
@@ -1114,6 +1154,13 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
   count_--;
 
   return false;
+}
+
+void QList::OffloadNode(Node* node) {
+  DCHECK(tiering_params_ && node->offloaded == 0);
+  num_offloaded_nodes_++;
+  stats.offload_requests++;
+  node->offloaded = 1;
 }
 
 void QList::InitIteratorEntry(Iterator* it) const {

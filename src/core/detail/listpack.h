@@ -76,6 +76,10 @@ class ListPack {
     return lp_;
   }
 
+  size_t BytesSize() const {
+    return lpBytes(lp_);
+  }
+
  private:
   static CollectionEntry GetEntry(uint8_t* pos);
 

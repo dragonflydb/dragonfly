@@ -1389,6 +1389,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     }
 
     if (aggregated_result->first_error) {
+      RdbLoader::PerformPostLoad(&service_, true);
       LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
     } else {
       RdbLoader::PerformPostLoad(&service_);
@@ -1963,6 +1964,12 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
 
+  AppendMetricHeader("list_reads", "List Reads Patterns", MetricType::COUNTER, &resp->body());
+  AppendMetricValue("list_reads", m.qlist_stats.total_node_reads, {"type"}, {"total"},
+                    &resp->body());
+  AppendMetricValue("list_reads", m.qlist_stats.interior_node_reads, {"type"}, {"interior"},
+                    &resp->body());
+
   // Tiered metrics
   {
     AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
@@ -1998,12 +2005,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricValue("tiered_hits", m.events.ram_misses, {"type"}, {"disk"}, &resp->body());
 
     // Potential problems due to overloading system
-    AppendMetricHeader("tiered_overload", "Potential problems due to overlaoding",
+    AppendMetricHeader("tiered_overload", "Potential problems due to overloading",
                        MetricType::COUNTER, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_clients_throttled, {"type"},
                       {"client throttling"}, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
                       {"stash overflows"}, &resp->body());
+
+    AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
+                       &resp->body());
+    AppendMetricValue("tiered_list_events", m.qlist_stats.offload_requests, {"type"}, {"offload"},
+                      &resp->body());
+    AppendMetricValue("tiered_list_events", m.qlist_stats.onload_requests, {"type"}, {"onload"},
+                      &resp->body());
   }
 }
 
@@ -2836,6 +2850,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       if (shard->search_indices()) {
         result.search_stats += shard->search_indices()->GetStats();
       }
+
+      result.qlist_stats += QList::stats;
 
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);

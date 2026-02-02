@@ -26,6 +26,10 @@
 
 namespace dfly {
 
+namespace search {
+struct IndexBuilder;
+}  // namespace search
+
 struct BaseAccessor;
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
@@ -247,7 +251,9 @@ class ShardDocIndex {
 
  public:
   // Index must be rebuilt at least once after intialization
-  ShardDocIndex(std::shared_ptr<const DocIndex> index);
+  explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
+
+  ~ShardDocIndex();  // To use forward declarations
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -336,6 +342,8 @@ class ShardDocIndex {
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
+
+  std::unique_ptr<search::IndexBuilder> builder_;
 };
 
 // Stores shard doc indices by name on a specific shard.

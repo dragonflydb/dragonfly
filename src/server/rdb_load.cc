@@ -2944,6 +2944,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
+// Static synchronization for thread-safe search index creation
+base::SpinLock RdbLoader::search_index_mu_;
+absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
 
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
@@ -2952,9 +2955,12 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  string index_name;
+  string full_cmd;
+
   // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
   if (!def.empty() && def[0] == '{') {
-    // New JSON format with HNSW metadata
+    // New JSON format with HNSW metadata (from summary file)
     try {
       auto json_opt = JsonFromString(def);
       if (!json_opt) {
@@ -2962,21 +2968,42 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
         return;
       }
       const auto& json = *json_opt;
-      string index_name = json["name"].as<string>();
+      index_name = json["name"].as<string>();
       string cmd = json["cmd"].as<string>();
 
       // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
       // Currently we just restore the index definition, HNSW graph will be rebuilt
 
-      string full_cmd = absl::StrCat(index_name, " ", cmd);
-      LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+      full_cmd = absl::StrCat(index_name, " ", cmd);
     } catch (const std::exception& e) {
       LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
+      return;
     }
   } else {
-    // Old format: "index_name cmd" - for backwards compatibility
-    LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+    // Simple format: "index_name cmd" - from per-shard DFS files or old format
+    // Extract index name (first token before space)
+    size_t space_pos = def.find(' ');
+    if (space_pos == string::npos) {
+      LOG(ERROR) << "Invalid search index definition: " << def;
+      return;
+    }
+    index_name = def.substr(0, space_pos);
+    full_cmd = std::move(def);
   }
+
+  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
+  // We track which indices we've already attempted to create to avoid race conditions where
+  // multiple threads see the index doesn't exist and all try to create it.
+  {
+    std::lock_guard lk(search_index_mu_);
+    auto [it, inserted] = created_search_indices_.insert(index_name);
+    if (!inserted) {
+      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
+      return;
+    }
+  }
+
+  LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
@@ -2985,9 +3012,19 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
   pending_synonym_cmds_.push_back(std::move(def));
 }
 
-void RdbLoader::PerformPostLoad(Service* service) {
+void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+    return;
+
+  // Clear the created indices tracking set for next load
+  {
+    std::lock_guard lk(search_index_mu_);
+    created_search_indices_.clear();
+  }
+
+  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  if (is_error)
     return;
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
@@ -2997,7 +3034,6 @@ void RdbLoader::PerformPostLoad(Service* service) {
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
-  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

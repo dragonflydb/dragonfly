@@ -61,6 +61,8 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
+ABSL_FLAG(unsigned, list_tiering_threshold, 0,
+          "Tiering threshold for lists. Default - no tiering.");
 
 namespace dfly {
 
@@ -86,9 +88,21 @@ class ListWrapper {
     return std::visit(Overload{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
-  static bool ShouldPromoteToQL(uint8_t* lp, size_t new_size) {
-    size_t sz = lpBytes(lp);
-    return !ShouldStoreAsListPack(sz + new_size);
+  static QList* PromoteToQLIfNeeded(LP lp, size_t additional_size) {
+    size_t sz = lp.BytesSize();
+    if (ShouldStoreAsListPack(sz + additional_size)) {
+      return nullptr;
+    }
+    QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                              GetFlag(FLAGS_list_compress_depth));
+    if (GetFlag(FLAGS_list_tiering_threshold) > 0) {
+      ql->SetTieringParams(
+          QList::TieringParams{.node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold)});
+    }
+    if (lp.Size() > 0) {
+      ql->AppendListpack(lp.GetPointer());
+    }
+    return ql;
   }
 
   void PushInternal(string_view value, QList::Where where, QList& ql) {
@@ -96,12 +110,8 @@ class ListWrapper {
   }
 
   void PushInternal(string_view value, QList::Where where, LP& lp) {
-    if (ShouldPromoteToQL(lp.GetPointer(), value.size())) {
-      QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                                GetFlag(FLAGS_list_compress_depth));
-      if (lp.Size() > 0) {
-        ql->AppendListpack(lp.GetPointer());
-      } else {
+    if (QList* ql = PromoteToQLIfNeeded(lp, value.size()); ql) {
+      if (lp.Size() == 0) {  // otherwise we already appended it in PromoteToQLIfNeeded.
         lpFree(lp.GetPointer());
       }
       ql->Push(value, where);
@@ -120,14 +130,12 @@ class ListWrapper {
     if (!p)
       return false;
 
-    if (ShouldPromoteToQL(lp.GetPointer(), elem.size())) {
-      QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                                GetFlag(FLAGS_list_compress_depth));
-      DCHECK_GT(lp.Size(), 0u);  // otherwise we would not find anything
+    if (QList* ql = PromoteToQLIfNeeded(lp, elem.size()); ql) {
+      DCHECK_GT(ql->Size(), 0u);  // otherwise we would not Find the pivot.
       impl_ = ql;
-      ql->AppendListpack(lp.GetPointer());
       return ql->Insert(pivot, elem, insert_opt);
     }
+
     lp.Insert(p, elem, insert_opt);
     return true;
   }
@@ -141,12 +149,9 @@ class ListWrapper {
     if (!p)
       return false;
 
-    if (ShouldPromoteToQL(lp.GetPointer(), elem.size())) {
-      QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                                GetFlag(FLAGS_list_compress_depth));
-      DCHECK_GT(lp.Size(), 0u);  // otherwise we would not seek
+    if (QList* ql = PromoteToQLIfNeeded(lp, elem.size()); ql) {
+      DCHECK_GT(ql->Size(), 0u);  // otherwise we would not seek
       impl_ = ql;
-      ql->AppendListpack(lp.GetPointer());
       return ql->Replace(index, elem);
     }
     lp.Replace(p, elem);

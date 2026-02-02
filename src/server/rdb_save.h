@@ -133,8 +133,10 @@ class RdbSaver {
 
   SnapshotStats GetCurrentSnapshotProgress() const;
 
-  // Fetch global data to be serialized in summary part of a snapshot / full sync.
-  static GlobalData GetGlobalData(const Service* service);
+  // Fetch global data to be serialized in snapshot.
+  // is_summary: true for summary file (full data with JSON search indices),
+  //             false for per-shard files (only simple search index restore commands)
+  static GlobalData GetGlobalData(const Service* service, bool is_summary);
 
   // Returns time in nanos of start of the last pending write interaction.
   // Returns -1 if no write operations are currently pending.
