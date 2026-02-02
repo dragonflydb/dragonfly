@@ -2261,6 +2261,8 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
     size_t mem = cmd->UsedMemory();
     pending_pipeline_bytes_ += mem;
     GetQueueBackpressure().pipeline_bytes.fetch_add(mem, std::memory_order_relaxed);
+    stats_->pipeline_queue_entries++;
+    stats_->pipeline_queue_bytes += mem;
   } else {  // MEMCACHE
     local_stats_.dispatch_entries_added++;
     stats_->dispatch_queue_bytes += cmd->UsedMemory();
@@ -2282,10 +2284,14 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
   if (protocol_ == Protocol::REDIS) {
     DCHECK_GT(pending_pipeline_cmd_cnt_, 0u);
     DCHECK_GE(pending_pipeline_bytes_, used_mem);
+    DCHECK_GT(stats_->pipeline_queue_entries, 0u);
+    DCHECK_GE(stats_->pipeline_queue_bytes, used_mem);
     pending_pipeline_cmd_cnt_--;
     size_t mem = cmd->UsedMemory();
     pending_pipeline_bytes_ -= mem;
     GetQueueBackpressure().pipeline_bytes.fetch_sub(mem, std::memory_order_relaxed);
+    stats_->pipeline_queue_entries--;
+    stats_->pipeline_queue_bytes -= mem;
   } else {
     DCHECK_GE(stats_->dispatch_queue_bytes, used_mem);
     DCHECK_GT(stats_->dispatch_queue_entries, 0u);
