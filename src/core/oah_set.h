@@ -85,7 +85,7 @@ class OAHSet {  // Open Addressing Hash Set
     void SetEntryIt() {
       if (!owner_)
         return;
-      for (auto size = owner_->entries_.size(); bucket_ < size; ++bucket_) {
+      for (auto num_entries = owner_->entries_.size(); bucket_ < num_entries; ++bucket_) {
         auto& bucket = owner_->entries_[bucket_];
         for (uint32_t bucket_size = bucket.ElementsNum(); pos_ < bucket_size; ++pos_) {
           if (bucket[pos_])
@@ -120,8 +120,8 @@ class OAHSet {  // Open Addressing Hash Set
     PREFETCH_READ(entries_.data() + bucket_id);
     PREFETCH_READ(entries_.data() + bucket_id + 8);
 
-    if (entries_.empty() || size_ >= entries_.size()) {
-      Reserve(Capacity() * 2);
+    if (size_ >= entries_.size()) {
+      Reserve(BucketCount() * 2);
       bucket_id = BucketId(hash, capacity_log_);
     }
 
@@ -142,13 +142,14 @@ class OAHSet {  // Open Addressing Hash Set
 
   void Reserve(size_t sz) {
     sz = absl::bit_ceil(sz);
-    if (sz > entries_.size()) {
+    if (sz > BucketCount()) {
       auto prev_capacity_log = capacity_log_;
       capacity_log_ = std::max(kMinCapacityLog, uint32_t(absl::bit_width(sz) - 1));
+      size_t prev_size = entries_.size();
       entries_.resize(Capacity());
-      Rehash(prev_capacity_log);
+      Rehash(prev_capacity_log, prev_size);
     }
-    assert(Capacity() >= kDisplacementSize);
+    assert(entries_.size() >= kDisplacementSize);
   }
 
   // Shrinks the table to the specified size. The new_size must be a power of 2,
@@ -167,7 +168,7 @@ class OAHSet {  // Open Addressing Hash Set
       ShrinkBucket(i);
     }
 
-    entries_.resize(new_size);
+    entries_.resize(Capacity());
     entries_.shrink_to_fit();
   }
 
@@ -183,9 +184,8 @@ class OAHSet {  // Open Addressing Hash Set
   void AddUnique(OAHEntry&& e, uint32_t bid, uint32_t ttl_sec = UINT32_MAX) {
     ++size_;
     assert(Capacity() >= kDisplacementSize);
-    const uint32_t capacity_mask = Capacity() - 1;
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      const uint32_t bucket_id = bid + i;
       if (entries_[bucket_id].Empty()) {
         entries_[bucket_id] = std::move(e);
         return;
@@ -195,7 +195,7 @@ class OAHSet {  // Open Addressing Hash Set
     }
 
     bid = GetExtensionPoint(bid);
-    assert(bid < Capacity());
+    assert(bid < entries_.size());
 
     ptr_vectors_alloc_used_ += entries_[bid].Insert(std::move(e));
   }
@@ -239,21 +239,23 @@ class OAHSet {  // Open Addressing Hash Set
   using ItemCb = std::function<void(std::string_view)>;
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) {
-    const uint32_t capacity_mask = Capacity() - 1;
+    if (entries_.empty())
+      return 0;
+
     uint32_t bucket_id = cursor >> (32 - capacity_log_);
 
     // First find the bucket to scan, skip empty buckets.
-    for (; bucket_id < entries_.size(); ++bucket_id) {
+    for (; bucket_id < BucketCount(); ++bucket_id) {
       bool res = false;
       for (uint32_t i = 0; i < kDisplacementSize; i++) {
-        const uint32_t shifted_bid = (bucket_id + i) & capacity_mask;
+        const uint32_t shifted_bid = bucket_id + i;
         res |= ScanBucket(entries_[shifted_bid], cb, bucket_id);
       }
       if (res)
         break;
     }
 
-    if (++bucket_id >= entries_.size()) {
+    if (++bucket_id >= BucketCount()) {
       return 0;
     }
 
@@ -309,11 +311,10 @@ class OAHSet {  // Open Addressing Hash Set
     auto bucket_id = BucketId(hash, capacity_log_);
 
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
-    const uint32_t capacity_mask = Capacity() - 1;
 
     // fast check
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bid = (bucket_id + i) & capacity_mask;
+      const uint32_t bid = bucket_id + i;
       if ((entries_[bid].GetHash() == ext_hash) && entries_[bid].IsEntry()) {
         if (entries_[bid].Key() == member) {
           entries_[bid].ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
@@ -341,11 +342,11 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   std::uint32_t BucketCount() const {
-    return entries_.size();  // the same as Capacity()
+    return 1 << capacity_log_;
   }
 
   std::uint32_t Capacity() const {
-    return 1 << capacity_log_;
+    return BucketCount() + kDisplacementSize - 1;
   }
 
   // set an abstract time that allows expiry.
@@ -380,51 +381,39 @@ class OAHSet {  // Open Addressing Hash Set
 
  private:
   // was Grow in StringSet
-  void Rehash(uint32_t prev_capacity_log) {
-    size_t prev_size = 1ul << prev_capacity_log;
+  void Rehash(uint32_t prev_capacity_log, uint32_t prev_size) {
+    if (prev_size == 0) {
+      return;
+    }
     // we should prevent moving elements before current possition to avoid double processing
-    constexpr size_t mix_size = 2 << kShiftLog;
-
-    auto max_element = std::min(mix_size, prev_size);
+    constexpr size_t mix_size = (2 << kShiftLog) - 1;
     std::array<OAHEntry, mix_size> old_buckets{};
-    for (size_t i = 0; i < max_element; ++i) {
+    for (size_t i = 0; i < mix_size; ++i) {
       old_buckets[i] = std::move(entries_[i]);
     }
 
     for (size_t bucket_id = prev_size - 1; bucket_id >= mix_size; --bucket_id) {
-      auto bucket = std::move(entries_[bucket_id]);  // can be redundant
-      // TODO add optimization for package processing
+      auto bucket = std::move(entries_[bucket_id]);
       for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
-        // TODO operator [] is inefficient and it is better to avoid it
         if (bucket[pos]) {
           auto new_bucket_id =
               bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
-
-          // TODO add optimization for package processing
           new_bucket_id = FindEmptyAround(new_bucket_id);
-
-          // insert method is inefficient
-          ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
+          ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
         }
       }
       if (bucket.IsVector())
         ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
     }
 
-    for (size_t bucket_id = 0; bucket_id < max_element; ++bucket_id) {
+    for (size_t bucket_id = 0; bucket_id < mix_size; ++bucket_id) {
       auto& bucket = old_buckets[bucket_id];
-      // TODO add optimization for package processing
       for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
-        // TODO operator [] is inefficient and it is better to avoid it
         if (bucket[pos]) {
           auto new_bucket_id =
               bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
-
-          // TODO add optimization for package processing
           new_bucket_id = FindEmptyAround(new_bucket_id);
-
-          // insert method is inefficient
-          ptr_vectors_alloc_used_ += entries_[new_bucket_id]->Insert(std::move(bucket[pos]));
+          ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
         }
       }
       if (bucket.IsVector())
@@ -467,13 +456,12 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   bool FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
-    const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
     const auto ext_bid = GetExtensionPoint(bid);
 
     bool res = true;
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      const uint32_t bucket_id = bid + i;
       res &= entries_[bucket_id].CheckNoCollisions(ext_hash);
     }
 
@@ -526,26 +514,23 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   uint32_t FindEmptyAround(uint32_t bid) {
-    const uint32_t capacity_mask = Capacity() - 1;
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      const uint32_t bucket_id = bid + i;
       if (entries_[bucket_id].Empty())
         return bucket_id;
       // TODO add expiration logic
     }
 
-    assert(Capacity() >= kDisplacementSize);
     bid = GetExtensionPoint(bid);
-    assert(bid < Capacity());
+    assert(bid < entries_.size());
     return bid;
   }
 
   // return bucket_id and position otherwise max
   iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
-    const uint32_t capacity_mask = Capacity() - 1;
     const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
-      const uint32_t bucket_id = (bid + i) & capacity_mask;
+      const uint32_t bucket_id = bid + i;
       auto pos = entries_[bucket_id].Find(str, ext_hash, capacity_log_, kShiftLog, &size_,
                                           &obj_alloc_used_, time_now_);
       if (pos) {
