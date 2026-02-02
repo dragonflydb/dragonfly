@@ -248,6 +248,17 @@ size_t ShardDocIndex::DocKeyIndex::Size() const {
   return ids_.size();
 }
 
+std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::Serialize() const {
+  std::vector<std::pair<std::string, search::DocId>> result;
+  result.reserve(ids_.size());
+  for (search::DocId id = 0; id < keys_.size(); ++id) {
+    if (!keys_[id].empty()) {
+      result.emplace_back(keys_[id], id);
+    }
+  }
+  return result;
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }

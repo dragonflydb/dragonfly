@@ -246,6 +246,9 @@ class ShardDocIndex {
       return ids_;
     }
 
+    // Serialization: returns pairs of (key, doc_id) for all active mappings
+    std::vector<std::pair<std::string, DocId>> Serialize() const;
+
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -329,6 +332,10 @@ class ShardDocIndex {
       return indices_->Defragment(page_usage);
     }
     return search::DefragmentResult{false, 0};
+  }
+
+  std::vector<std::pair<std::string, DocId>> SerializeKeyIndex() const {
+    return key_index_.Serialize();
   }
 
  private:

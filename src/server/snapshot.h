@@ -8,6 +8,7 @@
 #include <bitset>
 
 #include "base/pod_array.h"
+#include "core/search/base.h"
 #include "io/file.h"
 #include "server/common.h"
 #include "server/db_slice.h"
@@ -99,6 +100,13 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void ThrottleIfNeeded();
 
  private:
+  [[maybe_unused]] void SerializeIndexMapping(
+      uint32_t shard_id, std::string_view index_name,
+      const std::vector<std::pair<std::string, search::DocId>>& mappings);
+
+  // Serialize ShardDocIndex key-to-DocId mappings for all search indices on this shard
+  void SerializeIndexMappings();
+
   // Serialize HNSW global indices for shard 0 only
   void SerializeGlobalHnswIndices();
 
