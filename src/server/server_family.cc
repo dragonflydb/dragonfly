@@ -1559,8 +1559,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("pipeline_queue_length", "",
-                            conn_stats.dispatch_queue_entries + conn_stats.pipeline_queue_entries,
+  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.pipeline_queue_entries,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("send_delay_seconds", "",
                             double(GetDelayMs(m.oldest_pending_send_ts)) / 1000.0,
@@ -3008,9 +3007,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
-    // Sum of dispatch and pipeline queues.
-    append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries +
-                                        m.facade_stats.conn_stats.pipeline_queue_entries);
+    append("pipeline_queue_length", m.facade_stats.conn_stats.pipeline_queue_entries);
     append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
     append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
   };

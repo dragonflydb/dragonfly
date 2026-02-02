@@ -292,7 +292,7 @@ class Connection : public util::Connection {
 
   // Processes a single Admin/Control message from dispatch_q_.
   // Returns true if the fiber should terminate (e.g. Migration).
-  bool ProcessAdminMessage(MessageHandle msg, AsyncOperations& async_op);
+  bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
 
   // Processes the next Pipeline command from parsed_head_.
   void ProcessPipelineCommand();

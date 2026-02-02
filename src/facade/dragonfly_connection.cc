@@ -1568,8 +1568,8 @@ string Connection::DebugInfo() const {
   return info;
 }
 
-bool Connection::ProcessAdminMessage(MessageHandle msg, AsyncOperations& async_op) {
-  bool is_replying = msg.IsReplying();
+bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op) {
+  bool is_replying = msg->IsReplying();
 
   // Pre-execution Flush
   // If this is a non-replying control message (e.g. Migration) and it's the last item,
@@ -1580,8 +1580,8 @@ bool Connection::ProcessAdminMessage(MessageHandle msg, AsyncOperations& async_o
   }
 
   // Fiber Termination Check
-  if (ShouldEndAsyncFiber(msg)) {
-    UpdateDispatchStats(msg, false /* subtract */);
+  if (ShouldEndAsyncFiber(*msg)) {
+    UpdateDispatchStats(*msg, false /* subtract */);
     CHECK(!HasPendingMessages()) << DebugInfo();
     GetQueueBackpressure().pipeline_cnd.notify_all();
     return true;  // Signal to terminate AsyncFiber
@@ -1590,7 +1590,7 @@ bool Connection::ProcessAdminMessage(MessageHandle msg, AsyncOperations& async_o
   // Execution
   auto replies_recorded_before = reply_builder_->RepliesRecorded();
   cc_->async_dispatch = true;
-  std::visit(async_op, msg.handle);
+  std::visit(*async_op, msg->handle);
   cc_->async_dispatch = false;
 
   // Post-execution Flush
@@ -1601,7 +1601,7 @@ bool Connection::ProcessAdminMessage(MessageHandle msg, AsyncOperations& async_o
     reply_builder_->Flush();
   }
 
-  UpdateDispatchStats(msg, false /* subtract */);
+  UpdateDispatchStats(*msg, false /* subtract */);
   return false;
 }
 
@@ -1729,7 +1729,7 @@ void Connection::AsyncFiber() {
         dispatch_q_.pop_front();
 
         // Execute and check if we need to terminate the fiber
-        if (ProcessAdminMessage(std::move(msg), async_op)) {
+        if (ProcessAdminMessage(&msg, &async_op)) {
           return;  // don't set conn closing flag
         }
       } else {  // Process Pipeline Queue
