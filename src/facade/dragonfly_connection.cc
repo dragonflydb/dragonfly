@@ -319,8 +319,27 @@ struct QueueBackpressure {
   // Block until subscriber memory usage is below limit, can be called from any thread.
   void EnsureBelowLimit();
 
+  // Checks if backpressure should be applied.
+  // 'size' should be the total bytes currently consumed by all connections on this thread.
+  // 'q_len' should be the length of the pipeline queue for the current connection.
+  //
+  // Returns true if EITHER:
+  // 1. Thread-Global memory limit is exceeded (protects server from OOM).
+  // 2. Per-Connection queue length limit is exceeded (protects against single-client abuse).
   bool IsPipelineBufferOverLimit(size_t size, uint32_t q_len) const {
-    return size >= pipeline_buffer_limit || q_len > pipeline_queue_max_len;
+    return size >= (pipeline_buffer_limit) || (q_len > pipeline_queue_max_len);
+  }
+
+  // Checks if usage has dropped below the limit in at least one criteria.
+  // Used to determine if we should notify waiters.
+  // 'size' should be the total bytes currently consumed by all connections on this thread.
+  // 'q_len' should be the length of the pipeline queue for the current connection.
+  //
+  // Returns true if EITHER:
+  // 1. Thread-Global memory is now under the limit (allows neighbors to wake up).
+  // 2. Per-Connection queue length is now within the limit (allows self to wake up).
+  bool IsPipelineBufferUnderLimit(size_t size, uint32_t q_len) const {
+    return (size < pipeline_buffer_limit) || (q_len <= pipeline_queue_max_len);
   }
 
   // Used by publisher/subscriber actors to make sure we do not publish too many messages
@@ -1109,8 +1128,10 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     return;
 
   bool optimize_for_async = has_more;
+  bool can_dispatch_sync =
+      !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
   QueueBackpressure& qbp = GetQueueBackpressure();
-  if (optimize_for_async &&
+  if ((optimize_for_async || !can_dispatch_sync) &&
       qbp.IsPipelineBufferOverLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_)) {
     stats_->pipeline_throttle_count++;
     LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit."
@@ -1122,10 +1143,17 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
     fb2::NoOpLock noop;
     qbp.pipeline_cnd.wait(noop, [this, &qbp] {
+      // Wait until at least one is true:
+      // 1) Connection is closing.
+      // 2) Can dispatch synchronously.
+      // 3) Not over limits (for an async dispatch).
+      bool can_dispatch_sync =
+          !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
+      if (can_dispatch_sync)
+        return true;
       bool over_limits =
           qbp.IsPipelineBufferOverLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_);
-      bool pipeline_idle = (parsed_cmd_q_len_ == 0);
-      return !over_limits || (pipeline_idle && !cc_->async_dispatch) || cc_->conn_closing;
+      return !over_limits || cc_->conn_closing;
     });
 
     if (cc_->conn_closing) {
@@ -1141,7 +1169,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
-  bool can_dispatch_sync = !cc_->async_dispatch && !HasPendingMessages() && cc_->subscriptions == 0;
+  can_dispatch_sync = !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
@@ -1737,7 +1765,10 @@ void Connection::AsyncFiber() {
       }
     }
 
-    if (!qbp.IsPipelineBufferOverLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_) ||
+    // Notify waiters if backpressure constraints are relieved.
+    // 1. Global memory (bytes) is under limit -> Wakes up neighbors on this thread.
+    // 2. Local queue (length) is under limit -> Wakes up this connection's producer.
+    if (qbp.IsPipelineBufferUnderLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_) ||
         !HasPendingMessages()) {
       qbp.pipeline_cnd.notify_all();
     }
