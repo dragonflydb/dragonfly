@@ -1510,4 +1510,50 @@ TEST_F(StreamFamilyTest, XTrimCrashWithMallocUsedZero) {
   Run("XTRIM mystream MAXLEN 0");
 }
 
+TEST_F(StreamFamilyTest, XReadGroupMultipleStreams) {
+  Run("XGROUP CREATE mystream1 mygroup $ MKSTREAM");
+  Run("XGROUP CREATE mystream mygroup $ MKSTREAM");
+
+  Run("XADD mystream 2000-0 field1 value1");
+  Run("XADD mystream 2000-1 field1 value1");
+  Run("XADD mystream 2000-2 field1 value1");
+
+  Run("XADD mystream1 2000-0 field1 value1");
+  Run("XADD mystream1 2000-1 field1 value1");
+  Run("XADD mystream1 2000-2 field1 value1");
+
+  auto resp = Run("XREADGROUP GROUP mygroup myconsumer STREAMS mystream mystream1 > 2000-0");
+
+  EXPECT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+
+  const auto& vec = resp.GetVec();
+
+  auto first_stream = vec[0];
+  EXPECT_THAT(first_stream, RespArray(ElementsAre("mystream", ArrLen(3))));
+  auto entries = first_stream.GetVec()[1].GetVec();
+  EXPECT_THAT(entries[0], RespArray(ElementsAre("2000-0", RespElementsAre("field1", "value1"))));
+  EXPECT_THAT(entries[1], RespArray(ElementsAre("2000-1", RespElementsAre("field1", "value1"))));
+  EXPECT_THAT(entries[2], RespArray(ElementsAre("2000-2", RespElementsAre("field1", "value1"))));
+
+  auto second_stream = vec[1];
+  EXPECT_THAT(second_stream, RespArray(ElementsAre("mystream1", ArrLen(0))));
+}
+
+TEST_F(StreamFamilyTest, XGroupSetIdEntriesRead) {
+  Run("XGROUP CREATE mystream mygroup $ MKSTREAM");
+  Run("XADD mystream 2000-0 key val");
+  Run("XGROUP SETID mystream mygroup 2000-0 ENTRIESREAD 100");
+
+  auto resp = Run("XINFO GROUPS mystream");
+  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending",
+                                         IntArg(0), "last-delivered-id", "2000-0", "entries-read",
+                                         IntArg(100), "lag", IntArg(-99)));
+
+  Run("XGROUP SETID mystream mygroup 2000-0 ENTRIESREAD -1");
+  resp = Run("XINFO GROUPS mystream");
+  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending",
+                                         IntArg(0), "last-delivered-id", "2000-0", "entries-read",
+                                         kMatchNil, "lag", IntArg(0)));
+}
+
 }  // namespace dfly
