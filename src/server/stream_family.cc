@@ -181,6 +181,7 @@ struct StreamIDsItem {
   // Readgroup fields - id and group-consumer pair is exclusive.
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
+  bool serve_history = false;
 };
 
 struct ReadOpts {
@@ -194,7 +195,6 @@ struct ReadOpts {
 
   // readgroup fields
   bool read_group = false;
-  bool serve_history = false;
   string_view group_name;
   string_view consumer_name;
   bool noack = false;
@@ -967,8 +967,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
 
     OpResult<RecordVec> range_res;
 
-    // TODO server history IS PER stream. Fix this incorrect behaviour
-    if (opts.serve_history)
+    if (sitem.serve_history)
       range_res = OpRangeFromConsumerPEL(op_args, key, range_opts);
     else
       range_res = OpRange(op_args, key, range_opts);
@@ -2009,7 +2008,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   while (parser->HasNext()) {
     if (parser->Check("ENTRIESREAD") && parser->HasAtLeast(1)) {
       entries_read = parser->Next<int64>();
-      if (parser->HasError() || *entries_read < 0) {
+      if (parser->HasError() || *entries_read < SCG_INVALID_ENTRIES_READ) {
         return cmd_cntx->SendError(kSyntaxErr);
       }
     } else {
@@ -2425,7 +2424,9 @@ void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const Recor
     return;
   }
 
-  if (!opts.serve_history) {
+  const bool serve_history = opts.stream_ids.at(key).serve_history;
+
+  if (!serve_history) {
     // Reading NEW messages (ID = ">")
     auto journal_xgroup = [&opts, op_args](const auto& records, std::string_view key) {
       if (!records.empty()) {
@@ -3385,7 +3386,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
 
     // If '>' is not provided, consumer PEL is used. So don't need to block.
     if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
-      opts->serve_history = true;
+      requested_sitem.serve_history = true;
       return true;
     }
 
