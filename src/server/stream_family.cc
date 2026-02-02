@@ -2089,9 +2089,7 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const Trim
 
   int64_t deleted_items_number = TrimStream(opts, s);
 
-  if (s->length != 0) {
-    mem_tracker.UpdateStreamSize(pv);
-  }
+  mem_tracker.UpdateStreamSize(pv);
 
   if (op_args.shard->journal() && journal_as_minid) {
     const bool stream_is_empty = s->length == 0;

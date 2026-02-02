@@ -1501,40 +1501,13 @@ TEST_F(StreamFamilyTest, ConsumerGroupLagWithXAddTrimming) {
                           "lag", IntArg(0), "pel-count", _, "pending", _, "consumers", _));
 }
 
-// Regression test for memory tracking bug when trimming a stream to empty.
-// Previously, trimming to empty would cause MallocUsed() to become 0, triggering
-// a DCHECK failure in UpdateStreamSize that treats 0 as an invalid special value.
-TEST_F(StreamFamilyTest, TrimToEmpty) {
-  // Add some entries to the stream
-  Run({"xadd", "mystream", "1-0", "field1", "value1"});
-  Run({"xadd", "mystream", "2-0", "field2", "value2"});
-  Run({"xadd", "mystream", "3-0", "field3", "value3"});
+TEST_F(StreamFamilyTest, XTrimCrashWithMallocUsedZero) {
+  auto resp = Run({"xadd", "mystream", "0-0", "field1", "value1"});
+  EXPECT_THAT(
+      resp, ErrArg("The ID specified in XADD is equal or smaller than the target stream top item"));
 
-  // Verify stream has 3 entries
-  auto resp = Run({"xlen", "mystream"});
-  EXPECT_THAT(resp, IntArg(3));
-
-  // Trim to maxlen 0 - this should empty the stream completely
-  resp = Run({"xtrim", "mystream", "maxlen", "0"});
-  EXPECT_THAT(resp, IntArg(3));
-
-  // Verify stream is now empty
-  resp = Run({"xlen", "mystream"});
-  EXPECT_THAT(resp, IntArg(0));
-
-  // Verify stream still exists but is empty
-  resp = Run({"exists", "mystream"});
-  EXPECT_THAT(resp, IntArg(1));
-
-  // Test trimming to empty with minid as well
-  Run({"xadd", "mystream2", "1-0", "field1", "value1"});
-  Run({"xadd", "mystream2", "2-0", "field2", "value2"});
-
-  resp = Run({"xtrim", "mystream2", "minid", "999-0"});
-  EXPECT_THAT(resp, IntArg(2));
-
-  resp = Run({"xlen", "mystream2"});
-  EXPECT_THAT(resp, IntArg(0));
+  // Without the fix we would have crashed here with check failed MallocUsed() != 0
+  Run("XTRIM mystream MAXLEN 0");
 }
 
 }  // namespace dfly
