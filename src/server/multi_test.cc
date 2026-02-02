@@ -1474,4 +1474,25 @@ TEST_F(MultiTest, StoredCmdBytesMetric) {
   ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
 }
 
+// Verify that lazy expiration works inside EVAL running in global mode
+// (allow-undeclared-keys). Previously, the shard_lock()->Check(EXCLUSIVE) guard
+// in ExpireIfNeeded prevented any lazy expiry while a global transaction held
+// the shard lock, causing expired keys to be returned as if they were still alive.
+TEST_F(MultiEvalTest, EvalGlobalLazyExpire) {
+  for (int i = 0; i < 50; i++) {
+    string key = absl::StrCat("key", i);
+
+    // Use a large TTL so real wall-clock time cannot expire it before EVAL.
+    Run({"set", key, "val", "px", "5000"});
+
+    // Advance logical time past the expiry.
+    AdvanceTime(6000);
+
+    // Access the key from a global-mode EVAL script. The key should be lazily
+    // expired and the script should see nil.
+    auto resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", key});
+    ASSERT_THAT(resp, ArgType(RespExpr::NIL)) << "iteration " << i;
+  }
+}
+
 }  // namespace dfly
