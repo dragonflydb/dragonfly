@@ -1799,6 +1799,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_cmd_cache_bytes, {"class"},
                     {"pipeline_cmd_cache"}, &memory_by_class_bytes);
 
+  AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_queue_bytes, {"class"},
+                    {"pipeline_queue"}, &memory_by_class_bytes);
+
   AppendMetricValue("memory_by_class_bytes", conn_stats.dispatch_queue_bytes, {"class"},
                     {"dispatch_queue"}, &memory_by_class_bytes);
 
