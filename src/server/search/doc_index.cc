@@ -248,6 +248,51 @@ size_t ShardDocIndex::DocKeyIndex::Size() const {
   return ids_.size();
 }
 
+std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::Serialize() const {
+  std::vector<std::pair<std::string, search::DocId>> result;
+  result.reserve(ids_.size());
+  for (const auto& [key, id] : ids_) {
+    result.emplace_back(key, id);
+  }
+  return result;
+}
+
+void ShardDocIndex::DocKeyIndex::Deserialize(
+    const std::vector<std::pair<std::string, search::DocId>>& data) {
+  // Clear existing state
+  ids_.clear();
+  keys_.clear();
+  free_ids_.clear();
+  last_id_ = 0;
+
+  if (data.empty()) {
+    return;
+  }
+
+  // Find the maximum DocId to size the keys_ vector
+  search::DocId max_id = 0;
+  for (const auto& [key, id] : data) {
+    max_id = std::max(max_id, id);
+  }
+
+  // Resize keys_ to accommodate all DocIds
+  keys_.resize(max_id + 1);
+  last_id_ = max_id + 1;
+
+  // Populate ids_ and keys_
+  for (const auto& [key, id] : data) {
+    ids_[key] = id;
+    keys_[id] = key;
+  }
+
+  // Find free IDs (gaps in the range [0, max_id])
+  for (search::DocId id = 0; id <= max_id; ++id) {
+    if (keys_[id].empty()) {
+      free_ids_.push_back(id);
+    }
+  }
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
@@ -275,6 +320,12 @@ ShardDocIndex::~ShardDocIndex() {
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
+  // If we have a pre-loaded key index (from snapshot), use it to preserve DocIds
+  if (key_index_.Size() > 0) {
+    RebuildWithPreloadedMapping(op_args, mr);
+    return;
+  }
+
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
@@ -289,6 +340,34 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   indices_->FinalizeInitialization();
   VLOG(1) << "Indexed " << key_index_.Size()
           << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
+}
+
+void ShardDocIndex::RebuildWithPreloadedMapping(const OpArgs& op_args,
+                                                PMR_NS::memory_resource* mr) {
+  // key_index_ is already populated from deserialization
+  indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
+
+  auto cb = [this](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
+    // Look up the pre-assigned DocId for this key
+    auto doc_id_opt = key_index_.Find(key);
+    if (!doc_id_opt) {
+      // Key not in pre-loaded mapping, skip (this shouldn't happen normally)
+      VLOG(1) << "Key not found in pre-loaded mapping: " << key;
+      return;
+    }
+
+    auto doc = GetAccessor(db_cntx, pv);
+    if (!indices_->Add(*doc_id_opt, *doc)) {
+      VLOG(1) << "Failed to add doc to indices: " << key;
+    }
+  };
+
+  TraverseAllMatching(*base_, op_args, cb);
+
+  indices_->FinalizeInitialization();
+
+  VLOG(1) << "Indexed " << key_index_.Size()
+          << " docs using pre-loaded mapping on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
 }
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
@@ -809,6 +888,18 @@ void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
     ptr->Rebuild(op_args, &local_mr_);
     ptr->RebuildGlobalVectorIndices(index_name, op_args);
   }
+}
+
+void ShardDocIndices::ApplyKeyIndexMapping(
+    std::string_view index_name,
+    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  auto it = indices_.find(index_name);
+  if (it == indices_.end()) {
+    VLOG(1) << "Index not found for applying mapping: " << index_name;
+    return;
+  }
+  it->second->DeserializeKeyIndex(mappings);
+  VLOG(1) << "Applied " << mappings.size() << " key mappings to index: " << index_name;
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {

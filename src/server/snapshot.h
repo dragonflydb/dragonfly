@@ -99,6 +99,9 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void ThrottleIfNeeded();
 
  private:
+  // Serialize ShardDocIndex key-to-DocId mappings for all search indices on this shard
+  void SerializeIndexMappings();
+
   // Serialize HNSW global indices for shard 0 only
   void SerializeGlobalHnswIndices();
 
