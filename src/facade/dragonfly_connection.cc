@@ -1865,7 +1865,7 @@ void Connection::LaunchAsyncFiberIfNeeded() {
 // SendAsync is now strictly for the Control Path (Admin/Events).
 // Pipeline commands are handled separately via EnqueueParsedCommand to maintain
 // clean separation between Data and Control paths.
-// Note: Should never block - the callers may run in as a a brief callback.
+// Note: Should never block - the callers may run in as a brief callback.
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(listener());
@@ -1937,21 +1937,26 @@ void Connection::SendAsync(MessageHandle msg) {
 void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
   size_t mem = msg.UsedMemory();
   ssize_t count_delta = add ? 1 : -1;
-  ssize_t mem_delta = add ? static_cast<ssize_t>(mem) : -static_cast<ssize_t>(mem);
-
-  if (!add) {
+  if (add) {
+    stats_->dispatch_queue_entries++;
+    stats_->dispatch_queue_bytes += mem;
+    if (msg.IsPubMsg()) {
+      GetQueueBackpressure().subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
+      stats_->dispatch_queue_subscriber_bytes += mem;
+    }
+  } else {
     DCHECK_GT(stats_->dispatch_queue_entries, 0u);
     DCHECK_GE(stats_->dispatch_queue_bytes, mem);
     if (msg.IsPubMsg()) {
       DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, mem);
     }
-  }
-  stats_->dispatch_queue_entries += count_delta;
-  stats_->dispatch_queue_bytes += mem_delta;
-
-  if (msg.IsPubMsg()) {
-    GetQueueBackpressure().subscriber_bytes.fetch_add(mem_delta, std::memory_order_relaxed);
-    stats_->dispatch_queue_subscriber_bytes += mem_delta;
+    stats_->dispatch_queue_entries--;
+    stats_->dispatch_queue_bytes -= mem;
+    if (msg.IsPubMsg()) {
+      GetQueueBackpressure().subscriber_bytes.fetch_add(-static_cast<ssize_t>(mem),
+                                                        std::memory_order_relaxed);
+      stats_->dispatch_queue_subscriber_bytes -= mem;
+    }
   }
 }
 
@@ -2243,7 +2248,9 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   stats_->pipeline_queue_entries++;
   stats_->pipeline_queue_bytes += used_mem;
 
-  if (!cc_->sync_dispatch) {
+  // AsyncFiber for Memcache only wakes up on dispatch_q_, notify only redis as this is the parse
+  // commands queue.
+  if ((!cc_->sync_dispatch) && (protocol_ == Protocol::REDIS)) {
     cnd_.notify_one();
   }
 }

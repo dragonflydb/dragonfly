@@ -2915,8 +2915,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   // update peak_stats_ from it.
   {
     util::fb2::LockGuard lk{peak_stats_mu_};
-    // Tracks the combined total of dispatch_queue_bytes and pipeline_queue_bytes for connection
-    // pipeline memory usage.
+    // Note: PeakStats::conn_dispatch_queue_bytes is a legacy name. It now tracks the combined
+    // total of dispatch_queue_bytes and pipeline_queue_bytes for ALL connections on this thread.
     UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
               result.facade_stats.conn_stats.dispatch_queue_bytes +
                   result.facade_stats.conn_stats.pipeline_queue_bytes);
