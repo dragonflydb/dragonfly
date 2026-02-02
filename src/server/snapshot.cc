@@ -112,6 +112,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
                                                          : fb2::FiberPriority::NORMAL,
                         .name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex())};
   snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal] {
+    // TODO add error processing for index serialization
     SerializeIndexMappings();
     SerializeGlobalHnswIndices();
     this->IterateBucketsFb(stream_journal);
@@ -178,16 +179,15 @@ void SliceSnapshot::SerializeIndexMapping(
 
   for (const auto& [key, doc_id] : mappings) {
     if (auto ec = serializer_->SaveString(key); ec)
-      break;
+      return;
     if (auto ec = serializer_->SaveLen(doc_id); ec)
-      break;
+      return;
   }
   ThrottleIfNeeded();
 }
 
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
-  // Skip for legacy RDB format
   if (SaveMode() == dfly::SaveMode::RDB) {
     return;
   }

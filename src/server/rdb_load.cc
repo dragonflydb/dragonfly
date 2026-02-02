@@ -2253,7 +2253,6 @@ error_code RdbLoader::Load(io::Source* src) {
       PendingIndexMapping pim;
       SET_OR_RETURN(LoadLen(nullptr), pim.shard_id);
 
-      string index_name;
       SET_OR_RETURN(FetchGenericString(), pim.index_name);
 
       uint64_t mapping_count;

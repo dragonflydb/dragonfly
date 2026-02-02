@@ -100,7 +100,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void ThrottleIfNeeded();
 
  private:
-  // Serialize a single index's key-to-DocId mappings
   [[maybe_unused]] void SerializeIndexMapping(
       uint32_t shard_id, std::string_view index_name,
       const std::vector<std::pair<std::string, search::DocId>>& mappings);

@@ -328,14 +328,8 @@ class ShardDocIndex {
     return search::DefragmentResult{false, 0};
   }
 
-  // Serialize the key-to-DocId mapping for persistence
   std::vector<std::pair<std::string, DocId>> SerializeKeyIndex() const {
     return key_index_.Serialize();
-  }
-
-  // Check if key index has been pre-populated (e.g., from deserialization)
-  bool HasPreloadedKeyIndex() const {
-    return key_index_.Size() > 0;
   }
 
  private:
