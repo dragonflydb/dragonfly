@@ -292,18 +292,39 @@ std::vector<DocId> RangeResult::Take() {
 }
 
 void RangeTree::Builder::Add(DocId id, double value) {
-  bool inserted = entries_.emplace(id, value).second;
-  DCHECK(inserted);
+  if (processing) {
+    delayed_[id].first = value;
+  } else {
+    bool inserted = updates_.emplace(id, value).second;
+    DCHECK(inserted);
+  }
 }
 
 void RangeTree::Builder::Remove(DocId id, double value) {
-  entries_.erase({id, value});
+  if (processing) {
+    // If the value was already changed, nullify the updated value.
+    // If this is a new delete, store the original value
+    if (auto it = delayed_.find(id); it != delayed_.end()) {
+      auto& [updated, original] = it->second;
+      updated = std::nullopt;
+      if (!original)  // Populate doesn't know about it, we can forget it
+        delayed_.erase(it);
+    } else {
+      delayed_[id].second = value;  // store original to be able to delete
+    }
+  } else {
+    updates_.erase({id, value});
+  }
 }
 
 void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
-  // Sort all elements
-  std::vector<Entry> sorted_entries(entries_.begin(), entries_.end());
+  processing = true;
+
+  // Sort all elements by value
+  std::vector<Entry> sorted_entries(updates_.begin(), updates_.end());
   std::ranges::sort(sorted_entries, {}, &Entry::second);
+  updates_.clear();
+
   quota.Check();
 
   // Add sorted elements in batches
@@ -326,9 +347,18 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
     quota.Check();  // Yield if needed
   }
 
-  // Insert entries accumulated during yields
-  for (auto entry : entries_)
-    tree->Add(entry.first, entry.second);
+  // Update entries accumulated during yields
+  // TODO: possibly apply upadtes in steps
+  DCHECK(updates_.empty());
+  for (const auto& [id, delayed_v] : delayed_) {
+    const auto [updated, original] = delayed_v;
+    DCHECK(updated || original);  // no stale updates
+
+    if (original)
+      tree->Remove(id, *original);
+    if (updated)
+      tree->Add(id, *updated);
+  }
 }
 
 }  // namespace dfly::search

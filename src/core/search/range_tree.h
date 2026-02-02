@@ -36,15 +36,23 @@ class RangeTree {
   friend class RangeResult;
   using Entry = std::pair<DocId, double>;
 
-  // Builder for index when queries are not required
+  // More efficient builder for range tree where updates are batched
+  // and then applied in an optimized order inside Populate
   struct Builder {
     void Add(DocId id, double value);
     void Remove(DocId id, double value);
 
+    // Build tree form batched updates. Accepts new updates during suspensions
     void Populate(RangeTree* tree, const RenewableQuota& quota);
 
    private:
-    absl::flat_hash_set<Entry> entries_;
+    bool processing = false;
+    absl::flat_hash_set<Entry> updates_;
+
+    // Erase requests for entries that are already handled by Populate
+    absl::flat_hash_map<DocId, std::pair<std::optional<double> /* updated value*/,
+                                         std::optional<double> /* original value */>>
+        delayed_;
   };
 
   // Main node of numeric tree
@@ -87,7 +95,8 @@ class RangeTree {
   absl::InlinedVector<const RangeBlock*, 5> GetAllBlocks() const;
 
   // Build tree ouf of a single block after replication
-  void FinalizeInitialization();
+  void FinalizeInitialization() {
+  }
 
   struct Stats {
     size_t splits = 0;

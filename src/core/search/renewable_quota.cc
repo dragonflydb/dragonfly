@@ -5,6 +5,10 @@
 
 namespace dfly::search {
 
+RenewableQuota RenewableQuota::Unlimited() {
+  return RenewableQuota{std::numeric_limits<size_t>::max()};
+}
+
 // Quota that yields if the fiber is running for too long
 void RenewableQuota::Check() const {
   size_t cycles = util::ThisFiber::GetRunningTimeCycles();
