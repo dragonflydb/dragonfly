@@ -307,7 +307,7 @@ class ShardDocIndex {
                        const std::vector<std::string_view>& terms);
 
   // Public access to key index for direct operations (e.g., when dropping index with DD)
-  // TODO: replac with keys() view
+  // TODO: replace with keys() view
   const DocKeyIndex& key_index() const {
     return key_index_;
   }

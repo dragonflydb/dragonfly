@@ -390,7 +390,7 @@ TEST_F(SearchFamilyTest, Indexing) {
     EXPECT_THAT(resp, Not(ErrArg("")));
 
     iterations++;
-    EXPECT_LE(absl::Now(), deadline);
+    ASSERT_LE(absl::Now(), deadline);
   }
 
   EXPECT_GT(iterations, 5u);  // some reasonable amount
