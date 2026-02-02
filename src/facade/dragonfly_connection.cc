@@ -844,8 +844,8 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (parsed_cmd_q_len_ > 0) {
-    absl::StrAppend(&after, " parsed_cmd_q_len=", parsed_cmd_q_len_);
-    absl::StrAppend(&after, " parsed_cmd_q_bytes=", parsed_cmd_q_bytes_);
+    absl::StrAppend(&after, " pipeline=", parsed_cmd_q_len_);
+    absl::StrAppend(&after, " pbuf=", parsed_cmd_q_bytes_);
   }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
