@@ -63,6 +63,7 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
+#include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
@@ -1244,6 +1245,9 @@ void ServerFamily::Shutdown() {
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
+#ifdef WITH_SEARCH
+    SearchFamily::Shutdown();
+#endif
   });
 }
 

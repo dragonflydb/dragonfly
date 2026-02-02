@@ -272,23 +272,35 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
 }
 
 ShardDocIndex::~ShardDocIndex() {
+  CancelBuilder();
 }
 
-void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool sync) {
+  CancelBuilder();
+
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
   // Create builder and start indexing
   builder_ = std::make_unique<search::IndexBuilder>(this);
-  builder_->Start(op_args, [this] { builder_.reset(); });
+  builder_->Start(op_args, [this] {
+    indices_->FinalizeInitialization();
+    VLOG(1) << "Indexed " << key_index_.Size()
+            << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
+    builder_.reset();
+  });
 
-  // This PR is limited to using the builder synchronously
-  while (builder_)
-    util::ThisFiber::SleepFor(100us);
+  // Temporary. In the future rdb loader will construct indices at the start
+  if (sync) {
+    builder_->Worker().JoinIfNeeded();
+  }
+}
 
-  indices_->FinalizeInitialization();
-  VLOG(1) << "Indexed " << key_index_.Size()
-          << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
+void ShardDocIndex::CancelBuilder() {
+  if (builder_) {
+    builder_->Cancel();
+    builder_.reset();
+  }
 }
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
@@ -729,7 +741,11 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
-  return {*base_, key_index_.Size(), nullopt};
+  return {.base_index = *base_,
+          .num_docs = key_index_.Size(),
+          .indexing = bool(builder_),
+          .percent_indexed = bool(builder_) ? 0.5f : 1.0f,  // no estimation for now
+          .hnsw_metadata = nullopt};
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
@@ -804,9 +820,9 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
     JsonAccessor::RemoveFieldFromCache(fident);
 }
 
-void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool sync) {
   for (auto& [index_name, ptr] : indices_) {
-    ptr->Rebuild(op_args, &local_mr_);
+    ptr->Rebuild(op_args, &local_mr_, sync);
     ptr->RebuildGlobalVectorIndices(index_name, op_args);
   }
 }

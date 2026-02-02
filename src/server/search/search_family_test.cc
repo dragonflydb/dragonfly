@@ -291,12 +291,14 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(
-      info,
-      IsArray(_, _, _, IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1),
-              "index_options", RespArray(IsEmpty()), "attributes",
-              IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
-              "num_docs", IntArg(15)));
+
+  auto descriptor_matcher =
+      IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1);
+  auto schema_matcher = IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT"));
+
+  EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
+                            "attributes", schema_matcher, "num_docs", IntArg(15), "indexing",
+                            IntArg(0), "percent_indexed", "1"));
 }
 
 TEST_F(SearchFamilyTest, Stats) {
@@ -321,6 +323,84 @@ TEST_F(SearchFamilyTest, Stats) {
                           50 * 2 * 1 /* posting list entries */;
   EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
   EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
+}
+
+// Test how asynchronous indexing indexes documents and reports its progress
+TEST_F(SearchFamilyTest, Indexing) {
+  // Create documents
+#ifdef NDEBUG
+  constexpr size_t kNumDocs = 10'000;
+#else
+  constexpr size_t kNumDocs = 1'000;
+#endif
+
+  for (size_t i = 0; i < kNumDocs; i++) {
+    Run({"hset", absl::StrCat("doc-", i), "t", absl::StrCat("some long text at ", i), "v1",
+         absl::StrCat(i / 10), "v2", absl::StrCat(i / 1000)});
+  }
+
+  string_view create_cmd[] = {"ft.create", "i1", "schema", "v1", "numeric", "t", "text"};
+
+  // Drop immediately to check cancel
+  {
+    Run(create_cmd);
+    for (size_t i = 0; i < 3; i++)
+      ThisFiber::Yield();
+    Run({"ft.dropindex", "i1"});
+  }
+
+  // Update with ft.alter to check restart
+  {
+    Run(create_cmd);
+    for (size_t i = 0; i < 5; i++)
+      ThisFiber::Yield();
+    Run({"ft.alter", "i1", "schema", "add", "v2", "numeric"});
+  }
+
+  // loop and wait for index construction
+  absl::Time deadline = absl::Now() + absl::Seconds(10);
+  size_t iterations = 0;
+  bool seen_full = false;
+  while (true) {
+    auto resp = Run({"ft.info", "i1"});
+    auto arr = resp.GetVec();
+
+    auto find_field = [&arr](string_view field) {
+      return ++std::find_if(arr.begin(), arr.end(), [field](const auto& i) { return i == field; });
+    };
+
+    auto num_docs = find_field("num_docs");
+    auto indexing = find_field("indexing");
+    auto percent_indexed = find_field("percent_indexed");
+
+    if (indexing->GetInt() == 0) {
+      EXPECT_THAT(*num_docs, IntArg(kNumDocs));
+      EXPECT_EQ(*percent_indexed, "1");
+      break;
+    }
+
+    // Check basic invariants
+    EXPECT_FALSE(seen_full);
+    seen_full |= num_docs->GetInt() == kNumDocs;
+    EXPECT_THAT(*indexing, IntArg(1));
+    EXPECT_NE(*percent_indexed, "1");  // change once we have estimations
+
+    // Check search doesn't return any errors
+    resp = Run({"ft.search", "i1", "@v1:[10 20]"});
+    EXPECT_THAT(resp, Not(ErrArg("")));
+
+    iterations++;
+    ASSERT_LE(absl::Now(), deadline);
+  }
+
+  EXPECT_GT(iterations, 5u);  // some reasonable amount
+
+  auto resp = Run({"ft.search", "i1", "@v1:[10 20]", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, IntArg(110));
+
+  // check added with alter field v2 is fully indexed
+  resp = Run({"ft.search", "i1", "@v2:[0 10000]", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, IntArg(kNumDocs));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -582,14 +662,14 @@ TEST_F(SearchFamilyTest, TagEscapeCharacters) {
 }
 
 TEST_F(SearchFamilyTest, Numbers) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "i", "numeric", "j", "numeric"}), "OK");
+
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {
       auto key = absl::StrCat("i", i, "j", j);
       Run({"hset", key, "i", absl::StrCat(i), "j", absl::StrCat(j)});
     }
   }
-
-  EXPECT_EQ(Run({"ft.create", "i1", "schema", "i", "numeric", "j", "numeric"}), "OK");
 
   // Test simple ranges:
   EXPECT_THAT(Run({"ft.search", "i1", "@i:[5 5] @j:[5 5]"}), AreDocIds("i5j5"));
@@ -1130,11 +1210,11 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
 }
 
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
+  Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
   for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
     Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",
          absl::StrCat(i)});
   }
-  Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
 
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
@@ -1521,6 +1601,11 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
 }
 
 TEST_F(SearchFamilyTest, WrongVectorFieldType) {
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
+           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
   Run({"JSON.SET", "j1", ".",
        R"({"vector_field": [0.1, 0.2, 0.3], "name": "doc_with_correct_dim"})"});
   Run({"JSON.SET", "j2", ".", R"({"vector_field": [0.1, 0.2], "name": "doc_with_small_dim"})"});
@@ -1539,24 +1624,19 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
        R"({"vector_field":[true, false, true], "name": "doc_with_booleans"})"});
   Run({"JSON.SET", "j12", ".", R"({"vector_field":1, "name": "doc_with_int"})"});
 
-  auto resp =
-      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
-           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
-  EXPECT_EQ(resp, "OK");
-
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4", "j8"));
 }
 
 // Test that FT.AGGREGATE prints only needed fields
 TEST_F(SearchFamilyTest, AggregateResultFields) {
-  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
-  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
-  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
-
   auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT", "SORTABLE",
                    "$.b", "AS", "b", "TEXT", "$.c", "AS", "c", "TEXT"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
+  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
+  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
 
   resp = Run({"FT.AGGREGATE", "i1", "*"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
@@ -1601,6 +1681,8 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByJson) {
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
   Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
   Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
   Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
@@ -1610,9 +1692,6 @@ TEST_F(SearchFamilyTest, AggregateSortByJson) {
   Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
   Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
   Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
-
-  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
-       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
 
   // Test sorting by name (DESC) and number (ASC)
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "DESC", "@number", "ASC"});
@@ -1703,6 +1782,8 @@ TEST_F(SearchFamilyTest, AggregateSortByJson) {
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
   Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
   Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
   Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
@@ -1712,9 +1793,6 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
   Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
   Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
-
-  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
-       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
 
   // Test SORTBY with invalid argument count
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "999", "@name", "@number", "DESC"});
@@ -1743,10 +1821,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
-  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
-
   Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
        "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
 
   // Test SORTBY with field name without '@'
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "name"});
@@ -1766,9 +1844,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
 }
 
 TEST_F(SearchFamilyTest, InvalidSearchOptions) {
-  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
        "AS", "field2", "TEXT"});
+
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
 
   /* Test with an empty query and LOAD. TODO: Add separate test for query syntax
   auto resp = Run({"FT.SEARCH", "idx", "", "LOAD", "1", "@field1"});
@@ -1808,14 +1887,14 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
 }
 
 TEST_F(SearchFamilyTest, KnnSearchOptions) {
-  Run({"JSON.SET", "doc:1", ".", R"({"vector": [0.1, 0.2, 0.3, 0.4]})"});
-  Run({"JSON.SET", "doc:2", ".", R"({"vector": [0.5, 0.6, 0.7, 0.8]})"});
-  Run({"JSON.SET", "doc:3", ".", R"({"vector": [0.9, 0.1, 0.4, 0.3]})"});
-
   auto resp = Run({"FT.CREATE", "my_index", "ON",  "JSON",   "PREFIX",          "1",     "doc:",
                    "SCHEMA",    "$.vector", "AS",  "vector", "VECTOR",          "FLAT",  "6",
                    "TYPE",      "FLOAT32",  "DIM", "4",      "DISTANCE_METRIC", "COSINE"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "doc:1", ".", R"({"vector": [0.1, 0.2, 0.3, 0.4]})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"vector": [0.5, 0.6, 0.7, 0.8]})"});
+  Run({"JSON.SET", "doc:3", ".", R"({"vector": [0.9, 0.1, 0.4, 0.3]})"});
 
   std::string query_vector("\x00\x00\x00\x3f\x00\x00\x00\x40\x00\x00\x00\x41\x00\x00\x80\x42", 16);
 
@@ -1856,17 +1935,17 @@ TEST_F(SearchFamilyTest, KnnSearchOptions) {
 }
 
 TEST_F(SearchFamilyTest, KnnWithSortBy) {
+  Run({"FT.CREATE", "i1",      "ON",     "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",     "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM",    "1",    "DISTANCE_METRIC", "L2",   "$.d",
+       "AS",        "d",       "NUMERIC"});
+
   vector<string> doc_ids(100);
   for (size_t i = 0; i < doc_ids.size(); i++) {
     doc_ids[i] = absl::StrCat("d:", i);
     auto v = absl::StrFormat(R"({"v": [%d.0], "d": %d})", i, i);
     Run({"JSON.SET", doc_ids[i], ".", v});
   }
-
-  Run({"FT.CREATE", "i1",      "ON",     "JSON", "PREFIX",          "1",    "d:",
-       "SCHEMA",    "$.v",     "AS",     "v",    "VECTOR",          "FLAT", "6",
-       "TYPE",      "FLOAT32", "DIM",    "1",    "DISTANCE_METRIC", "L2",   "$.d",
-       "AS",        "d",       "NUMERIC"});
 
   // We first select knn_limit closest values and then sort in REVERSE by distance
   // on a non-sortable field. The result should be first cut off by knn_limit and then sorted
@@ -1884,9 +1963,10 @@ TEST_F(SearchFamilyTest, KnnWithSortBy) {
 }
 
 TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
-  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
        "AS", "field2", "TEXT"});
+
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
 
   // Test GROUPBY with no arguments
   auto resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY"});
@@ -2790,7 +2870,7 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
                                                  "type", "NUMERIC", "blocksize", "2"),
                                          IsArray("identifier", "number2", "attribute", "number2",
                                                  "type", "NUMERIC", "blocksize", "1024")),
-                            "num_docs", IntArg(0)));
+                            "num_docs", IntArg(0), _, _, _, _));
 
   // Add a document to the index
   for (int i = 1; i <= 5; ++i) {

@@ -1177,7 +1177,6 @@ void Service::Shutdown() {
 
   // to shutdown all the runtime components that depend on EngineShard
   cluster_family_.Shutdown();
-
   server_family_.Shutdown();
 
   shutdown_watchdog.emplace(pp_);
@@ -1188,10 +1187,6 @@ void Service::Shutdown() {
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
-
-#ifdef WITH_SEARCH
-  SearchFamily::Shutdown();
-#endif
 
   Transaction::Shutdown();
 

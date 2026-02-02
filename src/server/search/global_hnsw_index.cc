@@ -49,17 +49,8 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
 
 bool GlobalHnswIndexRegistry::Remove(std::string_view index_name, std::string_view field_name) {
   std::string key = MakeKey(index_name, field_name);
-
   std::unique_lock<std::shared_mutex> lock(registry_mutex_);
-
-  auto it = indices_.find(key);
-
-  if (it != indices_.end()) {
-    indices_.erase(it);
-    return true;
-  }
-
-  return false;
+  return bool(indices_.erase(key));
 }
 
 std::shared_ptr<search::HnswVectorIndex> GlobalHnswIndexRegistry::Get(
