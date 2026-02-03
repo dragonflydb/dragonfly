@@ -177,7 +177,7 @@ TEST_F(OAHSetTest, OAHSetAddFindTest) {
     EXPECT_EQ(e->Key(), s);
   }
 
-  EXPECT_EQ(ss.Capacity(), 16384);
+  EXPECT_EQ(ss.BucketCount(), 16384);
 }
 
 TEST_F(OAHSetTest, Basic) {
@@ -803,16 +803,16 @@ void BM_Grow(benchmark::State& state) {
     state.PauseTiming();
     OAHSet tmp;
     src.Fill(&tmp);
-    CHECK_EQ(tmp.Capacity(), elems);
+    CHECK_EQ(tmp.BucketCount(), elems);
     state.ResumeTiming();
     for (const auto& str : strs) {
       tmp.Add(str);
-      if (tmp.Capacity() > elems) {
+      if (tmp.BucketCount() > elems) {
         break;  // we grew
       }
     }
 
-    CHECK_GT(tmp.Capacity(), elems);
+    CHECK_GT(tmp.BucketCount(), elems);
   }
 }
 BENCHMARK(BM_Grow);
