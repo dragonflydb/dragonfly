@@ -539,7 +539,7 @@ TEST_F(BuilderTest, Builder) {
   // Build tree
   builder.Populate(&tree, RenewableQuota::Unlimited());
 
-  // Sort for comparisions
+  // Sort for comparisons
   std::ranges::sort(entries, {}, &RangeTree::Entry::first);
   auto entry_ids = entries | std::views::keys;
 
@@ -574,7 +574,7 @@ TEST_F(BuilderTest, BuilderUpdates) {
     builder.Add(entry.first, entry.second);
 
   // Construct while suspending at every node
-  volatile bool done = false;
+  bool done = false;
   util::fb2::Fiber populate_fb{[&] {
     builder.Populate(&tree, {0});  // suspend each time
     done = true;
@@ -584,13 +584,14 @@ TEST_F(BuilderTest, BuilderUpdates) {
   DocId current = entries.size();
   bool add = false;
   size_t added = 0;
+  absl::InsecureBitGen gen;
   while (!done) {
     if (add) {
       entries.emplace_back(current, double(current) / 2);
       builder.Add(entries.back().first, entries.back().second);
       current++;
     } else {
-      size_t idx = rand() % entries.size();
+      size_t idx = absl::Uniform(gen, size_t{0}, entries.size());
       auto it = entries.begin() + idx;
       builder.Remove(it->first, it->second);
 
@@ -611,7 +612,7 @@ TEST_F(BuilderTest, BuilderUpdates) {
 
   populate_fb.Join();
 
-  // Sort for comparisions
+  // Sort for comparisons
   std::sort(entries.begin(), entries.end());
   auto entry_ids = entries | std::views::keys;
 

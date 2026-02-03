@@ -391,7 +391,7 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
   }
 
   // Update entries accumulated during yields
-  // TODO: possibly apply upadtes in steps
+  // TODO: possibly apply updates in steps
   DCHECK(updates_.empty());
   for (const auto& [id, delayed_v] : delayed_) {
     const auto [updated, original] = delayed_v;

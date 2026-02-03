@@ -42,7 +42,7 @@ class RangeTree {
     void Add(DocId id, double value);
     void Remove(DocId id, double value);
 
-    // Build tree form batched updates. Accepts new updates during suspensions.
+    // Build tree from batched updates. Accepts new updates during suspensions.
     void Populate(RangeTree* tree, const RenewableQuota& quota);
 
    private:
