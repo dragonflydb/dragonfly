@@ -331,7 +331,7 @@ std::vector<DocId> RangeResult::Take() {
 }
 
 void RangeTree::Builder::Add(DocId id, double value) {
-  if (processing) {
+  if (processing_) {
     delayed_[id].first = value;
   } else {
     bool inserted = updates_.emplace(id, value).second;
@@ -340,7 +340,7 @@ void RangeTree::Builder::Add(DocId id, double value) {
 }
 
 void RangeTree::Builder::Remove(DocId id, double value) {
-  if (processing) {
+  if (processing_) {
     // If the value was already changed, nullify the updated value.
     // If this is a new delete, store the original value
     if (auto it = delayed_.find(id); it != delayed_.end()) {
@@ -357,7 +357,7 @@ void RangeTree::Builder::Remove(DocId id, double value) {
 }
 
 void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
-  processing = true;
+  processing_ = true;
 
   // Sort all elements by value
   std::vector<Entry> sorted_entries(updates_.begin(), updates_.end());
@@ -367,6 +367,7 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
   quota.Check();
 
   // Add sorted elements in batches
+  size_t max_size = tree->max_range_block_size_;
   RangeBlock* block = &tree->entries_.begin()->second;
   for (size_t idx = 0; idx < sorted_entries.size();) {
     // Create new block for each insertion batch (first goes into only first block)
@@ -375,12 +376,15 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
 
     // Insert until we filled a block and a new value started (equal value must be in same block)
     while (idx < sorted_entries.size()) {
-      if (block->Size() >= tree->max_range_block_size_ &&
-          sorted_entries[idx - 1].second != sorted_entries[idx].second)
+      if (block->Size() >= max_size && sorted_entries[idx - 1].second != sorted_entries[idx].second)
         break;
 
       block->Insert(sorted_entries[idx]);
       idx++;
+
+      // If we filled a new multiple of the block size due to equal entries, check quota
+      if ((block->Size() - 1) / max_size != block->Size() / max_size)
+        quota.Check();
     }
 
     quota.Check();  // Yield if needed
@@ -398,6 +402,9 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
     if (updated)
       tree->Add(id, *updated);
   }
+
+  delayed_.clear();
+  processing_ = false;
 }
 
 }  // namespace dfly::search

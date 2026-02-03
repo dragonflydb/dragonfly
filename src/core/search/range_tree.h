@@ -37,16 +37,16 @@ class RangeTree {
   using Entry = std::pair<DocId, double>;
 
   // More efficient builder for range tree where updates are batched
-  // and then applied in an optimized order inside Populate
+  // and then applied in an optimized order inside Populate.
   struct Builder {
     void Add(DocId id, double value);
     void Remove(DocId id, double value);
 
-    // Build tree form batched updates. Accepts new updates during suspensions
+    // Build tree form batched updates. Accepts new updates during suspensions.
     void Populate(RangeTree* tree, const RenewableQuota& quota);
 
    private:
-    bool processing = false;
+    bool processing_ = false;
     absl::flat_hash_set<Entry> updates_;
 
     // Erase requests for entries that are already handled by Populate
