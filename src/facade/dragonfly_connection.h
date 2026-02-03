@@ -252,6 +252,8 @@ class Connection : public util::Connection {
     io_event_.notify();
   }
 
+  void MarkForClose();
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
