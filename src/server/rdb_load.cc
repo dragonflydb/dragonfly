@@ -2646,7 +2646,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   if (item->load_config.streamed) {
     std::unique_lock lk{now_streamed_mu_};
-    if (!now_streamed_.contains(item->key))
+    if (const auto it = now_streamed_.find(item->key); it == now_streamed_.end())
       now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
