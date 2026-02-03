@@ -141,7 +141,7 @@ TEST_P(LatentCoolingTSTest, SimpleGetSet) {
 
 TEST_F(TieredStorageTest, IntStrings) {
   absl::FlagSaver saver;
-  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // upload all values
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // do not stop uploads based on free-memory threshold (this test does not itself trigger uploads)
   UpdateFromFlags();
 
   // STRING object can be encoded as LONG LONG internally
