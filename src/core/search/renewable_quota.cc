@@ -1,3 +1,7 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "core/search/renewable_quota.h"
 
 #include "base/cycle_clock.h"
