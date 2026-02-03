@@ -302,12 +302,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         tableint candidate_id = *(datal + j);
         //                    if (candidate_id == 0) continue;
 
-        // Request prefetching of max 32 next vectors memory locations
-        if ((j % 32) == 0) {
-          size_t builtin_prefetch_limit = std::min(size - j, (size_t)32);
-          for (size_t k = 0; k + 1 < builtin_prefetch_limit; k++) {
-            __builtin_prefetch(getDataByInternalId(*(datal + j + k + 1)), 0, 3);
-          }
+        // Request prefetching next vector data memory
+        if (j + 1 < size) {
+          __builtin_prefetch(getDataByInternalId(*(datal + j + 1)), 0, 3);
         }
 
         if (visited_array[candidate_id] == visited_array_tag)
@@ -411,12 +408,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         int candidate_id = *(data + j);
         //                    if (candidate_id == 0) continue;
 
-        // Request prefetching of max 32 next vectors
-        if ((j % 32) == 0) {
-          size_t builtin_prefetch_limit = std::min(size - j, (size_t)32);
-          for (size_t k = 0; k + 1 < builtin_prefetch_limit; k++) {
-            __builtin_prefetch(getDataByInternalId(*(data + j + k + 1)), 0, 3);
-          }
+        // Request prefetching next vector data memory
+        if (j + 1 < size) {
+          __builtin_prefetch(getDataByInternalId(*(data + j + 1)), 0, 3);
         }
 
         if (!(visited_array[candidate_id] == visited_array_tag)) {
