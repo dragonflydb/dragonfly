@@ -148,7 +148,7 @@ TEST_F(TieredStorageTest, IntStrings) {
   string short_int_string = BuildString(18, '1');
   Run({"SET", "k1", short_int_string});
 
-  // STRING object is not offloaded due it's small size
+  // STRING object is not offloaded due to its small size
   string long_int_string = BuildString(32, '1');
   Run({"SET", "k2", long_int_string});
 
