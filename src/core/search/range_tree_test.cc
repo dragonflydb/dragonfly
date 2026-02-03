@@ -472,6 +472,31 @@ TEST_F(RangeTreeTest, RangeResultTwoBlocks) {
   }
 }
 
+TEST_F(RangeTreeTest, FinalizeInitialization) {
+  RangeTree tree{PMR_NS::get_default_resource(), 2, false};
+
+  // Add some values
+  tree.Add(1, 10.0);
+  tree.Add(2, 20.0);
+  tree.Add(3, 20.0);
+  tree.Add(4, 30.0);
+  tree.Add(5, 20.0);
+  tree.Add(6, 30.0);
+  tree.Add(7, 40.0);
+
+  auto result = tree.RangeBlocks(10.0, 40.0);
+  EXPECT_THAT(
+      result,
+      BlocksAre({{{1, 10.0}, {2, 20.0}, {3, 20.0}, {4, 30.0}, {5, 20.0}, {6, 30.0}, {7, 40.0}}}));
+
+  tree.FinalizeInitialization();
+
+  result = tree.RangeBlocks(10.0, 40.0);
+  EXPECT_THAT(result, BlocksAre({{{1, 10.0}, {2, 20.0}, {3, 20.0}, {5, 20.0}},
+                                 {{4, 30.0}, {6, 30.0}},
+                                 {{7, 40.0}}}));
+}
+
 struct BuilderTest : public RangeTreeTest {
   static void Shuffle(std::vector<RangeTree::Entry>* entries) {
     std::random_device rd;
@@ -599,6 +624,18 @@ TEST_F(BuilderTest, BuilderUpdates) {
     std::sort(all_pairs.begin(), all_pairs.end());
     EXPECT_EQ(all_pairs, entries);
   }
+}
+
+// Test tree doesn't create unnecessary nodes after initialization
+TEST_F(RangeTreeTest, DiscreteIntialization) {
+  RangeTree tree{PMR_NS::get_default_resource(), 4, false};
+  for (size_t i = 0; i < 32; i++) {
+    tree.Add(i, i % 4);
+  }
+
+  tree.FinalizeInitialization();
+  auto result = tree.GetAllBlocks();
+  EXPECT_EQ(result.size(), 4u);
 }
 
 // Benchmark tree insertion performance with set of discrete values

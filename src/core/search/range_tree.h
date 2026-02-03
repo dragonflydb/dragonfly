@@ -77,7 +77,8 @@ class RangeTree {
   static constexpr size_t kDefaultMaxRangeBlockSize = 10'000;
 
   explicit RangeTree(PMR_NS::memory_resource* mr,
-                     size_t max_range_block_size = kDefaultMaxRangeBlockSize);
+                     size_t max_range_block_size = kDefaultMaxRangeBlockSize,
+                     bool enable_splitting = true);
 
   // Adds a document with a value to the index.
   void Add(DocId id, double value);
@@ -95,8 +96,7 @@ class RangeTree {
   absl::InlinedVector<const RangeBlock*, 5> GetAllBlocks() const;
 
   // Build tree ouf of a single block after replication
-  void FinalizeInitialization() {
-  }
+  void FinalizeInitialization();
 
   struct Stats {
     size_t splits = 0;
@@ -128,6 +128,13 @@ class RangeTree {
     size_t splits = 0;
     size_t merges = 0;
   } stats_;
+
+  // TODO: Remove
+  /* During index initialization, we are using temporary buffer to store all entries.
+     That is needed to avoid unnecessary complexity of splitting blocks.
+     After calling FinishInitialization, the tmp_buffer_ is cleared and
+     further Add/Remove operations are applied directly to the entries_ map. */
+  bool enable_splitting_;
 };
 
 /* This iterator filters out entries that are not in the range [l, r].
