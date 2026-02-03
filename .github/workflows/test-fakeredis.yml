@@ -17,7 +17,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/romange/ubuntu-dev:22
+      image: ghcr.io/romange/ubuntu-dev:24
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
     strategy:
       fail-fast: false
@@ -30,15 +30,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: true
-
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+          check-latest: true
       - name: Install dependencies
         env:
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
         shell: bash
         working-directory: tests/fakeredis
         run: |
+          python -m venv .venv
+          source .venv/bin/activate
           pip install poetry
-          echo "$HOME/.poetry/bin" >> $GITHUB_PATH
           poetry install
       - name: Configure CMake
         run: |
@@ -59,7 +63,9 @@ jobs:
 
       - name: Run tests
         working-directory: tests/fakeredis
+        shell: bash
         run: |
+          source .venv/bin/activate
           # Some tests are pending on #5383
           poetry run pytest test/ \
           --ignore test/test_hypothesis/test_transaction.py \
