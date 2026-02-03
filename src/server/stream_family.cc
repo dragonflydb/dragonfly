@@ -2606,6 +2606,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
       if (result) {
+        JournalConsumerCreationIfNeeded(t->GetOpArgs(shard), *opts, *wake_key);
         JournalXReadGroupIfNeeded(t->GetOpArgs(shard), *opts, *result, *wake_key);
       }
     }
