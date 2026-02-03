@@ -365,6 +365,10 @@ class CompactObj {
     return taglen_ <= kInlineLen;
   }
 
+  bool IsIntTag() const {
+    return taglen_ == INT_TAG;
+  }
+
   uint8_t GetFirstByte() const;
 
   struct Stats {

@@ -139,6 +139,26 @@ TEST_P(LatentCoolingTSTest, SimpleGetSet) {
   EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, 0);
 }
 
+TEST_F(TieredStorageTest, IntStrings) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_upload_threshold, 0.0f);  // upload all values
+  UpdateFromFlags();
+
+  // STRING object can be encoded as LONG LONG internally
+  string short_int_string = BuildString(18, '1');
+  Run({"SET", "k1", short_int_string});
+
+  // STRING object is not offloaded due it's small size
+  string long_int_string = BuildString(32, '1');
+  Run({"SET", "k2", long_int_string});
+
+  // Long STRING object that is offloaded
+  string tiered_int_string = BuildString(4096, '1');
+  Run({"SET", "k3", tiered_int_string});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+}
+
 // Use MGET to load multiple offloaded values
 TEST_P(LatentCoolingTSTest, MGET) {
   vector<string> command = {"MGET"}, values = {};

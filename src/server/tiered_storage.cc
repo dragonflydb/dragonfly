@@ -89,7 +89,7 @@ tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
 TieredStorage::StashDescriptor DetermineSerializationParams(const PrimeValue& pv) {
   switch (pv.ObjType()) {
     case OBJ_STRING: {
-      if (pv.IsInline())
+      if (pv.IsInline() || pv.IsIntTag())
         return {};
       auto strs = pv.GetRawString();
       return {strs, CompactObj::ExternalRep::STRING};
