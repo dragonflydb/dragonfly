@@ -8,10 +8,13 @@
 
 namespace dfly::search {
 
+// Running time quota that can be reset by suspending the fiber
 struct RenewableQuota {
-  void Check() const;
-
+  // Create unlimited quota
   static RenewableQuota Unlimited();
+
+  // Check if quota is remaining and suspend the fiber if it ran out
+  void Check() const;
 
   const size_t max_usec;
 };

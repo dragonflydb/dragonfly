@@ -559,7 +559,7 @@ TEST_F(BuilderTest, Builder) {
 }
 
 TEST_F(BuilderTest, BuilderUpdates) {
-  RangeTree tree{PMR_NS::get_default_resource(), 4};
+  RangeTree tree{PMR_NS::get_default_resource(), 5};
   RangeTree::Builder builder;
 
   // Prepare entries shuffled
@@ -583,6 +583,7 @@ TEST_F(BuilderTest, BuilderUpdates) {
   // In the meantime insert new entries
   DocId current = entries.size();
   bool add = false;
+  size_t added = 0;
   while (!done) {
     if (add) {
       entries.emplace_back(current, double(current) / 2);
@@ -602,8 +603,11 @@ TEST_F(BuilderTest, BuilderUpdates) {
       }
     }
     add = !add;
+    added++;
     util::ThisFiber::Yield();
   }
+
+  EXPECT_GT(added, 5u);  // At least some updates were performed
 
   populate_fb.Join();
 
