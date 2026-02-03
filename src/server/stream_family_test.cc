@@ -1556,4 +1556,10 @@ TEST_F(StreamFamilyTest, XGroupSetIdEntriesRead) {
                                          kMatchNil, "lag", IntArg(0)));
 }
 
+TEST_F(StreamFamilyTest, XInfoConsumersArityCrash) {
+  Run("XGROUP CREATE mystream mygroup $ MKSTREAM");
+  auto resp = Run("XINFO CONSUMERS mystream");
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 }  // namespace dfly

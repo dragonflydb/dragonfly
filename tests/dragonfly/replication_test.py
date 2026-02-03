@@ -3857,6 +3857,7 @@ async def test_xreadgroup_replication(df_factory):
             assert m_dict["entries-read"] == expected_entries_read
             assert m_dict["pending"] == r_dict["pending"]
             assert m_dict["pending"] == expected_pending
+            assert m_dict["consumers"] == r_dict["consumers"]
 
     # Case 1: Non-blocking path, NOACK
     await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
@@ -3904,3 +3905,14 @@ async def test_xreadgroup_replication(df_factory):
 
     await check_all_replicas_finished([c_replica], c_master)
     await compare_group_info("mystream", 3, 5)
+
+    await c_master.execute_command("flushall")
+    # Create consumer
+    await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+    await c_master.execute_command("XADD mystream 2000-0 tmp tmp")
+    # Add to PEL but don't ack
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 STREAMS mystream >")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker2 STREAMS mystream 2000-0")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 1, 1)
