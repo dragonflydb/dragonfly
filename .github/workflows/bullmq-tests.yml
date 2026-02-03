@@ -1,5 +1,8 @@
 name: bullmq-tests
+
 on:
+  schedule:
+    - cron: '0 7 * * *' # run at 7 AM daily
   workflow_dispatch:
 
 permissions:
@@ -54,7 +57,6 @@ jobs:
             --alsologtostderr \
             --cluster_mode=emulated \
             --lock_on_hashtags \
-            --default_lua_flags=allow-undeclared-keys \
             --dbfilename= \
             --port 6379 &
           timeout 15s bash -c 'until redis-cli -p 6379 PING 2>/dev/null | grep -q PONG; do sleep 0.1; done'
@@ -78,3 +80,15 @@ jobs:
         with:
           name: unit_logs
           path: /tmp/dragonfly.*
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="BullMQ tests failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
