@@ -11,6 +11,7 @@ extern "C" {
 
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
+#include "base/spinlock.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
@@ -359,6 +360,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Map of currently streamed big values
   std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
+  base::SpinLock now_streamed_mu_;  // guards now_streamed_
 };
 
 }  // namespace dfly
