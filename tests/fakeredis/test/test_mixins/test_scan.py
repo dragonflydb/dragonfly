@@ -105,9 +105,7 @@ def test_scan_add_key_while_scanning_should_return_all_keys(r: redis.Redis):
         keys.extend(data)
 
     keys = set(keys)
-    assert (
-        len(keys) >= size
-    ), f"{set(all_keys_dict).difference(keys)} is not empty but should be"
+    assert len(keys) >= size, f"{set(all_keys_dict).difference(keys)} is not empty but should be"
 
 
 def test_scan(r: redis.Redis):

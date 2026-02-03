@@ -24,7 +24,5 @@ class TestSet(BaseTest):
         | commands(st.just("smove"), keys, keys, fields)
         | commands(st.just("srem"), keys, st.lists(fields))
     )
-    create_command_strategy = commands(
-        st.just("sadd"), keys, st.lists(fields, min_size=1)
-    )
+    create_command_strategy = commands(st.just("sadd"), keys, st.lists(fields, min_size=1))
     command_strategy = set_commands | common_commands

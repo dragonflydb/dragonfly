@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
 #include "base/random.h"
 
 namespace dfly {
@@ -32,6 +33,7 @@ namespace dfly {
 class TopKeys {
   TopKeys(const TopKeys&) = delete;
   TopKeys& operator=(const TopKeys&) = delete;
+
  public:
   struct Options {
     // HeavyKeeper options

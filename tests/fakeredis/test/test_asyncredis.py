@@ -35,9 +35,7 @@ async def test_ping(async_redis: redis.asyncio.Redis):
 
 
 async def test_types(async_redis: redis.asyncio.Redis):
-    await async_redis.hset(
-        "hash", mapping={"key1": "value1", "key2": "value2", "key3": 123}
-    )
+    await async_redis.hset("hash", mapping={"key1": "value1", "key2": "value2", "key3": 123})
     result = await async_redis.hgetall("hash")
     assert result == {b"key1": b"value1", b"key2": b"value2", b"key3": b"123"}
 
