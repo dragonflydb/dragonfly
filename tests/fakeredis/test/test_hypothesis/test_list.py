@@ -39,5 +39,7 @@ class TestList(BaseTest):
         | commands(st.just("ltrim"), keys, counts, counts)
         | commands(st.just("rpoplpush"), keys, keys)
     )
-    create_command_strategy = commands(st.just("rpush"), keys, st.lists(values, min_size=1))
+    create_command_strategy = commands(
+        st.just("rpush"), keys, st.lists(values, min_size=1)
+    )
     command_strategy = list_commands | common_commands

@@ -35,7 +35,9 @@ class TestTransaction(BaseTest):
         | commands(st.sampled_from(["substr", "getrange"]), keys, counts, counts)
         | commands(st.just("getset"), keys, values)
         | commands(st.just("mget"), st.lists(keys))
-        | commands(st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values)))
+        | commands(
+            st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values))
+        )
         | commands(
             st.just("set"),
             keys,

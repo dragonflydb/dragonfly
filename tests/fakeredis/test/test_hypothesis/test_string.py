@@ -19,7 +19,9 @@ optional_bitcount_range = st.just(()) | st.tuples(int_as_bytes, int_as_bytes)
 # str_len = st.integers(min_value=-3, max_value=3) | st.integers(
 #     min_value=-2147483647, max_value=2147483648
 # )
-str_len = st.integers(min_value=-3, max_value=3) | st.integers(min_value=-3000, max_value=3000)
+str_len = st.integers(min_value=-3, max_value=3) | st.integers(
+    min_value=-3000, max_value=3000
+)
 
 string_commands = (
     commands(st.just("append"), keys, values)

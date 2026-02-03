@@ -35,19 +35,25 @@ fields = sample_attr("fields")
 values = sample_attr("values")
 scores = sample_attr("scores")
 
-eng_text = st.builds(lambda x: x.encode(), st.text(alphabet=string.ascii_letters, min_size=1))
+eng_text = st.builds(
+    lambda x: x.encode(), st.text(alphabet=string.ascii_letters, min_size=1)
+)
 ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
 int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
-floats = st.floats(width=32, allow_nan=False, allow_subnormal=False, allow_infinity=False)
+floats = st.floats(
+    width=32, allow_nan=False, allow_subnormal=False, allow_infinity=False
+)
 float_as_bytes = st.builds(lambda x: repr(_default_normalize(x)).encode(), floats)
 counts = st.integers(min_value=-3, max_value=3) | ints
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
 # a limited range (https://github.com/antirez/redis/issues/5737).
-dbnums = st.integers(min_value=0, max_value=3) | st.integers(min_value=-1000, max_value=1000)
-# The filter is to work around https://github.com/antirez/redis/issues/5632
-patterns = st.text(alphabet=st.sampled_from("[]^$*.?-azAZ\\\r\n\t")) | st.binary().filter(
-    lambda x: b"\0" not in x
+dbnums = st.integers(min_value=0, max_value=3) | st.integers(
+    min_value=-1000, max_value=1000
 )
+# The filter is to work around https://github.com/antirez/redis/issues/5632
+patterns = st.text(
+    alphabet=st.sampled_from("[]^$*.?-azAZ\\\r\n\t")
+) | st.binary().filter(lambda x: b"\0" not in x)
 
 # Redis has integer overflow bugs in time computations, which is why we set a maximum.
 expires_seconds = st.integers(min_value=5, max_value=1_000)
@@ -242,7 +248,9 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
         super().teardown()
 
     @staticmethod
-    def _evaluate(client: redis.Redis, command) -> Tuple[Any, Optional[Type[Exception]]]:
+    def _evaluate(
+        client: redis.Redis, command
+    ) -> Tuple[Any, Optional[Type[Exception]]]:
         try:
             result = client.execute_command(*command.args)
             if result != "QUEUED":
@@ -331,7 +339,11 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
     # preconditions on rules to ensure we call init_data exactly once and
     # after init_attrs.
     @precondition(lambda self: not self.initialized_data)
-    @rule(commands=self_strategy.flatmap(lambda self: st.lists(self.create_command_strategy)))
+    @rule(
+        commands=self_strategy.flatmap(
+            lambda self: st.lists(self.create_command_strategy)
+        )
+    )
     def init_data(self, commands) -> None:
         for command in commands:
             self._compare(command)
@@ -358,6 +370,8 @@ class BaseTest:
         # hypothesis.settings.register_profile(
         #     "debug", max_examples=10, verbosity=hypothesis.Verbosity.debug
         # )
-        hypothesis.settings.register_profile("debug", verbosity=hypothesis.Verbosity.debug)
+        hypothesis.settings.register_profile(
+            "debug", verbosity=hypothesis.Verbosity.debug
+        )
         hypothesis.settings.load_profile("debug")
         hypothesis.stateful.run_state_machine_as_test(Machine)

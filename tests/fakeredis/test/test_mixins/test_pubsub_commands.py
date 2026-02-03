@@ -18,7 +18,9 @@ def wait_for_message(
     now = time.time()
     timeout = now + timeout
     while now < timeout:
-        message = pubsub.get_message(ignore_subscribe_messages=ignore_subscribe_messages)
+        message = pubsub.get_message(
+            ignore_subscribe_messages=ignore_subscribe_messages
+        )
         if message is not None:
             return message
         time.sleep(0.01)
@@ -387,7 +389,8 @@ def test_pubsub_help_redis7(r: redis.Redis):
     assert testtools.raw_command(r, "PUBSUB HELP") == [
         b"PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         b"CHANNELS [<pattern>]",
-        b"    Return the currently active channels matching a <pattern> (default: '*')" b".",
+        b"    Return the currently active channels matching a <pattern> (default: '*')"
+        b".",
         b"NUMPAT",
         b"    Return number of subscriptions to patterns.",
         b"NUMSUB [<channel> ...]",
@@ -397,7 +400,8 @@ def test_pubsub_help_redis7(r: redis.Redis):
         b"    Return the currently active shard level channels matching a <pattern> (d"
         b"efault: '*').",
         b"SHARDNUMSUB [<shardchannel> ...]",
-        b"    Return the number of subscribers for the specified shard level channel(s" b")",
+        b"    Return the number of subscribers for the specified shard level channel(s"
+        b")",
         b"HELP",
         b"    Prints this help.",
     ]
@@ -408,7 +412,8 @@ def test_pubsub_help_redis71(r: redis.Redis):
     assert testtools.raw_command(r, "PUBSUB HELP") == [
         b"PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         b"CHANNELS [<pattern>]",
-        b"    Return the currently active channels matching a <pattern> (default: '*')" b".",
+        b"    Return the currently active channels matching a <pattern> (default: '*')"
+        b".",
         b"NUMPAT",
         b"    Return number of subscriptions to patterns.",
         b"NUMSUB [<channel> ...]",
@@ -418,7 +423,8 @@ def test_pubsub_help_redis71(r: redis.Redis):
         b"    Return the currently active shard level channels matching a <pattern> (d"
         b"efault: '*').",
         b"SHARDNUMSUB [<shardchannel> ...]",
-        b"    Return the number of subscribers for the specified shard level channel(s" b")",
+        b"    Return the number of subscribers for the specified shard level channel(s"
+        b")",
         b"HELP",
         b"    Print this help.",
     ]

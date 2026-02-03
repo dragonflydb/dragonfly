@@ -6,7 +6,9 @@ from ..test_hypothesis.test_string import string_commands
 
 bad_commands = (
     # redis-py splits the command on spaces, and hangs if that ends up being an empty list
-    commands(st.text().filter(lambda x: bool(x.split())), st.lists(st.binary() | st.text()))
+    commands(
+        st.text().filter(lambda x: bool(x.split())), st.lists(st.binary() | st.text())
+    )
 )
 
 

@@ -171,12 +171,16 @@ def test_jsonset_flags_should_be_mutually_exclusive(r: redis.Redis):
     with pytest.raises(Exception):
         r.json().set("obj", Path("foo"), "baz", nx=True, xx=True)
     with pytest.raises(redis.ResponseError):
-        testtools.raw_command(r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "NX", "XX")
+        testtools.raw_command(
+            r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "NX", "XX"
+        )
 
 
 def test_json_unknown_param(r: redis.Redis):
     with pytest.raises(redis.ResponseError):
-        testtools.raw_command(r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "unknown")
+        testtools.raw_command(
+            r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "unknown"
+        )
 
 
 def test_jsonmget(r: redis.Redis):
@@ -303,7 +307,9 @@ def test_jsonstrlen(r: redis.Redis):
     r.json().set("str", Path.root_path(), "foo")
     assert r.json().strlen("str", Path.root_path()) == 3
     # Test multi
-    r.json().set("doc1", "$", {"a": "foo", "nested1": {"a": "hello"}, "nested2": {"a": 31}})
+    r.json().set(
+        "doc1", "$", {"a": "foo", "nested1": {"a": "hello"}, "nested2": {"a": 31}}
+    )
     assert r.json().strlen("doc1", "$..a") == [3, 5, None]
 
     res2 = r.json().strappend("doc1", "bar", "$..a")
@@ -718,9 +724,13 @@ def test_json_merge(r: redis.Redis):
     }
 
     # Test with root path path $.person1.personal_data
-    assert r.json().merge("person_data", "$.person1.personal_data", {"country": "Israel"})
+    assert r.json().merge(
+        "person_data", "$.person1.personal_data", {"country": "Israel"}
+    )
     assert r.json().get("person_data") == {
-        "person1": {"personal_data": {"name": "John", "hobbies": "reading", "country": "Israel"}}
+        "person1": {
+            "personal_data": {"name": "John", "hobbies": "reading", "country": "Israel"}
+        }
     }
 
     # Test with null value to delete a value

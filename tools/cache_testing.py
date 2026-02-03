@@ -6,7 +6,7 @@ import asyncio
 import argparse
 import numpy as np
 
-"""
+'''
 Run Cache Testing.
 This tool performs cache testing for Dragonfly
 by calling the `incrby` function on a constrained set
@@ -15,7 +15,7 @@ distributes the frequency of `incrby` calls for each
 item based on a Zipfian distribution (with alpha values
 between 0 and 1 being representative of real-life cache
 load scenarios)
-"""
+'''
 
 
 def rand_zipf_generator(alpha: float, upper: int, batch: int):
@@ -28,7 +28,7 @@ def rand_zipf_generator(alpha: float, upper: int, batch: int):
     """
 
     # Calculate Zeta values from 1 to n:
-    tmp = np.power(np.arange(1, upper + 1), -alpha)
+    tmp = np.power(np.arange(1, upper+1), -alpha)
     zeta = np.r_[0.0, np.cumsum(tmp)]
 
     # Store the translation map:
@@ -41,7 +41,7 @@ def rand_zipf_generator(alpha: float, upper: int, batch: int):
         # bisect them with distMap
         v = np.searchsorted(distMap, u)
 
-        samples = [t - 1 for t in v]
+        samples = [t-1 for t in v]
         yield samples
 
 
@@ -57,21 +57,14 @@ def update_stats(hits, misses, value_index, total_count):
     print("\r", end="")
 
     # Print the loading bar and current hit rate
-    print(
-        "[{}{}] {:.0f}%, current hit rate: {:.6f}%".format(
-            "#" * int(percent_complete * 20),
-            " " * int(20 - percent_complete * 20),
-            percent_complete * 100,
-            (hits / (hits + misses)) * 100,
-        ),
-        end="",
-    )
+    print("[{}{}] {:.0f}%, current hit rate: {:.6f}%".format("#" * int(percent_complete * 20), " " *
+          int(20 - percent_complete * 20), percent_complete * 100, (hits / (hits + misses)) * 100), end="")
 
 
 async def run_single_conn(redis_client, keys_gen, args) -> None:
     misses = 0
     hits = 0
-    val = "x" * args.length
+    val = 'x' * args.length
     items_sent = 0
     last_stat = 0
     for keys in keys_gen:
@@ -98,36 +91,23 @@ async def run_single_conn(redis_client, keys_gen, args) -> None:
     print()
 
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Cache Benchmark", formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument(
-        "-c", "--count", type=int, default=100000, help="total number of operations"
-    )
-    parser.add_argument("-u", "--uri", type=str, default="localhost:6379", help="Redis server URI")
-    parser.add_argument(
-        "-a",
-        "--alpha",
-        type=float,
-        default=1.0,
-        help="alpha value being used for the Zipf distribution",
-    )
-    parser.add_argument(
-        "--upper_bound",
-        type=int,
-        default=1000,
-        help="the number of values to be used in the distribution",
-    )
-    parser.add_argument(
-        "-d",
-        "--length",
-        type=int,
-        default=10,
-        help="the length of the values to be used in the distribution",
-    )
-    parser.add_argument("-p", "--pipeline", type=int, default=1, help="pipeline size")
-    parser.add_argument("-t", "--test", action="store_true")
+        description='Cache Benchmark', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-c', '--count', type=int, default=100000,
+                        help='total number of operations')
+    parser.add_argument('-u', '--uri', type=str,
+                        default='localhost:6379', help='Redis server URI')
+    parser.add_argument('-a', '--alpha', type=float, default=1.0,
+                        help='alpha value being used for the Zipf distribution')
+    parser.add_argument('--upper_bound', type=int, default=1000,
+                        help='the number of values to be used in the distribution')
+    parser.add_argument('-d', '--length', type=int, default=10,
+                        help='the length of the values to be used in the distribution')
+    parser.add_argument('-p', '--pipeline', type=int,
+                        default=1, help='pipeline size')
+    parser.add_argument('-t', '--test', action='store_true')
 
     args = parser.parse_args()
     if args.test:
@@ -138,8 +118,10 @@ if __name__ == "__main__":
                 break
         exit(0)
 
-    r = aioredis.from_url(f"redis://{args.uri}", encoding="utf-8", decode_responses=True)
+    r = aioredis.from_url(
+        f"redis://{args.uri}", encoding="utf-8", decode_responses=True)
 
-    distribution_keys_generator = rand_zipf_generator(args.alpha, args.upper_bound, args.pipeline)
+    distribution_keys_generator = rand_zipf_generator(
+        args.alpha, args.upper_bound, args.pipeline)
 
     asyncio.run(run_single_conn(r, distribution_keys_generator, args))

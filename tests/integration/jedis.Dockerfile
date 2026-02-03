@@ -10,7 +10,8 @@ RUN git clone -b dragonfly https://github.com/dragonflydb/jedis.git
 WORKDIR /app/jedis
 
 # Build the client and tests
-RUN mvn test -DskipTests
+RUN mvn test -DskipTests 
 
 # Run selected tests
-CMD mvn surefire:test -Dtest="AllKindOfValuesCommandsTest,BitCommandsTest,ControlCommandsTest,ControlCommandsTest,HashesCommandsTest,ListCommandsTest,ScriptingCommandsTest,ScriptingCommandsTest,SetCommandsTest,SetCommandsTest,SetCommandsTest,TransactionCommandsTest,ClientCommandsTest,PublishSubscribeCommandsTest,SortedSetCommandsTest,SortingCommandsTest,StreamsCommandsTest"
+CMD mvn surefire:test -Dtest="AllKindOfValuesCommandsTest,BitCommandsTest,ControlCommandsTest,ControlCommandsTest,HashesCommandsTest,ListCommandsTest,ScriptingCommandsTest,ScriptingCommandsTest,SetCommandsTest,SetCommandsTest,SetCommandsTest,TransactionCommandsTest,ClientCommandsTest,PublishSubscribeCommandsTest,SortedSetCommandsTest,SortingCommandsTest,StreamsCommandsTest" 
+

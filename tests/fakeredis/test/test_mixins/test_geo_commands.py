@@ -123,7 +123,9 @@ def test_geodist(r: redis.Redis):
         "place2",
     )
     assert r.geoadd("barcelona", values) == 2
-    assert r.geodist("barcelona", "place1", "place2") == pytest.approx(3067.4157, 0.0001)
+    assert r.geodist("barcelona", "place1", "place2") == pytest.approx(
+        3067.4157, 0.0001
+    )
 
 
 def test_geodist_units(r: redis.Redis):
@@ -136,9 +138,15 @@ def test_geodist_units(r: redis.Redis):
         "place2",
     )
     r.geoadd("barcelona", values)
-    assert r.geodist("barcelona", "place1", "place2", "km") == pytest.approx(3.0674, 0.0001)
-    assert r.geodist("barcelona", "place1", "place2", "mi") == pytest.approx(1.906, 0.0001)
-    assert r.geodist("barcelona", "place1", "place2", "ft") == pytest.approx(10063.6998, 0.0001)
+    assert r.geodist("barcelona", "place1", "place2", "km") == pytest.approx(
+        3.0674, 0.0001
+    )
+    assert r.geodist("barcelona", "place1", "place2", "mi") == pytest.approx(
+        1.906, 0.0001
+    )
+    assert r.geodist("barcelona", "place1", "place2", "ft") == pytest.approx(
+        10063.6998, 0.0001
+    )
     with pytest.raises(redis.RedisError):
         assert r.geodist("x", "y", "z", "inches")
 
@@ -203,9 +211,9 @@ def test_georadiusbymember(
     )
     r.geoadd("barcelona", values)
     assert r.georadiusbymember("barcelona", member, radius, **extra) == expected
-    assert r.georadiusbymember("barcelona", member, radius, **extra, store_dist="extract") == len(
-        expected
-    )
+    assert r.georadiusbymember(
+        "barcelona", member, radius, **extra, store_dist="extract"
+    ) == len(expected)
     assert r.zcard("extract") == len(expected)
 
 
@@ -232,12 +240,18 @@ def test_georadius_with(r: redis.Redis):
         withcoord=True,
     )
     assert res == [
-        pytest.approx([b"place1", 0.0881, pytest.approx((2.1909, 41.4337), 0.0001)], 0.001)
+        pytest.approx(
+            [b"place1", 0.0881, pytest.approx((2.1909, 41.4337), 0.0001)], 0.001
+        )
     ]
 
-    res = r.georadius("barcelona", 2.191, 41.433, 1, unit="km", withdist=True, withcoord=True)
+    res = r.georadius(
+        "barcelona", 2.191, 41.433, 1, unit="km", withdist=True, withcoord=True
+    )
     assert res == [
-        pytest.approx([b"place1", 0.0881, pytest.approx((2.1909, 41.4337), 0.0001)], 0.001)
+        pytest.approx(
+            [b"place1", 0.0881, pytest.approx((2.1909, 41.4337), 0.0001)], 0.001
+        )
     ]
 
     res = r.georadius("barcelona", 2.191, 41.433, 1, unit="km", withcoord=True)
@@ -271,7 +285,9 @@ def test_georadius_count(r: redis.Redis):
 
     r.geoadd("barcelona", values)
 
-    assert r.georadius("barcelona", 2.191, 41.433, 3000, count=1, store="barcelona") == 1
+    assert (
+        r.georadius("barcelona", 2.191, 41.433, 3000, count=1, store="barcelona") == 1
+    )
     assert r.georadius("barcelona", 2.191, 41.433, 3000, store_dist="extract") == 1
     assert r.zcard("extract") == 1
     res = r.georadius("barcelona", 2.191, 41.433, 3000, count=1, any=True)
@@ -363,8 +379,12 @@ def test_geosearch(r: redis.Redis):
         b"place3",
     )
     r.geoadd("barcelona", values)
-    assert r.geosearch("barcelona", longitude=2.191, latitude=41.433, radius=1000) == [b"place1"]
-    assert r.geosearch("barcelona", longitude=2.187, latitude=41.406, radius=1000) == [b"place2"]
+    assert r.geosearch("barcelona", longitude=2.191, latitude=41.433, radius=1000) == [
+        b"place1"
+    ]
+    assert r.geosearch("barcelona", longitude=2.187, latitude=41.406, radius=1000) == [
+        b"place2"
+    ]
     # assert r.geosearch("barcelona", longitude=2.191, latitude=41.433, height=1000, width=1000) == [b"place1"]
     assert set(r.geosearch("barcelona", member="place3", radius=100, unit="km")) == {
         b"place2",
@@ -372,13 +392,15 @@ def test_geosearch(r: redis.Redis):
         b"place3",
     }
     # test count
-    assert r.geosearch("barcelona", member="place3", radius=100, unit="km", count=2) == [
+    assert r.geosearch(
+        "barcelona", member="place3", radius=100, unit="km", count=2
+    ) == [
         b"place3",
         b"place2",
     ]
-    assert r.geosearch("barcelona", member="place3", radius=100, unit="km", count=1, any=True)[
-        0
-    ] in [
+    assert r.geosearch(
+        "barcelona", member="place3", radius=100, unit="km", count=1, any=True
+    )[0] in [
         b"place1",
         b"place3",
         b"place2",
