@@ -46,13 +46,7 @@ class RangeTree {
     void Populate(RangeTree* tree, const RenewableQuota& quota);
 
    private:
-    bool processing_ = false;
-    absl::flat_hash_set<Entry> updates_;
-
-    // Erase requests for entries that are already handled by Populate
-    absl::flat_hash_map<DocId, std::pair<std::optional<double> /* updated value*/,
-                                         std::optional<double> /* original value */>>
-        delayed_;
+    absl::flat_hash_set<Entry> updates_, delayed_erased_;
   };
 
   // Main node of numeric tree

@@ -331,34 +331,16 @@ std::vector<DocId> RangeResult::Take() {
 }
 
 void RangeTree::Builder::Add(DocId id, double value) {
-  if (processing_) {
-    delayed_[id].first = value;
-  } else {
-    bool inserted = updates_.emplace(id, value).second;
-    DCHECK(inserted);
-  }
+  bool inserted = updates_.emplace(id, value).second;
+  DCHECK(inserted);
 }
 
 void RangeTree::Builder::Remove(DocId id, double value) {
-  if (processing_) {
-    // If the value was already changed, nullify the updated value.
-    // If this is a new delete, store the original value
-    if (auto it = delayed_.find(id); it != delayed_.end()) {
-      auto& [updated, original] = it->second;
-      updated = std::nullopt;
-      if (!original)  // Populate doesn't know about it, we can forget it
-        delayed_.erase(it);
-    } else {
-      delayed_[id].second = value;  // store original to be able to delete
-    }
-  } else {
-    updates_.erase({id, value});
-  }
+  if (!updates_.erase({id, value}))
+    delayed_erased_.emplace(id, value);
 }
 
 void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
-  processing_ = true;
-
   // Sort all elements by value
   std::vector<Entry> sorted_entries(updates_.begin(), updates_.end());
   std::ranges::sort(sorted_entries, {}, &Entry::second);
@@ -392,19 +374,13 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
 
   // Update entries accumulated during yields
   // TODO: possibly apply updates in steps
-  DCHECK(updates_.empty());
-  for (const auto& [id, delayed_v] : delayed_) {
-    const auto [updated, original] = delayed_v;
-    DCHECK(updated || original);  // no stale updates
+  for (auto [id, v] : delayed_erased_)
+    tree->Remove(id, v);
+  for (auto [id, v] : updates_)
+    tree->Add(id, v);
 
-    if (original)
-      tree->Remove(id, *original);
-    if (updated)
-      tree->Add(id, *updated);
-  }
-
-  delayed_.clear();
-  processing_ = false;
+  updates_.clear();
+  delayed_erased_.clear();
 }
 
 }  // namespace dfly::search
