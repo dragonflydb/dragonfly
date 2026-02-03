@@ -133,6 +133,27 @@ struct HnswlibAdapter {
     return metadata;
   }
 
+  void SetMetadata(const HnswIndexMetadata& metadata) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    absl::WriterMutexLock resize_lock(&resize_mutex_);
+
+    // SetMetadata is only called during deserialization before the index is used.
+    // Assert the index is empty to ensure no concurrent operations are possible.
+    DCHECK_EQ(world_.cur_element_count.load(), 0u)
+        << "SetMetadata should only be called on an empty index during deserialization";
+
+    // Pre-allocate capacity based on expected element count, but don't set cur_element_count.
+    // cur_element_count will be set by RestoreFromNodes when the actual nodes are restored.
+    if (world_.max_elements_ < metadata.cur_element_count) {
+      world_.resizeIndex(metadata.cur_element_count);
+    }
+    // Note: Don't set cur_element_count here - RestoreFromNodes will set it after restoring nodes.
+    // Only set static configuration parameters.
+    world_.ef_construction_ = metadata.ef_construction;
+    world_.mult_ = metadata.mult;
+    // Note: M, maxM, maxM0 are set at construction and shouldn't change
+  }
+
   size_t GetNodeCount() const {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return world_.cur_element_count.load();
@@ -208,6 +229,125 @@ struct HnswlibAdapter {
     return out;
   }
 
+ public:
+  // Restore HNSW graph structure from serialized nodes with metadata
+  void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    absl::WriterMutexLock resize_lock(&resize_mutex_);
+
+    if (nodes.empty()) {
+      return;
+    }
+
+    // RestoreFromNodes is only called during deserialization on a freshly created index.
+    // Assert the index is empty to prevent memory leaks from double-allocation of linkLists_.
+    DCHECK_EQ(world_.cur_element_count.load(), 0u)
+        << "RestoreFromNodes should only be called on an empty index during deserialization";
+
+    // Ensure we have enough capacity
+    size_t required_capacity = metadata.cur_element_count;
+    if (world_.max_elements_ < required_capacity) {
+      world_.resizeIndex(required_capacity);
+    }
+
+    // Restore each node - directly set up memory and fields
+    for (const auto& node : nodes) {
+      size_t internal_id = node.internal_id;
+
+      // Validate internal_id is within bounds
+      if (internal_id >= world_.max_elements_) {
+        LOG(ERROR) << "RestoreFromNodes: internal_id " << internal_id << " exceeds max_elements "
+                   << world_.max_elements_;
+        continue;
+      }
+
+      // Register label in lookup table
+      world_.label_lookup_[node.global_id] = internal_id;
+
+      // Set the level
+      world_.element_levels_[internal_id] = node.level;
+
+      // Clear level 0 memory and set label.
+      // Memory layout: each element occupies size_data_per_element_ bytes starting at
+      // data_level0_memory_ + internal_id * size_data_per_element_.
+      // offsetLevel0_ is always 0, so we clear exactly one element's worth of data.
+      // This matches the pattern in hnswlib's addPoint().
+      memset(world_.data_level0_memory_ + internal_id * world_.size_data_per_element_, 0,
+             world_.size_data_per_element_);
+      world_.setExternalLabel(internal_id, node.global_id);
+
+      // Initialize vector data to a safe default. This prevents crashes during KNN search
+      // if UpdateVectorData is not called for this node (e.g., document was deleted).
+      // In copy mode: zero the vector memory. In borrowed mode: point to null_vector_.
+      if (world_.copy_vector_) {
+        char* data_ptr = world_.data_vector_memory_ + internal_id * world_.data_size_;
+        memset(data_ptr, 0, world_.data_size_);
+      } else {
+        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
+        memcpy(ptr_location, &world_.null_vector_, sizeof(void*));
+      }
+
+      // Allocate upper layer links if needed
+      if (node.level > 0) {
+        world_.linkLists_[internal_id] =
+            (char*)mi_malloc(world_.size_links_per_element_ * node.level + 1);
+        memset(world_.linkLists_[internal_id], 0, world_.size_links_per_element_ * node.level + 1);
+      }
+
+      // Restore links for layer 0
+      if (!node.levels_links.empty()) {
+        auto* ll0 = world_.get_linklist0(internal_id);
+        world_.setListCount(ll0, node.levels_links[0].size());
+        auto* links0 = reinterpret_cast<uint32_t*>(ll0 + 1);
+        std::copy(node.levels_links[0].begin(), node.levels_links[0].end(), links0);
+      }
+
+      // Restore links for upper layers
+      for (int lvl = 1; lvl <= node.level && lvl < static_cast<int>(node.levels_links.size());
+           ++lvl) {
+        auto* ll = world_.get_linklist(internal_id, lvl);
+        world_.setListCount(ll, node.levels_links[lvl].size());
+        auto* links = reinterpret_cast<uint32_t*>(ll + 1);
+        std::copy(node.levels_links[lvl].begin(), node.levels_links[lvl].end(), links);
+      }
+    }
+
+    // Set the metadata for the graph
+    world_.cur_element_count.store(metadata.cur_element_count);
+    world_.maxlevel_ = metadata.maxlevel;
+    world_.enterpoint_node_ = metadata.enterpoint_node;
+
+    VLOG(1) << "Restored HNSW index with " << metadata.cur_element_count
+            << " nodes, maxlevel=" << metadata.maxlevel
+            << ", enterpoint=" << metadata.enterpoint_node;
+  }
+
+  // Update vector data for an existing node (used after RestoreFromNodes)
+  void UpdateVectorData(GlobalDocId id, const void* data) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+
+    // Find the internal id for this label
+    auto it = world_.label_lookup_.find(id);
+    if (it == world_.label_lookup_.end()) {
+      LOG(WARNING) << "UpdateVectorData: label " << id << " not found in index";
+      return;
+    }
+
+    size_t internal_id = it->second;
+
+    // Copy/store the vector data based on copy_vector_ mode
+    if (world_.copy_vector_) {
+      // Owned mode: copy data into world's vector memory
+      char* data_ptr = world_.data_vector_memory_ + internal_id * world_.data_size_;
+      memcpy(data_ptr, data, world_.data_size_);
+    } else {
+      // Borrowed mode: store pointer to external data
+      char* ptr_location = world_.getDataPtrByInternalId(internal_id);
+      memcpy(ptr_location, &data, sizeof(void*));
+    }
+  }
+
+ private:
   HnswSpace space_;
   HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
@@ -264,12 +404,40 @@ HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
   return adapter_->GetMetadata();
 }
 
+void HnswVectorIndex::SetMetadata(const HnswIndexMetadata& metadata) {
+  adapter_->SetMetadata(metadata);
+}
+
 size_t HnswVectorIndex::GetNodeCount() const {
   return adapter_->GetNodeCount();
 }
 
 std::vector<HnswNodeData> HnswVectorIndex::GetNodesRange(size_t start, size_t end) const {
   return adapter_->GetNodesRange(start, end);
+}
+
+void HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
+                                       const HnswIndexMetadata& metadata) {
+  adapter_->RestoreFromNodes(nodes, metadata);
+  restored_ = true;
+}
+
+bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,
+                                       std::string_view field) {
+  auto vector_ptr = doc.GetVector(field, dim_);
+  if (!vector_ptr) {
+    return false;
+  }
+
+  const void* data = nullptr;
+  if (std::holds_alternative<OwnedFtVector>(*vector_ptr)) {
+    data = std::get<OwnedFtVector>(*vector_ptr).first.get();
+  } else {
+    data = std::get<BorrowedFtVector>(*vector_ptr);
+  }
+
+  adapter_->UpdateVectorData(id, data);
+  return true;
 }
 
 }  // namespace dfly::search

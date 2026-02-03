@@ -86,6 +86,13 @@ absl::flat_hash_set<std::string> GlobalHnswIndexRegistry::GetIndexNames() const 
   return index_names;
 }
 
+void GlobalHnswIndexRegistry::ClearRestoredFlags() {
+  std::unique_lock<std::shared_mutex> lock(registry_mutex_);
+  for (auto& [key, index] : indices_) {
+    index->SetRestored(false);
+  }
+}
+
 std::string GlobalHnswIndexRegistry::MakeKey(std::string_view index_name,
                                              std::string_view field_name) const {
   return absl::StrCat(index_name, ":", field_name);

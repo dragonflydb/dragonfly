@@ -444,6 +444,60 @@ void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, cons
   if (std::ranges::empty(GetVectorFieldsView(base_->schema)))
     return;
 
+  // Check if any vector index was restored from RDB - if so, iterate by index keys
+  // which is more efficient than traversing the entire database
+  bool any_restored = false;
+  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+        index && index->IsRestored()) {
+      any_restored = true;
+      break;
+    }
+  }
+
+  if (any_restored) {
+    // Iterate by index keys - more efficient for restored indices
+    RebuildGlobalVectorIndicesByIndexKeys(index_name, op_args);
+  } else {
+    // Iterate by database - needed when building new index
+    RebuildGlobalVectorIndicesByDatabase(index_name, op_args);
+  }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index_name,
+                                                          const OpArgs& op_args) {
+  auto& db_slice = op_args.GetDbSlice();
+  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
+
+  size_t processed = 0;
+  for (const auto& [key, local_id] : key_index_.GetDocKeysMap()) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
+    if (!it || !IsValid(it->it))
+      continue;
+
+    PrimeValue& pv = it->it->second;
+    auto doc = GetAccessor(op_args.db_cntx, pv);
+    GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
+
+    for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
+      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+          index) {
+        bool success = index->UpdateVectorData(global_id, *doc, field_ident);
+        if (success && !index->IsVectorCopied()) {
+          pv.SetOmitDefrag(true);
+        }
+      }
+    }
+
+    // Yield periodically to avoid blocking the fiber
+    if (++processed % 1000 == 0) {
+      util::ThisFiber::Yield();
+    }
+  }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndicesByDatabase(std::string_view index_name,
+                                                         const OpArgs& op_args) {
   auto cb = [this, index_name](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
     if (auto local_id = key_index_.Find(key); local_id)
       AddDocToGlobalVectorIndex(index_name, *local_id, db_cntx, &pv);

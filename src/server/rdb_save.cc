@@ -1413,12 +1413,12 @@ namespace {
 
 // Collect search index definitions. If as_json is true, collects JSON with HNSW metadata
 // and synonyms (for summary file). Otherwise collects simple restore commands (for per-shard).
-void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
+void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
                           [[maybe_unused]] StringVec* search_indices,
                           [[maybe_unused]] StringVec* search_synonyms,
                           [[maybe_unused]] bool is_summary) {
 #ifdef WITH_SEARCH
-  auto* indices = shard->search_indices();
+  auto* indices = shard.search_indices();
   for (const auto& index_name : indices->GetIndexNames()) {
     auto* index = indices->GetIndex(index_name);
     auto index_info = index->GetInfo();
@@ -1429,13 +1429,16 @@ void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
       continue;
     }
 
-    // Collect HNSW metadata for vector field (first one found)
+    // Collect HNSW metadata for vector field (first one found), for now we don't support multiple
+    // vector fields per index serialization
+    std::string hnsw_field_name;
     for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
       if (finfo.type == search::SchemaField::VECTOR &&
           !(finfo.flags & search::SchemaField::NOINDEX)) {
         if (auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
             hnsw_index) {
           index_info.hnsw_metadata = hnsw_index->GetMetadata();
+          hnsw_field_name = finfo.short_name;
           break;
         }
       }
@@ -1444,6 +1447,7 @@ void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
     // Save index definition as JSON with HNSW metadata
     TmpJson index_json;
     index_json["name"] = index_name;
+    index_json["field"] = hnsw_field_name;
     index_json["cmd"] = index_info.BuildRestoreCommand();
 
     if (index_info.hnsw_metadata.has_value()) {
@@ -1485,7 +1489,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   if (!is_summary) {
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (shard->shard_id() == 0)
-        CollectSearchIndices(shard, &search_indices, &search_synonyms, is_summary);
+        CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
     });
     return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
                                 std::move(search_synonyms), table_mem_result};
@@ -1501,7 +1505,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (shard->shard_id() == 0)
-      CollectSearchIndices(shard, &search_indices, &search_synonyms, is_summary);
+      CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
 
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     size_t shard_table_mem = 0;

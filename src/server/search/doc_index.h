@@ -347,6 +347,12 @@ class ShardDocIndex {
   // Cancel builder if in progress
   void CancelBuilder();
 
+  // Helper methods for RebuildGlobalVectorIndices
+  // Iterates by index keys - more efficient for restored indices
+  void RebuildGlobalVectorIndicesByIndexKeys(std::string_view index_name, const OpArgs& op_args);
+  // Iterates by database - needed when building new index
+  void RebuildGlobalVectorIndicesByDatabase(std::string_view index_name, const OpArgs& op_args);
+
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
 
