@@ -43,6 +43,10 @@ cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histo
 
 # Include search module
 add_subdirectory(search)
+if(NOT DEFINED DF_SEARCH_SRCS)
+  message(FATAL_ERROR "Search source files not exported via DF_SEARCH_SRCS")
+endif()
+
 if (WITH_SEARCH)
   add_definitions(-DWITH_SEARCH)
 endif()
@@ -79,7 +83,7 @@ endif()
 add_library(dragonfly_lib
             engine_shard.cc engine_shard_set.cc
             config_registry.cc conn_context.cc
-            debugcmd.cc dflycmd.cc error.cc family_utils.cc
+            debugcmd.cc dflycmd.cc error.cc family_utils.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
             main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc http_api.cc
@@ -112,7 +116,7 @@ if (WITH_GCP)
   add_definitions(-DWITH_GCP)
 endif()
 
-cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_search_server dfly_tiering
+cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
          redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
@@ -159,3 +163,11 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
                  json_family_memory_test)
+
+if (WITH_SEARCH)
+  helio_cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+  helio_cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
+  helio_cxx_test(search/index_join_test dfly_test_lib LABELS DFLY)
+
+  add_dependencies(check_dfly search_family_test aggregator_test index_join_test)
+endif()
