@@ -129,18 +129,24 @@ std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_v
 class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
  public:
   explicit RangeTreeAdapter(size_t max_range_block_size, PMR_NS::memory_resource* mr)
-      : range_tree_(mr, max_range_block_size, false) {
+      : range_tree_{mr, max_range_block_size}, builder_{RangeTree::Builder{}} {
   }
 
   void Add(DocId id, absl::Span<double> values) override {
     for (double value : values) {
-      range_tree_.Add(id, value);
+      if (builder_)
+        builder_->Add(id, value);
+      else
+        range_tree_.Add(id, value);
     }
   }
 
   void Remove(DocId id, absl::Span<double> values) override {
     for (double value : values) {
-      range_tree_.Remove(id, value);
+      if (builder_)
+        builder_->Remove(id, value);
+      else
+        range_tree_.Remove(id, value);
     }
   }
 
@@ -154,11 +160,13 @@ class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
   }
 
   void FinalizeInitialization() override {
-    range_tree_.FinalizeInitialization();
+    builder_->Populate(&range_tree_, {500});
+    builder_.reset();
   }
 
  private:
   RangeTree range_tree_;
+  std::optional<RangeTree::Builder> builder_;
 };
 
 class BtreeSetImpl : public NumericIndex::RangeTreeBase {

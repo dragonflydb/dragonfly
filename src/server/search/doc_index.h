@@ -226,6 +226,8 @@ class ShardDocIndices;
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
   friend class ShardDocIndices;
+  friend struct search::IndexBuilder;
+
   using DocId = search::DocId;
   using GlobalDocId = search::GlobalDocId;
 
