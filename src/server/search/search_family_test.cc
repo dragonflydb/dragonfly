@@ -1123,16 +1123,16 @@ TEST_F(SearchFamilyTest, DocsEditing) {
 }
 
 TEST_F(SearchFamilyTest, AggregateGroupBy) {
+  auto resp = Run(
+      {"ft.create", "i1", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC", "text", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
   Run({"hset", "key:1", "word", "item1", "foo", "10", "text", "\"first key\"", "non_indexed_value",
        "1"});
   Run({"hset", "key:2", "word", "item2", "foo", "20", "text", "\"second key\"", "non_indexed_value",
        "2"});
   Run({"hset", "key:3", "word", "item1", "foo", "40", "text", "\"third key\"", "non_indexed_value",
        "3"});
-
-  auto resp = Run(
-      {"ft.create", "i1", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC", "text", "TEXT"});
-  EXPECT_EQ(resp, "OK");
 
   resp = Run(
       {"ft.aggregate", "i1", "*", "GROUPBY", "1", "@word", "REDUCE", "COUNT", "0", "AS", "count"});
