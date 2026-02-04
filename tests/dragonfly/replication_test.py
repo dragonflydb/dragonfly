@@ -801,6 +801,8 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         # XREADGROUP without NOACK should journal XCLAIM + XGROUP SETID
         await c_master.execute_command("XREADGROUP GROUP mygroup consumer1 STREAMS mystream >")
+        # Consumer creation
+        assert await is_match_rsp("XGROUP CREATECONSUMER mystream mygroup consumer1")
         # Expect XCLAIM for the message + XGROUP SETID with ENTRIESREAD
         assert await is_match_rsp(
             r"XCLAIM mystream mygroup consumer1 0 (.*?) TIME \d+ RETRYCOUNT 1 FORCE JUSTID LASTID (.*?)"
