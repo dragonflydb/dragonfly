@@ -435,8 +435,8 @@ class Transaction {
 
   // State of a multi transaction.
   struct MultiData {
-    MultiRole role;
-    MultiMode mode;
+    MultiRole role = MultiRole::DEFAULT;
+    MultiMode mode = MultiMode::NOT_DETERMINED;
     std::optional<IntentLock::Mode> lock_mode;
 
     // Unique normalized fingerprints used for scheduling the multi transaction.

@@ -444,7 +444,8 @@ int DragonflyHashCommand(lua_State* lua) {
   // Collect output into custom string collector
   StringCollectorTranslator translator;
   void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, false, &translator);
+  reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(Interpreter::CallArgs::PCALL,
+                                                            &translator);
 
   if (requires_sort)
     sort(translator.values.begin(), translator.values.end());
@@ -519,6 +520,21 @@ int RedisSha1Command(lua_State* lua) {
   lua_pushstring(lua, hex);
   return 1;
 }
+
+#define LUA_FORWARD_CALL(fname, args)                                       \
+  int fname(lua_State* lua) {                                               \
+    void** ptr = static_cast<void**>(lua_getextraspace(lua));               \
+    return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(args); \
+  }
+
+LUA_FORWARD_CALL(RedisCallCommand, Interpreter::CallArgs::CALL);
+LUA_FORWARD_CALL(RedisPCallCommand, Interpreter::CallArgs::PCALL);
+LUA_FORWARD_CALL(RedisACallCommand, Interpreter::CallArgs::ACALL);
+LUA_FORWARD_CALL(RedisAPCallCommand, Interpreter::CallArgs::APCALL);
+LUA_FORWARD_CALL(DragonflyLockCommand, Interpreter::CallArgs::LOCK);
+LUA_FORWARD_CALL(DragonflyUnlockCommand, Interpreter::CallArgs::UNLOCK);
+
+#undef LUA_FORWARD_CALL
 
 /* Returns a table with a single field 'field' set to the string value
  * passed as argument. This helper function is handy when returning
@@ -642,83 +658,49 @@ Interpreter::Interpreter() {
   InitLua(lua_);
   void** ptr = static_cast<void**>(lua_getextraspace(lua_));
   *ptr = this;
-  // SaveOnRegistry(lua_, kInstanceKey, this);
+
+  auto set_function = [&](const char* name, lua_CFunction func) {
+    lua_pushstring(lua_, name);
+    lua_pushcfunction(lua_, func);
+    lua_settable(lua_, -3);
+  };
 
   /* Register the dragonfly commands table and fields */
   lua_newtable(lua_);
+  set_function("ihash", DragonflyHashCommand);       // compute quick integer hash of command result
+  set_function("randstr", DragonflyRandstrCommand);  // generate random string or table of those
+  set_function("lock", DragonflyLockCommand);        // lock (transactionally) keys
+  set_function("unlock", DragonflyUnlockCommand);    // unlock (transactionally)
 
-  /* dragonfly.ihash - compute quick integer hash of command result */
-  lua_pushstring(lua_, "ihash");
-  lua_pushcfunction(lua_, DragonflyHashCommand);
-  lua_settable(lua_, -3);
-
-  /* dragonfly.randstr - generate random string or table of random strings */
-  lua_pushstring(lua_, "randstr");
-  lua_pushcfunction(lua_, DragonflyRandstrCommand);
-  lua_settable(lua_, -3);
-
-  /* Finally set the table as 'dragonfly' global var. */
-  lua_setglobal(lua_, "dragonfly");
+  lua_setglobal(lua_, "dragonfly");  // set dragonfly as global var
   CHECK(lua_checkstack(lua_, 64));
 
   /* Register the redis commands table and fields */
   lua_newtable(lua_);
+  set_function("call", RedisCallCommand);
+  set_function("pcall", RedisPCallCommand);
+  set_function("acall", RedisACallCommand);
+  set_function("apcall", RedisAPCallCommand);
+  set_function("sha1hex", RedisSha1Command);
+  set_function("error_reply", RedisErrorReplyCommand);
+  set_function("status_reply", RedisStatusReplyCommand);
+  set_function("replicate_commands", RedisReplicateCommands);
+  set_function("log", RedisLogCommand);
 
-  /* redis.call */
-  lua_pushstring(lua_, "call");
-  lua_pushcfunction(lua_, RedisCallCommand);
-  lua_settable(lua_, -3);
+  // Push log levels
+  {
+    lua_pushinteger(lua_, LL_DEBUG);
+    lua_setfield(lua_, -2, "LOG_DEBUG");
 
-  /* redis.pcall */
-  lua_pushstring(lua_, "pcall");
-  lua_pushcfunction(lua_, RedisPCallCommand);
-  lua_settable(lua_, -3);
+    lua_pushinteger(lua_, LL_VERBOSE);
+    lua_setfield(lua_, -2, "LOG_VERBOSE");
 
-  /* redis.acall */
-  lua_pushstring(lua_, "acall");
-  lua_pushcfunction(lua_, RedisACallCommand);
-  lua_settable(lua_, -3);
+    lua_pushinteger(lua_, LL_NOTICE);
+    lua_setfield(lua_, -2, "LOG_NOTICE");
 
-  /* redis.apcall */
-  lua_pushstring(lua_, "apcall");
-  lua_pushcfunction(lua_, RedisAPCallCommand);
-  lua_settable(lua_, -3);
-
-  lua_pushstring(lua_, "sha1hex");
-  lua_pushcfunction(lua_, RedisSha1Command);
-  lua_settable(lua_, -3);
-
-  /* redis.error_reply and redis.status_reply */
-  lua_pushstring(lua_, "error_reply");
-  lua_pushcfunction(lua_, RedisErrorReplyCommand);
-  lua_settable(lua_, -3);
-  lua_pushstring(lua_, "status_reply");
-  lua_pushcfunction(lua_, RedisStatusReplyCommand);
-  lua_settable(lua_, -3);
-
-  /* no-op functions */
-
-  /* redis.replicate_commands*/
-  lua_pushstring(lua_, "replicate_commands");
-  lua_pushcfunction(lua_, RedisReplicateCommands);
-  lua_settable(lua_, -3);
-
-  /* redis.log*/
-  lua_pushstring(lua_, "log");
-  lua_pushcfunction(lua_, RedisLogCommand);
-  lua_settable(lua_, -3);
-
-  lua_pushinteger(lua_, LL_DEBUG);
-  lua_setfield(lua_, -2, "LOG_DEBUG");
-
-  lua_pushinteger(lua_, LL_VERBOSE);
-  lua_setfield(lua_, -2, "LOG_VERBOSE");
-
-  lua_pushinteger(lua_, LL_NOTICE);
-  lua_setfield(lua_, -2, "LOG_NOTICE");
-
-  lua_pushinteger(lua_, LL_WARNING);
-  lua_setfield(lua_, -2, "LOG_WARNING");
+    lua_pushinteger(lua_, LL_WARNING);
+    lua_setfield(lua_, -2, "LOG_WARNING");
+  }
 
   /* Finally set the table as 'redis' global var. */
   lua_setglobal(lua_, "redis");
@@ -1067,11 +1049,8 @@ void Interpreter::UpdateGCParameters() {
 
 std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() {
   int argc = lua_gettop(lua_);
-  /* Require at least one argument */
-  if (argc == 0) {
-    PushError(lua_, "Please specify at least one argument for redis.call()");
-    return std::nullopt;
-  }
+  if (argc == 0)
+    return {{}};
 
   size_t blob_len = 0;
   char tmpbuf[64];
@@ -1145,10 +1124,14 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
 
 // Calls redis function
 // Returns false if error needs to be raised.
-bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer* explorer,
+bool Interpreter::CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer,
                                     SliceSpan args) {
+  bool raise_error = (call_type & CallArgs::PCALL) == 0;
+  bool async = call_type & CallArgs::ACALL;
+  bool tx = call_type & (CallArgs::LOCK | CallArgs::UNLOCK);
+
   // Calling with custom explorer is not supported with errors or async
-  DCHECK(explorer == nullptr || (!raise_error && !async));
+  DCHECK(explorer == nullptr || (!raise_error && !async)) << int(call_type);
 
   // If no custom explorer is set, use default translator
   optional<RedisTranslator> translator;
@@ -1157,7 +1140,7 @@ bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer
     explorer = &*translator;
   }
   cmd_depth_++;
-  redis_func_(CallArgs{args, &buffer_, explorer, async, raise_error, &raise_error});
+  redis_func_(CallArgs{args, &buffer_, explorer, call_type, &raise_error});
   cmd_depth_--;
 
   // Shrink reusable buffer if it's too big.
@@ -1175,7 +1158,7 @@ bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer
     return false;
   }
 
-  if (!async)
+  if (!async && !tx)
     DCHECK_EQ(1, lua_gettop(lua_));
 
   return true;
@@ -1184,7 +1167,7 @@ bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer
 // Returns number of results, which is always 1 in this case.
 // Please note that lua resets the stack once the function returns so no need
 // to unwind the stack manually in the function (though lua allows doing this).
-int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplorer* explorer) {
+int Interpreter::RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* explorer) {
   /* By using Lua debug hooks it is possible to trigger a recursive call
    * to luaRedisGenericCommand(), which normally should never happen.
    * To make this function reentrant is futile and makes it slower, but
@@ -1196,6 +1179,8 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
     PushError(lua_, recursion_warning);
     return 1;
   }
+
+  bool raise_error = (call_type & CallArgs::PCALL) == 0;
 
   if (!redis_func_) {
     PushError(lua_, "internal error - redis function not defined");
@@ -1210,34 +1195,21 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
   // uses longjmp which bypasses stack unwinding and skips the destruction of objects.
   {
     std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
+
+    // Verify argument are non-empty for all calls but unlock
+    if (args->empty() && (call_type & CallArgs::UNLOCK) == 0) {
+      PushError(lua_, "Please specify at least one argument for this call");
+      args = nullopt;
+    }
+
     if (args.has_value()) {
-      raise_error = !CallRedisFunction(raise_error, async, explorer, SliceSpan{*args});
+      raise_error = !CallRedisFunction(call_type, explorer, SliceSpan{*args});
     }
   }
   if (!raise_error) {
     return 1;
   }
   return RaiseErrorAndAbort(lua_);  // this function never returns, it unwinds the Lua call stack
-}
-
-int Interpreter::RedisCallCommand(lua_State* lua) {
-  void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(true, false);
-}
-
-int Interpreter::RedisPCallCommand(lua_State* lua) {
-  void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, false);
-}
-
-int Interpreter::RedisACallCommand(lua_State* lua) {
-  void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(true, true);
-}
-
-int Interpreter::RedisAPCallCommand(lua_State* lua) {
-  void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, true);
 }
 
 InterpreterManager::Stats& InterpreterManager::Stats::operator+=(const Stats& other) {
