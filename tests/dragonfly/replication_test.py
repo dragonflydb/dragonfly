@@ -794,6 +794,30 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         await check("ZMPOP 3 key3 key2 key MAX", r"ZPOPMAX key 1")
 
+        # Check XREADGROUP turns into XGROUP SETID + XCLAIM (for non-NOACK)
+        await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+        await skip_cmd()
+        await c_master.execute_command("XADD mystream * field1 value1")
+        await skip_cmd()
+        # XREADGROUP without NOACK should journal XCLAIM + XGROUP SETID
+        await c_master.execute_command("XREADGROUP GROUP mygroup consumer1 STREAMS mystream >")
+        # Consumer creation
+        assert await is_match_rsp("XGROUP CREATECONSUMER mystream mygroup consumer1")
+        # Expect XCLAIM for the message + XGROUP SETID with ENTRIESREAD
+        assert await is_match_rsp(
+            r"XCLAIM mystream mygroup consumer1 0 (.*?) TIME \d+ RETRYCOUNT 1 FORCE JUSTID LASTID (.*?)"
+        )
+        assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 1")
+
+        # Check XREADGROUP with NOACK only journals XGROUP SETID
+        await c_master.execute_command("XADD mystream * field2 value2")
+        await skip_cmd()
+        await c_master.execute_command(
+            "XREADGROUP GROUP mygroup consumer1 NOACK STREAMS mystream >"
+        )
+        # With NOACK, only XGROUP SETID should be journaled (no XCLAIM)
+        assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 2")
+
 
 """
 Test automatic replication of expiry.
@@ -3804,3 +3828,93 @@ async def test_replica_reconnection_leaks_connections(df_factory: DflyInstanceFa
 
     await c_master.aclose()
     await c_replica.aclose()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_xreadgroup_replication(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    master.start()
+    replica.start()
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async def compare_group_info(stream_key, expected_pending, expected_entries_read):
+        master_info = await c_master.execute_command(f"XINFO GROUPS {stream_key}")
+        replica_info = await c_replica.execute_command(f"XINFO GROUPS {stream_key}")
+
+        # Parse group info (format: [name, consumers, pending, last-delivered-id, entries-read, lag])
+        assert len(master_info) == len(replica_info)
+
+        for m_group, r_group in zip(master_info, replica_info):
+            m_dict = dict(zip(m_group[::2], m_group[1::2]))
+            r_dict = dict(zip(r_group[::2], r_group[1::2]))
+
+            assert m_dict["last-delivered-id"] == r_dict["last-delivered-id"]
+            assert m_dict["entries-read"] == r_dict["entries-read"]
+            assert m_dict["entries-read"] == expected_entries_read
+            assert m_dict["pending"] == r_dict["pending"]
+            assert m_dict["pending"] == expected_pending
+            assert m_dict["consumers"] == r_dict["consumers"]
+
+    # Case 1: Non-blocking path, NOACK
+    await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 NOACK STREAMS mystream >")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 0, 1)
+
+    # Case 2: Non-blocking path, with PEL
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 STREAMS mystream >")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 2, 3)
+
+    # Case 3: Blocking path, NOACK
+
+    # Start blocking XREADGROUP in background
+    read_task = asyncio.create_task(
+        c_master.execute_command(
+            "XREADGROUP GROUP mygroup worker1 NOACK BLOCK 0 STREAMS mystream >"
+        )
+    )
+    # Let the blocking command start
+    await asyncio.sleep(0.1)
+    await c_master.execute_command("XADD mystream * tmp tmp")
+
+    await read_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 2, 4)
+
+    # Case 4: Blocking path, with PEL
+
+    # Start blocking XREADGROUP in background
+    read_task = asyncio.create_task(
+        c_master.execute_command("XREADGROUP GROUP mygroup worker1 BLOCK 0 STREAMS mystream >")
+    )
+
+    await asyncio.sleep(0.1)
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await read_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 3, 5)
+
+    await c_master.execute_command("flushall")
+    # Create consumer
+    await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+    await c_master.execute_command("XADD mystream 2000-0 tmp tmp")
+    # Add to PEL but don't ack
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 STREAMS mystream >")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker2 STREAMS mystream 2000-0")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 1, 1)

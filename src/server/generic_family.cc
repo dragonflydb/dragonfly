@@ -1348,9 +1348,6 @@ void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   int64_t abs_ms = int_arg * 1000;
-  if (abs_ms > kMaxExpireDeadlineMs)
-    abs_ms = kMaxExpireDeadlineMs;
-
   DbSlice::ExpireParams params{.ms_timestamp = abs_ms, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

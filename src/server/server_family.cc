@@ -63,6 +63,7 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
+#include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
@@ -1244,6 +1245,9 @@ void ServerFamily::Shutdown() {
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
+#ifdef WITH_SEARCH
+    SearchFamily::Shutdown();
+#endif
   });
 }
 
@@ -1559,7 +1563,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
+  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.pipeline_queue_entries,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("send_delay_seconds", "",
                             double(GetDelayMs(m.oldest_pending_send_ts)) / 1000.0,
@@ -1771,6 +1775,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                               MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                               MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("pipeline_queue_bytes", "", conn_stats.pipeline_queue_bytes,
+                              MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
                               MetricType::GAUGE, &resp->body());
   }
@@ -1796,6 +1802,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_cmd_cache_bytes, {"class"},
                     {"pipeline_cmd_cache"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_queue_bytes, {"class"},
+                    {"pipeline_queue"}, &memory_by_class_bytes);
 
   AppendMetricValue("memory_by_class_bytes", conn_stats.dispatch_queue_bytes, {"class"},
                     {"dispatch_queue"}, &memory_by_class_bytes);
@@ -2912,8 +2921,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   // update peak_stats_ from it.
   {
     util::fb2::LockGuard lk{peak_stats_mu_};
+    // Note: PeakStats::conn_dispatch_queue_bytes is a legacy name. It now tracks the combined
+    // server-wide total of dispatch_queue_bytes and pipeline_queue_bytes for ALL connections.
     UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
-              result.facade_stats.conn_stats.dispatch_queue_bytes);
+              result.facade_stats.conn_stats.dispatch_queue_bytes +
+                  result.facade_stats.conn_stats.pipeline_queue_bytes);
     UpdateMax(&peak_stats_.conn_read_buf_capacity,
               result.facade_stats.conn_stats.read_buf_capacity);
     result.peak_stats = peak_stats_;
@@ -3002,8 +3014,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
-    append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
-
+    append("pipeline_queue_length", m.facade_stats.conn_stats.pipeline_queue_entries);
     append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
     append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
   };
@@ -3053,6 +3064,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("small_string_bytes", m.small_string_bytes);
     append("pipeline_cache_bytes", m.facade_stats.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.facade_stats.conn_stats.dispatch_queue_bytes);
+    append("pipeline_queue_bytes", m.facade_stats.conn_stats.pipeline_queue_bytes);
     append("dispatch_queue_subscriber_bytes",
            m.facade_stats.conn_stats.dispatch_queue_subscriber_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);

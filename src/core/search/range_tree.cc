@@ -104,11 +104,11 @@ void RangeTree::Add(DocId id, double value) {
   auto insert_result = block.Insert({id, value});
   LOG_IF(ERROR, !insert_result) << "RangeTree: Failed to insert id: " << id << ", value: " << value;
 
-  if (!enable_splitting_ || block.Size() <= max_range_block_size_)
+  if (!enable_splitting_)
     return;
 
-  // Large monovalue block, not reducable by splitting
-  if (lower_bound == block.max_seen)
+  // Small block or large monovalue block, not reducable by splitting
+  if (block.Size() <= max_range_block_size_ || lower_bound == block.max_seen)
     return;
 
   SplitBlock(it);
@@ -328,6 +328,59 @@ std::vector<DocId> RangeResult::Take() {
   };
 
   return std::visit(cb, result_);
+}
+
+void RangeTree::Builder::Add(DocId id, double value) {
+  bool inserted = updates_.emplace(id, value).second;
+  DCHECK(inserted);
+}
+
+void RangeTree::Builder::Remove(DocId id, double value) {
+  if (!updates_.erase({id, value}))
+    delayed_erased_.emplace(id, value);
+}
+
+void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
+  // Sort all elements by value
+  std::vector<Entry> sorted_entries(updates_.begin(), updates_.end());
+  std::ranges::sort(sorted_entries, {}, &Entry::second);
+  updates_.clear();
+
+  quota.Check();
+
+  // Add sorted elements in batches
+  size_t max_size = tree->max_range_block_size_;
+  RangeBlock* block = &tree->entries_.begin()->second;
+  for (size_t idx = 0; idx < sorted_entries.size();) {
+    // Create new block for each insertion batch (first goes into only first block)
+    if (idx)
+      block = &tree->CreateEmptyBlock(sorted_entries[idx].second)->second;
+
+    // Insert until we filled a block and a new value started (equal value must be in same block)
+    while (idx < sorted_entries.size()) {
+      if (block->Size() >= max_size && sorted_entries[idx - 1].second != sorted_entries[idx].second)
+        break;
+
+      block->Insert(sorted_entries[idx]);
+      idx++;
+
+      // If we filled a new multiple of the block size due to equal entries, check quota
+      if ((block->Size() - 1) / max_size != block->Size() / max_size)
+        quota.Check();
+    }
+
+    quota.Check();  // Yield if needed
+  }
+
+  // Update entries accumulated during yields
+  // TODO: possibly apply updates in steps
+  for (auto [id, v] : delayed_erased_)
+    tree->Remove(id, v);
+  for (auto [id, v] : updates_)
+    tree->Add(id, v);
+
+  updates_.clear();
+  delayed_erased_.clear();
 }
 
 }  // namespace dfly::search

@@ -153,13 +153,17 @@ inline std::string_view ArgS(ArgSlice args, size_t i) {
 }
 
 struct ConnectionStats {
-  size_t read_buf_capacity = 0;                // total capacity of input buffers
-  uint64_t dispatch_queue_entries = 0;         // total count of all pending
-                                               // messages (data + administrative messages)
-  size_t dispatch_queue_bytes = 0;             // total size of memory used by all pending
-                                               // messages (pipeline data queue + dispatch queue)
-  size_t dispatch_queue_subscriber_bytes = 0;  // total size of all publish messages
-                                               // (subset of dispatch_queue_bytes)
+  size_t read_buf_capacity = 0;  // total capacity of input buffers
+  // Count of pending messages in dispatch queue
+  uint64_t dispatch_queue_entries = 0;
+  // Memory used by pending messages in dispatch queue
+  size_t dispatch_queue_bytes = 0;
+  // Count of pending parsed commands in the pipeline queue (Data Path)
+  uint64_t pipeline_queue_entries = 0;
+  // Memory used by pending parsed commands in the pipeline queue (Data Path)
+  size_t pipeline_queue_bytes = 0;
+  // total size of all publish messages (subset of dispatch_queue_bytes)
+  size_t dispatch_queue_subscriber_bytes = 0;
 
   size_t pipeline_cmd_cache_bytes = 0;
 

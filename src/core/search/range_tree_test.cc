@@ -13,6 +13,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "util/fibers/fibers.h"
 
 namespace dfly::search {
 
@@ -494,6 +495,147 @@ TEST_F(RangeTreeTest, FinalizeInitialization) {
   EXPECT_THAT(result, BlocksAre({{{1, 10.0}, {2, 20.0}, {3, 20.0}, {5, 20.0}},
                                  {{4, 30.0}, {6, 30.0}},
                                  {{7, 40.0}}}));
+}
+
+struct BuilderTest : public RangeTreeTest {
+  static void Shuffle(std::vector<RangeTree::Entry>* entries) {
+    std::random_device rd;
+    std::shuffle(entries->begin(), entries->end(), std::mt19937(rd()));
+  }
+};
+
+// Test if the builder builds the tree correctly
+TEST_F(BuilderTest, Builder) {
+  RangeTree tree{PMR_NS::get_default_resource(), 4};
+  RangeTree::Builder builder;
+
+  // Prepare entries shuffled
+  std::vector<RangeTree::Entry> entries;
+  entries.reserve(100);
+  for (size_t i = 0; i < 120; i++)
+    entries.emplace_back(i, double(i) / 2);
+  Shuffle(&entries);
+
+  // Add fake entries
+  for (auto [id, v] : entries) {
+    builder.Add(id, v * 2);
+  }
+
+  // Add all entries for real
+  for (auto [id, v] : entries) {
+    builder.Remove(id, v * 2);
+    builder.Add(id, v);
+  }
+
+  // Shuffle again
+  Shuffle(&entries);
+
+  // Remove last
+  while (entries.size() > 100) {
+    builder.Remove(entries.back().first, entries.back().second);
+    entries.pop_back();
+  }
+
+  // Build tree
+  builder.Populate(&tree, RenewableQuota::Unlimited());
+
+  // Sort for comparisons
+  std::ranges::sort(entries, {}, &RangeTree::Entry::first);
+  auto entry_ids = entries | std::views::keys;
+
+  // Check correctness of all ids
+  {
+    auto all_values = tree.Range(-1000, +1000);
+    auto got_ids = all_values.Take();
+    EXPECT_TRUE(std::ranges::equal(got_ids, entry_ids));
+  }
+
+  // Check correctness of all values including ids
+  {
+    auto all_pairs = ExtractDocPairs(tree.GetAllBlocks());
+    std::sort(all_pairs.begin(), all_pairs.end());
+    EXPECT_EQ(all_pairs, entries);
+  }
+}
+
+TEST_F(BuilderTest, BuilderUpdates) {
+  RangeTree tree{PMR_NS::get_default_resource(), 5};
+  RangeTree::Builder builder;
+
+  // Prepare entries shuffled
+  std::vector<RangeTree::Entry> entries;
+  entries.reserve(1000);
+  for (size_t i = 0; i < 1000; i++) {
+    entries.emplace_back(i, double(i) / 2);
+    entries.emplace_back(i, double(i) / 2 + 0.25);
+  }
+  Shuffle(&entries);
+
+  // Insert entries
+  for (auto entry : entries)
+    builder.Add(entry.first, entry.second);
+
+  // Construct while suspending at every node
+  bool done = false;
+  util::fb2::Fiber populate_fb{[&] {
+    builder.Populate(&tree, {0});  // suspend each time
+    done = true;
+  }};
+
+  // In the meantime insert new entries
+  DocId current = entries.size();
+  bool add = false;
+  size_t added = 0;
+  absl::InsecureBitGen gen;
+  while (!done) {
+    if (add) {
+      entries.emplace_back(current, double(current) / 2);
+      builder.Add(entries.back().first, entries.back().second);
+      current++;
+    } else {
+      size_t idx = absl::Uniform(gen, size_t{0}, entries.size());
+      auto it = entries.begin() + idx;
+      builder.Remove(it->first, it->second);
+
+      // Change our mind with 50% prob and just update
+      if (current % 2 == 0) {
+        it->second += 1;
+        builder.Add(it->first, it->second);
+      } else {
+        entries.erase(it);
+      }
+    }
+    add = !add;
+    added++;
+    util::ThisFiber::Yield();
+  }
+
+  EXPECT_GT(added, 5u);  // At least some updates were performed
+
+  populate_fb.Join();
+
+  // Sort for comparisons
+  std::sort(entries.begin(), entries.end());
+  // auto entry_ids_view = entries | std::views::keys;
+
+  // Check correctness of all ids
+  // TODO: Range tree doesn't filter duplicate ids
+  //{
+  //  auto all_values = tree.Range(-100000, +100000);
+  //  auto got_ids = all_values.Take();
+  //
+  //  std::set entry_ids_set(entry_ids_view.begin(), entry_ids_view.end());
+  //  std::vector entry_ids_vec(entry_ids_set.begin(), entry_ids_set.end());
+  //
+  //  EXPECT_EQ(got_ids, entry_ids_vec);
+  //}
+
+  // Check correctness of all values including ids
+  {
+    auto all_pairs = ExtractDocPairs(tree.GetAllBlocks());
+    std::sort(all_pairs.begin(), all_pairs.end());
+    EXPECT_EQ(all_pairs, entries);
+  }
 }
 
 // Test tree doesn't create unnecessary nodes after initialization

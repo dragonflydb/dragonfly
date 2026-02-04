@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <memory>
 #include <shared_mutex>
@@ -37,6 +38,9 @@ class GlobalHnswIndexRegistry {
     std::shared_lock<std::shared_mutex> lock(registry_mutex_);
     return indices_;
   }
+
+  // Returns unique index names from all registered HNSW indices
+  absl::flat_hash_set<std::string> GetIndexNames() const;
 
   void Reset();
 

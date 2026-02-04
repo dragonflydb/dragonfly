@@ -2247,6 +2247,34 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_SHARD_DOC_INDEX) {
+      // Load ShardDocIndex key-to-DocId mapping
+      // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
+      PendingIndexMapping pim;
+      SET_OR_RETURN(LoadLen(nullptr), pim.shard_id);
+
+      SET_OR_RETURN(FetchGenericString(), pim.index_name);
+
+      uint64_t mapping_count;
+      SET_OR_RETURN(LoadLen(nullptr), mapping_count);
+      pim.mappings.reserve(mapping_count);
+
+      for (uint64_t i = 0; i < mapping_count; ++i) {
+        string key;
+        SET_OR_RETURN(FetchGenericString(), key);
+        uint64_t doc_id;
+        SET_OR_RETURN(LoadLen(nullptr), doc_id);
+        pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+      }
+
+      VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
+              << " entries";
+
+      // Store the mapping to be applied after index creation
+      pending_index_mappings_.emplace_back(std::move(pim));
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -3029,8 +3057,9 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    es->search_indices()->RebuildAllIndices(
-        OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    es->search_indices()->RebuildAllIndices(op_args, true);
   });
 
   // Now execute all pending synonym commands after indices are rebuilt

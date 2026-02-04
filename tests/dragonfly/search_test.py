@@ -190,11 +190,11 @@ async def test_management(async_client: aioredis.Redis):
 async def test_basic(async_client: aioredis.Redis, index_type):
     i1 = async_client.ft("i1-" + str(index_type))
 
-    await index_test_data(async_client, index_type)
     await i1.create_index(
         fix_schema_naming(index_type, BASIC_TEST_SCHEMA),
         definition=IndexDefinition(index_type=index_type),
     )
+    await index_test_data(async_client, index_type)
 
     res = await i1.search("article")
     assert contains_test_data(index_type, res, [0, 1])
@@ -234,13 +234,13 @@ async def test_big_json(async_client: aioredis.Redis):
     i1 = async_client.ft("i1")
     gen_arr = lambda base: {"blob": [base + str(i) for i in range(100)]}
 
-    await async_client.json().set("k1", "$", gen_arr("alex"))
-    await async_client.json().set("k2", "$", gen_arr("bob"))
-
     await i1.create_index(
         [TextField(name="$.blob", as_name="items")],
         definition=IndexDefinition(index_type=IndexType.JSON),
     )
+
+    await async_client.json().set("k1", "$", gen_arr("alex"))
+    await async_client.json().set("k2", "$", gen_arr("bob"))
 
     res = await i1.search("alex55")
     assert res.docs[0].id == "k1"
