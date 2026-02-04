@@ -1022,6 +1022,9 @@ io::Result<bool> Connection::CheckForHttpProto() {
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
 
+  // Register the new connection with the thread-local statistics.
+  // At this point (connection birth), local queue stats/luggage are 0,
+  // so only connection counts and buffer capacities are incremented.
   IncreaseConnStats();
   ++stats_->conn_received_cnt;
 
@@ -1080,6 +1083,11 @@ void Connection::ConnectionFlow() {
   DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
+
+  // We have already cleared the queues above (ClearPipelinedMessages), so local queue stats
+  // (dispatch_q_bytes_, etc.) represent 0 usage. DecreaseConnStats will safely subtract 0 for those
+  // stats, while correctly removing this connection from the global connection counts and buffer
+  // capacity tracking.
   DecreaseConnStats();
 
   if (ioloop_v2_) {
@@ -1598,6 +1606,8 @@ string Connection::DebugInfo() const {
 }
 
 bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op) {
+  // Guard: Automatically subtract stats when this scope exits (via return or exception).
+  absl::Cleanup stats_guard = [this, msg] { UpdateDispatchStats(*msg, false /* subtract */); };
   bool is_replying = msg->IsReplying();
 
   // Pre-execution Flush
@@ -1610,7 +1620,6 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
 
   // Fiber Termination Check
   if (ShouldEndAsyncFiber(*msg)) {
-    UpdateDispatchStats(*msg, false /* subtract */);
     CHECK(!HasPendingMessages()) << DebugInfo();
     GetQueueBackpressure().pipeline_cnd.notify_all();
     return true;  // Signal to terminate AsyncFiber
@@ -1629,8 +1638,6 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
       (replies_recorded_before == reply_builder_->RepliesRecorded())) {
     reply_builder_->Flush();
   }
-
-  UpdateDispatchStats(*msg, false /* subtract */);
   return false;
 }
 
@@ -1979,20 +1986,24 @@ void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
   if (add) {
     stats_->dispatch_queue_entries++;
     stats_->dispatch_queue_bytes += mem;
+    dispatch_q_bytes_ += mem;
     if (msg.IsPubMsg()) {
       qbp.subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
       stats_->dispatch_queue_subscriber_bytes += mem;
+      dispatch_q_subscriber_bytes_ += mem;
     }
   } else {
     DCHECK_GT(stats_->dispatch_queue_entries, 0u);
     DCHECK_GE(stats_->dispatch_queue_bytes, mem);
     stats_->dispatch_queue_entries--;
     stats_->dispatch_queue_bytes -= mem;
+    dispatch_q_bytes_ -= mem;
     if (msg.IsPubMsg()) {
       DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, mem);
       DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), mem);
       qbp.subscriber_bytes.fetch_sub(mem, std::memory_order_relaxed);
       stats_->dispatch_queue_subscriber_bytes -= mem;
+      dispatch_q_subscriber_bytes_ -= mem;
     }
   }
 }
@@ -2081,19 +2092,51 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 }
 
 void Connection::IncreaseConnStats() {
+  DCHECK(stats_);
   if (IsMainOrMemcache())
     ++stats_->num_conns_main;
   else
     ++stats_->num_conns_other;
   stats_->read_buf_capacity += io_buf_.Capacity();
+
+  stats_->dispatch_queue_entries += dispatch_q_.size();
+  stats_->dispatch_queue_bytes += dispatch_q_bytes_;
+  stats_->pipeline_queue_entries += parsed_cmd_q_len_;
+  stats_->pipeline_queue_bytes += parsed_cmd_q_bytes_;
+  if (dispatch_q_subscriber_bytes_ > 0) {
+    auto& qbp = GetQueueBackpressure();
+    stats_->dispatch_queue_subscriber_bytes += dispatch_q_subscriber_bytes_;
+    qbp.subscriber_bytes.fetch_add(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+  }
 }
 
 void Connection::DecreaseConnStats() {
-  if (IsMainOrMemcache())
+  DCHECK(stats_);
+  if (IsMainOrMemcache()) {
+    DCHECK_GT(stats_->num_conns_main, 0u);
     --stats_->num_conns_main;
-  else
+  } else {
+    DCHECK_GT(stats_->num_conns_other, 0u);
     --stats_->num_conns_other;
+  }
+  DCHECK_GE(stats_->read_buf_capacity, io_buf_.Capacity());
   stats_->read_buf_capacity -= io_buf_.Capacity();
+
+  DCHECK_GE(stats_->dispatch_queue_entries, dispatch_q_.size());
+  stats_->dispatch_queue_entries -= dispatch_q_.size();
+  DCHECK_GE(stats_->dispatch_queue_bytes, dispatch_q_bytes_);
+  stats_->dispatch_queue_bytes -= dispatch_q_bytes_;
+  if (dispatch_q_subscriber_bytes_ > 0) {
+    auto& qbp = GetQueueBackpressure();
+    DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, dispatch_q_subscriber_bytes_);
+    stats_->dispatch_queue_subscriber_bytes -= dispatch_q_subscriber_bytes_;
+    DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), dispatch_q_subscriber_bytes_);
+    qbp.subscriber_bytes.fetch_sub(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+  }
+  DCHECK_GE(stats_->pipeline_queue_entries, parsed_cmd_q_len_);
+  stats_->pipeline_queue_entries -= parsed_cmd_q_len_;
+  DCHECK_GE(stats_->pipeline_queue_bytes, parsed_cmd_q_bytes_);
+  stats_->pipeline_queue_bytes -= parsed_cmd_q_bytes_;
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
