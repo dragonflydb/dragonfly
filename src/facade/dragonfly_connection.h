@@ -380,9 +380,15 @@ class Connection : public util::Connection {
 
   void DestroyParsedQueue();
 
-  std::deque<MessageHandle> dispatch_q_;  // dispatch queue
-  util::fb2::CondVarAny cnd_;             // dispatch queue waker
-  util::fb2::Fiber async_fb_;             // async fiber (if started)
+  // Dispatch Queue - Queue for the Control Path.
+  // Handles asynchronous administrative tasks, events, and high-priority control
+  // messages (e.g., PubSub, Monitor, Migration requests, Checkpoints) processed
+  // by the AsyncFiber.
+  std::deque<MessageHandle> dispatch_q_;    // dispatch queue
+  util::fb2::CondVarAny cnd_;               // dispatch queue waker
+  util::fb2::Fiber async_fb_;               // async fiber (if started)
+  size_t dispatch_q_bytes_ = 0;             // total bytes in dispatch queue
+  size_t dispatch_q_subscriber_bytes_ = 0;  // total bytes from subscribers in dispatch queue
 
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
@@ -397,7 +403,7 @@ class Connection : public util::Connection {
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
 
-  // Parsed commands queue.
+  // Parsed Commands Queue - Queue for the Data Path.
   //
   // Commands move through the following stages in a single linked list:
   //   1) parsed but not yet dispatched        : [parsed_to_execute_, ..., parsed_tail_]
@@ -422,7 +428,6 @@ class Connection : public util::Connection {
   size_t parsed_cmd_q_len_ = 0;
   // Total bytes used by commands in parsed command queue
   size_t parsed_cmd_q_bytes_ = 0;
-
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool HasPendingMessages() const {
     return parsed_head_ || !dispatch_q_.empty();
