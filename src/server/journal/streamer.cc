@@ -422,6 +422,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
+      db_slice_,
       [&](std::string s) {
         Write(std::move(s));
         ThrottleIfNeeded();
@@ -450,6 +451,7 @@ void RestoreStreamer::Run() {
   boost::intrusive_ptr<DbTable> table = db_array_.front();
   PrimeTable* pt = &table->prime;
   ExpireTable& expire_table = table->expire;
+
   do {
     if (!cntx_->IsRunning())
       return;
@@ -499,6 +501,9 @@ void RestoreStreamer::Run() {
       stats_.buckets_loop += WriteBucket(it, expire_table);
     });
 
+    // Serialize any pending delayed entries.
+    cmd_serializer_->SerializeDelayedEntries(false);
+
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
     // setting that controls how agressive we are with migration pace.
     // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
@@ -508,6 +513,9 @@ void RestoreStreamer::Run() {
       last_yield = 0;
     }
   } while (cursor);
+
+  // Force serialize of all delayed entries.
+  cmd_serializer_->SerializeDelayedEntries(true);
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
