@@ -91,10 +91,7 @@ async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val
 
     info = (await p.execute())[-1]
     assert info["used_memory"] < 4 * 1_000_000  # Table memory
-    # interned strings used by jsoncons are stored in a pool. The pool is not cleared on flushall
-    # and holds onto its capacity, causing higher RSS usage.
-    expected_min_rss = min_rss / 5 if type == "JSON" else min_rss / 10
-    assert info["used_memory_rss"] < expected_min_rss  # RSS must have been freed
+    assert info["used_memory_rss"] < min_rss / 10  # RSS must have been freed
 
 
 @pytest.mark.asyncio
