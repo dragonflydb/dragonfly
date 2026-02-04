@@ -117,7 +117,7 @@ std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
   return {std::move(basic_fields), std::move(is_sortable_field)};
 }
 
-auto IndexableVectorFields(const search::Schema& schema) {
+auto GetVectorFieldsView(const search::Schema& schema) {
   return schema.fields | std::views::filter([](const auto& item) {
            return item.second.type == search::SchemaField::VECTOR &&
                   !(item.second.flags & search::SchemaField::NOINDEX);
@@ -415,7 +415,7 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
   auto accessor = GetAccessor(db_cntx, *pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : IndexableVectorFields(base_->schema)) {
+  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
     if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
         index) {
       bool added = index->Add(global_id, *accessor, field_ident);
@@ -432,7 +432,7 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
   auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : IndexableVectorFields(base_->schema)) {
+  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
     if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
         index) {
       index->Remove(global_id, *accessor, field_ident);
@@ -442,7 +442,7 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
 
 void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
   // Don't run loop if no vector fields are present
-  if (std::ranges::empty(IndexableVectorFields(base_->schema)))
+  if (std::ranges::empty(GetVectorFieldsView(base_->schema)))
     return;
 
   auto cb = [this, index_name](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
