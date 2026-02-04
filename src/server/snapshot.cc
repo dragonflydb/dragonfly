@@ -458,7 +458,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     do {
       // We may call PushSerialized from multiple fibers concurrently, so we need to
       // ensure that we are not serializing the same entry concurrently.
-      DelayedEntry entry = std::move(delayed_entries_.back());
+      TieredDelayedEntry entry = std::move(delayed_entries_.back());
       delayed_entries_.pop_back();
 
       // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
