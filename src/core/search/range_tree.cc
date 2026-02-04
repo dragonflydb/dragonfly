@@ -339,6 +339,8 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
   while (tries--) {
     auto stolen_erased = std::move(delayed_erased_);
     auto stolen_updates = std::move(updates_);
+    delayed_erased_.clear();
+    updates_.clear();
 
     auto check_quota = [&, ops = size_t(0)]() mutable {
       ops++;
