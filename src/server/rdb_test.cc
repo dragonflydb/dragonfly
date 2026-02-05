@@ -36,7 +36,8 @@ ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 ABSL_DECLARE_FLAG(bool, rdb_ignore_expiry);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
-ABSL_DECLARE_FLAG(bool, save_vector_index);
+ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
+ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 
 namespace dfly {
 
@@ -61,7 +62,8 @@ class RdbTest : public BaseFamilyTest {
 void RdbTest::SetUp() {
   // Setting max_memory_limit must be before calling  InitWithDbFilename
   max_memory_limit = 40000000;
-  absl::SetFlag(&FLAGS_save_vector_index, true);
+  absl::SetFlag(&FLAGS_serialize_hnsw_index, true);
+  absl::SetFlag(&FLAGS_deserialize_hnsw_index, true);
   InitWithDbFilename();
   CHECK_EQ(zmalloc_used_memory_tl, 0);
 }

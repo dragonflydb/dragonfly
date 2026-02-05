@@ -532,6 +532,13 @@ void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index
     }
   }
 
+  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+        index) {
+      index->SetRestored(false);
+    }
+  }
+
   // Log summary of vector restoration
   size_t total_docs = key_index_.GetDocKeysMap().size();
   if (failed_updates > 0 || missing_documents > 0) {

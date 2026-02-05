@@ -56,7 +56,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
-ABSL_DECLARE_FLAG(bool, save_vector_index);
+ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
@@ -2227,7 +2227,7 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
       // Only restore if flag enabled and shard count matches (GlobalDocId encodes shard_id)
-      bool should_restore = GetFlag(FLAGS_save_vector_index) && shard_count_ > 0 &&
+      bool should_restore = GetFlag(FLAGS_deserialize_hnsw_index) && shard_count_ > 0 &&
                             shard_set != nullptr && shard_count_ == shard_set->size();
 
       // Extract index_name and field_name from index_key
@@ -2297,7 +2297,8 @@ error_code RdbLoader::Load(io::Source* src) {
           metadata.maxlevel = -1;  // Invalid, will be set in loop
           metadata.enterpoint_node = 0;
           for (const auto& node : nodes) {
-            if (node.level > metadata.maxlevel) {
+            // Cast node.level to int for proper signed comparison with maxlevel (-1)
+            if (static_cast<int>(node.level) > metadata.maxlevel) {
               metadata.maxlevel = node.level;
               metadata.enterpoint_node = node.internal_id;
             }
@@ -2336,7 +2337,7 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      if (!GetFlag(FLAGS_save_vector_index)) {
+      if (!GetFlag(FLAGS_deserialize_hnsw_index)) {
         continue;
       }
 
@@ -3178,7 +3179,11 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
 
   // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
   for (const auto& [shard_id, shard_mappings] : mappings_by_shard) {
-    DCHECK_LT(shard_id, shard_set->size());
+    if (shard_id >= shard_set->size()) {
+      LOG(ERROR) << "Invalid shard_id in RDB: " << shard_id << " (max: " << shard_set->size() - 1
+                 << "). Skipping index mappings for this shard.";
+      continue;
+    }
     shard_set->Add(shard_id, [shard_mappings]() {
       EngineShard* es = EngineShard::tlocal();
       for (const auto* pim : shard_mappings) {
@@ -3199,9 +3204,6 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
     es->search_indices()->RebuildAllIndices(op_args, true);
   });
-
-  // Clear restored flags so subsequent Add() operations work correctly
-  GlobalHnswIndexRegistry::Instance().ClearRestoredFlags();
 
   // Now execute all pending synonym commands after indices are rebuilt
   for (auto& syn_cmd : synonym_cmds) {

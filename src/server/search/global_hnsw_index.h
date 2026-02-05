@@ -44,9 +44,6 @@ class GlobalHnswIndexRegistry {
 
   void Reset();
 
-  // Clear restored flag on all indices
-  void ClearRestoredFlags();
-
  private:
   GlobalHnswIndexRegistry() = default;
   std::string MakeKey(std::string_view index_name, std::string_view field_name) const;

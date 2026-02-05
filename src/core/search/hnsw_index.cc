@@ -269,14 +269,20 @@ struct HnswlibAdapter {
       if (internal_id >= world_.max_elements_) {
         LOG(ERROR) << "RestoreFromNodes: internal_id " << internal_id << " exceeds max_elements "
                    << world_.max_elements_ << ", aborting restoration (corrupted snapshot data)";
-        // Free allocated linkLists_ to prevent memory leak
+        // Clean up all state modified for previously processed nodes
         for (size_t id : restored_internal_ids) {
+          // Free allocated linkLists_ to prevent memory leak
           if (world_.linkLists_[id]) {
             mi_free(world_.linkLists_[id]);
             world_.linkLists_[id] = nullptr;
           }
+          // Reset element_levels_ entry
+          world_.element_levels_[id] = 0;
+          // Clear level 0 memory that was modified
+          memset(world_.data_level0_memory_ + id * world_.size_data_per_element_, 0,
+                 world_.size_data_per_element_);
         }
-        // Reset any partially restored state
+        // Reset global state
         world_.cur_element_count.store(0);
         world_.label_lookup_.clear();
         return;
