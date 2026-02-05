@@ -863,12 +863,14 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   } else {
     absl::StrAppend(&before, " name=", name_);
   }
+#ifdef DF_USE_SSL
   if (is_tls_) {
     tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
     string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
     const SSL_CIPHER* cipher = SSL_get_current_cipher(tls_sock->ssl_handle());
     absl::StrAppend(&before, " tls=", proto_version, "|", SSL_CIPHER_get_name(cipher));
   }
+#endif
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (parsed_cmd_q_len_ > 0) {
