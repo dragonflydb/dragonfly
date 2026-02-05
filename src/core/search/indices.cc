@@ -109,7 +109,7 @@ double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
 std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_view field) {
   auto element = doc.GetStrings(field);
 
-  if (!element)
+  if (!element || element->empty())
     return std::nullopt;
 
   absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
