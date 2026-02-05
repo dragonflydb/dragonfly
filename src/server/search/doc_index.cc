@@ -302,7 +302,6 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
   // Create builder and start indexing
   builder_ = std::make_unique<search::IndexBuilder>(this);
   builder_->Start(op_args, [this] {
-    indices_->FinalizeInitialization();
     VLOG(1) << "Indexed " << key_index_.Size()
             << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
     builder_.reset();

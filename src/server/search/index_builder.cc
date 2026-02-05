@@ -15,7 +15,11 @@ void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complet
   DCHECK(table.get());
 
   auto cb = [this, table, db_cntx = op_args.db_cntx, on_complete = std::move(on_complete)] {
-    MainLoopFb(table.get(), db_cntx);
+    CursorLoop(table.get(), db_cntx);
+
+    // TODO: make it step by step + wire cancellation inside
+    if (state_.IsRunning())
+      index_->indices_->FinalizeInitialization();
 
     // Finish by clearing the fiber reference and calling on_complete as its last action
     {
@@ -38,7 +42,7 @@ util::fb2::Fiber IndexBuilder::Worker() {
   return std::move(fiber_);
 }
 
-void IndexBuilder::MainLoopFb(dfly::DbTable* table, DbContext db_cntx) {
+void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
     std::string_view key = it->first.GetSlice(&scratch);

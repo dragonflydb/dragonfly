@@ -32,8 +32,8 @@ struct IndexBuilder {
   util::fb2::Fiber Worker();
 
  private:
-  // Main fiber function
-  void MainLoopFb(DbTable* table, DbContext db_cntx);
+  // Loop with cursor over table and add entries
+  void CursorLoop(DbTable* table, DbContext db_cntx);
 
   dfly::ExecutionState state_;
   ShardDocIndex* index_;
