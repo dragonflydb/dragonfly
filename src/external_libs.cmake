@@ -70,6 +70,7 @@ add_third_party(mimalloc2
         patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/0_base.patch
         COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/1_add_stat_type.patch
         COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/2_return_stat.patch
+        COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/4_fix_heap_collect.patch
    # Add -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS=-O0 to debug
    CMAKE_PASS_FLAGS "-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF \
                     -DMI_INSTALL_TOPLEVEL=ON -DMI_OVERRIDE=OFF -DMI_NO_PADDING=ON \ -DCMAKE_C_FLAGS=-g"
