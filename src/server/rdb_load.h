@@ -340,18 +340,21 @@ class RdbLoader : protected RdbLoaderBase {
   // Get pending synonym commands collected from all RdbLoader instances
   static std::vector<std::string> TakePendingSynonymCommands();
 
-  Service* service_;
-  static std::vector<std::string> pending_synonym_cmds_;
-  static base::SpinLock search_index_mu_;  // guards created_search_indices_
-  static absl::flat_hash_set<std::string> created_search_indices_;
-
   // Pending index key-to-DocId mappings to apply after indices are created
   struct PendingIndexMapping {
     uint32_t shard_id;
     std::string index_name;
     std::vector<std::pair<std::string, search::DocId>> mappings;
   };
-  std::vector<PendingIndexMapping> pending_index_mappings_;
+
+  // Get and clear pending index mappings collected from all RdbLoader instances
+  static std::vector<PendingIndexMapping> TakePendingIndexMappings();
+
+  Service* service_;
+  static std::vector<std::string> pending_synonym_cmds_;
+  static base::SpinLock search_index_mu_;  // created_search_indices_, pending_index_mappings_
+  static std::vector<PendingIndexMapping> pending_index_mappings_;
+  static absl::flat_hash_set<std::string> created_search_indices_;
 
   std::string snapshot_id_;
   bool override_existing_keys_ = false;

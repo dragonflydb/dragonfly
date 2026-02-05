@@ -2343,8 +2343,11 @@ error_code RdbLoader::Load(io::Source* src) {
       VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
               << " entries";
 
-      // Store the mapping to be applied after index creation
-      pending_index_mappings_.emplace_back(std::move(pim));
+      // Store the mapping to be applied after index creation (thread-safe)
+      {
+        std::lock_guard lk(search_index_mu_);
+        pending_index_mappings_.emplace_back(std::move(pim));
+      }
       continue;
     }
 
@@ -3045,12 +3048,21 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-// Static synchronization for thread-safe search index creation
+// Static storage for index key-to-DocId mappings collected from all RdbLoader instances
+std::vector<RdbLoader::PendingIndexMapping> RdbLoader::pending_index_mappings_;
+// Static synchronization for thread-safe search index creation and pending mappings
 base::SpinLock RdbLoader::search_index_mu_;
 absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
   result.swap(pending_synonym_cmds_);
+  return result;
+}
+
+std::vector<RdbLoader::PendingIndexMapping> RdbLoader::TakePendingIndexMappings() {
+  // we don't need to lock here as this is called after all RdbLoader instances are done
+  std::vector<PendingIndexMapping> result;
+  result.swap(pending_index_mappings_);
   return result;
 }
 
@@ -3152,8 +3164,34 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   }
 
   std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  std::vector<PendingIndexMapping> index_mappings = TakePendingIndexMappings();
+
   if (is_error)
     return;
+
+  // Apply pending index key-to-DocId mappings before rebuilding indices
+  // Group mappings by shard_id for efficient dispatch
+  absl::flat_hash_map<uint32_t, std::vector<const PendingIndexMapping*>> mappings_by_shard;
+  for (const auto& pim : index_mappings) {
+    mappings_by_shard[pim.shard_id].push_back(&pim);
+  }
+
+  // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
+  for (const auto& [shard_id, shard_mappings] : mappings_by_shard) {
+    DCHECK_LT(shard_id, shard_set->size());
+    shard_set->Add(shard_id, [shard_mappings]() {
+      EngineShard* es = EngineShard::tlocal();
+      for (const auto* pim : shard_mappings) {
+        if (auto* index = es->search_indices()->GetIndex(pim->index_name); index) {
+          index->RestoreKeyIndex(pim->mappings);
+          VLOG(1) << "Restored " << pim->mappings.size() << " key mappings for index "
+                  << pim->index_name << " on shard " << pim->shard_id;
+        }
+      }
+    });
+  }
+  // Wait for all mappings to be applied
+  shard_set->RunBriefInParallel([](EngineShard*) {});
 
   // Rebuild all search indices - for restored HNSW indices, this will populate vectors
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {

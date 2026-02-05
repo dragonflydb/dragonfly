@@ -266,6 +266,32 @@ std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::S
   return result;
 }
 
+void ShardDocIndex::DocKeyIndex::Restore(
+    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  // Find max doc_id to size the keys_ vector appropriately
+  DocId max_id = 0;
+  for (const auto& [key, doc_id] : mappings) {
+    max_id = std::max(max_id, doc_id);
+  }
+
+  // Resize keys_ to accommodate all doc_ids
+  keys_.resize(max_id + 1);
+  last_id_ = max_id + 1;
+
+  // Restore the mappings
+  for (const auto& [key, doc_id] : mappings) {
+    keys_[doc_id] = key;
+    ids_[key] = doc_id;
+  }
+
+  // Build free_ids_ list for any gaps in the id sequence
+  for (DocId id = 0; id <= max_id; ++id) {
+    if (keys_[id].empty()) {
+      free_ids_.push_back(id);
+    }
+  }
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
