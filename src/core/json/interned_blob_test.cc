@@ -230,3 +230,39 @@ TEST_F(InternedBlobTest, StringCtors) {
   StringCheck(k, ".......");
   EXPECT_EQ(pool.size(), 2);
 }
+
+TEST_F(InternedBlobTest, PoolShrink) {
+  InternedString::ResetPool();
+  std::vector<InternedString> v;
+  const auto& ref = InternedString::GetPoolRef();
+  for (const auto i : std::views::iota(0, 1000))
+    v.emplace_back(std::to_string(i));
+
+  std::vector<size_t> caps;
+
+  constexpr auto jitter = std::views::iota(0, 6);
+
+  while (!v.empty()) {
+    constexpr auto step = 20;
+    const auto from = v.end() - std::min<size_t>(step, v.size());
+    v.erase(from, v.end());
+    // Interleaving inserts right after a possible resize, to ensure we don't have to increase
+    // capacity right after a shrink. The caps vector should remain monotonically decreasing.
+    for (const auto j : jitter)
+      v.emplace_back(std::to_string(10000 + j));
+    caps.push_back(ref.capacity());
+    for (size_t i = 0; i < jitter.size(); ++i)
+      v.pop_back();
+  }
+
+  EXPECT_EQ(ref.load_factor(), 0);
+  EXPECT_TRUE(std::ranges::is_sorted(caps, std::ranges::greater{}));
+
+  // Check that capacity changes very infrequently
+  size_t cap_trans = 0;
+  for (size_t i = 1; i < caps.size(); ++i) {
+    if (caps[i] != caps[i - 1])
+      ++cap_trans;
+  }
+  EXPECT_LT(cap_trans, caps.size() / 2);
+}

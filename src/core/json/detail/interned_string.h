@@ -106,7 +106,9 @@ class InternedString {
   // Increments the refcount if the entry is not null
   void Acquire();
 
-  // Decrements the refcount, removes entry from the pool if necessary, destroying the interned blob
+  // Decrements the refcount, removes entry from the pool if necessary, destroying the interned
+  // blob. A side effect may be shrinking the pool if the load factor is suboptimal (see
+  // kLoadFactorToShrinkPool in the implementation)
   void Release();
 
   // Wraps a null pointer by default

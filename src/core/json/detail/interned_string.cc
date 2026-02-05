@@ -56,8 +56,13 @@ void InternedString::Release() {
     pool_ref.erase(entry_);
     InternedBlobHandle::Destroy(entry_);
 
+    // When pool is underutilized, shrink it by swapping.
     if (const auto load_factor = pool_ref.load_factor();
         ABSL_PREDICT_FALSE(load_factor > 0 && load_factor < kLoadFactorToShrinkPool)) {
+      // The LHS of swap is a new pool constructed from the original pool reference. The RHS is the
+      // original pool. After the swap, the temporary is destroyed. Note that this is not a strict
+      // shrink. The new pool internally allocates enough capacity so that the load factor is around
+      // 0.8. So the capacity after swap is still larger than size, but the load factor is improved.
       InternedBlobPool(pool_ref).swap(pool_ref);
     }
   }
