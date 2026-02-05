@@ -109,7 +109,7 @@ double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
 std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_view field) {
   auto element = doc.GetStrings(field);
 
-  if (!element)
+  if (!element || element->empty())
     return std::nullopt;
 
   // Check if it null field
