@@ -69,6 +69,7 @@ add_third_party(mimalloc2
    # GIT_TAG v2.2.4
    URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz
    PATCH_COMMAND "${MIMALLOC_PATCH_COMMAND}"
+   COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${CMAKE_CURRENT_LIST_DIR}/../patches/4_fix_heap_collect.patch
    # Add -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS=-O0 to debug
    CMAKE_PASS_FLAGS "-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF \
                     -DMI_INSTALL_TOPLEVEL=ON -DMI_OVERRIDE=OFF -DMI_NO_PADDING=ON \ -DCMAKE_C_FLAGS=-g"
