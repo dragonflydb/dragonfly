@@ -259,6 +259,9 @@ struct HnswlibAdapter {
 
     // Restore each node - directly set up memory and fields
     size_t restored_count = 0;
+    std::vector<size_t> restored_internal_ids;  // Track for cleanup on abort
+    restored_internal_ids.reserve(nodes.size());
+
     for (const auto& node : nodes) {
       size_t internal_id = node.internal_id;
 
@@ -266,6 +269,13 @@ struct HnswlibAdapter {
       if (internal_id >= world_.max_elements_) {
         LOG(ERROR) << "RestoreFromNodes: internal_id " << internal_id << " exceeds max_elements "
                    << world_.max_elements_ << ", aborting restoration (corrupted snapshot data)";
+        // Free allocated linkLists_ to prevent memory leak
+        for (size_t id : restored_internal_ids) {
+          if (world_.linkLists_[id]) {
+            mi_free(world_.linkLists_[id]);
+            world_.linkLists_[id] = nullptr;
+          }
+        }
         // Reset any partially restored state
         world_.cur_element_count.store(0);
         world_.label_lookup_.clear();
@@ -322,6 +332,7 @@ struct HnswlibAdapter {
         std::copy(node.levels_links[lvl].begin(), node.levels_links[lvl].end(), links);
       }
 
+      restored_internal_ids.push_back(internal_id);
       ++restored_count;
     }
 
