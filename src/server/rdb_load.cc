@@ -55,6 +55,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
+ABSL_DECLARE_FLAG(bool, save_vector_index);
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
@@ -2265,6 +2266,10 @@ error_code RdbLoader::Load(io::Source* src) {
         uint64_t doc_id;
         SET_OR_RETURN(LoadLen(nullptr), doc_id);
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+      }
+
+      if (!GetFlag(FLAGS_save_vector_index)) {
+        continue;
       }
 
       VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count

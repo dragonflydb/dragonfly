@@ -436,6 +436,9 @@ class DflyInstanceFactory:
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
             args.setdefault("serialization_max_chunk_size", 300000)
 
+        if version > 1.36:
+            args.setdefault("save_vector_index", "true")
+
         if version >= 1.26:
             args.setdefault("fiber_safety_margin=4096")
 
