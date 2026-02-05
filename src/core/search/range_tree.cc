@@ -333,10 +333,11 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
     quota.Check();  // Yield if needed
   }
 
-  // Update entries accumulated during yields in batches while respecting quota
-  // Don't have more than `tries` iterations to be completable
-  size_t tries = 3;
-  while (tries--) {
+  // Update entries accumulated during yields in batches while respecting quota.
+  // Last loop is atomic (without quota checks) to ensure consistency
+  size_t iterations = 3;
+  while (iterations--) {
+    // Take updates to allow new ones during suspensions
     auto stolen_erased = std::move(delayed_erased_);
     auto stolen_updates = std::move(updates_);
     delayed_erased_.clear();
@@ -344,7 +345,7 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
 
     auto check_quota = [&, ops = size_t(0)]() mutable {
       ops++;
-      if (tries && ops / max_size != (ops + 1) / max_size)
+      if (iterations && ops / max_size != (ops + 1) / max_size)
         quota.Check();
     };
 
@@ -359,6 +360,7 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
     }
   }
 
+  // Because last iteration was atomic
   DCHECK(updates_.empty());
   DCHECK(delayed_erased_.empty());
 }

@@ -4,8 +4,6 @@
 
 #include "core/search/renewable_quota.h"
 
-#include <iostream>
-
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "util/fibers/fibers.h"
