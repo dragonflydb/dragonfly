@@ -26,16 +26,20 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
 add_executable(dfly_bench dfly_bench.cc)
 cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
 
-# Include journal target
+# Include journal sources (not separate target for now)
 add_subdirectory(journal)
+if(NOT DEFINED DF_JOURNAL_SRCS)
+  message(FATAL_ERROR "Journal source files not exported via DF_JOURNAL_SRCS")
+endif()
 
 # Define transaction library
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
-            cluster_support.cc common.cc command_registry.cc namespaces.cc
+            cluster_support.cc common.cc command_registry.cc
+            ${DF_JOURNAL_SRCS}
             server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc
             acl/acl_log.cc slowlog.cc channel_store.cc)
-cxx_link(dfly_transaction dfly_core dfly_journal strings_lib TRDP::fast_float TRDP::hdr_histogram)
+cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
 
 # Include search module
 add_subdirectory(search)
@@ -141,6 +145,7 @@ helio_cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
