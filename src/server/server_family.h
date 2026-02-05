@@ -11,6 +11,7 @@
 
 #include "core/qlist.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_stats.h"
 #include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"

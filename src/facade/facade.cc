@@ -8,6 +8,7 @@
 #include "base/logging.h"
 #include "facade/command_id.h"
 #include "facade/error.h"
+#include "facade/facade_stats.h"
 #include "facade/parsed_command.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_expr.h"

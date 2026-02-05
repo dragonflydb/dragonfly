@@ -5,6 +5,7 @@
 #include "server/stream_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {

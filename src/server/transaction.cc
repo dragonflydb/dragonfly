@@ -10,6 +10,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/facade_stats.h"
 #include "facade/op_status.h"
 #include "redis/redis_aux.h"
 #include "server/blocking_controller.h"

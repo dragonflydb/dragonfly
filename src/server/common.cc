@@ -4,6 +4,7 @@
 
 #include "server/common.h"
 
+#include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <fast_float/fast_float.h>
@@ -17,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/glob_matcher.h"
 #include "core/interpreter.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/conn_context.h"
@@ -350,6 +352,9 @@ GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
 
 std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
   return os << GlobalStateName(state);
+}
+
+ScanOpts::~ScanOpts() {
 }
 
 ThreadLocalMutex::ThreadLocalMutex() {

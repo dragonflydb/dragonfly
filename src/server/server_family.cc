@@ -26,9 +26,10 @@
 #include <unordered_set>
 
 #include "absl/strings/ascii.h"
+#include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "server/common.h"
-#include "slowlog.h"
+#include "server/slowlog.h"
 #include "util/fibers/synchronization.h"
 
 extern "C" {

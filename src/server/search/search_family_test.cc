@@ -5,12 +5,13 @@
 #include "server/search/search_family.h"
 
 #include <absl/flags/flag.h>
+#include <absl/strings/str_format.h>
 
 #include <algorithm>
 
-#include "absl/strings/str_format.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
@@ -994,7 +995,7 @@ TEST_P(SortTest, BasicSort) {
   absl::InsecureBitGen gen;
   vector<string> random_strs;
   for (size_t i = 0; i < 10; i++)
-    random_strs.emplace_back(dfly::GetRandomHex(gen, 7));
+    random_strs.emplace_back(GetRandomHex(gen, 7));
   sort(random_strs.begin(), random_strs.end());
 
   for (size_t i = 0; i < 10; i++)
