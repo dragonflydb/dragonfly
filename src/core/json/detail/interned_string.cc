@@ -3,6 +3,10 @@
 
 #include "core/json/detail/interned_string.h"
 
+namespace {
+constexpr auto kLoadFactorToShrinkPool = 0.2;
+}
+
 namespace dfly::detail {
 
 InternedString& InternedString::operator=(InternedString other) {
@@ -48,8 +52,14 @@ void InternedString::Release() {
   entry_.DecrRefCount();
 
   if (entry_.RefCount() == 0) {
-    GetPoolRef().erase(entry_);
+    InternedBlobPool& pool_ref = GetPoolRef();
+    pool_ref.erase(entry_);
     InternedBlobHandle::Destroy(entry_);
+
+    if (const auto load_factor = pool_ref.load_factor();
+        ABSL_PREDICT_FALSE(load_factor > 0 && load_factor < kLoadFactorToShrinkPool)) {
+      InternedBlobPool(pool_ref).swap(pool_ref);
+    }
   }
 }
 

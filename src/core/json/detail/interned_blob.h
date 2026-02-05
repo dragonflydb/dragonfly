@@ -54,8 +54,9 @@ class InternedBlobHandle {
   // Convenience method to deallocate storage. Not for use in destructor.
   static void Destroy(InternedBlobHandle& handle);
 
-  operator std::string_view() const;  // NOLINT (non-explicit operator for easier comparisons)
-
+  operator std::string_view() const {  // NOLINT (non-explicit operator for easier comparisons)
+    return blob_ ? std::string_view{blob_, Size()} : "";
+  }
   auto operator<=>(const InternedBlobHandle& other) const = default;
   bool operator==(const InternedBlobHandle& other) const = default;
 
