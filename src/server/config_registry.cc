@@ -12,6 +12,7 @@
 #include "core/glob_matcher.h"
 #include "facade/facade_types.h"
 #include "server/common.h"
+#include "strings/human_readable.h"
 
 namespace dfly {
 namespace {
@@ -84,8 +85,8 @@ optional<string> ConfigRegistry::Get(string_view config_name) {
   }
 
   // For MemoryBytesFlag, return numeric bytes for compatibility.
-  if (flag->IsOfType<facade::MemoryBytesFlag>()) {
-    auto val = flag->TryGet<facade::MemoryBytesFlag>();
+  if (flag->IsOfType<strings::MemoryBytesFlag>()) {
+    auto val = flag->TryGet<strings::MemoryBytesFlag>();
     if (val.has_value()) {
       return absl::StrCat(val->value);
     }

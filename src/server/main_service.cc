@@ -93,7 +93,7 @@ ABSL_FLAG(bool, admin_nopass, false,
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
+ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database, until data starts to be evicted "
           "(according to eviction policy). With tiering, this value defines only the size in RAM, "
           "and not the whole dataset (RAM + SSD). "
@@ -1065,10 +1065,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                          FLAGS_scheduler_background_warrant),
       []() { UpdateSchedulerFlagsOnThread(); });
 
-  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
-    // TODO: reduce code reliance on constant direct access of max_memory_limit
-    max_memory_limit.store(flag.value, memory_order_relaxed);
-  });
+  config_registry.RegisterSetter<strings::MemoryBytesFlag>(
+      "maxmemory", [](const strings::MemoryBytesFlag& flag) {
+        // TODO: reduce code reliance on constant direct access of max_memory_limit
+        max_memory_limit.store(flag.value, memory_order_relaxed);
+      });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("background_snapshotting");

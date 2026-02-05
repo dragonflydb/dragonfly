@@ -31,6 +31,7 @@
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
+#include "strings/human_readable.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
@@ -61,10 +62,10 @@ ABSL_FLAG(string, admin_bind, "",
           "If set, the admin consol TCP connection would be bind the given address. "
           "This supports both HTTP and RESP protocols");
 
-ABSL_FLAG(facade::MemoryBytesFlag, request_cache_limit, 64_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, request_cache_limit, 64_MB,
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
           "Amount of memory to use for storing pipeline requests - per IO thread."
           "Please note that clients that send excecissively huge pipelines, "
           "may deadlock themselves. See https://github.com/dragonflydb/dragonfly/discussions/3997"
@@ -77,7 +78,7 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "may require increasing this limit to prevent the risk of deadlocking."
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
-ABSL_FLAG(facade::MemoryBytesFlag, publish_buffer_limit, 128_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
 ABSL_FLAG(uint32_t, pipeline_squash, 1,
@@ -92,7 +93,7 @@ ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
           "Maximum bulk length that is "
           "allowed to be accepted when parsing RESP protocol");
 
-ABSL_FLAG(facade::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
+ABSL_FLAG(strings::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
 ABSL_FLAG(bool, migrate_connections, true,
