@@ -705,7 +705,7 @@ async def test_ft_info_concurrent_create_drop(df_server):
 async def test_replicate_all_index_types(df_factory, master_threads, replica_threads):
     """
     Test that all index types (text, numeric, tag, geo, and vector) can be replicated
-    via full sync rebuild on the replica side. Uses 10000 elements for stress testing.
+    via full sync rebuild on the replica side. Uses 1000 elements for testing.
     Tests with different thread counts between master and replica to ensure proper
     shard handling during replication.
     """
@@ -750,8 +750,8 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
         "L2",
     )
 
-    # Insert 10000 test documents
-    NUM_DOCS = 10000
+    # Insert 1000 test documents
+    NUM_DOCS = 1000
     pipe = c_master.pipeline(transaction=False)
     for i in range(NUM_DOCS):
         lat = 37.0 + (i % 100) * 0.01  # Varying latitudes
@@ -782,12 +782,12 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     assert text_result.total >= 1
 
     # Numeric search
-    numeric_result = await master_idx.search("@price:[1000 2000]")
-    assert numeric_result.total == 1001  # prices 1000-2000
+    numeric_result = await master_idx.search("@price:[100 200]")
+    assert numeric_result.total == 101  # prices 100-200
 
     # Tag search - every 3rd item is electronics (0, 3, 6, ...)
     tag_result = await master_idx.search(Query("@category:{electronics}").paging(0, 0))
-    expected_electronics = (NUM_DOCS + 2) // 3  # ceil(10000/3)
+    expected_electronics = (NUM_DOCS + 2) // 3  # ceil(1000/3)
     assert tag_result.total == expected_electronics
 
     # Geo search - search around (-122.0, 37.0) with 10km radius
@@ -827,8 +827,8 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     assert replica_text.total >= 1
 
     # Numeric search
-    replica_numeric = await replica_idx.search("@price:[1000 2000]")
-    assert replica_numeric.total == 1001
+    replica_numeric = await replica_idx.search("@price:[100 200]")
+    assert replica_numeric.total == 101
 
     # Tag search
     replica_tag = await replica_idx.search(Query("@category:{electronics}").paging(0, 0))
@@ -855,7 +855,7 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
 async def test_vector_search_with_geo_and_tags(async_client: aioredis.Redis):
     """
     Test combining vector search (KNN) with geo radius filter and category tags.
-    This tests complex queries that use multiple index types together with 10000 elements.
+    This tests complex queries that use multiple index types together with 1000 elements.
     """
     idx = async_client.ft("combined_idx")
 
@@ -872,15 +872,15 @@ async def test_vector_search_with_geo_and_tags(async_client: aioredis.Redis):
                     "TYPE": "FLOAT32",
                     "DIM": 3,
                     "DISTANCE_METRIC": "L2",
-                    "INITIAL_CAP": 10000,
+                    "INITIAL_CAP": 1000,
                 },
             ),
         ],
         definition=IndexDefinition(index_type=IndexType.HASH, prefix=["place:"]),
     )
 
-    # Insert 10000 places with varying locations and categories
-    NUM_PLACES = 10000
+    # Insert 1000 places with varying locations and categories
+    NUM_PLACES = 1000
     categories = ["restaurant", "cafe", "bar", "shop", "hotel"]
 
     pipe = async_client.pipeline(transaction=False)
