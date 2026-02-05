@@ -496,10 +496,16 @@ void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
   size_t processed = 0;
+  size_t successful_updates = 0;
+  size_t failed_updates = 0;
+  size_t missing_documents = 0;
+
   for (const auto& [key, local_id] : key_index_.GetDocKeysMap()) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
-    if (!it || !IsValid(it->it))
+    if (!it || !IsValid(it->it)) {
+      ++missing_documents;
       continue;
+    }
 
     PrimeValue& pv = it->it->second;
     auto doc = GetAccessor(op_args.db_cntx, pv);
@@ -509,8 +515,13 @@ void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index
       if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
           index) {
         bool success = index->UpdateVectorData(global_id, *doc, field_ident);
-        if (success && !index->IsVectorCopied()) {
-          pv.SetOmitDefrag(true);
+        if (success) {
+          ++successful_updates;
+          if (!index->IsVectorCopied()) {
+            pv.SetOmitDefrag(true);
+          }
+        } else {
+          ++failed_updates;
         }
       }
     }
@@ -519,6 +530,17 @@ void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index
     if (++processed % 1000 == 0) {
       util::ThisFiber::Yield();
     }
+  }
+
+  // Log summary of vector restoration
+  size_t total_docs = key_index_.GetDocKeysMap().size();
+  if (failed_updates > 0 || missing_documents > 0) {
+    LOG(WARNING) << "Restored vectors for index " << index_name << ": " << successful_updates
+                 << " successful, " << failed_updates << " failed (missing vector field), "
+                 << missing_documents << " missing documents out of " << total_docs << " total";
+  } else {
+    VLOG(1) << "Restored vectors for index " << index_name << ": " << successful_updates << "/"
+            << total_docs << " documents";
   }
 }
 

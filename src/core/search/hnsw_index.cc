@@ -142,6 +142,13 @@ struct HnswlibAdapter {
     DCHECK_EQ(world_.cur_element_count.load(), 0u)
         << "SetMetadata should only be called on an empty index during deserialization";
 
+    // Runtime check for release builds to prevent silent corruption
+    if (world_.cur_element_count.load() != 0) {
+      LOG(ERROR) << "SetMetadata called on non-empty HNSW index with "
+                 << world_.cur_element_count.load() << " elements, ignoring";
+      return;
+    }
+
     // Pre-allocate capacity based on expected element count, but don't set cur_element_count.
     // cur_element_count will be set by RestoreFromNodes when the actual nodes are restored.
     if (world_.max_elements_ < metadata.cur_element_count) {
@@ -251,14 +258,18 @@ struct HnswlibAdapter {
     }
 
     // Restore each node - directly set up memory and fields
+    size_t restored_count = 0;
     for (const auto& node : nodes) {
       size_t internal_id = node.internal_id;
 
-      // Validate internal_id is within bounds
+      // Validate internal_id is within bounds - invalid internal_id indicates corrupted data
       if (internal_id >= world_.max_elements_) {
         LOG(ERROR) << "RestoreFromNodes: internal_id " << internal_id << " exceeds max_elements "
-                   << world_.max_elements_;
-        continue;
+                   << world_.max_elements_ << ", aborting restoration (corrupted snapshot data)";
+        // Reset any partially restored state
+        world_.cur_element_count.store(0);
+        world_.label_lookup_.clear();
+        return;
       }
 
       // Register label in lookup table
@@ -310,14 +321,16 @@ struct HnswlibAdapter {
         auto* links = reinterpret_cast<uint32_t*>(ll + 1);
         std::copy(node.levels_links[lvl].begin(), node.levels_links[lvl].end(), links);
       }
+
+      ++restored_count;
     }
 
-    // Set the metadata for the graph
-    world_.cur_element_count.store(metadata.cur_element_count);
+    // Set the metadata for the graph - use actual restored count for consistency
+    world_.cur_element_count.store(restored_count);
     world_.maxlevel_ = metadata.maxlevel;
     world_.enterpoint_node_ = metadata.enterpoint_node;
 
-    VLOG(1) << "Restored HNSW index with " << metadata.cur_element_count
+    VLOG(1) << "Restored HNSW index with " << restored_count
             << " nodes, maxlevel=" << metadata.maxlevel
             << ", enterpoint=" << metadata.enterpoint_node;
   }
@@ -426,6 +439,11 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
                                        std::string_view field) {
   auto vector_ptr = doc.GetVector(field, dim_);
   if (!vector_ptr) {
+    // Document doesn't have the vector field - mark node as deleted to prevent
+    // "ghost" nodes with invalid vector data from participating in searches
+    LOG(WARNING) << "UpdateVectorData: document " << id
+                 << " missing vector field, marking node as deleted in HNSW index";
+    adapter_->Remove(id);
     return false;
   }
 

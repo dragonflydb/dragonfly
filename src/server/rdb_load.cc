@@ -56,7 +56,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
-ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
+ABSL_DECLARE_FLAG(bool, save_vector_index);
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
@@ -2226,9 +2226,9 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      // Only restore if shard count matches (GlobalDocId encodes shard_id)
-      bool should_restore =
-          shard_count_ > 0 && shard_set != nullptr && shard_count_ == shard_set->size();
+      // Only restore if flag enabled and shard count matches (GlobalDocId encodes shard_id)
+      bool should_restore = GetFlag(FLAGS_save_vector_index) && shard_count_ > 0 &&
+                            shard_set != nullptr && shard_count_ == shard_set->size();
 
       // Extract index_name and field_name from index_key
       size_t colon_pos = index_key.find(':');
@@ -2294,8 +2294,8 @@ error_code RdbLoader::Load(io::Source* src) {
         if (metadata.cur_element_count == 0) {
           // Create default metadata from graph data
           metadata.cur_element_count = nodes.size();
-          metadata.maxlevel = 0;  // Minimum valid level when nodes exist
-          metadata.enterpoint_node = nodes[0].internal_id;
+          metadata.maxlevel = -1;  // Invalid, will be set in loop
+          metadata.enterpoint_node = 0;
           for (const auto& node : nodes) {
             if (node.level > metadata.maxlevel) {
               metadata.maxlevel = node.level;
@@ -2336,7 +2336,7 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      if (!GetFlag(FLAGS_deserialize_hnsw_index)) {
+      if (!GetFlag(FLAGS_save_vector_index)) {
         continue;
       }
 
