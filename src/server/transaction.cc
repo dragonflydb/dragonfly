@@ -15,7 +15,6 @@
 #include "redis/redis_aux.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
-#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"

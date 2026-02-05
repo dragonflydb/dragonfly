@@ -11,7 +11,6 @@
 #include <vector>
 
 #include "facade/facade_types.h"
-#include "facade/op_status.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 
