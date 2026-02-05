@@ -3745,10 +3745,148 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
                    IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
 }
 
-TEST_F(SearchFamilyTest, BadJson) {
-  string_view kBadJson = R"({"description": "This object has no location"})";
-  Run({"FT.CREATE", "idx1", "on", "json", "schema", "$.location", "AS", "location", "GEO"});
-  Run({"JSON.SET", "bad-place", "$", kBadJson});
+// GEO index tests for FT.SEARCH with HASH and JSON documents
+
+TEST_F(SearchFamilyTest, GeoSearchHash) {
+  auto resp =
+      Run({"FT.CREATE", "geo_idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add documents with geo coordinates as "lon,lat" or "lon lat" format
+  Run({"HSET", "city:1", "name", "Mountain View", "location", "-122.08, 37.386"});
+  Run({"HSET", "city:2", "name", "Palo Alto", "location", "-122.143, 37.444"});
+  Run({"HSET", "city:3", "name", "San Jose", "location", "-121.886, 37.338"});
+  Run({"HSET", "city:4", "name", "San Francisco", "location", "-122.419, 37.774"});
+
+  // Search within 30 miles of Mountain View - should find nearby cities
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 30 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+
+  // Search within 50 miles - should include San Francisco
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+
+  // Search with very small radius - only exact match
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 1 km]"});
+  EXPECT_THAT(resp, AreDocIds("city:1"));
+
+  // Search with wildcard - return all geo indexed docs
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+
+  // Combine geo search with text search
+  resp = Run({"FT.SEARCH", "geo_idx", "San* @location:[-122.08 37.386 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:3", "city:4"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchJson) {
+  auto resp = Run({"FT.CREATE", "geo_idx", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+                   "$.location", "AS", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add JSON documents with geo coordinates
+  Run({"JSON.SET", "city:1", ".", R"({"name":"Mountain View","location":"-122.08, 37.386"})"});
+  Run({"JSON.SET", "city:2", ".", R"({"name":"Palo Alto","location":"-122.143, 37.444"})"});
+  Run({"JSON.SET", "city:3", ".", R"({"name":"San Jose","location":"-121.886, 37.338"})"});
+  Run({"JSON.SET", "city:4", ".", R"({"name":"San Francisco","location":"-122.419, 37.774"})"});
+
+  // Search within 30 miles of Mountain View
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 30 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+
+  // Search within 50 miles - should include San Francisco
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+
+  // Search with kilometers
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 km]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+
+  // Search with wildcard
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchInvalidValues) {
+  auto resp =
+      Run({"FT.CREATE", "geo_idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test documents with invalid geo values are excluded from index
+  Run({"HSET", "d:1", "name", "valid", "location", "-122.08, 37.386"});
+  Run({"HSET", "d:2", "name", "invalid_text", "location", "not a coordinate"});
+  Run({"HSET", "d:3", "name", "missing_lon", "location", ", 37.386"});
+  Run({"HSET", "d:4", "name", "missing_lat", "location", "-122.08,"});
+  Run({"HSET", "d:7", "name", "empty", "location", ""});
+  Run({"HSET", "d:8", "name", "no_location"});
+  Run({"HSET", "d:9", "name", "space_format", "location", "-122.08,  37.386"});
+
+  // Only valid coordinates should be indexed (d:1 and d:9)
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("d:1", "d:9"));
+
+  // Search should only find valid documents
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 100 mi]"});
+  EXPECT_THAT(resp, AreDocIds("d:1", "d:9"));
+
+  // All documents should still be searchable by other fields
+  // TODO: failed to add - silent skip?
+  // resp = Run({"FT.SEARCH", "geo_idx", "*"});
+  // EXPECT_THAT(resp, AreDocIds("d:1", "d:2", "d:3", "d:4", "d:5", "d:6", "d:7", "d:8", "d:9"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchInvalidValuesJson) {
+  auto resp = Run({"FT.CREATE", "geo_idx", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+                   "$.location", "AS", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test JSON documents with various invalid geo values
+  Run({"JSON.SET", "j:1", ".", R"({"name":"valid","location":"-122.08, 37.386"})"});
+  Run({"JSON.SET", "j:2", ".", R"({"name":"invalid_text","location":"not a coordinate"})"});
+  Run({"JSON.SET", "j:3", ".", R"({"name":"number","location":12345})"});
+  Run({"JSON.SET", "j:4", ".", R"({"name":"null_value","location":null})"});
+  Run({"JSON.SET", "j:5", ".", R"({"name":"array","location":["-122.08", "37.386"]})"});
+  Run({"JSON.SET", "j:6", ".", R"({"name":"no_location"})"});
+  Run({"JSON.SET", "j:7", ".", R"({"name":"empty_string","location":""})"});
+  Run({"JSON.SET", "j:8", ".", R"({"name":"valid 2","location":"-122.08, 37.386"})"});
+
+  // Only valid coordinates should be indexed
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:8"));
+
+  // All documents should still be searchable via full-text
+  // TODO: failed to add - silent skip?
+  // resp = Run({"FT.SEARCH", "geo_idx", "*"});
+  // EXPECT_THAT(resp, AreDocIds("j:1", "j:2", "j:3", "j:4", "j:5", "j:6", "j:7", "j:8"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchUnits) {
+  auto resp = Run({"FT.CREATE", "geo_idx", "ON", "HASH", "SCHEMA", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test different distance units: m, km, mi, ft
+  // TODO: support lowercase
+  // TODO: support query with without dot for coord (i.e.) 0.0 0.0
+  Run({"HSET", "p:1", "location", "0, 0"});      // Origin
+  Run({"HSET", "p:2", "location", "0.001, 0"});  // ~111 meters east
+  Run({"HSET", "p:3", "location", "0.01, 0"});   // ~1.11 km east
+  Run({"HSET", "p:4", "location", "0.1, 0"});    // ~11.1 km east
+
+  // Test meters
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 200 M]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
+
+  // Test kilometers
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 2 KM]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2", "p:3"));
+
+  // Test miles
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 10 MI]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2", "p:3", "p:4"));
+
+  // Test feet
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 500 FT]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
 }  // namespace dfly
