@@ -37,22 +37,22 @@ class AclFamily final {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  void Acl(CmdArgList args, const CommandContext& cmd_cntx);
-  void List(CmdArgList args, const CommandContext& cmd_cntx);
-  void SetUser(CmdArgList args, const CommandContext& cmd_cntx);
-  void DelUser(CmdArgList args, const CommandContext& cmd_cntx);
-  void WhoAmI(CmdArgList args, const CommandContext& cmd_cntx);
-  void Save(CmdArgList args, const CommandContext& cmd_cntx);
-  void Load(CmdArgList args, const CommandContext& cmd_cntx);
+  void Acl(CmdArgList args, CommandContext* cmd_cntx);
+  void List(CmdArgList args, CommandContext* cmd_cntx);
+  void SetUser(CmdArgList args, CommandContext* cmd_cntx);
+  void DelUser(CmdArgList args, CommandContext* cmd_cntx);
+  void WhoAmI(CmdArgList args, CommandContext* cmd_cntx);
+  void Save(CmdArgList args, CommandContext* cmd_cntx);
+  void Load(CmdArgList args, CommandContext* cmd_cntx);
   // Helper function for bootstrap
   bool Load();
-  void Log(CmdArgList args, const CommandContext& cmd_cntx);
-  void Users(CmdArgList args, const CommandContext& cmd_cntx);
-  void Cat(CmdArgList args, const CommandContext& cmd_cntx);
-  void GetUser(CmdArgList args, const CommandContext& cmd_cntx);
-  void DryRun(CmdArgList args, const CommandContext& cmd_cntx);
-  void GenPass(CmdArgList args, const CommandContext& cmd_cntx);
-  void Help(CmdArgList args, const CommandContext& cmd_cntx);
+  void Log(CmdArgList args, CommandContext* cmd_cntx);
+  void Users(CmdArgList args, CommandContext* cmd_cntx);
+  void Cat(CmdArgList args, CommandContext* cmd_cntx);
+  void GetUser(CmdArgList args, CommandContext* cmd_cntx);
+  void DryRun(CmdArgList args, CommandContext* cmd_cntx);
+  void GenPass(CmdArgList args, CommandContext* cmd_cntx);
+  void Help(CmdArgList args, CommandContext* cmd_cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads

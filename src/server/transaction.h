@@ -168,8 +168,7 @@ class Transaction {
 
     // Whether it was suspended (by WatchInShard()). This flag is sticky and stays forever once set.
     WAS_SUSPENDED = 1 << 4,
-    AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
-    UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
+    AWAKED_Q = 1 << 5,  // Whether it was awakened (by NotifySuspended())
   };
 
   struct Guard {
@@ -201,6 +200,10 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
+  // Experimental command. Dispatch single hop and return,
+  // use Blocker() primitive to wait for it to finish
+  void SingleHopAsync(RunnableType cb);
+
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
@@ -231,6 +234,9 @@ class Transaction {
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
+  // Prepare transaction to do a single ScheduleSingleHop() for squashing
+  void PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys, MultiMode mode);
+
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(Namespace* ns, DbIndex dbid);
 
@@ -242,7 +248,8 @@ class Transaction {
   void StartMultiNonAtomic();
 
   // Unlock key locks of a multi transaction.
-  void UnlockMulti();
+  // If block is set, wait for unlock to finish.
+  void UnlockMulti(bool block = false);
 
   // Set new command for multi transaction.
   void MultiSwitchCmd(const CommandId* cid);
@@ -303,6 +310,15 @@ class Transaction {
     return multi_->mode;
   }
 
+  util::fb2::EmbeddedBlockingCounter* Blocker() {
+    return &run_barrier_;
+  }
+
+  // Temporary
+  OpStatus* LocalResultPtr() {
+    return &local_result_;
+  }
+
   // Whether the transaction is multi and runs in an atomic mode.
   // This, instead of just IsMulti(), should be used to check for the possibility of
   // different optimizations, because they can safely be applied to non-atomic multi
@@ -334,11 +350,6 @@ class Transaction {
   // Return debug information about a transaction, include shard local info if passed
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
-  // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
-  // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
-  // to it must not block.
-  void PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args);
-
   // Write a journal entry to a shard journal with the given payload.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
                          uint32_t shard_cnt) const;
@@ -351,6 +362,10 @@ class Transaction {
 
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::pair<ShardId, LockFp>>& GetMultiFps() const;
+
+  bool IsSquashedStub() const {
+    return multi_ && multi_->role == SQUASHED_STUB;
+  }
 
   uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;
@@ -382,20 +397,6 @@ class Transaction {
   }
 
  private:
-  // Holds number of locks for each IntentLock::Mode: shared and exlusive.
-  struct LockCnt {
-    unsigned& operator[](IntentLock::Mode mode) {
-      return cnt[int(mode)];
-    }
-
-    unsigned operator[](IntentLock::Mode mode) const {
-      return cnt[int(mode)];
-    }
-
-   private:
-    unsigned cnt[2] = {0, 0};
-  };
-
   struct alignas(64) PerShardData {
     PerShardData() {
     }
@@ -607,9 +608,9 @@ class Transaction {
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;
 
-  RunnableType* cb_ptr_ = nullptr;    // Run on shard threads
-  const CommandId* cid_ = nullptr;    // Underlying command
-  std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
+  std::optional<RunnableType> cb_ptr_;  // Run on shard threads
+  const CommandId* cid_ = nullptr;      // Underlying command
+  std::unique_ptr<MultiData> multi_;    // Initialized when the transaction is multi/exec.
 
   TxId txid_{0};
   bool global_{false};
@@ -625,6 +626,7 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes
   OpStatus block_cancel_result_ = OpStatus::OK;

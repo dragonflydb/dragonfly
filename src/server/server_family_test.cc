@@ -311,6 +311,29 @@ TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
              "OPTOUT mode enabled"));
 }
 
+TEST_F(ServerFamilyTest, ToggleTrackingOnAndOff) {
+  Run("HELLO 3");
+  // seq = 0
+  auto resp = Run("CLIENT TRACKING ON OPTIN");
+  // seq = 1
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  resp = Run("CLIENT CACHING YES");
+  // seq = 2, caching = 1
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  resp = Run("CLIENT TRACKING OFF");
+  resp = Run("CLIENT TRACKING ON OPTIN");
+  // seq = 3, caching = 1
+  EXPECT_THAT(resp.GetString(), "OK");
+  // seq(3) != (caching(1) + 1)
+  resp = Run("GET foo");
+  resp = Run("SET foo tmp");
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   // case 1. only read the keys doesn't trigger any notification.
   Run({"HELLO", "3"});
@@ -627,6 +650,23 @@ TEST_F(ServerFamilyTest, ConfigNormalization) {
               RespArray(ElementsAre("replica_priority", "13")));
   EXPECT_THAT(Run({"config", "get", "replica_priority"}),
               RespArray(ElementsAre("replica_priority", "13")));
+}
+
+// Verify CONFIG GET returns numeric bytes for memory configs (Redis/Valkey compatibility).
+TEST_F(ServerFamilyTest, ConfigGetMemoryBytes) {
+  absl::FlagSaver fs;
+
+  // Set maxmemory using human-readable format
+  EXPECT_THAT(Run({"config", "set", "maxmemory", "1GB"}), "OK");
+
+  // CONFIG GET should return numeric bytes, not human-readable format
+  EXPECT_THAT(Run({"config", "get", "maxmemory"}),
+              RespArray(ElementsAre("maxmemory", "1073741824")));
+
+  // Test another value
+  EXPECT_THAT(Run({"config", "set", "maxmemory", "512MB"}), "OK");
+  EXPECT_THAT(Run({"config", "get", "maxmemory"}),
+              RespArray(ElementsAre("maxmemory", "536870912")));
 }
 
 TEST_F(ServerFamilyTest, CommandDocsOk) {

@@ -5,7 +5,6 @@ option(WITH_COLLECTION_CMDS "Compile SET/HASH/ZSET/STREAM commands" ON)
 option(WITH_EXTENSION_CMDS "Compile BLOOM/BITOPS/GEO/HLL/JSON commands" ON)
 
 option(WITH_TIERING "Compile for macos" ON)
-
 if(APPLE)
     message(STATUS "Macos detected. Set WITH_TIERING=off")
     set(WITH_TIERING OFF CACHE BOOL "Compile for macos" FORCE)
@@ -24,23 +23,46 @@ endif()
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
-if (WITH_TIERING)
-    SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc
-      tiering/small_bins.cc tiering/external_alloc.cc)
+add_executable(dfly_bench dfly_bench.cc)
+cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
 
-    add_executable(dfly_bench dfly_bench.cc)
-    cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
-    cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
-    cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
-    cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
-    cxx_test(tiering/external_alloc_test dfly_test_lib LABELS DFLY)
-    cxx_test(tiering/serialized_map_test dfly_test_lib LABELS DFLY)
+# Include journal sources (not separate target for now)
+add_subdirectory(journal)
+if(NOT DEFINED DF_JOURNAL_SRCS)
+  message(FATAL_ERROR "Journal source files not exported via DF_JOURNAL_SRCS")
 endif()
 
-# Optionally include command families as needed
+# Define transaction library
+add_library(dfly_transaction db_slice.cc blocking_controller.cc
+            cluster_support.cc common.cc command_registry.cc
+            ${DF_JOURNAL_SRCS}
+            server_state.cc table.cc  transaction.cc tx_base.cc
+            serializer_commons.cc
+            acl/acl_log.cc slowlog.cc channel_store.cc)
+cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
+
+# Include search module
 add_subdirectory(search)
+if(NOT DEFINED DF_SEARCH_SRCS)
+  message(FATAL_ERROR "Search source files not exported via DF_SEARCH_SRCS")
+endif()
+
 if (WITH_SEARCH)
   add_definitions(-DWITH_SEARCH)
+endif()
+
+# Include tiering module
+add_subdirectory(tiering)
+if (WITH_TIERING)
+  add_definitions(-DWITH_TIERING)
+  SET(DF_TIERING_SRCS tiered_storage.cc)
+  helio_cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
+endif()
+
+# Include cluster sources definitons (not separate target for now)
+add_subdirectory(cluster)
+if (NOT DEFINED DF_CLUSTER_SRCS)
+  message(FATAL_ERROR "Cluster source files not exported via DF_CLUSTER_SRCS")
 endif()
 
 # Optionally compile collection commands
@@ -57,42 +79,23 @@ if (WITH_EXTENSION_CMDS)
   add_definitions(-DWITH_EXTENSION_CMDS)
 endif()
 
-add_library(dfly_transaction db_slice.cc blocking_controller.cc
-            command_registry.cc  cluster_support.cc
-            journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
-            common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
-            server_state.cc table.cc  transaction.cc tx_base.cc
-            serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
-            tiering/serialized_map.cc tiering/decoders.cc
-            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
-
-
-if (WITH_TIERING)
-  SET(DF_LINUX_SRCS tiered_storage.cc)
-  add_definitions(-DWITH_TIERING)
-  cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
-endif()
-
-set(FAMILY_SRCS "")
-
-
+# Optionally include tiered_storage which interfaces with tiering_module
 add_library(dragonfly_lib
-            config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
-            engine_shard_set.cc error.cc family_utils.cc
+            engine_shard.cc engine_shard_set.cc
+            config_registry.cc conn_context.cc
+            debugcmd.cc dflycmd.cc error.cc family_utils.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
             main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc http_api.cc
-            protocol_client.cc owned_resp_expr.cc
-            snapshot.cc script_mgr.cc
+            protocol_client.cc snapshot.cc script_mgr.cc
             detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc
             version.cc container_utils.cc
             multi_command_squasher.cc
-            ${DF_LINUX_SRCS}
-            cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
-            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc cluster/cluster_utility.cc
+            ${DF_TIERING_SRCS}
+            ${DF_CLUSTER_SRCS}
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc
-            sharding.cc)
+            sharding.cc cmd_support.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
@@ -113,8 +116,7 @@ if (WITH_GCP)
   add_definitions(-DWITH_GCP)
 endif()
 
-cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
-cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_search_server
+cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
          redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
@@ -128,32 +130,32 @@ endif()
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
-cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
-cxx_test(multi_test dfly_test_lib LABELS DFLY)
-cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
-cxx_test(hset_family_test dfly_test_lib LABELS DFLY)
-cxx_test(list_family_test dfly_test_lib LABELS DFLY)
-cxx_test(server_family_test dfly_test_lib LABELS DFLY)
-cxx_test(set_family_test dfly_test_lib LABELS DFLY)
-cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
-cxx_test(string_family_test dfly_test_lib LABELS DFLY)
-cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
-cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
+helio_cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(multi_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(hset_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(list_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(server_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(set_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(string_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
          testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
          testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb testdata/ignore_expiry.rdb LABELS DFLY)
-cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
-cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
-cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
-cxx_test(json_family_test dfly_test_lib LABELS DFLY)
-cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
-cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
-cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
-cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
-cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
-cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
-cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
-cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(json_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(json_family_memory_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
@@ -161,3 +163,11 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
                  json_family_memory_test)
+
+if (WITH_SEARCH)
+  helio_cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+  helio_cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
+  helio_cxx_test(search/index_join_test dfly_test_lib LABELS DFLY)
+
+  add_dependencies(check_dfly search_family_test aggregator_test index_join_test)
+endif()

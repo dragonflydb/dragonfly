@@ -36,33 +36,28 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::SinkReplyBuilder* builder,
-                                         facade::ConnectionContext* cntx) final;
+  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
+                                         facade::AsyncPreference apref) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
   facade::DispatchManyResult DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
                                                   unsigned count, facade::SinkReplyBuilder* builder,
                                                   facade::ConnectionContext* cntx) final;
 
-  // Check VerifyCommandExecution and invoke command with args
-  facade::DispatchResult InvokeCmd(const CommandId* cid, CmdArgList tail_args,
-                                   const CommandContext& cmd_cntx);
+  // Check OOM and invoke command with args
+  facade::DispatchResult InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx);
 
-  // Verify command can be executed now (check out of memory), always called immediately before
-  // execution
-  std::optional<facade::ErrorReply> VerifyCommandExecution(const ConnectionContext* cntx,
-                                                           CmdArgList tail_args);
-
-  // Verify command prepares excution in correct state.
+  // Verify command prepares execution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
   std::optional<facade::ErrorReply> VerifyCommandState(const CommandId& cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
 
-  void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                  facade::MCReplyBuilder* builder, facade::ConnectionContext* cntx) final;
+  facade::DispatchResult DispatchMC(facade::ParsedCommand* parsed_cmd,
+                                    facade::AsyncPreference apref) final;
 
   facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
+  facade::ParsedCommand* AllocateParsedCommand() final;
 
   const CommandId* FindCmd(std::string_view) const;
 
@@ -127,27 +122,27 @@ class Service : public facade::ServiceInterface {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Quit(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Multi(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Quit(CmdArgList args, CommandContext* cmd_cntx);
+  static void Multi(CmdArgList args, CommandContext* cmd_cntx);
 
-  static void Watch(CmdArgList args, const CommandContext& cmd_cntx);
-  static void Unwatch(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Watch(CmdArgList args, CommandContext* cmd_cntx);
+  static void Unwatch(CmdArgList args, CommandContext* cmd_cntx);
 
-  void Discard(CmdArgList args, const CommandContext& cmd_cntx);
-  void Eval(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
-  void EvalRo(CmdArgList args, const CommandContext& cmd_cntx);
-  void EvalSha(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
-  void EvalShaRo(CmdArgList args, const CommandContext& cmd_cntx);
-  void Exec(CmdArgList args, const CommandContext& cmd_cntx);
-  void Publish(CmdArgList args, const CommandContext& cmd_cntx);
-  void Subscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void PSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
-  void Function(CmdArgList args, const CommandContext& cmd_cntx);
-  void Monitor(CmdArgList args, const CommandContext& cmd_cntx);
-  void Pubsub(CmdArgList args, const CommandContext& cmd_cntx);
-  void Command(CmdArgList args, const CommandContext& cmd_cntx);
+  void Discard(CmdArgList args, CommandContext* cmd_cntx);
+  void Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalRo(CmdArgList args, CommandContext* cmd_cntx);
+  void EvalSha(CmdArgList args, CommandContext* cmd_cntx, bool read_only = false);
+  void EvalShaRo(CmdArgList args, CommandContext* cmd_cntx);
+  void Exec(CmdArgList args, CommandContext* cmd_cntx);
+  void Publish(CmdArgList args, CommandContext* cmd_cntx);
+  void Subscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void Unsubscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void PSubscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void PUnsubscribe(CmdArgList args, CommandContext* cmd_cntx);
+  void Function(CmdArgList args, CommandContext* cmd_cntx);
+  void Monitor(CmdArgList args, CommandContext* cmd_cntx);
+  void Pubsub(CmdArgList args, CommandContext* cmd_cntx);
+  void Command(CmdArgList args, CommandContext* cmd_cntx);
 
   void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);
@@ -168,15 +163,15 @@ class Service : public facade::ServiceInterface {
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
-  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
-               SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
+                    bool read_only, CommandContext* cmd_cntx);
+  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter, bool read_only,
+               CommandContext* cmd_cntx);
 
   // Return optional payload - first received error that occured when executing commands.
-  std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
-                                                                           bool force = false);
+  std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
+                                                             bool force = false);
 
-  void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
+  void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 
   OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
 

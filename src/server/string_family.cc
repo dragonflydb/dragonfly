@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/string_family.h"
-
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -20,9 +18,10 @@
 #include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
-#include "facade/reply_builder.h"
+#include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -58,7 +57,7 @@ template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 using StringResult = TResultOrT<string>;
 
 StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, EngineShard* es) {
-  return pv.IsExternal() ? StringResult{es->tiered_storage()->Read(dbid, key, pv)}
+  return pv.IsExternal() ? StringResult{ReadTieredString(dbid, key, pv, es->tiered_storage())}
                          : StringResult{pv.ToString()};
 }
 
@@ -112,7 +111,7 @@ class SetCmd {
   bool explicit_journal_;  // call RecordJournal (auto journaling disabled)
 };
 
-size_t SetRange(std::string* value, size_t start, std::string_view range) {
+size_t SetRangeInternal(std::string* value, size_t start, std::string_view range) {
   value->resize(max(value->size(), start + range.size()));
   memcpy(value->data() + start, range.data(), range.size());
   return value->size();
@@ -131,9 +130,10 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   // TODO(vlad): Optimize to return co.Size() if no modify operations are present
   // TODO(vlad): Omit decoding string to just query it's length
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
-    TieredStorage::TResult<size_t> fut;
-    auto cb = [fut](io::Result<string> s) mutable { fut.Resolve(s.transform(&string::size)); };
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co, std::move(cb));
+    auto cb = [](string_view s) { return s.size(); };
+
+    TieredStorage::TResult<size_t> fut = ReadTiered<size_t>(
+        op_args.db_cntx.db_index, key, co, std::move(cb), op_args.shard->tiered_storage());
     return {std::move(fut)};
   } else {
     return {co.Size()};
@@ -154,26 +154,27 @@ OpResult<TResultOrT<size_t>> OpSetRange(const OpArgs& op_args, string_view key, 
   auto& res = *op_res;
 
   if (res.it->second.IsExternal()) {
-    return {op_args.shard->tiered_storage()->Modify<size_t>(
+    return {ModifyTiered<size_t>(
         op_args.db_cntx.db_index, key, res.it->second,
         [start = start, range = string(range)](std::string* s) {
-          return SetRange(s, start, range);
-        })};
+          return SetRangeInternal(s, start, range);
+        },
+        op_args.shard->tiered_storage())};
   } else {
     string value;
 
     if (!res.is_new)
       value = res.it->second.ToString();
 
-    size_t len = SetRange(&value, start, range);
-    res.it->second.SetValue(value);
+    size_t len = SetRangeInternal(&value, start, range);
+    res.it->second.SetString(value);
     return {len};
   }
 }
 
 OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_t start,
                                   int32_t end) {
-  auto read = [start, end](std::string_view slice) mutable -> string_view {
+  auto read_cb = [start, end](std::string_view slice) mutable -> string {
     int32_t strlen = slice.size();
     if (strlen == 0)
       return "";
@@ -197,7 +198,7 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
       return "";
     }
 
-    return slice.substr(start, end - start + 1);
+    return string{slice.substr(start, end - start + 1)};
   };
 
   auto& db_slice = op_args.GetDbSlice();
@@ -207,17 +208,18 @@ OpResult<StringResult> OpGetRange(const OpArgs& op_args, string_view key, int32_
   }
   RETURN_ON_BAD_STATUS(it_res);
 
-  if (const PrimeValue& co = it_res.value()->second; co.IsExternal()) {
-    fb2::Future<io::Result<std::string>> fut;
-    op_args.shard->tiered_storage()->Read(
+  const PrimeValue& co = it_res.value()->second;
+  if (co.IsExternal()) {
+    fb2::Future<io::Result<string>> fut = ReadTiered<string>(
         op_args.db_cntx.db_index, key, co,
-        [read, fut](const io::Result<std::string>& s) mutable { fut.Resolve(string{read(*s)}); });
+        [read_cb](std::string_view sv) mutable { return read_cb(sv); },
+        op_args.shard->tiered_storage());
     return {std::move(fut)};
-  } else {
-    string tmp;
-    string_view slice = co.GetSlice(&tmp);
-    return {string{read(slice)}};
   }
+
+  string tmp;
+  string_view slice = co.GetSlice(&tmp);
+  return {read_cb(slice)};
 };
 
 // TODO: Don't copy whole value just to append
@@ -226,7 +228,7 @@ size_t ExtendExisting(const DbSlice::Iterator& it, string_view key, string_view 
   string_view slice = it->second.GetSlice(&tmp);
 
   string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-  it->second.SetString(new_val, false);
+  it->second.SetString(new_val);
   return new_val.size();
 }
 
@@ -251,7 +253,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   if (add_res.is_new) {
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
-    add_res.it->second.SetValue(str);
+    add_res.it->second.SetString(str);
 
     return val;
   }
@@ -275,7 +277,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  add_res.it->second.SetValue(str);
+  add_res.it->second.SetString(str);
 
   return base;
 }
@@ -295,10 +297,10 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     if (skip_on_missing)
       return OpStatus::KEY_NOTFOUND;
 
-    CompactObj cobj;
-    cobj.SetInt(incr);
+    PrimeValue pv;
+    pv.SetInt(incr);
 
-    auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
+    auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), 0);
     RETURN_ON_BAD_STATUS(op_result);
 
     return incr;
@@ -467,10 +469,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 
       res->it->second.SetInt(new_tat_ns);
     } else {
-      CompactObj cobj;
-      cobj.SetInt(new_tat_ns);
+      PrimeValue pv;
+      pv.SetInt(new_tat_ns);
 
-      auto res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
+      auto res = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), new_tat_ms);
       if (!res) {
         return res.status();
       }
@@ -481,10 +483,10 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 }
 
 struct GetResp {
-  string key;  // TODO: to use backing storage to optimize this as well.
   string_view value;
-  uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+  uint64_t mc_ver = 0;
   uint32_t mc_flag = 0;
+  uint32_t ttl_sec = 0;
 };
 
 struct MGetResponse {
@@ -495,10 +497,6 @@ struct MGetResponse {
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
 
-// fetch_mask values
-constexpr uint8_t FETCH_MCFLAG = 0x1;
-constexpr uint8_t FETCH_MCVER = 0x2;
-
 template <typename Iter> using SearchKey = std::function<OpResult<Iter>(string_view)>;
 
 // A find operation which can mutate, for commands which can write, eg GAT
@@ -508,7 +506,7 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
+MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
                          const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
@@ -560,8 +558,8 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
   // Allocate enough for all values
   response.storage = make_unique<char[]>(total_size);
   char* next = response.storage.get();
-  bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
-  bool fetch_mcver = fetch_mask & FETCH_MCVER;
+  bool fetch_mcflag = cmd_flags.return_flags;
+  bool fetch_cas = cmd_flags.return_cas;
   const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
 
   for (size_t i = 0; i < items.size(); ++i) {
@@ -579,14 +577,14 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
     const PrimeValue& value = it->second;
     if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, err, wait_bc](const io::Result<string>& v) mutable {
+      auto cb = [next, err, wait_bc](const io::Result<string_view>& v) mutable {
         if (v.has_value())
           memcpy(next, v->data(), v->size());
         else
           *err = v.error();
         wait_bc->Dec();
       };
-      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), value, std::move(cb));
+      ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
     } else {
       value.GetString(next);
     }
@@ -595,12 +593,20 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
     resp.value = string_view(next, size);
     next += size;
 
+    // Note - correct behavior is to return TTL before it was updated by GAT,
+    // but this is complex to implement so we return the updated TTL.
+    if (it->first.HasExpire() && cmd_flags.return_ttl) {
+      auto exp_it = db_slice.GetDBTable(t->GetDbIndex())->expire.Find(it->first);
+      int64_t expire_time_ms = db_slice.ExpireTime(exp_it->second);
+      int64_t ttl_ms = expire_time_ms - t->GetDbContext().time_now_ms;
+      resp.ttl_sec = ttl_ms > 0 ? static_cast<uint32_t>((ttl_ms + 999) / 1000) : 0;
+    }
     if (fetch_mcflag) {
       if (value.HasFlag()) {
         resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
       }
 
-      if (fetch_mcver) {
+      if (fetch_cas) {
         resp.mc_ver = it.GetVersion();
       }
     }
@@ -608,15 +614,6 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, uint8_t f
   key_index.clear();
 
   return response;
-}
-
-MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
-                    const Transaction* t, EngineShard* shard) {
-  SearchConst find_op = [&](string_view key) {
-    const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
-    return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-  };
-  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
 }
 
 // Extend key with value, either prepend or append. Return size of stored string
@@ -628,7 +625,7 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
   RETURN_ON_BAD_STATUS(it_res);
 
   if (it_res->is_new) {
-    it_res->it->second.SetValue(value);
+    it_res->it->second.SetString(value);
     return {it_res->it->second.Size()};
   }
 
@@ -637,8 +634,8 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
-                                                    std::move(modf))};
+    return {ModifyTiered<size_t>(op_args.db_cntx.db_index, key, pv, std::move(modf),
+                                 shard->tiered_storage())};
   } else {
     return {ExtendExisting(it_res->it, key, value, prepend)};
   }
@@ -656,6 +653,8 @@ struct GetReplies {
         return Send(std::move(res.value()));
       case OpStatus::WRONG_TYPE:
         return rb->SendError(kWrongTypeErr);
+      case OpStatus::IO_ERROR:
+        return rb->SendError(kTieredIoError);
       default:
         rb->SendNull();
     }
@@ -689,72 +688,66 @@ struct GetReplies {
   RedisReplyBuilder* rb;
 };
 
-void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuilder* builder) {
+void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
-  if (builder->GetProtocol() == Protocol::REDIS) {
+  if (cmd_cntx->mc_command() == nullptr) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
-    GetReplies{rb}.Send(tx->ScheduleSingleHopT(cb));
+    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+    GetReplies{rb}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
   } else {
     // Memcached skips if key is missing
-    DCHECK(builder->GetProtocol() == Protocol::MEMCACHE);
-
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    OpResult<bool> result = tx->ScheduleSingleHopT(std::move(cb));
-
-    if (result.value_or(false)) {
-      return builder->SendStored();
-    }
-
-    builder->SendSetSkipped();
+    OpResult<bool> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    MCRender render(cmd_cntx->mc_command()->cmd_flags);
+    cmd_cntx->SendSimpleString(render.RenderStored(result.value_or(false)));
   }
 }
 
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
 OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
                     const CommandContext& ctx) {
-  bool explicit_journal = ctx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  return ctx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
+  bool explicit_journal = ctx.cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  return ctx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   });
 }
 
-void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuilder* builder) {
-  bool skip_on_missing = (builder->GetProtocol() == Protocol::MEMCACHE);
+void IncrByGeneric(string_view key, int64_t val, CommandContext* cmd_cntx) {
+  bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
     return res;
   };
 
-  OpResult<int64_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
 
   switch (result.status()) {
     case OpStatus::OK:
-      builder->SendLong(result.value());
+      cmd_cntx->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
-      builder->SendError(kInvalidIntErr);
+      cmd_cntx->SendError(kInvalidIntErr);
       break;
     case OpStatus::OUT_OF_RANGE:
-      builder->SendError(kIncrOverflow);
+      cmd_cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      static_cast<MCReplyBuilder*>(builder)->SendNotFound();
+      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderNotFound());
       break;
     default:
-      builder->SendError(result.status());
+      cmd_cntx->SendError(result.status());
       break;
   }
 }
@@ -798,21 +791,27 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpGAT(BlockingCounter wait_bc, AggregateError* err, uint8_t fetch_mask,
-                   const Transaction* t, EngineShard* shard,
-                   const DbSlice::ExpireParams& expire_params) {
-  SearchMut find_op = [&](string_view key) {
-    return FindKeyAndSetExpiry(GetAndTouchParams{
-        .t = t,
-        .shard = shard,
-        .expire_params = expire_params,
-        .key = key,
-    });
-  };
-  return CollectKeys(std::move(wait_bc), err, fetch_mask, t, shard, std::move(find_op));
+MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
+                    const Transaction* t, EngineShard* shard,
+                    const DbSlice::ExpireParams* gat_params = nullptr) {
+  if (gat_params) {
+    SearchMut find_op = [&](string_view key) {
+      return FindKeyAndSetExpiry(GetAndTouchParams{
+          .t = t,
+          .shard = shard,
+          .expire_params = *gat_params,
+          .key = key,
+      });
+    };
+    return CollectKeys(std::move(wait_bc), err, cmd_flags, t, shard, std::move(find_op));
+  } else {
+    SearchConst find_op = [&](string_view key) {
+      const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+      return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    };
+    return CollectKeys(std::move(wait_bc), err, cmd_flags, t, shard, std::move(find_op));
+  }
 }
-
-}  // namespace
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
@@ -884,7 +883,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
     key.SetSticky(true);
   }
 
-  bool has_expire = prime_value.HasExpire();
+  bool has_expire = key.HasExpire();
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -901,9 +900,9 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   // overwrite existing entry.
-  prime_value.SetValue(value);
+  prime_value.SetString(value);
 
-  DCHECK_EQ(has_expire, prime_value.HasExpire());
+  DCHECK_EQ(has_expire, key.HasExpire());
 
   PostEdit(params, it_upd->it.key(), value, &prime_value);
   return OpStatus::OK;
@@ -912,7 +911,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
                     std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
-  it->second = PrimeValue{value, false};
+  it->second = PrimeValue{value};
 
   if (params.expire_after_ms) {
     db_slice.AddExpire(op_args_.db_cntx.db_index, it,
@@ -936,9 +935,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
-  // If we are beyond the offloading threshold, TryStash might return a backpressure future.
+  // If we are beyond the offloading threshold, StashPrimeValue might return a backpressure future.
   if (auto* ts = shard->tiered_storage(); ts) {
-    auto bp = ts->TryStash(op_args_.db_cntx.db_index, key, pv, true);
+    auto bp = StashPrimeValue(op_args_.db_cntx.db_index, key, true, pv, ts);
     if (bp && params.backpressure)
       *params.backpressure = std::move(*bp);
   }
@@ -984,35 +983,63 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
-  facade::CmdArgParser parser{args};
+void AyncCmdSet(string_view key, string_view value, SetCmd::SetParams sparams,
+                CommandContext* cmd_cntx) {
+  CHECK(cmd_cntx->mc_command());
 
-  auto [key, value] = parser.Next<string_view, string_view>();
+  auto cb = [cmd_cntx, key, value, sparams](Transaction* t, EngineShard* shard) {
+    bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+    SetCmd set_cmd(t->GetOpArgs(shard), explicit_journal);
 
+    return set_cmd.Set(sparams, key, value);
+  };
+
+  // Wrap callback to keep it alive inside the replier
+  auto wrapped_cb = std::make_unique<decltype(cb)>(std::move(cb));
+  cmd_cntx->tx()->SingleHopAsync(*wrapped_cb);
+
+  auto replier = [cmd_cntx, tx = boost::intrusive_ptr{cmd_cntx->tx()},
+                  wrapped_cb = std::move(wrapped_cb)](SinkReplyBuilder* rb) {
+    switch (auto status = *tx->LocalResultPtr()) {
+      case OpStatus::SKIPPED:
+      case OpStatus::OK: {
+        MCRender render(cmd_cntx->mc_command()->cmd_flags);
+        rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+        return;
+      }
+      case OpStatus::OUT_OF_MEMORY:
+        return rb->SendError(kOutOfMemory);
+      default:
+        LOG(FATAL) << "Unknown status" << status;
+    };
+  };
+  cmd_cntx->Resolve(cmd_cntx->tx()->Blocker(), std::move(replier));
+}
+
+struct NegativeExpire {};  // Returned if relative expiry was in the past
+std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
+    CmdArgParser parser, const CommandContext* cmd_cntx) {
   SetCmd::SetParams sparams;
-  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
-  auto* builder = cmnd_cntx.rb;
+
+  sparams.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
 
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-
-      if (auto err = parser.TakeError(); err) {
-        return builder->SendError(err.MakeReply());
-      }
+      if (parser.HasError())
+        break;
 
       // We can set expiry only once.
       if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return builder->SendError(kSyntaxErr);
+        return facade::ErrorReply{kSyntaxErr};
 
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
-      if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("set"));
-      }
+      if (int_arg <= 0)
+        return facade::ErrorReply{InvalidExpireTime("set")};
 
       DbSlice::ExpireParams expiry{
           .value = int_arg,
@@ -1023,17 +1050,11 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
       int64_t now_ms = GetCurrentTimeMs();
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
-        return builder->SendError(InvalidExpireTime("set"));
+        return facade::ErrorReply{InvalidExpireTime("set")};
 
       // Remove existed key if the key is expired already
-      if (rel_ms < 0) {
-        cmnd_cntx.tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
-          ShardArgs args = tx->GetShardArgs(es->shard_id());
-          GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
-          return OpStatus::OK;
-        });
-        return builder->SendStored();
-      }
+      if (rel_ms < 0)
+        return NegativeExpire{};
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     } else if (parser.Check("_MCFLAGS")) {
@@ -1046,15 +1067,46 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
     }
   }
 
-  if (auto err = parser.TakeError(); err) {
-    return builder->SendError(err.MakeReply());
-  }
+  if (auto err = parser.TakeError(); err)
+    return err.MakeReply();
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
-
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return builder->SendError(kSyntaxErr);
+    return facade::ErrorReply{kSyntaxErr};
+  }
+
+  return sparams;
+}
+
+void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
+  facade::CmdArgParser parser{args};
+
+  auto [key, value] = parser.Next<string_view, string_view>();
+  auto params_result = ParseSetParams(parser, cmd_cntx);
+
+  if (holds_alternative<facade::ErrorReply>(params_result))
+    return cmd_cntx->SendError(get<facade::ErrorReply>(params_result));
+
+  if (holds_alternative<NegativeExpire>(params_result)) {
+    cmd_cntx->tx()->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
+      ShardArgs args = tx->GetShardArgs(es->shard_id());
+      GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
+      return OpStatus::OK;
+    });
+    if (cmd_cntx->mc_command() != nullptr) {
+      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
+    } else {
+      cmd_cntx->SendOk();
+    }
+    return;
+  }
+
+  auto& sparams = get<SetCmd::SetParams>(params_result);
+
+  // Experimental async path, memcache only
+  if (cmd_cntx->IsDeferredReply()) {
+    return AyncCmdSet(key, value, sparams, cmd_cntx);
   }
 
   optional<StringResult> prev;
@@ -1064,9 +1116,9 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   optional<util::fb2::Future<bool>> backpressure;
   sparams.backpressure = &backpressure;
 
-  OpStatus result = SetGeneric(sparams, key, value, cmnd_cntx);
+  OpStatus result = SetGeneric(sparams, key, value, *cmd_cntx);
   if (result == OpStatus::WRONG_TYPE) {
-    return builder->SendError(kWrongTypeErr);
+    return cmd_cntx->SendError(kWrongTypeErr);
   }
 
   // If backpressure was provided, wait with reasonable limit (to avoid client deadlocking).
@@ -1075,35 +1127,35 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
-  }
-
-  if (result == OpStatus::OK) {
-    return builder->SendStored();
+    return GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cmd_cntx->SendError(kOutOfMemory);
   }
 
-  DCHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
-
-  builder->SendSetSkipped();
+  if (cmd_cntx->mc_command() != nullptr) {
+    MCRender render(cmd_cntx->mc_command()->cmd_flags);
+    return cmd_cntx->SendSimpleString(render.RenderStored(result == OpStatus::OK));
+  }
+  if (result == OpStatus::OK) {
+    cmd_cntx->SendOk();
+  } else {
+    cmd_cntx->SendNull();
+  }
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
-  string_view cmd_name = cmd_cntx.conn_cntx->cid->name();
+void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view cmd_name = cmd_cntx->cid()->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
-  auto* builder = cmd_cntx.rb;
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   if (exp_int < 1)
-    return builder->SendError(InvalidExpireTime(cmd_name));
+    return cmd_cntx->SendError(InvalidExpireTime(cmd_name));
 
   DbSlice::ExpireParams expiry{
       .value = exp_int,
@@ -1114,35 +1166,36 @@ void StringFamily::SetExGeneric(CmdArgList args, const CommandContext& cmd_cntx)
   int64_t now_ms = GetCurrentTimeMs();
   auto [_, abs_ms] = expiry.Calculate(now_ms, false);
   if (abs_ms < 0)
-    return builder->SendError(InvalidExpireTime("set"));
+    return cmd_cntx->SendError(InvalidExpireTime("set"));
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
   sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-  builder->SendError(SetGeneric(sparams, key, value, cmd_cntx));
+  cmd_cntx->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
 }
 
-void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
+  if (cmd_cntx->mc_command())
+    sparams.memcache_flags = cmd_cntx->mc_command()->flags;
 
-  switch (SetGeneric(sparams, key, value, cmnd_cntx)) {
+  switch (SetGeneric(sparams, key, value, *cmd_cntx)) {
     case OpStatus::OK:
-      return cmnd_cntx.rb->SendLong(1);  // Successfully set the value
+      return cmd_cntx->SendLong(1);  // Successfully set the value
     case OpStatus::OUT_OF_MEMORY:
-      return cmnd_cntx.rb->SendError(kOutOfMemory);
+      return cmd_cntx->SendError(kOutOfMemory);
     case OpStatus::SKIPPED:
-      return cmnd_cntx.rb->SendLong(0);  // Existed, zero updates performed
+      return cmd_cntx->SendLong(0);  // Existed, zero updates performed
     default:
       LOG(FATAL) << "Invalid result";
   }
 }
 
-void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1151,10 +1204,10 @@ void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
     return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1166,52 +1219,90 @@ void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view key = ArgS(args, 0);
+  auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok()) {
+      return it_res.status();
+    }
+
+    // Read string value (handles tiered storage if needed)
+    StringResult str_result = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
+
+    // Handle both immediate value and tiered storage future
+    string value;
+    if (holds_alternative<string>(str_result)) {
+      value = std::move(get<string>(str_result));
+    } else {
+      auto& future = get<TieredStorage::TResult<string>>(str_result);
+      io::Result<string> io_res = future.Get();
+      if (!io_res) {
+        return OpStatus::IO_ERROR;
+      }
+      value = std::move(*io_res);
+    }
+
+    // Compute XXH3 hash and return as 16-char hex string
+    return XXH3_Digest(value);
+  };
+
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (result) {
+    rb->SendBulkString(*result);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    rb->SendNull();
+  } else {
+    cmd_cntx->SendError(result.status());
+  }
+}
+
+void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   optional<StringResult> prev;
   SetCmd::SetParams sparams{.prev_val = &prev};
 
-  if (OpStatus status = SetGeneric(sparams, key, value, cmnd_cntx); status != OpStatus::OK)
-    return cmnd_cntx.rb->SendError(status);
+  if (OpStatus status = SetGeneric(sparams, key, value, *cmd_cntx); status != OpStatus::OK)
+    return cmd_cntx->SendError(status);
 
-  GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
+  GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
 }
 
-void StringFamily::Append(CmdArgList args, const CommandContext& cmnd_cntx) {
-  ExtendGeneric(args, false, cmnd_cntx.tx, cmnd_cntx.rb);
+void CmdAppend(CmdArgList args, CommandContext* cmd_cntx) {
+  ExtendGeneric(args, false, cmd_cntx);
 }
 
-void StringFamily::Prepend(CmdArgList args, const CommandContext& cmnd_cntx) {
-  ExtendGeneric(args, true, cmnd_cntx.tx, cmnd_cntx.rb);
+void CmdPrepend(CmdArgList args, CommandContext* cmd_cntx) {
+  ExtendGeneric(args, true, cmd_cntx);
 }
 
-void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
-  auto* builder = cmnd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-      if (auto err = parser.TakeError(); err) {
-        return builder->SendError(err.MakeReply());
-      }
+      RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
       if (defined) {
-        return builder->SendError(kSyntaxErr, kSyntaxErrType);
+        return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
       }
 
       if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("getex"));
+        return cmd_cntx->SendError(InvalidExpireTime("getex"));
       }
 
       exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
@@ -1255,71 +1346,71 @@ void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
     return value;
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::Incr(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, 1, cmd_cntx);
 }
 
-void StringFamily::IncrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
-  return IncrByGeneric(key, val, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, val, cmd_cntx);
 }
 
-void StringFamily::IncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return cmnd_cntx.rb->SendError(kInvalidFloatErr);
+    return cmd_cntx->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrFloat(t->GetOpArgs(shard), key, val);
   };
 
-  OpResult<double> result = cmnd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx.rb);
+  OpResult<double> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
-    return rb->SendError(result.status());
+    return cmd_cntx->SendError(result.status());
   }
 
   rb->SendDouble(result.value());
 }
 
-void StringFamily::Decr(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdDecr(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, -1, cmd_cntx);
 }
 
-void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdDecrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return cmnd_cntx.rb->SendError(kIncrOverflow);
+    return cmd_cntx->SendError(kIncrOverflow);
   }
 
-  return IncrByGeneric(key, -val, cmnd_cntx.tx, cmnd_cntx.rb);
+  return IncrByGeneric(key, -val, cmd_cntx);
 }
 
 // Reorder per-shard results according to argument order of primary command
-void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t, bool is_memcache,
+void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* t,
                          absl::Span<optional<GetResp>> dest) {
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!t->IsActive(sid))
@@ -1332,79 +1423,107 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
       if (!src.resp_arr[src_indx])
         continue;
 
+      DCHECK_LT(it.index(), dest.size());
       auto& item = dest[it.index()];
-      item = std::move(src.resp_arr[src_indx]);
-      if (is_memcache)
-        item->key = *it;
+      item = src.resp_arr[src_indx];
     }
   }
 }
 
-void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void MGetGeneric(CmdArgList args, CommandContext* cmd_cntx,
+                 const DbSlice::ExpireParams* gat_params) {
   DCHECK_GE(args.size(), 1U);
 
-  uint8_t fetch_mask = 0;
-  auto* builder = cmnd_cntx.rb;
-  const bool is_memcache = builder->GetProtocol() == Protocol::MEMCACHE;
+  MemcacheCmdFlags cmd_flags;
 
-  if (is_memcache) {
-    fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
-      fetch_mask |= FETCH_MCVER;
+  if (cmd_cntx->mc_command()) {
+    cmd_flags = cmd_cntx->mc_command()->cmd_flags;
   }
 
   fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
-  AggregateError tiering_err;          // Fist tiering error
+  AggregateError tiering_err;          // First tiering error
 
-  std::vector<MGetResponse> mget_resp(shard_set->size());
+  unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, fetch_mask, t, shard);
+    mget_resp[shard->shard_id()] =
+        OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_params);
     return OpStatus::OK;
   };
 
-  OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
   if (auto err = std::move(tiering_err).Destroy(); err)
-    return builder->SendError(err.message());
+    return cmd_cntx->SendError(err.message());
 
-  // reorder shard results back according to argument order
-  absl::FixedArray<optional<GetResp>, 8> res(args.size());
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx.tx, is_memcache, absl::MakeSpan(res));
+  size_t arg_len = args.size();
 
-  SinkReplyBuilder::ReplyScope scope(builder);
-  if (is_memcache) {
-    auto* rb = static_cast<MCReplyBuilder*>(builder);
-    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);  // memcache is never squashed
-    for (const auto& entry : res) {
-      if (entry) {
-        rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
-      } else {
-        rb->SendMiss();
+  unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
+  ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmd_cntx->tx(),
+                      absl::MakeSpan(mget_results.get(), arg_len));
+
+  if (cmd_cntx->mc_command()) {
+    // We can not access `args` inside the lambda below if it runs asynchronously.
+    // Access to arguments must be done via cmd_cntx.
+    auto replier = [mget_results = std::move(mget_results), cmd_cntx](SinkReplyBuilder* builder) {
+      auto* mc_builder = static_cast<MCReplyBuilder*>(builder);
+      facade::MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
+      for (size_t i = 0; i < cmd_cntx->size(); ++i) {
+        const auto& entry = mget_results[i];
+        if (entry) {
+          mc_builder->SendValue(cmd_cntx->mc_command()->cmd_flags, cmd_cntx->at(i), entry->value, 0,
+                                entry->mc_flag, entry->ttl_sec);
+        } else {
+          mc_builder->SendSimpleString(mc_render.RenderMiss());
+        }
       }
-    }
-    rb->SendGetEnd();
+      mc_builder->SendSimpleString(mc_render.RenderGetEnd());
+    };
+    cmd_cntx->ReplyWith(std::move(replier));
   } else {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->StartArray(res.size());
-    for (const auto& entry : res) {
-      if (entry)
-        rb->SendBulkString(entry->value);
-      else
-        rb->SendNull();
-    }
+    // TODO: remove arg_len capture once we store RESP arguments inside cmd_cntx.
+    auto replier = [arg_len, mget_results = std::move(mget_results),
+                    cmd_cntx](SinkReplyBuilder* builder) {
+      auto* redis_builder = static_cast<RedisReplyBuilder*>(builder);
+      redis_builder->StartArray(arg_len);
+      for (size_t i = 0; i < arg_len; ++i) {
+        const auto& entry = mget_results[i];
+        if (entry) {
+          redis_builder->SendBulkString(entry->value);
+        } else {
+          redis_builder->SendNull();
+        }
+      }
+    };
+    cmd_cntx->ReplyWith(std::move(replier));
   }
 }
 
-void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
+  MGetGeneric(args, cmd_cntx, nullptr);
+}
+
+// Implements the memcache GAT command. The expected input is
+// GAT key [keys...]
+// The expiry argument is stored in mc_command()->expire_ts
+void CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
+  DCHECK(cmd_cntx->mc_command());
+  int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
+  const DbSlice::ExpireParams expire_params{
+      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
+  MGetGeneric(args, cmd_cntx, &expire_params);
+}
+
+void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   if (VLOG_IS_ON(2)) {
     string str;
     for (size_t i = 1; i < args.size(); ++i) {
       absl::StrAppend(&str, " ", ArgS(args, i));
     }
-    LOG(INFO) << "MSET/" << cmnd_cntx.tx->GetUniqueShardCnt() << str;
+    LOG(INFO) << "MSET/" << cmd_cntx->tx()->GetUniqueShardCnt() << str;
   }
 
   AggregateStatus result;
@@ -1415,17 +1534,17 @@ void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
     return OpStatus::OK;
   };
 
-  if (auto status = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
+  if (auto status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
     result = status;
 
   if (*result == OpStatus::OK) {
-    cmnd_cntx.rb->SendOk();
+    cmd_cntx->SendOk();
   } else {
-    cmnd_cntx.rb->SendError(*result);
+    cmd_cntx->SendError(*result);
   }
 }
 
-void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1444,7 +1563,7 @@ void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
     return OpStatus::OK;
   };
 
-  cmnd_cntx.tx->Execute(std::move(cb), false);
+  cmd_cntx->tx()->Execute(std::move(cb), false);
   const bool to_skip = exists.load(memory_order_relaxed);
 
   AggregateStatus result;
@@ -1457,41 +1576,37 @@ void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
       result = status;
     return OpStatus::OK;
   };
-  cmnd_cntx.tx->Execute(std::move(epilog_cb), true);
+  cmd_cntx->tx()->Execute(std::move(epilog_cb), true);
 
-  cmnd_cntx.rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void StringFamily::StrLen(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
-  if (auto err = parser.TakeError(); err) {
-    return cmnd_cntx.rb->SendError(err.MakeReply());
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
-  auto* builder = cmnd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
 
-  if (auto err = parser.TakeError(); err) {
-    return builder->SendError(err.MakeReply());
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   if (start < 0) {
     return builder->SendError("offset is out of range");
@@ -1504,7 +1619,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{builder}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
+  GetReplies{builder}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
@@ -1520,29 +1635,30 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) {
+void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   // Allow max burst in number of tokens
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Emit count of tokens per period
   uint64_t count;
   const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Apply quantity of tokens now
@@ -1551,43 +1667,43 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
     const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      return cmnd_cntx.rb->SendError(kInvalidIntErr);
+      return rb->SendError(kInvalidIntErr);
     }
   }
 
   if (max_burst > INT64_MAX - 1) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
   const int64_t limit = max_burst + 1;
 
   if (period > UINT64_MAX / kSecondToNanoSecond || count == 0 ||
       period * kSecondToNanoSecond / count > INT64_MAX) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
   }
 
   const int64_t emission_interval_ns = period * kSecondToNanoSecond / count;
 
   if (emission_interval_ns == 0) {
-    return cmnd_cntx.rb->SendError("zero rates are not supported");
+    return rb->SendError("zero rates are not supported");
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return cmnd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
     return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity);
   };
 
-  Transaction* trans = cmnd_cntx.tx;
+  Transaction* trans = cmd_cntx->tx();
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmnd_cntx.rb);
+    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
     redis_builder->StartArray(result->size());
     auto& array = result.value();
 
@@ -1609,86 +1725,34 @@ void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) 
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmnd_cntx.rb->SendError(kWrongTypeErr);
+        cmd_cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmnd_cntx.rb->SendError(kInvalidIntErr);
+        cmd_cntx->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmnd_cntx.rb->SendError(kOutOfMemory);
+        cmd_cntx->SendError(kOutOfMemory);
         break;
       default:
-        cmnd_cntx.rb->SendError(result.status());
+        cmd_cntx->SendError(result.status());
         break;
     }
   }
 }
 
-// Implements the memcache GAT command. The expected input is
-// GAT <expiry-in-seconds> key [keys...]
-void StringFamily::GAT(CmdArgList args, const CommandContext& cmnd_cntx) {
-  DCHECK_GE(args.size(), 1U);
+}  // namespace
 
-  auto* builder = cmnd_cntx.rb;
-  const Protocol protocol = builder->GetProtocol();
-  DCHECK(protocol == Protocol::MEMCACHE);
+#define HFUNC(x) SetHandler(&Cmd##x)
 
-  uint8_t fetch_mask = FETCH_MCFLAG;
-  if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
-    fetch_mask |= FETCH_MCVER;
-
-  SinkReplyBuilder::ReplyScope scope(builder);
-  auto* rb = static_cast<MCReplyBuilder*>(builder);
-  DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
-
-  CmdArgParser parser{args};
-  const int64_t expire_ts = parser.Next<uint64_t>();
-  if (parser.HasError()) {
-    return builder->SendError(parser.TakeError().MakeReply());
-  }
-
-  BlockingCounter tiering_bc{0};
-  AggregateError tiering_err;
-  std::vector<MGetResponse> mget_resp(shard_set->size());
-
-  const DbSlice::ExpireParams expire_params{
-      .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] =
-        OpGAT(tiering_bc, &tiering_err, fetch_mask, t, shard, expire_params);
-    return OpStatus::OK;
-  };
-
-  const OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  CHECK_EQ(OpStatus::OK, result);
-
-  tiering_bc->Wait();
-  if (auto err = std::move(tiering_err).Destroy(); err)
-    return builder->SendError(err.message());
-
-  absl::FixedArray<optional<GetResp>, 8> ordered_by_shard{args.size()};
-  ReorderShardResults(absl::MakeSpan(mget_resp), cmnd_cntx.tx, true,
-                      absl::MakeSpan(ordered_by_shard));
-  for (const auto& entry : ordered_by_shard) {
-    if (entry) {
-      rb->SendValue(entry->key, entry->value, 0, entry->mc_flag, fetch_mask & FETCH_MCVER);
-    } else {
-      rb->SendMiss();
-    }
-  }
-  rb->SendGetEnd();
-}
-
-#define HFUNC(x) SetHandler(&StringFamily::x)
-
-void StringFamily::Register(CommandRegistry* registry) {
+void RegisterStringFamily(CommandRegistry* registry) {
   constexpr uint32_t kMSetMask =
       CO::JOURNALED | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
 
   registry->StartFamily(acl::STRING);
   *registry
-      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
+      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetHandler(CmdSet,
+                                                                                          true)
       << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
@@ -1701,6 +1765,7 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
+      << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
@@ -1713,7 +1778,7 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
       << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
-      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -3, 2, -1}.HFUNC(
+      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}.HFUNC(
              GAT);
 }
 

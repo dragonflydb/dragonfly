@@ -337,7 +337,8 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     StoreKeysInArgs(key_index);
 
     unique_shard_cnt_ = 1;
-    string_view akey = *key_index.Range(full_args_).begin();
+    string_view akey = full_args_[*key_index];
+
     if (is_stub)  // stub transactions don't migrate
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     else {
@@ -509,7 +510,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
 
   cid_ = cid;
   re_enabled_auto_journal_ = false;
-  cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 
   for (auto& sd : shard_data_) {
     sd.slice_count = sd.slice_start = 0;
@@ -564,7 +565,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
   absl::StrAppend(&res, " {id=", trans_id(this));
-  absl::StrAppend(&res, " {cb_ptr=", absl::StrFormat("%p", static_cast<const void*>(cb_ptr_)));
+  absl::StrAppend(&res, " {cb_ptr=", bool(cb_ptr_));
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
@@ -574,14 +575,19 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   return res;
 }
 
-void Transaction::PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db,
-                                                   CmdArgList args) {
-  multi_.reset();
-  InitBase(ns, db, args);
+void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys,
+                                      MultiMode mode) {
+  if (mode == LOCK_AHEAD) {
+    StartMultiLockedAhead(ns, db, keys, true);  // delay locking until first hop
+  } else {
+    DCHECK_EQ(mode, GLOBAL);
+    StartMultiGlobal(ns, db);
+  }
   EnableShard(sid);
-  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
-  CHECK(key_index);
-  StoreKeysInArgs(*key_index);
+  MultiBecomeSquasher();
+
+  // As we never change commands, conclude immediately
+  coordinator_state_ |= COORD_CONCLUDING;
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.
@@ -686,7 +692,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     result = (*cb_ptr_)(this, shard);
 
     if (unique_shard_cnt_ == 1) {
-      cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
+      cb_ptr_.reset();  // We can do it because only a single thread runs the callback.
       local_result_ = result;
     } else {
       if (result == OpStatus::OUT_OF_MEMORY) {
@@ -834,38 +840,107 @@ void Transaction::ScheduleInternal() {
   RecordTxScheduleStats(this);
 }
 
-// Runs in the coordinator fiber.
-void Transaction::UnlockMulti() {
-  VLOG(1) << "UnlockMulti " << DebugId();
+void Transaction::UnlockMulti(bool block) {
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
   // Return if we either didn't schedule at all (and thus run) or already did conclude
   if ((coordinator_state_ & COORD_SCHED) == 0 || (coordinator_state_ & COORD_CONCLUDING) > 0)
     return;
+  coordinator_state_ |= COORD_CONCLUDING;
 
+  // Distribute keys by shards
+  DCHECK_EQ(shard_data_.size(), shard_set->size());  // Atomic doesn't use single shard optimization
   vector<vector<LockFp>> sharded_keys(shard_set->size());
-  for (const auto& [sid, fp] : multi_->tag_fps) {
+  for (const auto& [sid, fp] : multi_->tag_fps)
     sharded_keys[sid].emplace_back(fp);
+
+  // Whether transaction was active on the shard and needs to unlock
+  auto is_active = [&](ShardId sid) {
+    return !sharded_keys[sid].empty() || multi_->mode == GLOBAL;
+  };
+
+  // Count number of active shards ahead and set run/use counts
+  size_t occupied_shards = 0;
+  for (size_t sid = 0; sid < shard_set->size(); sid++) {
+    if (!is_active(sid))
+      continue;
+    occupied_shards++;
   }
+  run_barrier_.Start(occupied_shards);
+  use_count_.fetch_add(occupied_shards, std::memory_order_relaxed);
 
-  use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
+  // Dispatch callbacks to unlock on shards
+  for (ShardId sid = 0; sid < shard_data_.size(); sid++) {
+    if (!is_active(sid))
+      continue;
 
-  DCHECK_EQ(shard_data_.size(), shard_set->size());
-  for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    vector<LockFp> fps = std::move(sharded_keys[i]);
-    shard_set->Add(i, [this, fps = std::move(fps)] {
+    shard_set->Add(sid, [this, fps = std::move(sharded_keys[sid])] {
       this->UnlockMultiShardCb(fps, EngineShard::tlocal());
+      run_barrier_.Dec();
       intrusive_ptr_release(this);
     });
   }
 
-  VLOG(1) << "UnlockMultiEnd " << DebugId();
+  if (block) {
+    run_barrier_.Wait();
+    Refurbish();
+  }
 }
 
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   Execute(cb, true);
   return local_result_;
+}
+
+void Transaction::SingleHopAsync(RunnableType cb) {
+  CHECK(!multi_);
+  CHECK_EQ(coordinator_state_, 0u);
+
+  coordinator_state_ |= COORD_CONCLUDING;
+  cb_ptr_ = cb;
+
+  if (unique_shard_cnt_ == 1) {
+    CHECK_EQ(shard_data_.size(), 1u);
+
+    // Arm immediately
+    shard_data_.front().is_armed.store(true, memory_order_relaxed);
+
+    // Keep alive till end and set barrier
+    run_barrier_.Add(1);
+    use_count_.fetch_add(1, memory_order_relaxed);
+
+    auto shard_cb = [this] {
+      bool success = ScheduleInShard(EngineShard::tlocal(), true);
+      CHECK(success);  // single shard scheduling can't fail
+
+      if (shard_data_.front().local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
+        run_barrier_.Dec();
+        intrusive_ptr_release(this);
+      } else {
+        // do we really need to submit a shard callback?
+        // an armed transaction will be driven by the next previous txq entry
+
+        // possible deadlock beacuse of api
+        // but really we just need to re-schedule the callback
+        // shard_set->Add(unique_shard_id_, [this] {
+        //  EngineShard::tlocal()->PollExecution("exec_cb", this);
+        //  intrusive_ptr_release(this);
+        //});
+        EngineShard::tlocal()->PollExecution("exec_cb", this);
+        intrusive_ptr_release(this);
+      }
+    };
+
+    // Dispatch to shard
+    if (CanRunInlined())
+      shard_cb();
+    else
+      shard_set->Add(unique_shard_id_, shard_cb);
+  } else {
+    ScheduleInternal();
+    DispatchHop();  // won't wait on run_barrier_
+  }
 }
 
 // Runs in coordinator thread.
@@ -876,7 +951,7 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   }
 
   local_result_ = OpStatus::OK;
-  cb_ptr_ = &cb;
+  cb_ptr_ = cb;
 
   if (IsAtomicMulti()) {
     multi_->concluding = conclude;
@@ -891,7 +966,7 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
 
   DispatchHop();
   run_barrier_.Wait();
-  cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 
   if (coordinator_state_ & COORD_CONCLUDING)
     coordinator_state_ &= ~COORD_SCHED;
@@ -967,7 +1042,7 @@ void Transaction::Conclude() {
 void Transaction::Refurbish() {
   txid_ = 0;
   coordinator_state_ = 0;
-  cb_ptr_ = nullptr;
+  cb_ptr_.reset();
 }
 
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {
@@ -1395,7 +1470,6 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
 
   ShardId sid = shard->shard_id();
   auto& sd = shard_data_[SidToId(sid)];
-  sd.local_mask |= UNLOCK_MULTI;
 
   // It does not have to be that all shards in multi transaction execute this tx.
   // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
@@ -1636,6 +1710,16 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         string_view opt = ArgS(args, args.size() - 2);
         if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
           bonus = args.size() - 1;
+        }
+      }
+
+      if (name == "SORT") {
+        if (args.size() >= 3) {
+          // SORT key ... STORE destkey
+          string_view opt = ArgS(args, args.size() - 2);
+          if (absl::EqualsIgnoreCase(opt, "STORE")) {
+            bonus = args.size() - 1;
+          }
         }
       }
     }

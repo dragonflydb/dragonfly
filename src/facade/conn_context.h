@@ -10,8 +10,6 @@
 #include <string_view>
 
 #include "facade/acl_commands_def.h"
-#include "facade/facade_types.h"
-#include "facade/reply_builder.h"
 
 namespace facade {
 
@@ -19,7 +17,18 @@ class Connection;
 
 class ConnectionContext {
  public:
-  explicit ConnectionContext(Connection* owner);
+  explicit ConnectionContext(Connection* owner) : owner_(owner) {
+    conn_closing = false;
+    req_auth = false;
+    replica_conn = false;
+    authenticated = false;
+    async_dispatch = false;
+    sync_dispatch = false;
+    paused = false;
+    blocked = false;
+
+    subscriptions = 0;
+  }
 
   virtual ~ConnectionContext() {
   }
@@ -32,7 +41,9 @@ class ConnectionContext {
     return owner_;
   }
 
-  virtual size_t UsedMemory() const;
+  virtual size_t UsedMemory() const {
+    return 0;
+  }
 
   // Noop.
   virtual void Unsubscribe(std::string_view channel) {
@@ -43,29 +54,15 @@ class ConnectionContext {
   bool req_auth : 1;
   bool replica_conn : 1;  // whether it's a replica connection on the master side.
   bool authenticated : 1;
-  bool async_dispatch : 1;    // whether this connection is amid an async dispatch
-  bool sync_dispatch : 1;     // whether this connection is amid a sync dispatch
-  bool journal_emulated : 1;  // whether it is used to dispatch journal commands
+  bool async_dispatch : 1;  // whether this connection is amid an async dispatch
+  bool sync_dispatch : 1;   // whether this connection is amid a sync dispatch
 
   bool paused = false;  // whether this connection is paused due to CLIENT PAUSE
   // whether it's blocked on blocking commands like BLPOP, needs to be addressable
   bool blocked = false;
 
-  // Skip ACL validation, used by internal commands and commands run on admin port
-  bool skip_acl_validation = false;
-
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;
-
-  // TODO fix inherit actual values from default
-  std::string authed_username{"default"};
-  std::vector<uint64_t> acl_commands;
-  // keys
-  dfly::acl::AclKeys keys{{}, true};
-  // pub/sub
-  dfly::acl::AclPubSub pub_sub{{}, true};
-  // db index, std::numeric_limits<size_t>::max for ALL db's
-  size_t acl_db_idx = 0;
 
  private:
   Connection* owner_;

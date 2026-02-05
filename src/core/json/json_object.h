@@ -7,6 +7,7 @@
 #include <version>  // for __cpp_lib_to_chars macro.
 
 #include "core/detail/stateless_allocator.h"
+#include "core/json/detail/interned_string.h"
 
 // std::from_chars is available in C++17 if __cpp_lib_to_chars is defined.
 #if __cpp_lib_to_chars >= 201611L
@@ -20,9 +21,15 @@
 #include <string_view>
 
 namespace dfly {
+class PageUsage;
 
 using TmpJson = jsoncons::json;
-using JsonType = jsoncons::basic_json<char, jsoncons::sorted_policy, StatelessAllocator<char>>;
+
+struct InternedStringPolicy : jsoncons::sorted_policy {
+  template <typename, typename, typename> using member_key = detail::InternedString;
+};
+
+using JsonType = jsoncons::basic_json<char, InternedStringPolicy, StatelessAllocator<char>>;
 
 // A helper type to use in template functions which are expected to work with both TmpJson
 // and JsonType
@@ -38,10 +45,9 @@ std::optional<TmpJson> JsonFromString(std::string_view input);
 // shards where mimalloc heap is initialized.
 std::optional<JsonType> ParseJsonUsingShardHeap(std::string_view input);
 
-// Deep copy a JSON object, by first serializing it to a string and then deserializing the string.
-// The operation is intended to help during defragmentation, by copying into a page reserved for
-// malloc.
-JsonType DeepCopyJSON(const JsonType* j);
+// Defragments the given json object by traversing its tree structure non-recursively, examining
+// nodes and defragmenting as needed. Returns true if any object within the node was reallocated
+bool Defragment(JsonType& j, PageUsage* page_usage);
 
 template <typename Json = JsonType>
 auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)

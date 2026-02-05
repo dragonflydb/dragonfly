@@ -6,6 +6,7 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/reply_builder.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
 #include "util/fibers/pool.h"
@@ -20,11 +21,15 @@ namespace facade {
 
 namespace {
 
+struct CmdContext : public facade::ParsedCommand {
+  void ReuseInternal() final {
+  }
+};
+
 class OkService : public ServiceInterface {
  public:
-  DispatchResult DispatchCommand(ParsedArgs args, SinkReplyBuilder* builder,
-                                 ConnectionContext* cntx) final {
-    builder->SendOk();
+  DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) final {
+    cmd->rb()->SendOk();
     return DispatchResult::OK;
   }
 
@@ -33,7 +38,11 @@ class OkService : public ServiceInterface {
                                           ConnectionContext* cntx) final {
     for (unsigned i = 0; i < count; i++) {
       ParsedArgs args = arg_gen();
-      DispatchCommand(args, builder, cntx);
+      ParsedCommand* cmd = AllocateParsedCommand();
+      cmd->Init(builder, cntx);
+
+      DispatchCommand(args, cmd, AsyncPreference::ONLY_SYNC);
+      delete cmd;
     }
     DispatchManyResult result{
         .processed = static_cast<uint32_t>(count),
@@ -42,13 +51,17 @@ class OkService : public ServiceInterface {
     return result;
   }
 
-  void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                  MCReplyBuilder* builder, ConnectionContext* cntx) final {
-    builder->SendError("");
+  DispatchResult DispatchMC(ParsedCommand* cmd, AsyncPreference) final {
+    cmd->rb()->SendError("");
+    return DispatchResult::OK;
   }
 
   ConnectionContext* CreateContext(Connection* owner) final {
     return new ConnectionContext{owner};
+  }
+
+  ParsedCommand* AllocateParsedCommand() final {
+    return new CmdContext{};
   }
 };
 

@@ -221,8 +221,8 @@ uint32_t DenseSet::ClearStep(uint32_t start, uint32_t count) {
 
   if (size_ == 0) {
     entries_.clear();
-    num_used_buckets_ = 0;
     num_links_ = 0;
+    obj_malloc_used_ = 0;
     expiration_used_ = false;
   }
   return end;
@@ -390,7 +390,6 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
   // Take the entire bucket to avoid infinite loop when new_bid == bucket_idx
   DensePtr bucket = entries_[bucket_idx];
   entries_[bucket_idx].Reset();
-  --num_used_buckets_;
 
   // Process the taken bucket chain
   while (!bucket.IsEmpty()) {
@@ -414,7 +413,6 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
 
     uint32_t new_bid = BucketId(obj, 0);
     DVLOG(2) << " Shrink: Moving from " << bucket_idx << " to " << new_bid;
-    num_used_buckets_ += entries_[new_bid].IsEmpty();
     PushFront(entries_.begin() + new_bid, obj, has_ttl);
   }
 }
@@ -583,7 +581,6 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
       if (std::distance(entries_.begin(), list) != bucket_id) {
         list->SetDisplaced(std::distance(entries_.begin() + bucket_id, list));
       }
-      ++num_used_buckets_;
       ++size_;
       return;
     }
@@ -697,9 +694,7 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   if (ptr->IsObject()) {
     obj = ptr->Raw();
     ptr->Reset();
-    if (prev == nullptr) {
-      --num_used_buckets_;
-    } else {
+    if (prev) {
       DCHECK(prev->IsLink());
 
       DenseLinkKey* plink = prev->AsLink();
@@ -772,10 +767,6 @@ void* DenseSet::PopInternal() {
   auto bucket_iter = GetRandomChain();  // Find first non empty chain
   if (bucket_iter == entries_.end())
     return nullptr;
-
-  if (bucket_iter->IsObject()) {
-    --num_used_buckets_;
-  }
 
   // unlink the first node in the first non-empty chain
   obj_malloc_used_ -= ObjectAllocSize(bucket_iter->GetObject());

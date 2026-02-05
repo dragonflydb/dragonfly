@@ -25,7 +25,7 @@ using cmn::HeapSize;
 
 static void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
                                             unsigned count, RedisReplyBuilder* rb) {
-  rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+  rb->StartCollection(3, CollectionType::PUSH);
   rb->SendBulkString(action);
   if (topic.has_value())
     rb->SendBulkString(topic.value());
@@ -40,7 +40,7 @@ StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyM
   args_ = facade::ParsedArgs{*backed_};
 }
 
-CmdArgList StoredCmd::ArgList(CmdArgVec* scratch) const {
+CmdArgList StoredCmd::Slice(CmdArgVec* scratch) const {
   return args_.ToSlice(scratch);
 }
 
@@ -66,28 +66,6 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
     acl_commands = std::move(cred.acl_commands);
   }
   acl_db_idx = cred.db;
-}
-
-ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx)
-    : facade::ConnectionContext(nullptr), transaction{tx} {
-  if (owner) {
-    acl_commands = owner->acl_commands;
-    keys = owner->keys;
-    pub_sub = owner->pub_sub;
-    skip_acl_validation = owner->skip_acl_validation;
-    acl_db_idx = owner->acl_db_idx;
-    ns = owner->ns;
-    if (owner->conn()) {
-      has_main_or_memcache_listener = owner->conn()->IsMainOrMemcache();
-    }
-  } else {
-    acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
-  }
-  if (tx) {  // If we have a carrier transaction, this context is used for squashing
-    DCHECK(owner);
-    conn_state.db_index = owner->conn_state.db_index;
-    conn_state.squashing_info = {owner};
-  }
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
@@ -168,6 +146,7 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
 void ConnectionState::ExecInfo::AddStoredCmd(const CommandId* cid, ArgSlice args) {
   body.emplace_back(cid, args);
   stored_cmd_bytes += body.back().UsedMemory();
+  is_write |= cid->IsJournaled();
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
@@ -190,7 +169,9 @@ size_t ConnectionState::UsedMemory() const {
 }
 
 size_t ConnectionContext::UsedMemory() const {
-  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state);
+  return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state) +
+         HeapSize(authed_username) + HeapSize(acl_commands) + HeapSize(keys.key_globs) +
+         HeapSize(pub_sub.globs);
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {
@@ -284,6 +265,46 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
 
   const bool match = (seq_num_ == (1 + caching_seq_num_));
   return option_ == OPTIN ? match : !match;
+}
+
+void CommandContext::ReuseInternal() {
+  cid_ = nullptr;
+  tx_ = nullptr;
+  arg_slice_backing.clear();
+  start_time_ns = 0;
+  exec_body_len = 0;
+}
+
+void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
+  DCHECK_GT(start_time_ns, 0u);
+  int64_t after = absl::GetCurrentTimeNanos();
+
+  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
+  int64_t execution_time_usec = (after - start_time_ns) / 1000;
+
+  cid_->RecordLatency(ss->thread_index(), execution_time_usec);
+
+  DCHECK(conn_cntx_ != nullptr);
+
+  // TODO: we should probably discard more commands here,
+  // not just the blocking ones
+  const auto* conn = server_conn_cntx()->conn();
+  if (!(cid_->opt_mask() & CO::BLOCKING) && conn != nullptr &&
+      // Use SafeTLocal() to avoid accessing the wrong thread local instance
+      ServerState::SafeTLocal()->ShouldLogSlowCmd(execution_time_usec)) {
+    vector<string> aux_params;
+    CmdArgVec aux_slices;
+
+    if (tail_args.empty() && cid_->name() == "EXEC") {
+      // abuse tail_args to pass more information about the slow EXEC.
+      aux_params.emplace_back(absl::StrCat("CMDCOUNT/", exec_body_len));
+      aux_slices.emplace_back(aux_params.back());
+      tail_args = absl::MakeSpan(aux_slices);
+    }
+    ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
+                                                conn->RemoteEndpointStr(), execution_time_usec,
+                                                absl::GetCurrentTimeNanos() / 1000);
+  }
 }
 
 }  // namespace dfly

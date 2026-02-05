@@ -122,7 +122,7 @@ struct HMapWrap {
   }
 
   void AddOrUpdate(std::string_view key, std::string_view value) {
-    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value); },
+    Overloaded ov{[&](StringMap* sm) { sm->AddOrUpdate(key, value, UINT32_MAX, true); },
                   [&](detail::ListpackWrap& lw) { lw.Insert(key, value, false); }};
     VisitMut(ov);
   }
@@ -198,7 +198,8 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
+                                 std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -239,7 +240,7 @@ template <typename F> auto WrapW(F&& f) {
     if (hw.Length() == 0)
       DeleteHw(hw, op_args, key);
     else
-      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
     return res;
   };
@@ -320,7 +321,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   optional<string_view> res;
   if (!add_res.is_new) {
     if (auto it = hw.Find(field); it)
-      res = (*it).second;
+      res = it->second;
   }
 
   if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK)
@@ -338,14 +339,12 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   }
 
   hw.Launder(pv);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   return OpStatus::OK;
 }
 
 OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts& scan_op) {
-  constexpr size_t HASH_TABLE_ENTRIES_FACTOR = 2;  // return key/value
-
   /* We set the max number of iterations to ten times the specified
    * COUNT, so if the hash table is in a pathological state (very
    * sparsely populated) we avoid to block too much time at the cost
@@ -353,14 +352,17 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   constexpr size_t INTERATION_FACTOR = 10;
 
   StringVec res;
-  uint32_t count = scan_op.limit * HASH_TABLE_ENTRIES_FACTOR;
+  // If NOVALUES, we expect 1 element per match (key). Otherwise, 2 elements (key + value).
+  uint32_t count = scan_op.limit * (scan_op.novalues ? 1 : 2);
 
   if (auto lw = hw.Get<detail::ListpackWrap>(); lw) {
     // TODO: Optimize unnecessary value reads from iterator
     for (const auto [key, value] : *lw) {
       if (scan_op.Matches(key)) {
         res.emplace_back(key);
-        res.emplace_back(value);
+        if (!scan_op.novalues) {
+          res.emplace_back(value);
+        }
       }
     }
     *cursor = 0;
@@ -375,8 +377,10 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
       size_t len = sdslen(val);
       if (scan_op.Matches(string_view(val, len))) {
         res.emplace_back(val, len);
-        val = StringMap::GetValue(val);
-        res.emplace_back(val, sdslen(val));
+        if (!scan_op.novalues) {
+          val = StringMap::GetValue(val);
+          res.emplace_back(val, sdslen(val));
+        }
       }
     };
 
@@ -491,15 +495,16 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     }
   }
 
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
-  if (auto* ts = op_args.shard->tiered_storage(); ts)
-    ts->TryStash(op_args.db_cntx.db_index, key, &pv);
+  if (auto* ts = op_args.shard->tiered_storage(); ts) {
+    StashPrimeValue(op_args.db_cntx.db_index, key, false, &pv, ts);
+  }
 
   return created;
 }
 
-void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkReplyBuilder* builder) {
+void HGetGeneric(CmdArgList args, uint8_t getall_mask, CommandContext* cmd_cntx) {
   auto cb = [getall_mask](const HMapWrap& hw) -> OpResult<vector<string>> {
     vector<string> res;
     bool keyval = (getall_mask == (FIELDS | VALUES));
@@ -515,17 +520,16 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
     return res;
   };
 
-  OpResult<vector<string>> result = ExecuteRO(tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<vector<string>> result = ExecuteRO(cmd_cntx->tx(), cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
     case OpStatus::KEY_NOTFOUND: {
       bool is_map = (getall_mask == (VALUES | FIELDS));
-      return rb->SendBulkStrArr(*result,
-                                is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
+      return rb->SendBulkStrArr(*result, is_map ? CollectionType::MAP : CollectionType::ARRAY);
     }
     default:
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
   };
 }
 
@@ -536,18 +540,29 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
-  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
+  auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
+
+  // If it is a hash which became empty after expiring fields, we must delete the key safely.
+  // We use DelMutable which consumes the iterator/updater to prevent the crash.
+  if (pv->Encoding() == kEncodingStrMap2) {
+    auto* sm = static_cast<StringMap*>(pv->RObjPtr());
+    if (sm->UpperBoundSize() == 0) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+    }
+  }
+
+  return res;
 }
 
 // HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
-void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
+void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view key = parser.Next();
   OpSetParams op_sp;
 
   const auto option_already_set = [&cmd_cntx] {
-    return cmd_cntx.rb->SendError(WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()));
+    return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   };
 
   while (true) {
@@ -567,32 +582,31 @@ void HSetEx(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   op_sp.ttl = parser.Next<uint32_t>();
-
+  auto* rb = cmd_cntx->rb();
   if (parser.HasError()) {
-    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   CmdArgList fields = parser.Tail();
 
   if (fields.size() % 2 != 0) {
-    return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd_cntx.conn_cntx->cid->name()),
-                                  kSyntaxErrType);
+    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cmd_cntx.rb->SendLong(*result);
+    rb->SendLong(*result);
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
@@ -601,28 +615,26 @@ struct HSetReplies {
     switch (result.status()) {
       case OpStatus::OK:
       case OpStatus::KEY_NOTFOUND:
-        return rb->SendLong(result.value_or(0));
+        return cmd_cntx->SendLong(result.value_or(0));
       default:
-        return rb->SendError(result.status());
+        return cmd_cntx->SendError(result.status());
     };
   }
 
-  facade::SinkReplyBuilder* rb;
+  CommandContext* cmd_cntx;
 };
 
-}  // namespace
-
-void HSetFamily::HDel(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](HMapWrap& hw) -> OpResult<uint32_t> {
     unsigned deleted = 0;
     for (string_view s : args.subspan(1))
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(WrapW(cb)));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb)));
 }
 
-void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   using MinMaxTtl = FInt<0, (1 << 26)>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
@@ -632,66 +644,65 @@ void HSetFamily::HExpire(CmdArgList args, const CommandContext& cmd_cntx) {
                                       "GT", ExpireFlags::EXPIRE_GT, "LT", ExpireFlags::EXPIRE_LT)
                           .value_or(ExpireFlags::EXPIRE_ALWAYS);
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (parser.HasError()) {
-    return cmd_cntx.rb->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
   if (!parser.Check("FIELDS"sv)) {
-    return cmd_cntx.rb->SendError(
-        "Mandatory argument FIELDS is missing or not at the right position", kSyntaxErrType);
+    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                               kSyntaxErrType);
   }
 
   uint32_t numFields = parser.Next<uint32_t>();
 
   CmdArgList fields = parser.Tail();
   if (fields.size() != numFields) {
-    return cmd_cntx.rb->SendError("The `numfields` parameter must match the number of arguments",
-                                  kSyntaxErrType);
+    return rb->SendError("The `numfields` parameter must match the number of arguments",
+                         kSyntaxErrType);
   }
 
-  if (auto err = parser.TakeError(); err)
-    return cmd_cntx.rb->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
   };
-  OpResult<vector<long>> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   switch (result.status()) {
     case OpStatus::OK:
       return rb->SendLongArr(absl::MakeConstSpan(result.value()));
     case OpStatus::KEY_NOTFOUND:
       return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
     default:
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
   };
 }
 
-void HSetFamily::HGet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<string> {
     if (auto it = hw.Find(field); it)
       return string{it->second};
     return OpStatus::KEY_NOTFOUND;
   };
 
-  OpResult<string> result = ExecuteRO(cmd_cntx.tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult<string> result = ExecuteRO(cmd_cntx->tx(), cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
       return rb->SendBulkString(*result);
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     default:
-      return rb->SendError(result.status());
+      return cmd_cntx->SendError(result.status());
   };
 }
 
-void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHMGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto fields = args.subspan(1);
   auto cb = [fields](const HMapWrap& hw) { return OpHMGet(hw, fields); };
 
-  OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx.tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult<vector<OptStr>> result = ExecuteRO(cmd_cntx->tx(), cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::OK:
     case OpStatus::KEY_NOTFOUND: {
@@ -704,39 +715,39 @@ void HSetFamily::HMGet(CmdArgList args, const CommandContext& cmd_cntx) {
       }
     } break;
     default:
-      rb->SendError(result.status());
+      cmd_cntx->SendError(result.status());
   };
 }
 
-void HSetFamily::HStrLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = ArgS(args, 1)](const HMapWrap& hw) -> OpResult<uint32_t> {
     if (auto it = hw.Find(field); it)
       return it->second.length();
     return OpStatus::KEY_NOTFOUND;
   };
-  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void HSetFamily::HLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](const HMapWrap& hw) -> OpResult<uint32_t> { return hw.Length(); };
-  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void HSetFamily::HExists(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHExists(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<uint32_t> {
     return hw.Find(field) ? 1 : 0;
   };
-  HSetReplies{cmd_cntx.rb}.Send(ExecuteRO(cmd_cntx.tx, cb));
+  HSetReplies{cmd_cntx}.Send(ExecuteRO(cmd_cntx->tx(), cb));
 }
 
-void HSetFamily::HIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
   string_view incrs = ArgS(args, 2);
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   IncrByParam param{ival};
@@ -745,33 +756,33 @@ void HSetFamily::HIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    cmd_cntx.rb->SendLong(get<int64_t>(param));
+    cmd_cntx->SendLong(get<int64_t>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        cmd_cntx.rb->SendError("hash value is not an integer");
+        cmd_cntx->SendError("hash value is not an integer");
         break;
       case OpStatus::OUT_OF_RANGE:
-        cmd_cntx.rb->SendError(kIncrOverflow);
+        cmd_cntx->SendError(kIncrOverflow);
         break;
       default:
-        cmd_cntx.rb->SendError(status);
+        cmd_cntx->SendError(status);
         break;
     }
   }
 }
 
-void HSetFamily::HIncrByFloat(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
   string_view incrs = ArgS(args, 2);
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
-    return cmd_cntx.rb->SendError(kInvalidFloatErr);
+    return cmd_cntx->SendError(kInvalidFloatErr);
   }
 
   IncrByParam param{dval};
@@ -780,59 +791,59 @@ void HSetFamily::HIncrByFloat(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
     rb->SendDouble(get<double>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        cmd_cntx.rb->SendError("hash value is not a float");
+        cmd_cntx->SendError("hash value is not a float");
         break;
       default:
-        cmd_cntx.rb->SendError(status);
+        cmd_cntx->SendError(status);
         break;
     }
   }
 }
 
-void HSetFamily::HKeys(CmdArgList args, const CommandContext& cmd_cntx) {
-  HGetGeneric(args, FIELDS, cmd_cntx.tx, cmd_cntx.rb);
+void CmdHKeys(CmdArgList args, CommandContext* cmd_cntx) {
+  HGetGeneric(args, FIELDS, cmd_cntx);
 }
 
-void HSetFamily::HVals(CmdArgList args, const CommandContext& cmd_cntx) {
-  HGetGeneric(args, VALUES, cmd_cntx.tx, cmd_cntx.rb);
+void CmdHVals(CmdArgList args, CommandContext* cmd_cntx) {
+  HGetGeneric(args, VALUES, cmd_cntx);
 }
 
-void HSetFamily::HGetAll(CmdArgList args, const CommandContext& cmd_cntx) {
-  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx.tx, cmd_cntx.rb);
+void CmdHGetAll(CmdArgList args, CommandContext* cmd_cntx) {
+  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, cmd_cntx);
 }
 
-void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view token = ArgS(args, 1);
   uint64_t cursor = 0;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return cmd_cntx.rb->SendError("invalid cursor");
+    return rb->SendError("invalid cursor");
   }
 
-  // HSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 6) {
+  // HSCAN key cursor [MATCH pattern] [COUNT count] [NOVALUES]
+  if (args.size() > 7) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2), true);
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
-    return cmd_cntx.rb->SendError(ops.status());
+    return cmd_cntx->SendError(ops.status());
   }
 
   const ScanOpts& scan_op = ops.value();
   auto cb = [&](const HMapWrap& hw) { return OpScan(hw, &cursor, scan_op); };
 
-  OpResult<StringVec> result = ExecuteRO(cmd_cntx.tx, cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult<StringVec> result = ExecuteRO(cmd_cntx->tx(), cb);
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
       cursor = 0;
@@ -844,17 +855,17 @@ void HSetFamily::HScan(CmdArgList args, const CommandContext& cmd_cntx) {
       break;
     }
     default:
-      return rb->SendError(result.status());
+      cmd_cntx->SendError(result.status());
   }
 }
 
-void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
-  string_view cmd{cmd_cntx.conn_cntx->cid->name()};
-
+  string_view cmd{cmd_cntx->cid()->name()};
+  auto* rb = cmd_cntx->rb();
   if (args.size() % 2 != 1) {
-    return cmd_cntx.rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
+    return rb->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
   args.remove_prefix(1);
@@ -862,22 +873,22 @@ void HSetFamily::HSet(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpSet(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result && cmd == "HSET") {
-    cmd_cntx.rb->SendLong(*result);
+    rb->SendLong(*result);
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void HSetFamily::HSetNx(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-  HSetReplies{cmd_cntx.rb}.Send(cmd_cntx.tx->ScheduleSingleHopT(cb));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
@@ -888,10 +899,11 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
   str_vec.emplace_back(absl::StrCat(lp.lval));
 }
 
-void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() > 3) {
     DVLOG(1) << "Wrong number of command arguments: " << args.size();
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return rb->SendError(kSyntaxErr);
   }
 
   string_view key = ArgS(args, 0);
@@ -899,13 +911,13 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
   bool with_values = false;
 
   if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
-    return cmd_cntx.rb->SendError("count value is not an integer", kSyntaxErrType);
+    return rb->SendError("count value is not an integer", kSyntaxErrType);
   }
 
   if (args.size() == 3) {
     string arg = absl::AsciiStrToUpper(ArgS(args, 2));
     if (arg != "WITHVALUES")
-      return cmd_cntx.rb->SendError(kSyntaxErr);
+      return rb->SendError(kSyntaxErr);
     else
       with_values = true;
   }
@@ -991,8 +1003,7 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
     return str_vec;
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     if (result->size() == 1 && args.size() == 1)
       rb->SendBulkString(result->front());
@@ -1010,20 +1021,22 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
         rb->SendBulkString((*result)[i + 1]);
       }
     } else
-      rb->SendBulkStrArr(*result, RedisReplyBuilder::ARRAY);
+      rb->SendBulkStrArr(*result, CollectionType::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       rb->SendNull();
     else
       rb->SendEmptyArray();
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
+}  // namespace
+
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&HSetFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void HSetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::HASH);
@@ -1149,7 +1162,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
   vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }
 

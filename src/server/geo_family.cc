@@ -2,11 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/geo_family.h"
-
-#include "server/acl/acl_commands_def.h"
-#include "server/zset_family.h"
-
 extern "C" {
 #include "redis/geo.h"
 #include "redis/geohash.h"
@@ -20,12 +15,15 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/transaction.h"
+#include "server/zset_family.h"
 
 namespace dfly {
 
@@ -206,9 +204,32 @@ double ExtractUnit(std::string_view arg) {
   }
 }
 
-}  // namespace
+bool HandleGeoParserFinalize(const GeoShape& shape, CmdArgParser* parser,
+                             CommandContext* cmd_cntx) {
+  if (parser->Finalize()) {
+    return false;
+  }
 
-void GeoFamily::GeoAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto error = parser->TakeError();
+  switch (error.type) {
+    case Errors::INVALID_LONG_LAT: {
+      string err =
+          absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
+      cmd_cntx->SendError(err, kSyntaxErrType);
+      break;
+    }
+    case Errors::INVALID_UNIT:
+      cmd_cntx->SendError("Unsupported unit provided. please use M, KM, FT, MI", kSyntaxErrType);
+      break;
+    default:
+      cmd_cntx->SendError(error.MakeReply());
+      break;
+  }
+
+  return true;
+}
+
+void CmdGeoAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   ZSetFamily::ZParams zparams;
@@ -227,7 +248,7 @@ void GeoFamily::GeoAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
   args.remove_prefix(i);
   if (args.empty() || args.size() % 3 != 0) {
     builder->SendError(kSyntaxErr);
@@ -261,16 +282,16 @@ void GeoFamily::GeoAdd(CmdArgList args, const CommandContext& cmd_cntx) {
 
     members.emplace_back(bits, member);
   }
-  DCHECK(cmd_cntx.tx);
+  DCHECK(cmd_cntx->tx());
 
   absl::Span memb_sp{members.data(), members.size()};
-  ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx.tx, builder);
+  ZSetFamily::ZAddGeneric(key, zparams, memb_sp, cmd_cntx);
 }
 
-void GeoFamily::GeoHash(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void CmdGeoHash(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx.tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return rb->SendError(kWrongTypeErr);
@@ -287,10 +308,10 @@ void GeoFamily::GeoHash(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void GeoFamily::GeoPos(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void CmdGeoPos(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx.tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() != OpStatus::OK) {
     return rb->SendError(result.status());
@@ -309,9 +330,9 @@ void GeoFamily::GeoPos(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void GeoFamily::GeoDist(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdGeoDist(CmdArgList args, CommandContext* cmd_cntx) {
   double distance_multiplier = 1;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() == 4) {
     string_view unit = ArgS(args, 3);
@@ -324,7 +345,7 @@ void GeoFamily::GeoDist(CmdArgList args, const CommandContext& cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx.tx, rb);
+  OpResult<MScoreResponse> result = ZSetFamily::ZGetMembers(args, cmd_cntx->tx(), rb);
 
   if (result.status() != OpStatus::OK) {
     return rb->SendError(result.status());
@@ -585,7 +606,7 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
 
 }  // namespace
 
-void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdGeoSearch(CmdArgList args, CommandContext* cmd_cntx) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
   string_view member;
@@ -594,7 +615,7 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   int from_set = 0;
   // BYRADIUS or BYBOX is set
   int by_set = 0;
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
 
   CmdArgParser parser(args);
   string_view key = parser.Next();
@@ -654,20 +675,8 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  if (!parser.Finalize()) {
-    auto error = parser.TakeError();
-    switch (error.type) {
-      case Errors::INVALID_LONG_LAT: {
-        string err =
-            absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
-        return builder->SendError(err, kSyntaxErrType);
-      }
-      case Errors::INVALID_UNIT:
-        return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
-                                  kSyntaxErrType);
-      default:
-        return builder->SendError(error.MakeReply());
-    }
+  if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
+    return;
   }
 
   // check mandatory options
@@ -684,11 +693,10 @@ void GeoFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, member, geo_ops);
 }
 
-void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, const CommandContext& cmd_cntx,
-                                         bool read_only) {
+void GeoRadiusByMemberGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
   // parse arguments
@@ -696,7 +704,7 @@ void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, const CommandContext& 
   // member to latlong, set shape.xy
   string_view member = ArgS(args, 1);
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
   if (!ParseDouble(ArgS(args, 2), &shape.t.radius)) {
     return builder->SendError(kInvalidFloatErr);
   }
@@ -773,22 +781,14 @@ void GeoFamily::GeoRadiusByMemberGeneric(CmdArgList args, const CommandContext& 
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, member, geo_ops);
 }
 
-void GeoFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx) {
-  GeoRadiusByMemberGeneric(args, cmd_cntx, false);
-}
-
-void GeoFamily::GeoRadiusByMemberRO(CmdArgList args, const CommandContext& cmd_cntx) {
-  GeoRadiusByMemberGeneric(args, cmd_cntx, true);
-}
-
-void GeoFamily::GeoRadiusGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool read_only) {
+void GeoRadiusGeneric(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
 
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
 
   CmdArgParser parser(args);
 
@@ -853,21 +853,8 @@ void GeoFamily::GeoRadiusGeneric(CmdArgList args, const CommandContext& cmd_cntx
     }
   }
 
-  if (!parser.Finalize()) {
-    auto error = parser.TakeError();
-
-    switch (error.type) {
-      case Errors::INVALID_LONG_LAT: {
-        string err =
-            absl::StrCat("-ERR invalid longitude,latitude pair ", shape.xy[0], ",", shape.xy[1]);
-        return builder->SendError(err, kSyntaxErrType);
-      }
-      case Errors::INVALID_UNIT:
-        return builder->SendError("Unsupported unit provided. please use M, KM, FT, MI",
-                                  kSyntaxErrType);
-      default:
-        return builder->SendError(error.MakeReply());
-    }
+  if (HandleGeoParserFinalize(shape, &parser, cmd_cntx)) {
+    return;
   }
 
   if (geo_ops.sorting == Sorting::kError) {
@@ -884,47 +871,41 @@ void GeoFamily::GeoRadiusGeneric(CmdArgList args, const CommandContext& cmd_cntx
   }
 
   geo_ops.count = (geo_ops.count == UINT64_MAX) ? 0 : geo_ops.count;
-  GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, "", geo_ops);
+  GeoSearchStoreGeneric(cmd_cntx->tx(), builder, shape, key, "", geo_ops);
 }
 
-void GeoFamily::GeoRadius(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdGeoRadiusByMember(CmdArgList args, CommandContext* cmd_cntx) {
+  GeoRadiusByMemberGeneric(args, cmd_cntx, false);
+}
+
+void CmdGeoRadiusByMemberRO(CmdArgList args, CommandContext* cmd_cntx) {
+  GeoRadiusByMemberGeneric(args, cmd_cntx, true);
+}
+
+void CmdGeoRadius(CmdArgList args, CommandContext* cmd_cntx) {
   GeoRadiusGeneric(args, cmd_cntx, false);
 }
 
-void GeoFamily::GeoRadiusRO(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdGeoRadiusRO(CmdArgList args, CommandContext* cmd_cntx) {
   GeoRadiusGeneric(args, cmd_cntx, true);
 }
 
-#define HFUNC(x) SetHandler(&GeoFamily::x)
+}  // namespace
 
-namespace acl {
-constexpr uint32_t kGeoAdd = WRITE | GEO | SLOW;
-constexpr uint32_t kGeoHash = READ | GEO | SLOW;
-constexpr uint32_t kGeoPos = READ | GEO | SLOW;
-constexpr uint32_t kGeoDist = READ | GEO | SLOW;
-constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
-constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
-constexpr uint32_t kGeoRadiusByMemberRO = READ | GEO | SLOW;
-constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
-constexpr uint32_t kGeoRadiusRO = READ | GEO | SLOW;
-}  // namespace acl
+#define HFUNC(x) SetHandler(&Cmd##x)
 
-void GeoFamily::Register(CommandRegistry* registry) {
-  registry->StartFamily();
-  *registry << CI{"GEOADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -5, 1, 1, acl::kGeoAdd}.HFUNC(
-                   GeoAdd)
-            << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
-            << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
-            << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
-            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-            << CI{"GEORADIUSBYMEMBER",    CO::JOURNALED | CO::STORE_LAST_KEY, -5, 1, 1,
-                  acl::kGeoRadiusByMember}
-                   .HFUNC(GeoRadiusByMember)
-            << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1, acl::kGeoRadiusByMemberRO}.HFUNC(
-                   GeoRadiusByMemberRO)
-            << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY, -6, 1, 1, acl::kGeoRadius}.HFUNC(
-                   GeoRadius)
-            << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1, acl::kGeoRadiusRO}.HFUNC(GeoRadiusRO);
+void RegisterGeoFamily(CommandRegistry* registry) {
+  registry->StartFamily(acl::GEO);
+  *registry << CI{"GEOADD", CO::JOURNALED | CO::DENYOOM, -5, 1, 1}.HFUNC(GeoAdd)
+            << CI{"GEOHASH", CO::READONLY, -2, 1, 1}.HFUNC(GeoHash)
+            << CI{"GEOPOS", CO::READONLY, -2, 1, 1}.HFUNC(GeoPos)
+            << CI{"GEODIST", CO::READONLY, -4, 1, 1}.HFUNC(GeoDist)
+            << CI{"GEOSEARCH", CO::READONLY, -7, 1, 1}.HFUNC(GeoSearch)
+            << CI{"GEORADIUSBYMEMBER", CO::JOURNALED | CO::STORE_LAST_KEY, -5, 1, 1}.HFUNC(
+                   GeoRadiusByMember)
+            << CI{"GEORADIUSBYMEMBER_RO", CO::READONLY, -5, 1, 1}.HFUNC(GeoRadiusByMemberRO)
+            << CI{"GEORADIUS", CO::JOURNALED | CO::STORE_LAST_KEY, -6, 1, 1}.HFUNC(GeoRadius)
+            << CI{"GEORADIUS_RO", CO::READONLY, -6, 1, 1}.HFUNC(GeoRadiusRO);
 }
 
 }  // namespace dfly

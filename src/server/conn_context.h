@@ -10,7 +10,8 @@
 #include "acl/acl_commands_def.h"
 #include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
-#include "facade/reply_capture.h"
+#include "facade/parsed_command.h"
+#include "facade/reply_mode.h"
 #include "server/common.h"
 #include "server/tx_base.h"
 #include "server/version.h"
@@ -43,7 +44,7 @@ class StoredCmd {
     return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
   }
 
-  facade::CmdArgList ArgList(CmdArgVec* scratch) const;
+  facade::ArgSlice Slice(CmdArgVec* scratch) const;
   std::string FirstArg() const;
 
   const CommandId* Cid() const {
@@ -166,8 +167,6 @@ struct ConnectionState {
     const ConnectionContext* owner = nullptr;
   };
 
-  enum MCGetMask : uint8_t { FETCH_CAS_VER = 1 };
-
   size_t UsedMemory() const;
 
   // Client tracking is a per-connection state machine that adheres to the requirements
@@ -252,7 +251,7 @@ struct ConnectionState {
     }
 
     void ResetCachingSequenceNumber() {
-      caching_seq_num_ = 0;
+      caching_seq_num_ = 1;
     }
 
     bool HasOption(Options option) const {
@@ -266,38 +265,27 @@ struct ConnectionState {
     Options option_ = NONE;
     // sequence number
     size_t seq_num_ = 0;
-    size_t caching_seq_num_ = 0;
+    size_t caching_seq_num_ = 1;
   };
 
  public:
   DbIndex db_index = 0;
 
-  // used for memcache set/get commands.
-  // For set op - it's the flag value we are storing along with the value.
-  // For get op - we use it as a mask of MCGetMask values.
-  uint32_t memcache_flag = 0;
-
   ExecInfo exec_info;
   ReplicationInfo replication_info;
 
-  std::optional<SquashingInfo> squashing_info;
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
   ClientTracking tracking_info_;
-  uint64_t cmd_start_time_ns = 0;  // time when the last command started executing
 };
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
-  ConnectionContext(const ConnectionContext* owner, Transaction* tx);
 
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
-
-    // number of commands in the last exec body.
-    unsigned exec_body_len = 0;
   };
 
   DebugInfo last_command_debug;
@@ -305,7 +293,6 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Namespace* ns = nullptr;
   Transaction* transaction = nullptr;
-  const CommandId* cid = nullptr;
 
   ConnectionState conn_state;
 
@@ -333,12 +320,40 @@ class ConnectionContext : public facade::ConnectionContext {
 
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware
                          // of it as a state for the connection
+  bool journal_emulated = false;  // whether it is used to dispatch journal commands
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
 
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;
+
+  // ACLs.
+  // The following variables represent the ACL rules of the context.
+  // Each command, before run, is authorized against those rules by
+  // IsUserAllowedToInvokeCmd(and variants) in validator.cc
+
+  // Username
+  std::string authed_username{"default"};
+
+  // Each entry in the list is a bitfield representing a specific command family,
+  // where each bit corresponds to an individual command within that family.
+  // Together, these entries encode the user's full ACL to commands.
+  // The index 'i' in 'acl_commands[i]' refers to the command family based on
+  // its registration order at runtime. For more details, see acl_commands_def.h.
+  std::vector<uint64_t> acl_commands;
+
+  // Keyspace. Each key referenced in a command must match (any) of the rules (globs).
+  dfly::acl::AclKeys keys;
+
+  // Pub/sub channels. Each channel referenced in a command must match (any) of the rules (globs).
+  dfly::acl::AclPubSub pub_sub;
+
+  // db index, std::numeric_limits<size_t>::max for ALL db's. Dragonfly specific extension.
+  size_t acl_db_idx = std::numeric_limits<size_t>::max();
+
+  // Skip ACL validation, used by internal commands and commands run on admin port
+  bool skip_acl_validation = false;
 
  private:
   void EnableMonitoring(bool enable) {
@@ -348,6 +363,63 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::vector<unsigned> ChangeSubscriptions(CmdArgList channels, bool pattern, bool to_add,
                                             bool to_reply);
+};
+
+class CommandContext : public facade::ParsedCommand {
+ public:
+  CommandContext() = default;
+  CommandContext(facade::SinkReplyBuilder* rb, facade::ConnectionContext* conn_cntx) {
+    Init(rb, conn_cntx);
+  }
+
+  void SetupTx(const CommandId* cid, Transaction* tx) {
+    cid_ = cid;
+    tx_ = tx;
+  }
+
+  void UpdateCid(const CommandId* cid) {
+    cid_ = cid;
+  }
+
+  virtual size_t GetSize() const override {
+    return sizeof(CommandContext);
+  }
+
+  ConnectionContext* server_conn_cntx() const {
+    return static_cast<ConnectionContext*>(conn_cntx_);
+  }
+
+  void RecordLatency(facade::ArgSlice tail_args) const;
+
+  facade::Connection* conn() const {
+    return conn_cntx_->conn();
+  }
+
+  facade::SinkReplyBuilder* SwapReplier(facade::SinkReplyBuilder* new_rb) {
+    return std::exchange(rb_, new_rb);
+  }
+
+  Transaction* tx() const {
+    return tx_;
+  }
+
+  const CommandId* cid() const {
+    return cid_;
+  }
+
+  uint64_t start_time_ns = 0;
+
+  // number of commands in the last exec body.
+  unsigned exec_body_len = 0;
+
+  // Stores backing array for tail args slice
+  CmdArgVec arg_slice_backing;
+
+ protected:
+  void ReuseInternal() final;
+
+  Transaction* tx_ = nullptr;
+  const CommandId* cid_ = nullptr;
 };
 
 }  // namespace dfly

@@ -4,6 +4,7 @@
 
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_replace.h>
 #include <gmock/gmock.h>
 
 #include "base/flags.h"
@@ -16,6 +17,7 @@
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -55,6 +57,18 @@ class MultiTest : public BaseFamilyTest {
     num_threads_ = kPoolThreadCount;
   }
 };
+
+class SingleShardMultiTest : public BaseFamilyTest {
+ protected:
+  SingleShardMultiTest() : BaseFamilyTest() {
+    num_threads_ = 5;
+    absl::SetFlag(&FLAGS_num_shards, 1);
+  }
+
+  absl::FlagSaver saver_;
+};
+
+struct MultiTxTest : public MultiTest {};
 
 // Check constants are valid.
 TEST_F(MultiTest, VerifyConstants) {
@@ -114,6 +128,24 @@ TEST_F(MultiTest, Multi) {
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(MultiTxTest, MultiUnlock) {
+  auto* exec_cid = service_->FindCmd("EXEC");
+  boost::intrusive_ptr<Transaction> tx(new Transaction{exec_cid});
+
+  auto* ns = &namespaces->GetDefaultNamespace();
+  string_view keys[4] = {kKey1, kKey2, kKey3, kKey4};
+
+  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, keys); });
+
+  for (auto key : keys)
+    EXPECT_TRUE(IsLocked(0, key));
+
+  pp_->at(0)->Await([&] { tx->UnlockMulti(true); });
+
+  for (auto key : keys)
+    EXPECT_FALSE(IsLocked(0, key));
 }
 
 TEST_F(MultiTest, MultiGlobalCommands) {
@@ -331,6 +363,49 @@ TEST_F(MultiTest, MultiConsistent2) {
 
   for (auto& fb : fbs)
     fb.Join();
+}
+
+TEST_F(MultiTest, MultiConsistent3) {
+  GTEST_SKIP() << "Known consistency bug";
+
+  absl::SetFlag(&FLAGS_multi_exec_squash, false);
+  vector<Fiber> fbs;
+
+  auto run_multi = [this](string_view client) {
+    Run(client, {"multi"});
+    Run(client, {"incr", kKeySid0});
+    Run(client, {"incr", kKeySid1});
+    Run(client, {"incr", kKeySid2});
+    Run(client, {"exec"});
+  };
+
+  auto run_mget = [this](string_view client) {
+    auto resp = Run(client, {"mget", kKeySid0, kKeySid1, kKeySid2});
+    const auto& elems = resp.GetVec();
+    EXPECT_EQ(elems[0].GetString(), elems[1].GetString());
+    EXPECT_EQ(elems[1].GetString(), elems[2].GetString());
+  };
+
+  for (size_t i = 0; i < 10; i++) {
+    auto fb = pp_->at(i % pp_->size())->LaunchFiber([i, run_mget, run_multi] {
+      auto client = absl::StrCat("c", i);
+      for (size_t j = 0; j < 1000; j++) {
+        if (j % 2)
+          run_mget(client);
+        else
+          run_multi(client);
+        size_t sleep = 30 + j / 10 + 5 * i;
+        ThisFiber::SleepFor(chrono::microseconds(sleep));
+      }
+    });
+    fbs.emplace_back(std::move(fb));
+  }
+
+  for (auto& fb : fbs)
+    fb.JoinIfNeeded();
+
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.shard_stats.tx_optimistic_total, 100);
 }
 
 TEST_F(MultiTest, MultiRename) {
@@ -940,6 +1015,51 @@ TEST_F(MultiTest, ScriptBadCommand) {
   EXPECT_EQ(resp, "OK");
 }
 
+TEST_F(MultiTest, MultiSquash) {
+  string_view script = R"(
+redis.call('APPEND', KEYS[1], ARGV[1]);
+redis.call('GET', KEYS[1]);
+redis.call('APPEND', KEYS[1], ARGV[2])
+return 'OK';
+)";
+
+  auto resp = Run({"EVAL", script, "1", "A", "works", "reliably"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"EVAL", script, "1", "A", "once", "again"});
+  EXPECT_EQ(resp, "OK");
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 2u);
+  // EXPECT_EQ(metrics.shard_stats.tx_ooo_total, 2u);
+
+  auto a_expect = absl::StrCat("works", "reliably", "once", "again");
+  EXPECT_EQ(Run({"GET", "A"}), a_expect);
+}
+
+// Check that single shard script running with allow-undeclared-keys (i.e. global)
+// running on a single shard setup can be squashed with "shardlocal" execution
+TEST_F(SingleShardMultiTest, MultiSquashGlobalSingleShard) {
+  string_view script = R"(
+--!df flags=allow-undeclared-keys
+redis.call('SET', 'first', 'works');
+redis.call('SET', 'second', 'too');
+redis.call('SET', 'third', 'as well');
+return 'OK';
+)";
+
+  auto resp = Run({"EVAL", script, "0"});
+  EXPECT_EQ(resp, "OK");
+
+  // Check call was shardlocal and out of order
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.coordinator_stats.eval_shardlocal_coordination_cnt, 1u);
+
+  EXPECT_EQ(Run({"GET", "first"}), "works");
+  EXPECT_EQ(Run({"GET", "second"}), "too");
+  EXPECT_EQ(Run({"GET", "third"}), "as well");
+}
+
 TEST_F(MultiTest, MultiEvalModeConflict) {
   const char* s1 = R"(
   --!df flags=allow-undeclared-keys
@@ -1299,6 +1419,43 @@ TEST_F(MultiTest, EvalShaRo) {
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
 }
 
+TEST_F(MultiTest, EvalSelect) {
+  string_view script = R"(--!df flags=X
+redis.call('SET', 'A', ARGV[1])
+redis.call('SELECT', '1')
+redis.call('SET', 'A', ARGV[2])
+return 'OK';
+)";
+  auto script_global = absl::StrReplaceAll(script, {{"X", "allow-undeclared-keys"}});
+  auto resp = Run({"EVAL", script_global, "0", "G1", "G2"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"SELECT", "0"});
+  EXPECT_EQ(Run({"GET", "A"}), "G1");
+  Run({"SELECT", "1"});
+  EXPECT_EQ(Run({"GET", "A"}), "G2");
+  Run({"SELECT", "0"});
+
+  auto script_nonatomic = absl::StrReplaceAll(script, {{"X", "disable-atomicity"}});
+  resp = Run({"EVAL", script_nonatomic, "0", "G3", "G4"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"SELECT", "0"});
+  EXPECT_EQ(Run({"GET", "A"}), "G3");
+  Run({"SELECT", "1"});
+  EXPECT_EQ(Run({"GET", "A"}), "G4");
+  Run({"SELECT", "0"});
+
+  // Don't allow in regular transactions
+  string_view script_fail = R"(
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SELECT', '1')
+redis.call('SET', KEYS[1], ARGV[1])
+)";
+  resp = Run({"EVAL", script_fail, "1", "A", "wont-work"});
+  EXPECT_THAT(resp, ErrArg("SELECT is not allowed in regular"));
+}
+
 TEST_F(MultiTest, StoredCmdBytesMetric) {
   ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
 
@@ -1315,6 +1472,26 @@ TEST_F(MultiTest, StoredCmdBytesMetric) {
   ASSERT_THAT(resp, ArrLen(100));
   ASSERT_THAT(resp.GetVec(), Contains(ArgType(RespExpr::NIL)).Times(100));
   ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+}
+
+// Verify that lazy expiration works inside EVAL running in global mode.
+// Previously, the shard_lock()->Check(EXCLUSIVE) guard in ExpireIfNeeded
+// prevented lazy expiry while a global transaction held the shard lock,
+// causing expired keys to be returned as if they were still alive.
+TEST_F(MultiTest, EvalGlobalLazyExpire) {
+  // Set key with TTL, advance time past expiry, then read via global EVAL.
+  // The global shard lock blocks heartbeat during EVAL, so active expiry
+  // cannot delete the key — only lazy expiry inside GET can.
+  Run({"set", "key", "val", "px", "10"});
+  AdvanceTime(100);
+
+  constexpr char kScript[] = R"(
+--!df flags=allow-undeclared-keys
+return redis.call('GET', KEYS[1])
+)";
+
+  auto resp = Run({"eval", kScript, "1", "key"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 }  // namespace dfly

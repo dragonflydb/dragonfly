@@ -44,7 +44,7 @@ struct JournalReader {
   void SetSource(io::Source* source);
 
   // Try reading entry from source.
-  io::Result<journal::ParsedEntry> ReadEntry();
+  std::error_code ReadEntry(journal::ParsedEntry* dest);
 
  private:
   // Read from source until buffer contains at least num bytes.
@@ -53,8 +53,8 @@ struct JournalReader {
   // Read unsigned integer in packed encoding.
   template <typename UT> io::Result<UT> ReadUInt();
 
-  // Read and copy to buffer, return size.
-  io::Result<size_t> ReadString(io::MutableBytes buffer);
+  // Reads exactly buffer.size() bytes and copies them to buffer.
+  std::error_code ReadString(io::MutableBytes buffer);
 
   // Read argument array into string buffer.
   std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);

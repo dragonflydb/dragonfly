@@ -5,10 +5,12 @@
 
 #include <absl/flags/reflection.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
 
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "facade/facade_types.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -77,7 +79,19 @@ absl::CommandLineFlag* ConfigRegistry::GetFlag(std::string_view config_name) {
 
 optional<string> ConfigRegistry::Get(string_view config_name) {
   absl::CommandLineFlag* flag = GetFlag(config_name);
-  return flag ? flag->CurrentValue() : optional<string>();
+  if (!flag) {
+    return nullopt;
+  }
+
+  // For MemoryBytesFlag, return numeric bytes for compatibility.
+  if (flag->IsOfType<facade::MemoryBytesFlag>()) {
+    auto val = flag->TryGet<facade::MemoryBytesFlag>();
+    if (val.has_value()) {
+      return absl::StrCat(val->value);
+    }
+  }
+
+  return flag->CurrentValue();
 }
 
 void ConfigRegistry::Reset() {

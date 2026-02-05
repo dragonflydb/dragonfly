@@ -8,6 +8,8 @@
 #include "base/logging.h"
 #include "facade/command_id.h"
 #include "facade/error.h"
+#include "facade/parsed_command.h"
+#include "facade/reply_builder.h"
 #include "facade/resp_expr.h"
 #include "strings/human_readable.h"
 
@@ -20,11 +22,13 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 200);
+  static_assert(kSizeConnStats == 216);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
   ADD(dispatch_queue_bytes);
+  ADD(pipeline_queue_entries);
+  ADD(pipeline_queue_bytes);
   ADD(dispatch_queue_subscriber_bytes);
   ADD(pipeline_cmd_cache_bytes);
   ADD(io_read_cnt);
@@ -138,83 +142,6 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
       first_key_(first_key),
       last_key_(last_key),
       acl_categories_(acl_categories) {
-}
-
-static bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
-  if (str.empty())
-    return false;
-
-  const char* cstr = str.data();
-  bool neg = (*cstr == '-');
-  if (neg) {
-    cstr++;
-  }
-  char* end;
-  double d = strtod(cstr, &end);
-
-  if (end == cstr)  // did not succeed to advance
-    return false;
-
-  int64_t scale = 1;
-  switch (*end) {
-    // Considers just the first character after the number
-    // so it matches: 1G, 1GB, 1GiB and 1Gigabytes
-    // NB: an int64 can only go up to <8 EB.
-    case 'E':
-    case 'e':
-      scale <<= 10;  // Fall through...
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'P':
-    case 'p':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'T':
-    case 't':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'G':
-    case 'g':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'M':
-    case 'm':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'K':
-    case 'k':
-      scale <<= 10;
-      ABSL_FALLTHROUGH_INTENDED;
-    case 'B':
-    case 'b':
-    case '\0':
-      break;  // To here.
-    default:
-      return false;
-  }
-  d *= scale;
-  if (int64_t(d) > INT64_MAX || d < 0)
-    return false;
-
-  *num_bytes = static_cast<int64_t>(d + 0.5);
-  if (neg) {
-    *num_bytes = -*num_bytes;
-  }
-  return true;
-}
-
-bool AbslParseFlag(std::string_view in, MemoryBytesFlag* flag, std::string* err) {
-  int64_t val;
-  if (ParseHumanReadableBytes(in, &val) && val >= 0) {
-    flag->value = val;
-    return true;
-  }
-
-  *err = "Use human-readable format, eg.: 500MB, 1G, 1TB";
-  return false;
-}
-
-std::string AbslUnparseFlag(const MemoryBytesFlag& flag) {
-  return strings::HumanReadableNumBytes(flag.value);
 }
 
 }  // namespace facade

@@ -24,8 +24,6 @@
 
 namespace dfly {
 
-enum class ListDir : uint8_t { LEFT, RIGHT };
-
 // Dependent on ExpirePeriod representation of the value.
 constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;  // 8.5 years
 constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
@@ -326,8 +324,9 @@ struct ScanOpts {
   };
   std::optional<Mask> mask;
   size_t min_malloc_size = 0;
+  bool novalues = false;
   bool Matches(std::string_view val_name) const;
-  static OpResult<ScanOpts> TryFrom(CmdArgList args);
+  static OpResult<ScanOpts> TryFrom(CmdArgList args, bool allow_novalues = false);
 };
 
 // I use relative time from Feb 1, 2023 in seconds.

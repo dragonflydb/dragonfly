@@ -39,12 +39,10 @@ add_third_party(
 
 set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
 
-
-
 add_third_party(
   jsoncons
   GIT_REPOSITORY https://github.com/dragonflydb/jsoncons
-  GIT_TAG Dragonfly.178
+  GIT_TAG Dragonfly1.5.0
   GIT_SHALLOW 1
   CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF -DJSONCONS_HAS_POLYMORPHIC_ALLOCATOR=ON"
   LIB "none"
@@ -129,7 +127,7 @@ if (WITH_SEARCH)
     uni-algo
     URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
 
-    CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
+    CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=20"
   )
 
   add_third_party(
@@ -180,6 +178,7 @@ if(WITH_SIMSIMD)
     simsimd
     URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
     BUILD_IN_SOURCE 1
+    CONFIGURE_COMMAND echo skip
     BUILD_COMMAND bash -c "\
       mkdir -p ${THIRD_PARTY_LIB_DIR}/simsimd/lib && \
       ${CMAKE_C_COMPILER} -O3 -fPIC -DNDEBUG \

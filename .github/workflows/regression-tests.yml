@@ -10,19 +10,24 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20"]
+        container: ["ubuntu-dev:20-gcc14"]
         proactor: [Uring]
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
 
     runs-on: ${{ matrix.runner }}
 
+    permissions:
+      id-token: write
+      contents: read
+
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /var/crash:/var/crash
-
+        - /:/hostroot
+        - /mnt:/mnt
     steps:
       - uses: actions/checkout@v6
         with:
@@ -33,7 +38,7 @@ jobs:
           cat /proc/cpuinfo
           ulimit -a
           env
-
+          lsblk -l
       - name: Configure & Build
         run: |
           # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -45,6 +50,12 @@ jobs:
           pwd
           ls -l ..
 
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+
       - name: Run regression tests action
         uses: ./.github/actions/regression-tests
         with:
@@ -52,26 +63,14 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
-          aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
-          aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: logs
           path: /tmp/failed/*
-
-      - name: Copy binary on a self hosted runner
-        if: failure()
-        run: |
-          # We must use sh syntax.
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
-            cd ${GITHUB_WORKSPACE}/build
-            timestamp=$(date +%Y-%m-%d_%H:%M:%S)
-            mv ./dragonfly /var/crash/dragonfy_${timestamp}
-          fi
 
   lint-test-chart:
     runs-on: ubuntu-latest

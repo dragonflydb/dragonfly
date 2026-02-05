@@ -76,6 +76,10 @@ io::FileSource RdbTest::GetSource(string name) {
   return io::FileSource(*open_res);
 }
 
+static string FloatToBytes(float f) {
+  return string(reinterpret_cast<const char*>(&f), sizeof(float));
+}
+
 TEST_F(RdbTest, SnapshotIdTest) {
   absl::SetFlag(&FLAGS_num_shards, num_threads_);
   ResetService();
@@ -717,6 +721,48 @@ TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
   const auto& v = search.GetVec();
   ASSERT_FALSE(v.empty());
   EXPECT_THAT(v.front(), IntArg(1));
+}
+
+TEST_F(RdbTest, RestoreVectorSearchIndexHnsw) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "only_vec_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "embedding",
+           "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"}),
+      "OK");
+
+  EXPECT_EQ(Run({"FT.CREATE", "vec_idx", "ON",   "HASH",      "PREFIX",          "1",    "doc:",
+                 "SCHEMA",    "name",    "TEXT", "embedding", "VECTOR",          "HNSW", "6",
+                 "TYPE",      "FLOAT32", "DIM",  "2",         "DISTANCE_METRIC", "L2"}),
+            "OK");
+
+  Run({"HSET", "doc:1", "name", "first", "embedding",
+       StrCat(FloatToBytes(1.0f), FloatToBytes(2.0f))});
+  Run({"HSET", "doc:2", "name", "second", "embedding",
+       StrCat(FloatToBytes(3.0f), FloatToBytes(4.0f))});
+  Run({"HSET", "doc:3", "name", "third", "embedding",
+       StrCat(FloatToBytes(5.0f), FloatToBytes(6.0f))});
+
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+
+  // Verify text search still works on the restored index
+  auto search = Run({"FT.SEARCH", "vec_idx", "first"});
+  ASSERT_THAT(search, ArgType(RespExpr::ARRAY));
+  const auto& v = search.GetVec();
+  ASSERT_FALSE(v.empty());
+  EXPECT_THAT(v.front(), IntArg(1));
+
+  // Verify KNN vector search works on the restored index
+  // Query vector close to (1.0, 2.0) should find doc:1 as nearest
+  string query_vec = StrCat(FloatToBytes(1.1f), FloatToBytes(2.1f));
+  auto knn_search = Run({"FT.SEARCH", "vec_idx", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
+                         query_vec, "RETURN", "1", "name"});
+  ASSERT_THAT(knn_search, ArgType(RespExpr::ARRAY));
+  EXPECT_GE(knn_search.GetVec().front().GetInt(), 1);
+
+  // The same check for another index with only vector field
+  knn_search = Run({"FT.SEARCH", "only_vec_idx", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec",
+                    query_vec, "RETURN", "1", "name"});
+  ASSERT_THAT(knn_search, ArgType(RespExpr::ARRAY));
+  EXPECT_GE(knn_search.GetVec().front().GetInt(), 1);
 }
 
 TEST_F(RdbTest, DflyLoadAppend) {

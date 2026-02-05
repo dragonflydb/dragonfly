@@ -857,25 +857,43 @@ void sdssubstr(sds s, size_t start, size_t len) {
  *
  * The string is modified in-place.
  *
- * NOTE: this function can be misleading and can have unexpected behaviour,
- * specifically when you want the length of the new string to be 0.
- * Having start==end will result in a string with one character.
- * please consider using sdssubstr instead.
+ * Return value:
+ * -1 (error) if sdslen(s) is larger than maximum positive ssize_t value.
+ *  0 on success.
  *
  * Example:
  *
  * s = sdsnew("Hello World");
  * sdsrange(s,1,-1); => "ello World"
  */
-void sdsrange(sds s, ssize_t start, ssize_t end) {
+int sdsrange(sds s, ssize_t start, ssize_t end) {
     size_t newlen, len = sdslen(s);
-    if (len == 0) return;
-    if (start < 0)
+    if (len > SSIZE_MAX) return -1;
+
+    if (len == 0) return 0;
+    if (start < 0) {
         start = len+start;
-    if (end < 0)
+        if (start < 0) start = 0;
+    }
+    if (end < 0) {
         end = len+end;
+        if (end < 0) end = 0;
+    }
     newlen = (start > end) ? 0 : (end-start)+1;
-    sdssubstr(s, start, newlen);
+    if (newlen != 0) {
+        if (start >= (ssize_t)len) {
+            newlen = 0;
+        } else if (end >= (ssize_t)len) {
+            end = len-1;
+            newlen = (start > end) ? 0 : (end-start)+1;
+        }
+    } else {
+        start = 0;
+    }
+    if (start && newlen) memmove(s, s+start, newlen);
+    s[newlen] = 0;
+    sdssetlen(s,newlen);
+    return 0;
 }
 
 /* Apply tolower() to every character of the sds string 's'. */

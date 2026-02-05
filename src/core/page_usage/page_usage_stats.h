@@ -17,6 +17,35 @@ struct hdr_histogram;
 
 namespace dfly {
 
+class CycleQuota {
+ public:
+  static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
+  static constexpr uint64_t kDefaultDefragQuota = 150;
+
+  explicit CycleQuota(uint64_t quota_usec);
+
+  // Sets the starting point for the quota to be counted from. Can be called multiple times to reset
+  // the quota counter.
+  void Arm();
+
+  bool Depleted() const;
+
+  uint64_t UsedCycles() const;
+
+  static CycleQuota Unlimited();
+
+  // Extends the quota by the given amount. If any quota was already left over, it is also retained
+  // on top of the newly added quota. For example, if 80 usec was left, and we extend by 50 usec,
+  // the task now has 130 usec before the quota will be depleted.
+  void Extend(uint64_t quota_usec);
+
+ private:
+  explicit CycleQuota(uint64_t quota_cycles, bool /*tag*/);
+
+  uint64_t quota_cycles_;
+  uint64_t start_cycles_{0};
+};
+
 enum class CollectPageStats : uint8_t { YES, NO };
 
 struct CollectedPageStats {
@@ -42,11 +71,19 @@ struct CollectedPageStats {
 
 class PageUsage {
  public:
-  static constexpr uint64_t kMaxQuota = std::numeric_limits<uint64_t>::max();
+  PageUsage(CollectPageStats collect_stats, float threshold,
+            CycleQuota quota = CycleQuota::Unlimited());
 
-  PageUsage(CollectPageStats collect_stats, float threshold, uint64_t quota_usec = kMaxQuota);
+  virtual ~PageUsage() = default;
 
-  bool IsPageForObjectUnderUtilized(void* object);
+  // Resets the quota timer to split defragmentation into different groups with separate quotas.
+  // For example, first defragment objects with a quota and then defragment search indices with the
+  // same quota independently.
+  void ArmQuotaTimer();
+
+  uint64_t UsedQuotaCycles() const;
+
+  virtual bool IsPageForObjectUnderUtilized(void* object);
 
   bool IsPageForObjectUnderUtilized(mi_heap_t* heap, void* object);
 
@@ -69,6 +106,8 @@ class PageUsage {
   }
 
   bool QuotaDepleted() const;
+
+  void ExtendQuota(uint64_t quota_usec);
 
  private:
   CollectPageStats collect_stats_{CollectPageStats::NO};
@@ -95,11 +134,10 @@ class PageUsage {
 
   UniquePages unique_pages_;
 
+  CycleQuota quota_;
+
   // For use in testing, forces reallocate check to always return true
   bool force_reallocate_{false};
-
-  uint64_t quota_cycles_;
-  uint64_t start_cycles_;
 };
 
 }  // namespace dfly

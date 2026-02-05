@@ -4,6 +4,10 @@
 
 #include "server/hset_family.h"
 
+#include <absl/cleanup/cleanup.h>
+
+#include <tuple>
+
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/sds.h"
@@ -190,6 +194,22 @@ TEST_F(HSetFamilyTest, HIncrRespected) {
   EXPECT_EQ(11, CheckedInt({"hget", "key", "a"}));
 }
 
+TEST_F(HSetFamilyTest, HIncrCmdsPreserveTtl) {
+  Run({"hsetex", "key", "5", "a", "1"});
+  EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "a"}));
+  EXPECT_EQ(2, CheckedInt({"hincrby", "key", "a", "1"}));
+  EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "a"}));
+
+  // If the field has already expired by the time hincrby runs, the TTL is default
+  AdvanceTime(5 * 1000);
+  EXPECT_EQ(1, CheckedInt({"hincrby", "key", "a", "1"}));
+  EXPECT_EQ(-1, CheckedInt({"fieldttl", "key", "a"}));
+
+  Run({"hsetex", "key", "5", "fl", "1.1"});
+  EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "fl"}));
+  EXPECT_EQ("2.2", Run({"hincrbyfloat", "key", "fl", "1.1"}));
+}
+
 TEST_F(HSetFamilyTest, HScan) {
   auto resp = Run("hscan non-existing-key 100 count 5");
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
@@ -233,6 +253,42 @@ TEST_F(HSetFamilyTest, HScan) {
   // See https://redis.io/commands/scan/ --> "The COUNT option", for why this cannot be exact
   EXPECT_GE(vec.size(), 40);  // This should be larger than (20 * 2) and less than about 50
   EXPECT_LT(vec.size(), 60);
+
+  // Test NOVALUES option on 'myhash' (which has 10 items)
+  resp = Run({"hscan", "myhash", "0", "NOVALUES"});
+  EXPECT_THAT(resp, ArrLen(2));
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 10);
+  EXPECT_THAT(vec, Each(StartsWith("Field")));  // Should contain "Field-X", but never "Value-X"
+}
+
+// Verifies that the NOVALUES flag functions correctly when combined with other arguments
+// like MATCH and COUNT, ensuring values are suppressed even during filtered or limited scans.
+TEST_F(HSetFamilyTest, HScan_NoValuesCombinations) {
+  Run({"HSET", "h_combos", "user:1", "v1", "user:2", "v2", "admin:1", "v3"});
+
+  // case 1: MATCH + NOVALUES
+  // We want only keys starting with "user*", and NO values.
+  auto resp = Run({"HSCAN", "h_combos", "0", "MATCH", "user:*", "NOVALUES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  auto vec = StrArray(resp.GetVec()[1]);
+
+  // Should find: "user:1", "user:2" (2 items)
+  // Should NOT find: "admin:1" (filtered out)
+  // Should NOT find: "v1", "v2" (values suppressed)
+  EXPECT_EQ(vec.size(), 2);
+  EXPECT_THAT(vec, UnorderedElementsAre("user:1", "user:2"));
+
+  // case 2: COUNT + NOVALUES
+  // Populate a larger hash to force scanning behavior, verify no values and only key present
+  for (int i = 0; i < 50; ++i) {
+    Run({"HSET", "h_large", absl::StrCat("k", i), "v"});
+  }
+  resp = Run({"HSCAN", "h_large", "0", "COUNT", "10", "NOVALUES"});
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_GT(vec.size(), 0);
+  EXPECT_THAT(vec, Not(Contains("v")));
+  EXPECT_THAT(vec, Each(StartsWith("k")));
 }
 
 TEST_F(HSetFamilyTest, HScanLpMatchBug) {
@@ -697,6 +753,19 @@ TEST_F(HSetFamilyTest, HRandFieldRespFormat) {
     EXPECT_THAT(vec[i], AnyOf("a", "b", "c"));
     EXPECT_THAT(vec[i + 1], expected[vec[i].GetView()]);
   }
+}
+
+// Make sure no "Zombie Key": HEXPIRE with TTL 0 must delete the key
+// if the hash becomes empty. If the key remains (zombie), saving the RDB or running
+// commands like EXISTS against it may lead to crashes or other incorrect behavior.
+TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
+  constexpr auto kRdbFile = "zombie_test.rdb";
+  auto cleanup = absl::MakeCleanup([kRdbFile] { std::ignore = remove(kRdbFile); });
+  Run({"HSET", "zombie", "f", "v"});
+  auto resp = Run({"HEXPIRE", "zombie", "0", "FIELDS", "1", "f"});
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "zombie"}));
+  EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }
 
 }  // namespace dfly

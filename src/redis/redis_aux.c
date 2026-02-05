@@ -13,15 +13,9 @@ void InitRedisTables() {
   crc64_init();
   memset(&server, 0, sizeof(server));
 
-  // been used by t_zset routines that convert listpack to skiplist for cases
-  // above these thresholds.
-  server.zset_max_listpack_entries = 128;
-  server.zset_max_listpack_value = 32;
-
   server.max_map_field_len = 64;
   server.max_listpack_map_bytes = 1024;
 
-  server.stream_node_max_bytes = 4096;
   server.stream_node_max_entries = 100;
 }
 
@@ -44,6 +38,7 @@ void memrev64(void* p) {
   x[4] = t;
 }
 
+// used by t_stream.c
 uint64_t intrev64(uint64_t v) {
   memrev64(&v);
   return v;

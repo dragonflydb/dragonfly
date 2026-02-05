@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/json_family.h"
-
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
@@ -22,15 +20,16 @@
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/common.h"
+#include "server/conn_context.h"
 #include "server/detail/wrapped_json_path.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
 #include "server/sharding.h"
-#include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 
@@ -100,7 +99,7 @@ class JsonAutoUpdater {
   }
 
   void AddDocToIndexes() {
-    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, &GetPrimeValue());
   }
 
   ~JsonAutoUpdater() {
@@ -129,6 +128,10 @@ class JsonAutoUpdater {
     return GetPrimeValue().GetJson();
   }
 
+  const DbSlice::Iterator& GetIterator() const {
+    return it_.it;
+  }
+
  private:
   size_t GetMemoryUsage() const {
     return static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
@@ -144,7 +147,6 @@ class JsonAutoUpdater {
     }
   }
 
- private:
   const OpArgs& op_args_;
   string_view key_;
   DbSlice::ItAndUpdater it_;
@@ -209,38 +211,43 @@ ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
 
 namespace reply_generic {
 
-template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb);
+template <typename I> void Send(I begin, I end, CommandContext* cmd_cntx);
 
-void Send(bool value, RedisReplyBuilder* rb) {
-  rb->SendBulkString(value ? "true"sv : "false"sv);
+inline RedisReplyBuilder* RB(CommandContext* cmd_cntx) {
+  return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 }
 
-void Send(long value, RedisReplyBuilder* rb) {
-  rb->SendLong(value);
+void Send(bool value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendBulkString(value ? "true"sv : "false"sv);
 }
 
-void Send(size_t value, RedisReplyBuilder* rb) {
-  rb->SendLong(value);
+void Send(long value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendLong(value);
 }
 
-void Send(double value, RedisReplyBuilder* rb) {
-  rb->SendDouble(value);
+void Send(size_t value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendLong(value);
 }
 
-void Send(const std::string& value, RedisReplyBuilder* rb) {
-  rb->SendBulkString(value);
+void Send(double value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendDouble(value);
 }
 
-void Send(const std::vector<std::string>& vec, RedisReplyBuilder* rb) {
-  Send(vec.begin(), vec.end(), rb);
+void Send(const std::string& value, CommandContext* cmd_cntx) {
+  RB(cmd_cntx)->SendBulkString(value);
+}
+
+void Send(const std::vector<std::string>& vec, CommandContext* cmd_cntx) {
+  Send(vec.begin(), vec.end(), cmd_cntx);
 }
 
 template <typename Allocator>
-void Send(const JsonWithAllocator<Allocator>& value, RedisReplyBuilder* rb) {
+void Send(const JsonWithAllocator<Allocator>& value, CommandContext* cmd_cntx) {
+  auto* rb = RB(cmd_cntx);
   if (value.is_double()) {
-    Send(value.as_double(), rb);
+    Send(value.as_double(), cmd_cntx);
   } else if (value.is_number()) {
-    Send(value.template as_integer<long>(), rb);
+    Send(value.template as_integer<long>(), cmd_cntx);
   } else if (value.is_bool()) {
     rb->SendSimpleString(value.as_bool() ? "true" : "false");
   } else if (value.is_null()) {
@@ -253,54 +260,55 @@ void Send(const JsonWithAllocator<Allocator>& value, RedisReplyBuilder* rb) {
     for (const auto& item : value.object_range()) {
       rb->StartArray(2);
       rb->SendBulkString(item.key());
-      Send(item.value(), rb);
+      Send(item.value(), cmd_cntx);
     }
   } else if (value.is_array()) {
     if (rb->IsResp3()) {
       rb->StartArray(value.size());
       for (const auto& item : value.array_range()) {
-        Send(item, rb);
+        Send(item, cmd_cntx);
       }
     } else {
       rb->StartArray(value.size() + 1);
       rb->SendSimpleString("[");
       for (const auto& item : value.array_range()) {
-        Send(item, rb);
+        Send(item, cmd_cntx);
       }
     }
   }
 }
 
-template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* rb) {
+template <typename T> void Send(const std::optional<T>& opt, CommandContext* cmd_cntx) {
   if (opt.has_value()) {
-    Send(opt.value(), rb);
+    Send(opt.value(), cmd_cntx);
   } else {
-    rb->SendNull();
+    RB(cmd_cntx)->SendNull();
   }
 }
 
-template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
+template <typename I> void Send(I begin, I end, CommandContext* cmd_cntx) {
+  RedisReplyBuilder* rb = RB(cmd_cntx);
   RedisReplyBuilder::ReplyScope scope{rb};
   if (begin == end) {
     rb->SendEmptyArray();
   } else {
     if constexpr (is_same_v<decltype(*begin), const string>) {
-      rb->SendBulkStrArr(facade::OwnedArgSlice{begin, end});
+      rb->SendBulkStrArr(cmn::OwnedArgSlice{begin, end});
     } else {
       rb->StartArray(end - begin);
       for (auto i = begin; i != end; ++i) {
-        Send(*i, rb);
+        Send(*i, cmd_cntx);
       }
     }
   }
 }
 
-template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyBuilder* rb) {
+template <typename T> void Send(const JsonCallbackResult<T>& result, CommandContext* cmd_cntx) {
+  RedisReplyBuilder* rb = RB(cmd_cntx);
   if (result.ShouldSendNil())
     return rb->SendNull();
-
   if (result.ShouldSendWrongType())
-    return rb->SendError(OpStatus::WRONG_JSON_TYPE);
+    return cmd_cntx->SendError(OpStatus::WRONG_JSON_TYPE);
 
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
@@ -308,7 +316,7 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
     if (rb->IsResp3()) {
       rb->StartArray(1);
     }
-    Send(result.AsV1(), rb);
+    Send(result.AsV1(), cmd_cntx);
   } else {
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
@@ -320,36 +328,37 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyB
         if constexpr (std::is_same_v<T, std::string>) {
           rb->StartArray(1);
         }
-        Send(item, rb);
+        Send(item, cmd_cntx);
       }
     } else {
-      Send(arr.begin(), arr.end(), rb);
+      Send(arr.begin(), arr.end(), cmd_cntx);
     }
   }
 }
 
-template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb) {
-  RedisReplyBuilder::ReplyScope scope{rb};
+template <typename T> void Send(const OpResult<T>& result, CommandContext* cmd_cntx) {
   if (result) {
-    Send(result.value(), rb);
+    RedisReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
+    Send(result.value(), cmd_cntx);
   } else {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void SendJsonString(const OpResult<string>& result, RedisReplyBuilder* rb) {
-  RedisReplyBuilder::ReplyScope scope{rb};
+void SendJsonString(const OpResult<string>& result, CommandContext* cmd_cntx) {
   if (result) {
+    RedisReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
+    RedisReplyBuilder* rb = RB(cmd_cntx);
     const string& json_str = result.value();
     if (rb->IsResp3()) {
       if (const std::optional<TmpJson> parsed_json = JsonFromString(json_str)) {
-        Send(parsed_json.value(), rb);
+        Send(parsed_json.value(), cmd_cntx);
         return;
       }
     }
-    Send(json_str, rb);
+    Send(json_str, cmd_cntx);
   } else {
-    rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
@@ -495,35 +504,36 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   JsonAutoUpdater updater(op_args, key, *std::move(it_res),
                           {.disable_indexing = true, .update_on_delete = false});
 
-  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-  if (!parsed_json) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    if (type == OBJ_JSON) {
-      // We need to add the document to the indexes, because we removed it before
-      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+  {
+    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+    if (!parsed_json) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      if (type == OBJ_JSON) {
+        // We need to add the document to the indexes, because we removed it before
+        op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
+      }
+      return OpStatus::INVALID_JSON;
     }
-    return OpStatus::INVALID_JSON;
+
+    op_args.GetDbSlice().RemoveExpire(op_args.db_cntx.db_index, updater.GetIterator());
+
+    if (JsonEnconding() == kEncodingJsonFlat) {
+      flexbuffers::Builder fbb;
+      json::FromJsonType(*parsed_json, &fbb);
+      fbb.Finish();
+      const auto& buf = fbb.GetBuffer();
+      updater.GetPrimeValue().SetJson(buf.data(), buf.size());
+    } else {
+      updater.GetPrimeValue().SetJson(std::move(*parsed_json));
+    }
+
+    // We should reset parsed_json before setting the size of the json, because
+    // std::optional still holds the value and it will be deallocated
   }
-
-  op_args.GetDbSlice().RemoveExpire(op_args.db_cntx.db_index, it_res->it);
-
-  if (JsonEnconding() == kEncodingJsonFlat) {
-    flexbuffers::Builder fbb;
-    json::FromJsonType(*parsed_json, &fbb);
-    fbb.Finish();
-    const auto& buf = fbb.GetBuffer();
-    updater.GetPrimeValue().SetJson(buf.data(), buf.size());
-  } else {
-    updater.GetPrimeValue().SetJson(std::move(*parsed_json));
-  }
-
-  // We should do reset before setting the size of the json, because
-  // std::optional still holds the value and it will be deallocated
-  parsed_json.reset();
   updater.SetJsonSize();
 
   // We need to manually run add document here
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
 
   return OpStatus::OK;
 }
@@ -988,18 +998,16 @@ auto OpToggle(const OpArgs& op_args, string_view key,
 }
 
 template <typename T>
-auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, Transaction* tx,
-                   SinkReplyBuilder* builder) {
+auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpToggle<T>(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-enum ArithmeticOpType { OP_ADD, OP_MULTIPLY };
+enum ArithmeticOpType : uint8_t { OP_ADD, OP_MULTIPLY };
 
 void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* val,
                 bool* overflow) {
@@ -1305,7 +1313,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
   parsed_values.reserve(new_values.size());
 
   for (const auto& nv : new_values) {
-    const optional<JsonType> v = ShardJsonFromString(nv);
+    optional<JsonType> v = ShardJsonFromString(nv);
     if (!v) {
       return OpStatus::SYNTAX_ERR;
     }
@@ -1362,7 +1370,7 @@ OpResult<JsonCallbackResult<optional<optional<unsigned long>>>> OpArrAppend(
   parsed_values.reserve(append_values.size());
 
   for (const auto& v : append_values) {
-    const optional<JsonType> parsed = ShardJsonFromString(v);
+    optional<JsonType> parsed = ShardJsonFromString(v);
     if (!parsed) {
       return OpStatus::SYNTAX_ERR;
     }
@@ -1653,10 +1661,10 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 
 }  // namespace
 
-void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto res = parser.TryMapNext("NX", 1, "XX", 2);
@@ -1671,7 +1679,7 @@ void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
                  is_xx_condition);
   };
 
-  OpResult<bool> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<bool> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     if (*result) {
@@ -1680,15 +1688,15 @@ void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
       builder->SendNull();
     }
   } else {
-    builder->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
 // JSON.MSET key path value [key path value ...]
-void JsonFamily::MSet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 3u);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() % 3 != 0) {
     return builder->SendError(facade::WrongNumArgsError("json.mset"));
   }
@@ -1702,55 +1710,55 @@ void JsonFamily::MSet(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(cb);
+  cmd_cntx->tx()->ScheduleSingleHop(cb);
 
   if (*status != OpStatus::OK)
-    return builder->SendError(*status);
+    return cmd_cntx->SendError(*status);
   builder->SendOk();
 }
 
 // JSON.MERGE key path value
 // Based on https://datatracker.ietf.org/doc/html/rfc7386 spec
-void JsonFamily::Merge(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.Next();
   string_view value = parser.Next();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpMerge(t->GetOpArgs(shard), key, path, json_path, value);
   };
 
-  OpStatus status = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (status == OpStatus::OK)
     return builder->SendOk();
-  builder->SendError(status);
+  cmd_cntx->SendError(status);
 }
 
-void JsonFamily::Resp(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdResp(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpResp(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  reply_generic::Send(result, builder);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdDebug(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view command = parser.Next();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (absl::EqualsIgnoreCase(command, "help")) {
     builder->StartArray(3);
@@ -1772,16 +1780,16 @@ void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
     ShardId sid = Shard(key, shard_set->size());
+    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
     auto cb = [&]() {
       EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->conn_state.db_index};
+      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
       OpArgs op_args{shard, nullptr, db_cntx};
       return OpMemory(op_args, key, json_path);
     };
 
     auto result = shard_set->Await(sid, std::move(cb));
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    reply_generic::Send(result, rb);
+    reply_generic::Send(result, cmd_cntx);
     return;
   }
 
@@ -1793,28 +1801,28 @@ void JsonFamily::Debug(CmdArgList args, const CommandContext& cmd_cntx) {
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
     ShardId sid = Shard(key, shard_set->size());
+    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
     auto cb = [&]() {
       EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->conn_state.db_index};
+      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
       OpArgs op_args{shard, nullptr, db_cntx};
       return OpFields(op_args, key, json_path);
     };
 
     auto result = shard_set->Await(sid, std::move(cb));
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    reply_generic::Send(result, rb);
+    reply_generic::Send(result, cmd_cntx);
     return;
   }
 
   builder->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
 }
 
-void JsonFamily::MGet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   string_view path = ArgS(args, args.size() - 1);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   unsigned shard_count = shard_set->size();
@@ -1826,16 +1834,16 @@ void JsonFamily::MGet(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  OpStatus result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
   std::vector<std::optional<std::string>> results(args.size() - 1);
   for (ShardId sid = 0; sid < shard_count; ++sid) {
-    if (!cmd_cntx.tx->IsActive(sid))
+    if (!cmd_cntx->tx()->IsActive(sid))
       continue;
 
     std::vector<std::optional<std::string>>& res = mget_resp[sid];
-    ShardArgs shard_args = cmd_cntx.tx->GetShardArgs(sid);
+    ShardArgs shard_args = cmd_cntx->tx()->GetShardArgs(sid);
     unsigned src_index = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_index) {
       if (!res[src_index])
@@ -1846,16 +1854,15 @@ void JsonFamily::MGet(CmdArgList args, const CommandContext& cmd_cntx) {
     }
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(results.begin(), results.end(), rb);
+  reply_generic::Send(results.begin(), results.end(), cmd_cntx);
 }
 
-void JsonFamily::ArrIndex(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdArrIndex(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.Next();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   string_view search_value = parser.Next();
@@ -1882,16 +1889,16 @@ void JsonFamily::ArrIndex(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpArrIndex(t->GetOpArgs(shard), key, json_path, search_value, start_index, end_index);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  reply_generic::Send(result, builder);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdArrInsert(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   int index = -1;
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(ArgS(args, 2), &index)) {
     VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 2);
     builder->SendError(kInvalidIntErr);
@@ -1909,16 +1916,15 @@ void JsonFamily::ArrInsert(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpArrInsert(t->GetOpArgs(shard), key, json_path, index, new_values);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdArrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   vector<string_view> append_values;
@@ -1930,17 +1936,17 @@ void JsonFamily::ArrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpArrAppend(t->GetOpArgs(shard), key, json_path, append_values);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  reply_generic::Send(result, builder);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrTrim(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdArrTrim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   int start_index;
   int stop_index;
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(ArgS(args, 2), &start_index)) {
     VLOG(1) << "Failed to parse array start index";
     builder->SendError(kInvalidIntErr);
@@ -1959,21 +1965,18 @@ void JsonFamily::ArrTrim(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpArrTrim(t->GetOpArgs(shard), key, json_path, start_index, stop_index);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrPop(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdArrPop(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
   int index = parser.NextOrDefault<int>(-1);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.TakeError(); err) {
-    return builder->SendError(err.MakeReply());
-  }
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
@@ -1981,34 +1984,32 @@ void JsonFamily::ArrPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpArrPop(t->GetOpArgs(shard), key, json_path, index);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Clear(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdClear(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClear(t->GetOpArgs(shard), key, json_path);
   };
 
-  OpResult<long> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdStrAppend(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   string_view value = ArgS(args, 2);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
@@ -2022,191 +2023,182 @@ void JsonFamily::StrAppend(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStrAppend(t->GetOpArgs(shard), key, json_path, json_string);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  reply_generic::Send(result, builder);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ObjKeys(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdObjKeys(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpObjKeys(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDel(t->GetOpArgs(shard), key, path, json_path);
   };
 
-  OpResult<long> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  OpResult<long> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::NumIncrBy(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdNumIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::SendJsonString(result, rb);
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::SendJsonString(result, cmd_cntx);
 }
 
-void JsonFamily::NumMultBy(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdNumMultBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::SendJsonString(result, rb);
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::SendJsonString(result, cmd_cntx);
 }
 
-void JsonFamily::Toggle(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdToggle(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   if (json_path.IsLegacyModePath()) {
-    ExecuteToggle<bool>(key, json_path, cmd_cntx.tx, builder);
+    ExecuteToggle<bool>(key, json_path, cmd_cntx);
   } else {
-    ExecuteToggle<long>(key, json_path, cmd_cntx.tx, builder);
+    ExecuteToggle<long>(key, json_path, cmd_cntx);
   }
 }
 
-void JsonFamily::Type(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdType(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpType(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ArrLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdArrLen(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrLen(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::ObjLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdObjLen(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpObjLen(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::StrLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view path = parser.NextOrDefault();
 
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key, json_path);
   };
 
-  auto result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  reply_generic::Send(result, rb);
+  auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  reply_generic::Send(result, cmd_cntx);
 }
 
-void JsonFamily::Get(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 1U);
 
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   auto params = ParseJsonGetParams(&parser, builder);
   if (!params) {
     return;  // ParseJsonGetParams should have already sent an error
   }
 
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpJsonGet(t->GetOpArgs(shard), key, params.value());
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
   if (result == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();  // Match Redis
   } else {
-    reply_generic::Send(result, rb);
+    reply_generic::Send(result, cmd_cntx);
   }
 }
 
-#define HFUNC(x) SetHandler(&JsonFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 // Redis modules do not have acl categories, therefore they can not be used by default.
 // However, we do not implement those as modules and therefore we can define our own
@@ -2214,7 +2206,7 @@ void JsonFamily::Get(CmdArgList args, const CommandContext& cmd_cntx) {
 // For now I introduced only the JSON category which will be the default.
 // TODO: Add sensible defaults/categories to json commands
 
-void JsonFamily::Register(CommandRegistry* registry) {
+void RegisterJsonFamily(CommandRegistry* registry) {
   constexpr size_t kMsetFlags =
       CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
   registry->StartFamily();

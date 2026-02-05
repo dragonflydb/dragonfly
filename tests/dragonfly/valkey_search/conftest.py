@@ -2,8 +2,20 @@
 Pytest configuration for valkey-search tests on Dragonfly
 """
 
+import os
 import pytest
 from .. import dfly_args
+
+# Check if integration directory exists
+_integration_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "integration")
+INTEGRATION_AVAILABLE = os.path.isdir(_integration_dir)
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Skip collection of integration tests if directory is not synced."""
+    if not INTEGRATION_AVAILABLE and "integration" in str(collection_path):
+        return True
+    return None
 
 
 # List of tests to skip - add test node IDs here

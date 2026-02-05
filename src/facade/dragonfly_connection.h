@@ -14,13 +14,13 @@
 #include <variant>
 
 #include "common/backed_args.h"
-#include "facade/acl_commands_def.h"
+#include "facade/connection_ref.h"
 #include "facade/facade_types.h"
-#include "facade/memcache_parser.h"
-#include "facade/resp_expr.h"
+#include "facade/parsed_command.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
@@ -43,10 +43,10 @@ constexpr size_t kReqStorageSize = 120;
 namespace facade {
 
 class ConnectionContext;
-class RedisParser;
 class ServiceInterface;
 class SinkReplyBuilder;
 class DiskBackedQueue;
+class RespSrvParser;
 
 // Connection represents an active connection for a client.
 //
@@ -81,28 +81,8 @@ class Connection : public util::Connection {
     bool force_unsubscribe = false;
   };
 
-  // Pipeline message, accumulated Redis command to be executed.
-  using PipelineMessage = cmn::BackedArguments;
-
-  // Pipeline message, accumulated Memcached command to be executed.
-  struct MCPipelineMessage {
-    MCPipelineMessage(MemcacheParser::Command&& cmd, std::string_view value);
-
-    MemcacheParser::Command cmd;
-    std::string value;
-  };
-
   // Monitor message, carries a simple payload with the registered event to be sent.
   struct MonitorMessage : public std::string {};
-
-  // ACL Update message, contains ACL updates to be applied to the connection.
-  struct AclUpdateMessage {
-    std::string username;
-    std::vector<uint64_t> commands;
-    dfly::acl::AclKeys keys;
-    dfly::acl::AclPubSub pub_sub;
-    size_t db_indx;
-  };
 
   // Migration request message, the async fiber stops to give way for thread migration.
   struct MigrationRequestMessage {};
@@ -117,27 +97,18 @@ class Connection : public util::Connection {
     bool invalidate_due_to_flush = false;
   };
 
-  // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage>;
+  // Pipeline message, accumulated Redis command to be executed.
+  using PipelineMessagePtr = std::unique_ptr<ParsedCommand>;
   using PubMessagePtr = std::unique_ptr<PubMessage>;
-
-  using MCPipelineMessagePtr = std::unique_ptr<MCPipelineMessage>;
-  using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
   struct MessageHandle {
     size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
-    // Control messages put themselves at the front of the queue, but only after all other
-    // control ones. Used for management messages.
-    bool IsControl() const {
-      return std::holds_alternative<AclUpdateMessagePtr>(handle) ||
-             std::holds_alternative<CheckpointMessage>(handle);
-    }
-
-    bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle) ||
-             std::holds_alternative<MCPipelineMessagePtr>(handle);
+    // Checkpoint messages put themselves at the front of the queue, but only in relative
+    // order to the rest of the messages in the queue.
+    bool IsCheckPoint() const {
+      return std::holds_alternative<CheckpointMessage>(handle);
     }
 
     bool IsPubMsg() const {
@@ -148,10 +119,9 @@ class Connection : public util::Connection {
       return std::holds_alternative<MonitorMessage>(handle);
     }
 
-    bool IsReplying() const;  // control messges don't reply, messages carrying data do
+    bool IsReplying() const;  // control messages don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
-                 AclUpdateMessagePtr, MigrationRequestMessage, CheckpointMessage,
+    std::variant<MonitorMessage, PubMessagePtr, MigrationRequestMessage, CheckpointMessage,
                  InvalidationMessage>
         handle;
 
@@ -165,37 +135,7 @@ class Connection : public util::Connection {
 
   enum Phase : uint8_t { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
-  // Weak reference to a connection, invalidated upon connection close.
-  // Used to dispatch async operations for the connection without worrying about pointer lifetime.
-  struct WeakRef {
-   public:
-    // Get residing thread of connection. Thread-safe.
-    unsigned LastKnownThreadId() const {
-      return last_known_thread_id_;
-    }
-    // Get pointer to connection if still valid, nullptr if expired.
-    // Can only be called from connection's thread. Validity is guaranteed
-    // only until the next suspension point.
-    Connection* Get() const;
-
-    // Returns thue if the reference expired. Thread-safe.
-    bool IsExpired() const;
-
-    // Returns client id.Thread-safe.
-    uint32_t GetClientId() const;
-
-    bool operator<(const WeakRef& other) const;
-    bool operator==(const WeakRef& other) const;
-
-   private:
-    friend class Connection;
-
-    WeakRef(const std::shared_ptr<Connection>& ptr, unsigned thread_id, uint32_t client_id);
-
-    std::weak_ptr<Connection> ptr_;
-    unsigned last_known_thread_id_;
-    uint32_t client_id_;
-  };
+  using WeakRef = ConnectionRef;
 
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
@@ -203,9 +143,6 @@ class Connection : public util::Connection {
 
   // Add monitor message to dispatch queue.
   void SendMonitorMessageAsync(std::string);
-
-  // Add acl update to dispatch queue.
-  void SendAclUpdateAsync(AclUpdateMessage msg);
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
   // decrement it once finished.
@@ -312,6 +249,12 @@ class Connection : public util::Connection {
 
   bool IsSending() const;
 
+  void Notify() {
+    io_event_.notify();
+  }
+
+  void MarkForClose();
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -333,6 +276,10 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
+  void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  // Main loop reading client messages and passing requests to dispatch queue.
+  std::variant<std::error_code, ParserStatus> IoLoopV2();
+
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();
 
@@ -341,18 +288,24 @@ class Connection : public util::Connection {
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
   void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
-                      absl::FunctionRef<MessageHandle()> cmd_msg_cb);
+                      absl::FunctionRef<void()> enqueue_cmd_cb);
 
   // Handles events from the dispatch queue.
   void AsyncFiber();
 
+  // Processes a single Admin/Control message from dispatch_q_.
+  // Returns true if the fiber should terminate (e.g. Migration).
+  bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
+
+  // Processes the next Pipeline command from parsed_head_.
+  void ProcessPipelineCommand();
+
   void SendAsync(MessageHandle msg);
 
-  // Updates memory stats and pooling, must be called for all used messages
-  void RecycleMessage(MessageHandle msg);
-
-  // Create new pipeline request, re-use from pool when possible.
-  PipelineMessagePtr FromArgs(const RespVec& args);
+  // Updates Control Path statistics and backpressure counters for administrative
+  // events, monitor messages, and PubSub notifications.
+  // If add is true, stats are incremented, otherwise decremented.
+  void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
@@ -363,7 +316,7 @@ class Connection : public util::Connection {
   void ShrinkPipelinePool();
 
   // Returns non-null request ptr if pool has vacant entries.
-  PipelineMessagePtr GetFromPipelinePool();
+  PipelineMessagePtr GetFromPoolOrCreate();
 
   void HandleMigrateRequest();
   io::Result<size_t> HandleRecvSocket();
@@ -380,7 +333,8 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
-  void DecreaseStatsOnClose();
+  void IncreaseConnStats();
+  void DecreaseConnStats();
   void BreakOnce(uint32_t ev_mask);
 
   // The read buffer with read data that needs to be parsed and processed.
@@ -396,25 +350,94 @@ class Connection : public util::Connection {
     }
   };
 
-  void IncrNumConns();
-  void DecrNumConns();
-
   bool IsReplySizeOverLimit() const;
 
-  std::deque<MessageHandle> dispatch_q_;  // dispatch queue
-  util::fb2::CondVarAny cnd_;             // dispatch queue waker
-  util::fb2::Fiber async_fb_;             // async fiber (if started)
+  // Returns true if one or more commands were parsed from the read buffer,
+  // and false if no complete commands could be parsed (for example, when
+  // parsing is pending more input).
+  bool ParseMCBatch();
 
-  uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
-  size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
+  // Returns true on successful execution, false on reply builder error.
+  bool ExecuteMCBatch();
+
+  // Returns true on successful execution, false on reply builder error.
+  bool ReplyMCBatch();
+
+  struct WaitEvent {
+    explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
+
+    std::optional<util::fb2::EventCount::SubKey> key;
+  };
+
+  ParsedCommand* CreateParsedCommand();
+  void EnqueueParsedCommand(ParsedCommand* cmd);
+
+  // Releases the command memory back to the pool.
+  // - Set is_pipelined=true if the command was successfully executed and should be counted
+  // in latency/throughput stats.
+  // - Set is_pipelined=false if the command is being dropped/cleaned up without execution or should
+  // not be counted in stats.
+  void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+
+  void DestroyParsedQueue();
+
+  // Dispatch Queue - Queue for the Control Path.
+  // Handles asynchronous administrative tasks, events, and high-priority control
+  // messages (e.g., PubSub, Monitor, Migration requests, Checkpoints) processed
+  // by the AsyncFiber.
+  std::deque<MessageHandle> dispatch_q_;    // dispatch queue
+  util::fb2::CondVarAny cnd_;               // dispatch queue waker
+  util::fb2::Fiber async_fb_;               // async fiber (if started)
+  size_t dispatch_q_bytes_ = 0;             // total bytes in dispatch queue
+  size_t dispatch_q_subscriber_bytes_ = 0;  // total bytes from subscribers in dispatch queue
+
+  std::error_code io_ec_;
+  util::fb2::EventCount io_event_;
+  std::optional<WaitEvent> current_wait_;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
   io::IoBuf io_buf_;  // used in io loop and parsers
-  std::unique_ptr<RedisParser> redis_parser_;
+  std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
+  ParsedCommand* parsed_cmd_ = nullptr;
+
+  // Parsed Commands Queue - Queue for the Data Path.
+  //
+  // Commands move through the following stages in a single linked list:
+  //   1) parsed but not yet dispatched        : [parsed_to_execute_, ..., parsed_tail_]
+  //   2) dispatched but not yet completed     : between parsed_head_ and parsed_to_execute_
+  //   3) completed (replies ready to send)    : a prefix of [parsed_head_, ..., parsed_to_execute_)
+  //   4) replied and removed                  : before parsed_head_ (no longer in the list)
+  //
+  // Logical order diagram:
+  //   head -> ... -> (dispatched, waiting for completion) -> ... -> parsed_to_execute_ -> ... ->
+  //   tail
+  //
+  // parsed_to_execute_ is advanced as commands are dispatched for execution.
+  // Executed (completed) commands are kept in the queue until their replies are sent,
+  // in order to preserve reply ordering.
+  // ReplyMCBatch walks from parsed_head_ up to (but not including) parsed_to_execute_,
+  // replies commands that have completed, and removes only those replied commands from
+  // the queue, advancing parsed_head_ accordingly.
+  ParsedCommand* parsed_head_ = nullptr;
+  ParsedCommand* parsed_tail_ = nullptr;
+  ParsedCommand* parsed_to_execute_ = nullptr;
+  // Total number of commands in parsed command queue
+  size_t parsed_cmd_q_len_ = 0;
+  // Total bytes used by commands in parsed command queue
+  size_t parsed_cmd_q_bytes_ = 0;
+  // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
+  bool HasPendingMessages() const {
+    return parsed_head_ || !dispatch_q_.empty();
+  }
+
+  // Returns total count of commands pending in the parsed command queue and dispatch queue.
+  size_t GetPendingMessageCount() const {
+    return parsed_cmd_q_len_ + dispatch_q_.size();
+  }
 
   uint32_t id_;
   Protocol protocol_;
@@ -444,10 +467,6 @@ class Connection : public util::Connection {
 
   BreakerCb breaker_cb_;
 
-  // Used by redis parser to avoid allocations
-  RespVec tmp_parse_args_;
-  CmdArgVec tmp_cmd_vec_;
-
   // Used to keep track of borrowed references. Does not really own itself
   std::shared_ptr<Connection> self_;
 
@@ -473,6 +492,10 @@ class Connection : public util::Connection {
       // if the flag is set.
       bool is_tls_ : 1;
       bool is_main_ : 1;
+      bool ioloop_v2_ : 1;  // whether this connection is running on ioloop v2
+
+      // If post migration is allowed to call RegisterRecv
+      bool migration_allowed_to_register_ : 1;
     };
   };
 

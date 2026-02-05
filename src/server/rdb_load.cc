@@ -33,6 +33,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "facade/reply_capture.h"
 #include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -621,7 +622,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 
   if (!config_.append) {
-    pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    // Try to convert to listpack if it's a single-node quicklist
+    if (uint8_t* lp = qlv2->TryExtractListpack()) {
+      CompactObj::DeleteMR<QList>(qlv2);
+      pv_->InitRobj(OBJ_LIST, kEncodingListPack, lp);
+    } else {
+      pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
+    }
   }
 }
 
@@ -679,8 +686,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (!config_.streamed && zs->Size() <= server.zset_max_listpack_entries &&
-      maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
+  if (!config_.streamed && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
+      maxelelen <= ZSET_MAX_LISTPACK_VALUE && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
     CompactObj::DeleteMR<detail::SortedMap>(zs);
@@ -736,7 +743,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     ::memcpy(copy_lp, lp, data.size());
     /* Insert the key in the radix tree. */
     int retval =
-        raxTryInsert(s->rax_tree, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
+        raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
     if (!retval) {
       zfree(copy_lp);
       LOG(ERROR) << "Listpack re-added with existing key";
@@ -816,8 +823,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
        * consumer. */
       for (const auto& rawid : cons.nack_arr) {
         uint8_t* ptr = const_cast<uint8_t*>(rawid.data());
-        streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, ptr, rawid.size());
-        if (nack == raxNotFound) {
+        streamNACK* nack = nullptr;
+        int fres = raxFind(cgroup->pel, ptr, rawid.size(), (void**)&nack);
+        if (fres == 0) {
           LOG(ERROR) << "Consumer entry not found in group global PEL";
           ec_ = RdbError(errc::rdb_file_corrupted);
           return;
@@ -852,7 +860,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       pv_->ReserveString(config_.reserve);
       pv_->AppendString(blob);
     } else {
-      pv_->SetValue(blob);
+      pv_->SetString(blob);
     }
     return;
   }
@@ -2204,6 +2212,69 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_VECTOR_INDEX) {
+      // Stub: read and ignore HNSW vector index data
+      // Binary format: [index_name, elements_number,
+      //   then for each node (little-endian):
+      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
+      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
+      string index_key;
+      SET_OR_RETURN(FetchGenericString(), index_key);
+
+      uint64_t elements_number;
+      SET_OR_RETURN(LoadLen(nullptr), elements_number);
+
+      for (uint64_t elem = 0; elem < elements_number; ++elem) {
+        [[maybe_unused]] uint32_t internal_id;
+        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
+        [[maybe_unused]] uint64_t global_id;
+        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
+        uint32_t level;
+        SET_OR_RETURN(FetchInt<uint32_t>(), level);
+
+        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
+          uint32_t links_num;
+          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+          for (uint32_t i = 0; i < links_num; ++i) {
+            [[maybe_unused]] uint32_t link;
+            SET_OR_RETURN(FetchInt<uint32_t>(), link);
+          }
+        }
+      }
+
+      VLOG(2) << "Ignoring HNSW vector index: " << index_key
+              << " elements_number=" << elements_number;
+      continue;
+    }
+
+    if (type == RDB_OPCODE_SHARD_DOC_INDEX) {
+      // Load ShardDocIndex key-to-DocId mapping
+      // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
+      PendingIndexMapping pim;
+      SET_OR_RETURN(LoadLen(nullptr), pim.shard_id);
+
+      SET_OR_RETURN(FetchGenericString(), pim.index_name);
+
+      uint64_t mapping_count;
+      SET_OR_RETURN(LoadLen(nullptr), mapping_count);
+      pim.mappings.reserve(mapping_count);
+
+      for (uint64_t i = 0; i < mapping_count; ++i) {
+        string key;
+        SET_OR_RETURN(FetchGenericString(), key);
+        uint64_t doc_id;
+        SET_OR_RETURN(LoadLen(nullptr), doc_id);
+        pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+      }
+
+      VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
+              << " entries";
+
+      // Store the mapping to be applied after index creation
+      pending_index_mappings_.emplace_back(std::move(pim));
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -2239,6 +2310,8 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   if (EngineShard* es = EngineShard::tlocal(); es) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
+
+  now_streamed_.clear();
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -2416,19 +2489,22 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   size_t done = 0;
   JournalExecutor ex{service};
   while (done < num_entries) {
-    journal::ParsedEntry entry{};
-    SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
+    journal::ParsedEntry entry;
+    auto ec = journal_reader_.ReadEntry(&entry);
+    if (ec)
+      return ec;
+
     done++;
 
-    if (entry.cmd.cmd_args.empty()) {
+    if (entry.cmd.empty()) {
       if (entry.opcode == journal::Op::PING) {
         continue;
       }
       return RdbError(errc::rdb_file_corrupted);
     }
 
-    if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
-        absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
+    if (absl::EqualsIgnoreCase(entry.cmd[0], "FLUSHALL") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FLUSHDB")) {
       // Applying a flush* operation in the middle of a load can cause out-of-sync deletions of
       // data that should not be deleted, see https://github.com/dragonflydb/dragonfly/issues/1231
       // By returning an error we are effectively restarting the replication.
@@ -2576,7 +2652,7 @@ void RdbLoader::FlushAllShards() {
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
-                                          CompactObj* pv) {
+                                          PrimeValue* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
@@ -2600,8 +2676,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   LoadConfig config_copy = item->load_config;
   if (item->load_config.streamed && item->load_config.append) {
+    std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
-      pv_ptr = &*now_streamed_[item->key];
+      pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
@@ -2634,12 +2711,12 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
     stop_early_ = true;
-    now_streamed_.clear();
     return;
   }
 
   if (item->load_config.streamed) {
-    if (now_streamed_.find(item->key) == now_streamed_.end())
+    std::unique_lock lk{now_streamed_mu_};
+    if (!now_streamed_.contains(item->key))
       now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
@@ -2680,7 +2757,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
-    ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
+    StashPrimeValue(db_cntx.db_index, item->key, false, &res.it->second, ts);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
@@ -2837,8 +2914,9 @@ namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
                               string_view error_context) {
-  facade::CapturingReplyBuilder crb{};
-  ConnectionContext cntx{nullptr, nullptr};
+  facade::CapturingReplyBuilder crb;
+
+  ConnectionContext cntx{nullptr, acl::UserCredentials{}};
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
@@ -2859,14 +2937,30 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
     return;
   }
 
-  CmdArgVec arg_vec;
-  facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
+  // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
+  // serialized as "TAG SORTABLE SEPARATOR x" but parser expects "TAG SEPARATOR x SORTABLE".
+  // Reorder arguments if needed.
+  // TODO: Remove this workaround after Apr 2026.
+  for (size_t i = 0; i + 2 < resp_vec.size(); ++i) {
+    std::string_view cur = resp_vec[i].GetView();
+    std::string_view next = resp_vec[i + 1].GetView();
+    if (absl::EqualsIgnoreCase(cur, "SORTABLE") && absl::EqualsIgnoreCase(next, "SEPARATOR")) {
+      // SORTABLE SEPARATOR x -> SEPARATOR x SORTABLE
+      std::swap(resp_vec[i], resp_vec[i + 1]);      // SEPARATOR SORTABLE x
+      std::swap(resp_vec[i + 1], resp_vec[i + 2]);  // SEPARATOR x SORTABLE
+    }
+  }
 
   // Prepend command name (FT.CREATE or FT.SYNUPDATE)
-  string cmd_str{command_name};
-  arg_vec.insert(arg_vec.begin(), MutableSlice{cmd_str.data(), cmd_str.size()});
+  CommandContext cntx_cmd;
+  cntx_cmd.Init(&crb, &cntx);
 
-  service->DispatchCommand(facade::ParsedArgs{arg_vec}, &crb, &cntx);
+  cntx_cmd.PushArg(command_name);
+  for (unsigned i = 0; i < resp_vec.size(); i++) {
+    cntx_cmd.PushArg(resp_vec[i].GetView());
+  }
+  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
+                           facade::AsyncPreference::ONLY_SYNC);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
@@ -2878,6 +2972,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
+// Static synchronization for thread-safe search index creation
+base::SpinLock RdbLoader::search_index_mu_;
+absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
 
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
@@ -2886,8 +2983,55 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  // FT.CREATE command - execute immediately during RDB load
-  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+  string index_name;
+  string full_cmd;
+
+  // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
+  if (!def.empty() && def[0] == '{') {
+    // New JSON format with HNSW metadata (from summary file)
+    try {
+      auto json_opt = JsonFromString(def);
+      if (!json_opt) {
+        LOG(ERROR) << "Invalid search index JSON: " << def;
+        return;
+      }
+      const auto& json = *json_opt;
+      index_name = json["name"].as<string>();
+      string cmd = json["cmd"].as<string>();
+
+      // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
+      // Currently we just restore the index definition, HNSW graph will be rebuilt
+
+      full_cmd = absl::StrCat(index_name, " ", cmd);
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
+      return;
+    }
+  } else {
+    // Simple format: "index_name cmd" - from per-shard DFS files or old format
+    // Extract index name (first token before space)
+    size_t space_pos = def.find(' ');
+    if (space_pos == string::npos) {
+      LOG(ERROR) << "Invalid search index definition: " << def;
+      return;
+    }
+    index_name = def.substr(0, space_pos);
+    full_cmd = std::move(def);
+  }
+
+  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
+  // We track which indices we've already attempted to create to avoid race conditions where
+  // multiple threads see the index doesn't exist and all try to create it.
+  {
+    std::lock_guard lk(search_index_mu_);
+    auto [it, inserted] = created_search_indices_.insert(index_name);
+    if (!inserted) {
+      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
+      return;
+    }
+  }
+
+  LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
@@ -2896,19 +3040,29 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
   pending_synonym_cmds_.push_back(std::move(def));
 }
 
-void RdbLoader::PerformPostLoad(Service* service) {
+void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
     return;
 
+  // Clear the created indices tracking set for next load
+  {
+    std::lock_guard lk(search_index_mu_);
+    created_search_indices_.clear();
+  }
+
+  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  if (is_error)
+    return;
+
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    es->search_indices()->RebuildAllIndices(
-        OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    es->search_indices()->RebuildAllIndices(op_args, true);
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
-  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

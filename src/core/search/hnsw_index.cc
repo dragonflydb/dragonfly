@@ -5,13 +5,13 @@
 #include "core/search/hnsw_index.h"
 
 #include <absl/strings/match.h>
-#include <absl/synchronization/mutex.h>
 #include <hnswlib/hnswlib.h>
 #include <hnswlib/space_ip.h>
 #include <hnswlib/space_l2.h>
 
 #include "base/logging.h"
 #include "core/search/hnsw_alg.h"
+#include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
 
 namespace dfly::search {
@@ -61,17 +61,18 @@ struct HnswlibAdapter {
   // Default setting of hnswlib/hnswalg
   constexpr static size_t kDefaultEfRuntime = 10;
 
-  explicit HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{params.dim, params.sim},
-        world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
-               100 /* seed*/} {
+  explicit HnswlibAdapter(const SchemaField::VectorParams& params, bool copy_vector)
+      : space_{params.dim, params.sim}, world_{&space_,       params.capacity,
+                                               params.hnsw_m, params.hnsw_ef_construction,
+                                               100 /* seed*/, copy_vector} {
   }
 
-  void Add(const float* data, GlobalDocId id) {
+  void Add(const void* data, GlobalDocId id) {
     while (true) {
       try {
-        absl::ReaderMutexLock lock(&resize_mutex_);
-        world_.addPoint(data, id);
+        MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+        absl::ReaderMutexLock resize_lock(&resize_mutex_);
+        world_.addPoint(data ? data : world_.null_vector_, id);
         return;
       } catch (const std::exception& e) {
         std::string error_msg = e.what();
@@ -86,6 +87,7 @@ struct HnswlibAdapter {
 
   void Remove(GlobalDocId id) {
     try {
+      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
       world_.markDelete(id);
     } catch (const std::exception& e) {
       LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
@@ -94,6 +96,7 @@ struct HnswlibAdapter {
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
     world_.setEf(ef.value_or(kDefaultEfRuntime));
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnn(target, k));
   }
 
@@ -111,7 +114,62 @@ struct HnswlibAdapter {
 
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnn(target, k, &filter));
+  }
+
+  HnswIndexMetadata GetMetadata() const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    HnswIndexMetadata metadata;
+    metadata.max_elements = world_.max_elements_;
+    metadata.cur_element_count = world_.cur_element_count.load();
+    metadata.maxlevel = world_.maxlevel_;
+    metadata.enterpoint_node = world_.enterpoint_node_;
+    metadata.M = world_.M_;
+    metadata.maxM = world_.maxM_;
+    metadata.maxM0 = world_.maxM0_;
+    metadata.ef_construction = world_.ef_construction_;
+    metadata.mult = world_.mult_;
+    return metadata;
+  }
+
+  size_t GetNodeCount() const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return world_.cur_element_count.load();
+  }
+
+  std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    size_t count = world_.cur_element_count.load();
+    end = std::min(end, count);
+    start = std::min(start, end);
+
+    std::vector<HnswNodeData> result;
+    result.reserve(end - start);
+
+    for (size_t internal_id = start; internal_id < end; ++internal_id) {
+      HnswNodeData node_data;
+      node_data.internal_id = internal_id;
+      node_data.global_id = world_.getExternalLabel(internal_id);
+      node_data.level = world_.element_levels_[internal_id];
+
+      node_data.levels_links.resize(node_data.level + 1);
+
+      auto* ll0 = world_.get_linklist0(internal_id);
+      unsigned short link_count0 = world_.getListCount(ll0);
+      auto* links0 = reinterpret_cast<uint32_t*>(ll0 + 1);
+      node_data.levels_links[0].assign(links0, links0 + link_count0);
+
+      for (int lvl = 1; lvl <= node_data.level; ++lvl) {
+        auto* ll = world_.get_linklist(internal_id, lvl);
+        unsigned short link_count = world_.getListCount(ll);
+        auto* links = reinterpret_cast<uint32_t*>(ll + 1);
+        node_data.levels_links[lvl].assign(links, links + link_count);
+      }
+
+      result.push_back(std::move(node_data));
+    }
+    return result;
   }
 
  private:
@@ -153,10 +211,15 @@ struct HnswlibAdapter {
   HnswSpace space_;
   HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
+  mutable MRMWMutex mrmw_mutex_;
 };
 
-HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
-    : dim_{params.dim}, sim_{params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
+HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,
+                                 PMR_NS::memory_resource*)
+    : copy_vector_(copy_vector),
+      dim_{params.dim},
+      sim_{params.sim},
+      adapter_{make_unique<HnswlibAdapter>(params, copy_vector)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
 }
@@ -165,20 +228,18 @@ HnswVectorIndex::~HnswVectorIndex() {
 }
 
 bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field);
+  auto vector_ptr = doc.GetVector(field, dim_);
 
-  if (!vector) {
+  if (!vector_ptr) {
     return false;
   }
 
-  auto& [ptr, size] = vector.value();
-
-  if (ptr && size != dim_) {
-    return false;
-  }
-
-  if (ptr) {
-    adapter_->Add(ptr.get(), id);
+  if (std::holds_alternative<OwnedFtVector>(*vector_ptr)) {
+    const auto& owned_vector = std::get<OwnedFtVector>(*vector_ptr);
+    adapter_->Add(owned_vector.first.get(), id);
+  } else {
+    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
+    adapter_->Add(borrowed_vector, id);
   }
 
   return true;
@@ -198,4 +259,17 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
 void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
+
+HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
+  return adapter_->GetMetadata();
+}
+
+size_t HnswVectorIndex::GetNodeCount() const {
+  return adapter_->GetNodeCount();
+}
+
+std::vector<HnswNodeData> HnswVectorIndex::GetNodesRange(size_t start, size_t end) const {
+  return adapter_->GetNodesRange(start, end);
+}
+
 }  // namespace dfly::search

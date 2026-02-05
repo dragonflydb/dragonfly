@@ -240,6 +240,11 @@ TEST_F(SearchParserTest, Parse) {
 
   EXPECT_EQ(0, Parse("@name:{escape\\-err*}"));
 
+  // Parenthesized star - used by LangChain for KNN queries (issue #6342)
+  EXPECT_EQ(0, Parse("(*)"));
+  EXPECT_EQ(0, Parse("((*))"));
+  EXPECT_EQ(0, Parse("(((*)))"));
+
   // Colon in tag value
   EXPECT_EQ(0, Parse("@t:{Tag:value}"));
   EXPECT_EQ(0, Parse("@t:{Tag:*}"));
@@ -254,6 +259,14 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse("*infix*"));
 
   EXPECT_EQ(1, Parse("pre***"));
+
+  // Geo units
+  EXPECT_EQ(0, Parse("@t:{km}"));
+  EXPECT_EQ(0, Parse("@t:{Km|M}"));
+  EXPECT_EQ(0, Parse("@t:{ft|mi}"));
+  EXPECT_EQ(0, Parse("@location:[0.0 0.0 1 m]"));
+  EXPECT_EQ(0, Parse("@location:[0.0 0.0 1 Km]"));
+  EXPECT_EQ(1, Parse("@location:[0.0 0.0 1 yd]"));
 }
 
 TEST_F(SearchParserTest, ParseParams) {

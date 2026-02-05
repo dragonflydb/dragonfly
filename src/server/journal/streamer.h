@@ -36,8 +36,8 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void ConsumeJournalChange(const journal::JournalChangeItem& item);
 
   // Must be called on context cancellation for unblocking
-  // and manual cleanup.
-  virtual void Cancel();
+  // and manual cleanup. If it unregistered a listener, returns true.
+  virtual bool Cancel();
 
   size_t UsedBytes() const;
 
@@ -117,7 +117,7 @@ class RestoreStreamer : public JournalStreamer {
   void Run();
 
   // Cancel() must be called if Start() is called
-  void Cancel() override;
+  bool Cancel() override;
 
   void SendFinalize(long attempt);
 

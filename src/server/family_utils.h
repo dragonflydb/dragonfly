@@ -8,6 +8,8 @@
 #include <absl/random/random.h>
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "facade/facade_types.h"
 #include "server/engine_shard.h"
@@ -22,6 +24,9 @@ typedef struct streamConsumer streamConsumer;
 typedef struct streamCG streamCG;
 
 namespace dfly {
+
+// Compute XXH3 hash and return as 16-character hex string
+std::string XXH3_Digest(std::string_view s);
 
 template <typename DenseSet>
 std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList values, uint32_t ttl_sec);
@@ -77,7 +82,7 @@ streamConsumer* StreamCreateConsumer(streamCG* cg, std::string_view name, uint64
 
 /* Use these methods to add or remove documents from the indexes for generic commands when the key
  * being modified could potentially be of type HSET or JSON. */
-void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv,
+void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
                              EngineShard* shard);
 void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
                                   const PrimeValue& pv, EngineShard* shard);
@@ -108,10 +113,10 @@ inline std::vector<long> ExpireElements(DenseSet* owner, facade::CmdArgList valu
   return res;
 }
 
-inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
-                                    const PrimeValue& pv, EngineShard* shard) {
+inline void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, PrimeValue& pv,
+                                    EngineShard* shard) {
   if (IsIndexedKeyType(pv)) {
-    shard->search_indices()->AddDoc(key, db_cntx, pv);
+    shard->search_indices()->AddDoc(key, db_cntx, &pv);
   }
 }
 

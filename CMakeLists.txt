@@ -31,7 +31,7 @@ endif()
 # Set targets in folders
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 project(DRAGONFLY C CXX)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 # Disabled because it has false positives with ref-counted intrusive pointers.
 CHECK_CXX_COMPILER_FLAG("-Wuse-after-free" HAS_USE_AFTER_FREE_WARN)
@@ -40,8 +40,7 @@ if (HAS_USE_AFTER_FREE_WARN)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set(CMAKE_CXX_FLAGS "-Wthread-safety ${CMAKE_CXX_FLAGS}")
-    add_compile_options(-Werror=thread-safety)
+    set(CMAKE_CXX_FLAGS "-Wthread-safety -Werror=thread-safety ${CMAKE_CXX_FLAGS}")
 endif()
 
 # We can not use here CHECK_CXX_COMPILER_FLAG because systems that do not support sanitizers

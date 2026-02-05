@@ -7,9 +7,10 @@ set_source_files_properties(${gen_dir}/parser.cc PROPERTIES
                             COMPILE_FLAGS "-Wno-maybe-uninitialized")
 add_library(dfly_search_core ast_expr.cc base.cc hnsw_index.cc query_driver.cc search.cc
             indices.cc sort_indices.cc vector_utils.cc compressed_sorted_set.cc block_list.cc
-            range_tree.cc synonyms.cc ${gen_dir}/parser.cc ${gen_dir}/lexer.cc)
+            renewable_quota.cc range_tree.cc synonyms.cc
+            ${gen_dir}/parser.cc ${gen_dir}/lexer.cc)
 
-target_link_libraries(dfly_search_core dfly_page_usage base redis_lib absl::strings
+target_link_libraries(dfly_search_core dfly_page_usage base fibers2 redis_lib absl::strings
   TRDP::reflex TRDP::uni-algo TRDP::hnswlib Boost::headers)
 
 if(WITH_SIMSIMD)
@@ -21,12 +22,13 @@ if(WITH_SIMSIMD)
     SIMSIMD_NATIVE_BF16=$<IF:$<BOOL:${SIMSIMD_NATIVE_F16}>,1,0>)
 endif()
 
-cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
-cxx_test(block_list_test dfly_search_core LABELS DFLY)
-cxx_test(range_tree_test dfly_search_core absl::random_random LABELS DFLY)
-cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
-cxx_test(search_parser_test dfly_search_core LABELS DFLY)
-cxx_test(search_test redis_test_lib dfly_search_core LABELS DFLY)
+helio_cxx_test(compressed_sorted_set_test dfly_search_core LABELS DFLY)
+helio_cxx_test(block_list_test dfly_search_core LABELS DFLY)
+helio_cxx_test(range_tree_test dfly_search_core absl::random_random LABELS DFLY)
+helio_cxx_test(rax_tree_test redis_test_lib LABELS DFLY)
+helio_cxx_test(search_parser_test dfly_search_core LABELS DFLY)
+helio_cxx_test(search_test redis_test_lib dfly_search_core LABELS DFLY)
+helio_cxx_test(mrmw_mutex_test redis_test_lib dfly_search_core fibers2 LABELS DFLY)
 
 if(WITH_SIMSIMD)
   target_link_libraries(search_test TRDP::simsimd)

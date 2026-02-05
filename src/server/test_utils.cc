@@ -21,6 +21,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "util/fibers/pool.h"
@@ -76,10 +77,10 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
-TestConnection::TestConnection(Protocol protocol)
-    : facade::Connection(protocol, nullptr, nullptr, nullptr) {
+TestConnection::TestConnection(facade::ServiceInterface* si, Protocol protocol)
+    : facade::Connection(protocol, nullptr, nullptr, si) {
   cc_.reset(new dfly::ConnectionContext(this, {}));
-  cc_->skip_acl_validation = true;
+  static_cast<dfly::ConnectionContext*>(cc_.get())->skip_acl_validation = true;
   SetSocket(ProactorBase::me()->CreateSocket());
   OnConnectionStart();
 }
@@ -114,7 +115,7 @@ void TransactionSuspension::Terminate() {
 
 class BaseFamilyTest::TestConnWrapper {
  public:
-  TestConnWrapper(Protocol proto);
+  TestConnWrapper(facade::ServiceInterface* si, Protocol proto);
   ~TestConnWrapper();
 
   CmdArgVec Args(ArgSlice list);
@@ -159,8 +160,8 @@ class BaseFamilyTest::TestConnWrapper {
   std::unique_ptr<SinkReplyBuilder> builder_;
 };
 
-BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
-    : dummy_conn_(new TestConnection(proto)) {
+BaseFamilyTest::TestConnWrapper::TestConnWrapper(facade::ServiceInterface* si, Protocol proto)
+    : dummy_conn_(new TestConnection(si, proto)) {
   switch (proto) {
     case Protocol::REDIS:
       builder_.reset(new RedisReplyBuilder{&sink_});
@@ -219,6 +220,7 @@ void BaseFamilyTest::SetUp() {
 void BaseFamilyTest::TearDown() {
   CHECK_EQ(NumLocked(), 0U);
 
+  connections_.clear();
   ShutdownService();
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
@@ -302,9 +304,11 @@ void BaseFamilyTest::ResetService() {
           }
 
           LOG(ERROR) << "Transaction for shard " << es->shard_id();
+          std::unique_lock conn_lck{mu_};
           for (auto& conn : connections_) {
             auto* context = conn.second->cmd_cntx();
-            if (context->transaction && context->transaction->IsActive(es->shard_id())) {
+            if (context->transaction && context->transaction->IsScheduled() &&
+                context->transaction->IsActive(es->shard_id())) {
               LOG(ERROR) << context->transaction->DebugId(es->shard_id());
             }
           }
@@ -449,12 +453,14 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   CmdArgVec args = conn_wrapper->Args(slice);
 
-  auto* context = conn_wrapper->cmd_cntx();
+  ConnectionContext* context = conn_wrapper->cmd_cntx();
   context->ns = &namespaces->GetDefaultNamespace();
 
   DCHECK(context->transaction == nullptr) << id;
-
-  service_->DispatchCommand(ParsedArgs{args}, conn_wrapper->builder(), context);
+  CommandContext cmd_cntx;
+  cmd_cntx.Init(conn_wrapper->builder(), context);
+  cmd_cntx.Assign(args.begin(), args.end(), args.size());
+  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   DCHECK(context->transaction == nullptr);
 
@@ -499,26 +505,34 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   DCHECK(context->transaction == nullptr);
 }
 
-auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value, uint32_t flags,
-                           chrono::seconds ttl) -> MCResponse {
+auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, value, flags, ttl); });
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, args); });
   }
-
-  MP::Command cmd;
-  cmd.type = cmd_type;
-  cmd.Assign(&key, &key + 1, 1);
-  cmd.flags = flags;
-  cmd.bytes_len = value.size();
-  cmd.expire_ts = ttl.count();
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
+  CommandContext cmd_cntx{conn->builder(), conn->cmd_cntx()};
+  cmd_cntx.ConfigureMCExtension(true);
+  auto& cmd = *cmd_cntx.mc_command();
+  cmd.type = cmd_type;
+
+  string_view kv[2] = {key, args.value};
+  unsigned num_args = MP::IsStoreCmd(cmd_type) ? 2 : 1;
+  cmd_cntx.Assign(kv, kv + num_args, num_args);
+  cmd.flags = args.val_flags;
+  cmd.expire_ts = args.ttl.count();
+  cmd.delta = args.delta;
+  if (cmd.type >= MP::GET && cmd.type <= MP::GATS) {
+    cmd.cmd_flags.return_value = true;
+    cmd.cmd_flags.return_flags = true;
+    cmd.cmd_flags.return_cas = (cmd.type == MP::GETS || cmd.type == MP::GATS);
+  }
   auto* context = conn->cmd_cntx();
 
   DCHECK(context->transaction == nullptr);
 
-  service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(conn->builder()), context);
+  service_->DispatchMC(&cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   DCHECK(context->transaction == nullptr);
 
@@ -527,10 +541,10 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
 auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key); });
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, MCArgs{}); });
   }
 
-  return RunMC(cmd_type, key, string_view{}, 0, chrono::seconds{});
+  return RunMC(cmd_type, key, MCArgs{});
 }
 
 auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::string_view> list)
@@ -542,19 +556,19 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
     return pp_->at(0)->Await([&] { return this->GetMC(cmd_type, list); });
   }
 
-  MP::Command cmd;
+  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
+
+  CommandContext cmd_cntx{conn->builder(), conn->cmd_cntx()};
+  cmd_cntx.ConfigureMCExtension(true);
+  auto& cmd = *cmd_cntx.mc_command();
   cmd.type = cmd_type;
   auto src = list.begin();
   if (cmd.type == MP::GAT || cmd.type == MP::GATS) {
     CHECK(absl::SimpleAtoi(*src++, &cmd.expire_ts));
   }
 
-  cmd.Assign(src, list.end(), list.end() - src);
-
-  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
-
-  auto* context = conn->cmd_cntx();
-  service_->DispatchMC(cmd, string_view{}, static_cast<MCReplyBuilder*>(conn->builder()), context);
+  cmd_cntx.Assign(src, list.end(), list.end() - src);
+  service_->DispatchMC(&cmd_cntx, AsyncPreference::ONLY_SYNC);
 
   return conn->SplitLines();
 }
@@ -694,7 +708,7 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   auto [it, inserted] = connections_.emplace(id, nullptr);
 
   if (inserted) {
-    it->second.reset(new TestConnWrapper(proto));
+    it->second = make_unique<TestConnWrapper>(service_.get(), proto);
   } else {
     it->second->ClearSink();
   }

@@ -8,6 +8,7 @@
 
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "facade/dragonfly_connection.h"
 #include "server/cluster/slot_set.h"
 #include "server/cluster_support.h"
 #include "server/engine_shard_set.h"

@@ -76,9 +76,6 @@ class RobjWrapper {
   // Returns true if re-allocated.
   bool DefragIfNeeded(PageUsage* page_usage);
 
-  // as defined in zset.h
-  int ZsetAdd(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
-
  private:
   void ReallocateString(MemoryResource* mr);
 
@@ -158,7 +155,6 @@ class CompactObj {
     bool is_key_;
   };
 
-  using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
   // Different representations of external values
@@ -167,14 +163,15 @@ class CompactObj {
     SERIALIZED_MAP  // OBJ_HASH, Serialized map
   };
 
-  CompactObj() {  // By default - empty string.
+  explicit CompactObj(bool is_key)
+      : is_key_{is_key}, taglen_{0}, encoding_{0} {  // default - empty string
   }
 
-  explicit CompactObj(std::string_view str, bool is_key) {
-    SetString(str, is_key);
+  CompactObj(std::string_view str, bool is_key) : CompactObj(is_key) {
+    SetString(str);
   }
 
-  CompactObj(CompactObj&& cs) noexcept {
+  CompactObj(CompactObj&& cs) noexcept : CompactObj(cs.is_key_) {
     operator=(std::move(cs));
   };
 
@@ -186,18 +183,6 @@ class CompactObj {
   // For strings - returns the length of the string.
   // For containers - returns number of elements in the container.
   size_t Size() const;
-
-  // TODO: We don't use c++ constructs (ctor, dtor, =) in objects of U,
-  // because we use memcpy here.
-  CompactObj AsRef() const {
-    CompactObj res;
-    memcpy(&res.u_, &u_, sizeof(u_));
-    res.tagbyte_ = tagbyte_;
-    res.mask_ = mask_;
-    res.mask_bits_.ref = 1;
-
-    return res;
-  }
 
   bool IsRef() const {
     return mask_bits_.ref;
@@ -230,14 +215,6 @@ class CompactObj {
     return o.operator==(sl);
   }
 
-  bool HasExpire() const {
-    return mask_bits_.expire;
-  }
-
-  void SetExpire(bool e) {
-    mask_bits_.expire = e;
-  }
-
   bool HasFlag() const {
     return mask_bits_.mc_flag;
   }
@@ -255,6 +232,14 @@ class CompactObj {
   }
 
   bool DefragIfNeeded(PageUsage* page_usage);
+
+  void SetOmitDefrag(bool v) {
+    mask_bits_.omit_defrag = v;
+  }
+
+  bool OmitDefrag() const {
+    return mask_bits_.omit_defrag;
+  }
 
   bool HasStashPending() const {
     return mask_bits_.io_pending;
@@ -291,23 +276,9 @@ class CompactObj {
   void SetInt(int64_t val);
   std::optional<int64_t> TryGetInt() const;
 
-  // We temporary expose this function to avoid passing around robj objects.
-  detail::RobjWrapper* GetRobjWrapper() {
-    return &u_.r_obj;
-  }
-
-  const detail::RobjWrapper* GetRobjWrapper() const {
-    return &u_.r_obj;
-  }
-
-  // For STR object.
-  void SetString(std::string_view str, bool is_key);
-  void SetValue(std::string_view val) {
-    SetString(val, false);
-  }
-
   void GetString(std::string* res) const;
 
+  void SetString(std::string_view str);
   void ReserveString(size_t size);
   void AppendString(std::string_view str);
 
@@ -353,6 +324,7 @@ class CompactObj {
   // Switches to empty, non-external string.
   // Preserves all the attributes.
   void RemoveExternal() {
+    encoding_ = NONE_ENC;
     SetMeta(0, mask_);
   }
 
@@ -395,10 +367,6 @@ class CompactObj {
 
   uint8_t GetFirstByte() const;
 
-  static constexpr unsigned InlineLen() {
-    return kInlineLen;
-  }
-
   struct Stats {
     size_t small_string_bytes = 0;
     uint64_t huff_encode_total = 0, huff_encode_success = 0;
@@ -430,12 +398,12 @@ class CompactObj {
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
-  // returns raw (non-decoded) string. Used to bypass decoding layer.
+  // Return raw (non-decoded) string as two views. First is guaranteed to be non-empty.
   // Precondition: the object is a non-inline string.
-  StringOrView GetRawString() const;
+  std::array<std::string_view, 2> GetRawString() const;
 
   StrEncoding GetStrEncoding() const {
-    return StrEncoding{mask_bits_.encoding, bool(huffman_domain_)};
+    return StrEncoding{encoding_, is_key_};
   }
 
   bool HasAllocated() const;
@@ -446,15 +414,14 @@ class CompactObj {
     return taglen_;
   }
 
- private:
-  void EncodeString(std::string_view str, bool is_key);
-
-  bool EqualNonInline(std::string_view sv) const;
+ protected:
+  void EncodeString(std::string_view str);
 
   // Requires: HasAllocated() - true.
   void Free();
 
   bool CmpEncoded(std::string_view sv) const;
+  bool CmpNonInline(std::string_view sv) const;
 
   void SetMeta(uint8_t taglen, uint8_t mask = 0) {
     if (HasAllocated()) {
@@ -492,10 +459,6 @@ class CompactObj {
     size_t bytes_used;
 
     bool DefragIfNeeded(PageUsage* page_usage);
-
-    // Computes if the contained object should be defragmented, by examining pointers within it and
-    // returning true if any of them reside in an underutilized page.
-    bool ShouldDefragment(PageUsage* page_usage) const;
   };
 
   struct FlatJsonT {
@@ -514,10 +477,7 @@ class CompactObj {
     bool DefragIfNeeded(PageUsage* page_usage);
   };
 
-  // My main data structure. Union of representations.
-  // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
-  // In case of int values, we waste 8 bytes. I am assuming it's ok and it's not the data type
-  // with biggest memory usage.
+  // Union of different representations
   union U {
     char inline_str[kInlineLen];
 
@@ -534,7 +494,6 @@ class CompactObj {
     }
   } u_;
 
-  //
   static_assert(sizeof(u_) == 16);
 
   union {
@@ -543,9 +502,6 @@ class CompactObj {
       uint8_t ref : 1;      // Mark objects that don't own their allocation.
       uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
-
-      // See the EncodingEnum for the meaning of these bits.
-      uint8_t encoding : 2;
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
       // It is cleared when the io request finishes or is cancelled.
@@ -557,29 +513,61 @@ class CompactObj {
       // reached this item while travering the database to set items as cold.
       // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
       uint8_t touched : 1;  // used to mark keys that were accessed.
+
+      uint8_t omit_defrag : 1;  // mark object to skip defragmentation.
     } mask_bits_;
   };
 
-  // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
-  union {
-    uint8_t tagbyte_ = 0;
-    struct {
-      uint8_t taglen_ : 5;
-      uint8_t huffman_domain_ : 1;  // value from HuffmanDomain enum.
-      uint8_t reserved : 2;
-    };
-  };
+  // TODO: use c++20 bitfield initializers
+  const bool is_key_ : 1;
+  uint8_t taglen_ : 5;    // Either length of inline string or tag of type
+  uint8_t encoding_ : 2;  // Encoding of string values
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {
-  if (mask_bits_.encoding)
+  if (encoding_)
     return CmpEncoded(sv);
 
   if (IsInline()) {
     return std::string_view{u_.inline_str, taglen_} == sv;
   }
-  return EqualNonInline(sv);
+  return CmpNonInline(sv);
 }
+
+struct CompactKey : public CompactObj {
+  CompactKey() : CompactObj(true) {
+  }
+
+  explicit CompactKey(std::string_view str) : CompactObj{str, true} {
+  }
+
+  CompactKey AsRef() const {
+    CompactKey res;
+    memcpy(&res.u_, &u_, sizeof(u_));
+    res.encoding_ = encoding_;
+    res.taglen_ = taglen_;
+    res.mask_ = mask_;
+    res.mask_bits_.ref = 1;
+
+    return res;
+  }
+
+  bool HasExpire() const {
+    return mask_bits_.expire;
+  }
+
+  void SetExpire(bool e) {
+    mask_bits_.expire = e;
+  }
+};
+
+struct CompactValue : public CompactObj {
+  CompactValue() : CompactObj(false) {
+  }
+
+  explicit CompactValue(std::string_view str) : CompactObj{str, false} {
+  }
+};
 
 std::string_view ObjTypeToString(CompactObjType type);
 
@@ -591,7 +579,7 @@ namespace detail {
 struct TieredColdRecord : public ::boost::intrusive::list_base_hook<
                               boost::intrusive::link_mode<boost::intrusive::normal_link>> {
   uint64_t key_hash;  // Allows searching the entry in the dbslice.
-  CompactObj value;
+  CompactValue value;
   uint16_t db_index;
   uint32_t page_index;
 };

@@ -20,28 +20,32 @@ inputs:
     required: false
     type: string
   aws-access-key-id:
-    required: true
+    required: false
     type: string
+    description: "AWS access key ID (optional if using OIDC - credentials set by workflow)"
   aws-secret-access-key:
-    required: true
+    required: false
     type: string
+    description: "AWS secret access key (optional if using OIDC - credentials set by workflow)"
   s3-bucket:
     required: true
     type: string
   epoll:
     required: false
     type: string
+  df-arg:
+    default: ""
+    required: false
+    type: string
+
 runs:
   using: "composite"
   # bring back timeouts once composite actions start supporting them
   # timeout-minutes: 20
   steps:
     - name: Sync valkey-search tests
-      shell: bash
-      run: |
-        cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search
-        # main branch revision
-        ./sync-valkey-search-tests.sh 90124dc91756b24cb2e58e5c4eea5b8d53004ea6
+      uses: ./.github/actions/sync-valkey-tests
+
     - name: Prepare Step
       shell: bash
       run: |
@@ -57,6 +61,37 @@ runs:
         fi
         curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
         registry="ghcr.io/romange" && for image in fedora:30 ubuntu:noble; do ./docker pull "$registry/$image"; done
+    - name: Free disk space
+      if: contains(runner.labels, 'self-hosted') == false
+      shell: bash
+      run: |
+        echo "===================Before freeing up space ============================================"
+        df -h
+        rm -rf /hostroot/usr/share/dotnet
+        rm -rf /hostroot/usr/local/share/boost
+        rm -rf /hostroot/usr/local/lib/android
+        rm -rf /hostroot/opt/ghc
+        echo "===================After freeing up space ============================================"
+        df -h
+
+    - name: Install Python test requirements
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/tests
+        pip3 install -r dragonfly/requirements.txt
+
+    - name: Run S3 snapshot tests with MinIO
+      if: inputs.s3-bucket != ''
+      shell: bash
+      run: |
+        echo "=== Running S3 snapshot tests with local MinIO ==="
+        cd ${GITHUB_WORKSPACE}/tests
+
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+
+        # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
+        MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py --log-cli-level=INFO -v
+
     - name: Run PyTests
       id: main
       shell: bash
@@ -64,20 +99,24 @@ runs:
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
-        pip3 install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
+        if [[ "${{inputs.df-arg}}" == 'experimental_io_loop_v2' ]]; then
+          echo "df-arg: experimental io loop v2"
+          export DF_ARG="--df experimental_io_loop_v2=true"
+        fi
+
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
           export FILTER="${{inputs.filter}} and not exclude_epoll"
           # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           export FILTER="${{inputs.filter}}"
           # Run only replication tests with iouring
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --log-cli-level=INFO || code=$?
         fi
 
         # timeout returns 124 if we exceeded the timeout duration
@@ -99,10 +138,12 @@ runs:
         fi
       env:
         # Add environment variables to enable the S3 snapshot test.
+        # AWS credentials: if inputs provided, use them; otherwise rely on workflow OIDC auth
         DRAGONFLY_S3_BUCKET: ${{ inputs.s3-bucket }}
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
-        AWS_REGION: us-east-1
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id || env.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key || env.AWS_SECRET_ACCESS_KEY }}
+        AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
+        AWS_REGION: ${{ env.AWS_REGION || 'us-east-1' }}
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'
@@ -131,3 +172,10 @@ runs:
           -H 'Content-Type: application/json' \
           '${{ inputs.gspace-secret }}' \
           -d '{"text": "'"${message}"'"}'
+    - name: Copy binary on a self hosted runner
+      if: failure() && contains(runner.labels, 'self-hosted')
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/build
+        timestamp=$(date +%Y-%m-%d_%H:%M:%S)
+        mv ./dragonfly /var/crash/dragonfly_${timestamp}

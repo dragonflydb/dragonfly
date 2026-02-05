@@ -101,12 +101,14 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
   result->config_ = config;
 
   for (const auto& shard : result->config_) {
-    bool owned_by_me = shard.master.id == my_id ||
-                       any_of(shard.replicas.begin(), shard.replicas.end(),
-                              [&](const ClusterNodeInfo& node) { return node.id == my_id; });
+    const bool is_master = shard.master.id == my_id;
+    const bool owned_by_me =
+        is_master || any_of(shard.replicas.begin(), shard.replicas.end(),
+                            [&](const ClusterNodeInfo& node) { return node.id == my_id; });
     if (owned_by_me) {
       result->my_slots_.Set(shard.slot_ranges, true);
-      if (shard.master.id == my_id) {
+      if (is_master) {
+        result->is_master_ = true;
         result->my_outgoing_migrations_ = shard.migrations;
       }
     } else {

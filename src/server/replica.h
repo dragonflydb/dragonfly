@@ -132,6 +132,12 @@ class Replica : ProtocolClient {
     uint64_t repl_offset_sum;
     size_t psync_attempts;
     size_t psync_successes;
+    // We can't rely on full_sync_done or full_sync_in_progress because
+    // on disconnects the replica state mask is cleared. We use this variable
+    // to track if the replica reached full sync. When master disconnects,
+    // we use this variable to print the journal offsets in info command even
+    // when the link is down. It's reset whenever a full sync is initiated again.
+    bool passed_full_sync;
   };
 
   Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.
@@ -146,7 +152,7 @@ class Replica : ProtocolClient {
   // Get the current replication phase based on state_mask_
   std::string GetCurrentPhase() const;
 
-  // Used *only* in TakeOver flow. There is small data race if
+  // Used *only* in TakeOver flow and replicaof no one. There is small data race if
   // thread_flow_map_ gets written by the MainReplicationFiber thread but
   // the chances for that are extremely rare.
   std::vector<unsigned> GetFlowMapAtIndex(size_t index) const;
@@ -178,6 +184,17 @@ class Replica : ProtocolClient {
   // ack_offs_ last acknowledged offset.
   size_t repl_offs_ = 0, ack_offs_ = 0;
   unsigned state_mask_ = 0;  // see State enum above.
+
+  // When replica starts full sync it is set to false and true when it completes the full sync.
+  // Disconnects do not reset this, so this variable is still true if the master
+  // is not connected and the state_mask_ is cleared.
+  // Furthermore, on reconnects that enter full sync
+  // again this variable is set to false until full sync completes.
+  // Therefore, we have a consistent view of the replica:
+  // 1. True. Replica passed full sync even if master disconnects. In fact, once a
+  // node reached stable, the deltas from journal are the only missing items.
+  // 2. False. Replica has not passed full sync or a disconnect started full sync again.
+  bool passed_full_sync_ = false;
 
   bool is_paused_ = false;
   std::string id_;

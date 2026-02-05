@@ -139,19 +139,50 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
 
 using namespace std;
 
-bool IterateList(const PrimeValue& pv, const IterateFunc& func, long start, long end) {
+bool IterateList(const PrimeValue& pv, const IterateFunc& func, size_t start, size_t end) {
+  DCHECK_LE(start, end);
   bool success = true;
+  size_t len = pv.Size();
+  if (len == 0) {
+    return true;
+  }
+
+  if (end >= len) {
+    end = len - 1;
+    if (start > end) {
+      return true;
+    }
+  }
+
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t* lp = static_cast<uint8_t*>(pv.RObjPtr());
+    uint8_t* p = lpSeek(lp, start);
+    while (p && start <= end) {
+      unsigned int slen;
+      long long lval;
+      uint8_t* vstr = lpGetValue(p, &slen, &lval);
+
+      if (vstr) {
+        success = func(ContainerEntry{reinterpret_cast<const char*>(vstr), slen});
+      } else {
+        success = func(ContainerEntry{lval});
+      }
+
+      if (!success)
+        break;
+
+      p = lpNext(lp, p);
+      start++;
+    }
+    return success;
+  }
 
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = static_cast<QList*>(pv.RObjPtr());
 
   ql->Iterate(
-      [&](const QList::Entry& entry) {
-        if (entry.is_int()) {
-          success = func(ContainerEntry{entry.ival()});
-        } else {
-          success = func(ContainerEntry{entry.view().data(), entry.view().size()});
-        }
+      [&](const CollectionEntry& entry) {
+        success = func(entry);
         return success;
       },
       start, end);
@@ -180,19 +211,22 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
   return success;
 }
 
-bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSortedFunc& func,
-                      int32_t start, int32_t end, bool reverse, bool use_score) {
-  unsigned long llen = robj_wrapper->Size();
-  if (end < 0 || unsigned(end) >= llen)
-    end = llen - 1;
-
-  if (start > end || unsigned(start) >= llen)
+bool IterateSortedSet(const PrimeValue& pv, const IterateSortedFunc& func, size_t start, size_t end,
+                      bool reverse, bool use_score) {
+  size_t llen = pv.Size();
+  if (llen == 0)
     return true;
 
-  unsigned rangelen = unsigned(end - start) + 1;
+  if (end >= llen)
+    end = llen - 1;
 
-  if (robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK) {
-    uint8_t* zl = static_cast<uint8_t*>(robj_wrapper->inner_obj());
+  if (start > end || start >= llen)
+    return true;
+
+  size_t rangelen = end - start + 1;
+
+  if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+    uint8_t* zl = static_cast<uint8_t*>(pv.RObjPtr());
     uint8_t *eptr, *sptr;
     uint8_t* vstr;
     unsigned int vlen;
@@ -231,8 +265,8 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
     }
     return success;
   } else {
-    CHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
-    detail::SortedMap* smap = (detail::SortedMap*)robj_wrapper->inner_obj();
+    CHECK_EQ(pv.Encoding(), OBJ_ENCODING_SKIPLIST);
+    auto* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
     return smap->Iterate(start, rangelen, reverse, [&](sds ele, double score) {
       return func(ContainerEntry{ele, sdslen(ele)}, score);
     });

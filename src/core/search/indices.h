@@ -169,8 +169,7 @@ struct BaseVectorIndex : public BaseIndex {
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
 
-  using VectorPtr = decltype(std::declval<OwnedFtVector>().first);
-  virtual void AddVector(DocId id, const VectorPtr& vector) = 0;
+  virtual void AddVector(DocId id, const void* vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
@@ -189,7 +188,7 @@ struct FlatVectorIndex : public BaseVectorIndex {
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  void AddVector(DocId id, const void* vector) override;
 
  private:
   PMR_NS::vector<float> entries_;
@@ -216,16 +215,28 @@ struct GeoIndex : public BaseIndex {
 
 // Defragments a map like data structure. The values in the map must have a `Defragment` method.
 // Works with rax tree map and hash based maps
-template <typename Container, typename ItFunc> struct DefragmentMap {
-  // ItFunc is necessary because RaxTreeMap does not allow copying or moving iterators, so this
-  // class cannot accept begin,end iterators from caller. It must construct the begin iterator
-  using Iterator = std::invoke_result_t<ItFunc>;
-  DefragmentMap(Container& container, ItFunc&& f)
-      : container(container), it(f()), end(container.end()) {
+template <typename Container> struct DefragmentMap {
+  using ValueType = Container::value_type;
+  using Iterator = Container::iterator;
+
+  DefragmentMap(Container& container, std::string* key) : key{key} {
+    if (key->empty()) {
+      it = container.end();
+    } else if constexpr (requires { container.lower_bound(*key); }) {
+      it = container.lower_bound(*key);
+    } else {
+      it = container.find(*key);
+    }
+
+    if (it == container.end()) {
+      it = container.begin();
+    }
+
+    end = container.end();
   }
 
   // The key is set if the defragmentation has to stop mid way due to depleted quota
-  DefragmentResult Defragment(PageUsage* page_usage, std::string* key) {
+  DefragmentResult Defragment(PageUsage* page_usage) {
     if (page_usage->QuotaDepleted()) {
       return DefragmentResult{.quota_depleted = true, .objects_moved = 0};
     }
@@ -233,7 +244,7 @@ template <typename Container, typename ItFunc> struct DefragmentMap {
     DefragmentResult result;
     for (; it != end; ++it) {
       const auto& [k, map] = *it;
-      if (result.Merge(DefragmentIndex(map, page_usage, 0)).quota_depleted) {
+      if (result.Merge(DefragmentIndex(map, page_usage)).quota_depleted) {
         *key = k;
         break;
       }
@@ -247,19 +258,15 @@ template <typename Container, typename ItFunc> struct DefragmentMap {
   }
 
  private:
-  template <typename T>
-  static auto DefragmentIndex(T& t, PageUsage* page_usage, int /*tag*/)
-      -> decltype(t->Defragment(page_usage)) {
-    return t->Defragment(page_usage);
+  template <typename T> static auto DefragmentIndex(T& t, PageUsage* page_usage) {
+    if constexpr (requires { t->Defragment(page_usage); }) {
+      return t->Defragment(page_usage);
+    } else {
+      return t.Defragment(page_usage);
+    }
   }
 
-  template <typename T>
-  static auto DefragmentIndex(T& t, PageUsage* page_usage, char /*tag*/)
-      -> decltype(t.Defragment(page_usage)) {
-    return t.Defragment(page_usage);
-  }
-
-  Container& container;
+  std::string* key;
   Iterator it;
   Iterator end;
 };

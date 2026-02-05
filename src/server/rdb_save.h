@@ -4,6 +4,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/types/span.h>
 
 extern "C" {
 #include "redis/lzfP.h"
@@ -22,11 +23,14 @@ extern "C" {
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
-typedef struct quicklistNode quicklistNode;
+
+namespace dfly::search {
+struct HnswNodeData;
+}  // namespace dfly::search
 
 namespace dfly {
 
-uint8_t RdbObjectType(const PrimeValue& pv);
+uint8_t RdbObjectType(const CompactObj& pv);
 
 class EngineShard;
 class Service;
@@ -129,8 +133,10 @@ class RdbSaver {
 
   SnapshotStats GetCurrentSnapshotProgress() const;
 
-  // Fetch global data to be serialized in summary part of a snapshot / full sync.
-  static GlobalData GetGlobalData(const Service* service);
+  // Fetch global data to be serialized in snapshot.
+  // is_summary: true for summary file (full data with JSON search indices),
+  //             false for per-shard files (only simple search index restore commands)
+  static GlobalData GetGlobalData(const Service* service, bool is_summary);
 
   // Returns time in nanos of start of the last pending write interaction.
   // Returns -1 if no write operations are currently pending.
@@ -159,9 +165,9 @@ class SerializerBase {
   virtual ~SerializerBase() = default;
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
-  static void DumpObject(const CompactObj& obj, io::StringSink* out, bool ignore_crc = false);
-  static void DumpObject(RdbSerializer* serializer, const CompactObj& obj, io::StringSink* out,
-                         bool ignore_crc = false);
+  static void DumpValue(const PrimeValue& obj, io::StringSink* out, bool ignore_crc = false);
+  static void DumpValue(RdbSerializer* serializer, const PrimeValue& obj, io::StringSink* out,
+                        bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
@@ -253,6 +259,9 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveValue(const PrimeValue& pv);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
+
+  // Save HNSW index entry using provided tmp_buf for serialization to avoid repeated allocations.
+  std::error_code SaveHNSWEntry(const search::HnswNodeData& node, absl::Span<uint8_t> tmp_buf);
 
   size_t GetTempBufferSize() const override;
   std::error_code SendEofAndChecksum();

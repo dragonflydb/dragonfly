@@ -3,8 +3,6 @@
 //
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-
 #include <memory>
 #include <utility>
 #include <vector>

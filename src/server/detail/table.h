@@ -12,8 +12,8 @@ namespace dfly {
 
 namespace detail {
 
-using PrimeKey = CompactObj;
-using PrimeValue = CompactObj;
+using PrimeKey = CompactKey;
+using PrimeValue = CompactValue;
 
 struct PrimeTablePolicy {
   enum { kSlotNum = 14, kBucketNum = 56 };

@@ -14,6 +14,8 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/flags/internal/flag.h"
+#include "absl/functional/bind_front.h"
+#include "absl/functional/overload.h"
 #include "base/flag_utils.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -82,59 +84,66 @@ tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
 }
 
 // Determine required byte size and encoding type based on value.
-// TODO(vlad): Maybe split into different accessors?
 // Do NOT enforce rules depending on dynamic runtime values as this is called
 // when scheduling stash and just before succeeeding and is expected to return the same results
-pair<size_t /*size*/, CompactObj::ExternalRep> DetermineSerializationParams(const PrimeValue& pv) {
+TieredStorage::StashDescriptor DetermineSerializationParams(const PrimeValue& pv) {
   switch (pv.ObjType()) {
-    case OBJ_STRING:
-      if (pv.IsInline())
+    case OBJ_STRING: {
+      if (!pv.HasAllocated())
         return {};
-      return std::make_pair(pv.GetRawString().view().size(), CompactObj::ExternalRep::STRING);
-    case OBJ_HASH:
+      auto strs = pv.GetRawString();
+      return {strs, CompactObj::ExternalRep::STRING};
+    }
+    case OBJ_HASH: {
       if (pv.Encoding() == kEncodingListPack) {
-        auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
-        size_t bytes = 4 + lpBytes(lp);  // encoded length and data bytes
-        bytes += lpLength(lp) * 2 * 4;   // 4 bytes for encoded key/value lengths
-        return std::make_pair(bytes, CompactObj::ExternalRep::SERIALIZED_MAP);
+        return {static_cast<uint8_t*>(pv.RObjPtr()), CompactObj::ExternalRep::SERIALIZED_MAP};
       }
       return {};
+    }
     default:
       return {};
   };
 }
 
-size_t Serialize(CompactObj::ExternalRep rep, const PrimeValue& pv, io::MutableBytes buffer) {
-  DCHECK_LE(DetermineSerializationParams(pv).first, buffer.size());
-  switch (rep) {
-    case CompactObj::ExternalRep::STRING: {
-      auto sv = pv.GetRawString();
-      memcpy(buffer.data(), sv.view().data(), sv.view().size());
-      return sv.view().size();
-    }
-    case CompactObj::ExternalRep::SERIALIZED_MAP: {
-      DCHECK_EQ(pv.Encoding(), kEncodingListPack);
-
-      // TODO(vlad): Optimize copy for serialization
-      detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
-      vector<pair<string, string>> entries(lw.begin(), lw.end());
-      return tiering::SerializedMap::Serialize(
-          entries, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
-    }
-  };
-  return 0;
-}
-
-// TODO: Remove with proper no-copy serialization
-string SerializeToString(const PrimeValue& pv) {
-  auto [size, type] = DetermineSerializationParams(pv);
-  string s(size, 0);
-  size_t written = Serialize(type, pv, {reinterpret_cast<uint8_t*>(s.data()), s.size()});
+string SerializeToString(const TieredStorage::StashDescriptor& blobs) {
+  size_t est_size = blobs.EstimatedSerializedSize();
+  string s(est_size, 0);
+  size_t written = blobs.Serialize({reinterpret_cast<uint8_t*>(s.data()), s.size()});
   s.resize(written);
   return s;
 }
 
 }  // anonymous namespace
+
+size_t TieredStorage::StashDescriptor::EstimatedSerializedSize() const {
+  return visit(
+      absl::Overload{[](const array<string_view, 2>& a) { return a[0].size() + a[1].size(); },
+                     [](uint8_t* ptr) {
+                       detail::ListpackWrap lw{ptr};
+                       return tiering::SerializedMap::EstimateSize(lw.UsedBytes(), lw.size());
+                     }},
+      blob);
+};
+
+size_t TieredStorage::StashDescriptor::Serialize(io::MutableBytes buffer) const {
+  DCHECK_LE(EstimatedSerializedSize(), buffer.size());
+
+  switch (rep) {
+    case CompactObj::ExternalRep::STRING: {
+      auto strs = std::get<std::array<std::string_view, 2>>(blob);
+      memcpy(buffer.data(), strs[0].data(), strs[0].size());
+      if (!strs[1].empty())
+        memcpy(buffer.data() + strs[0].size(), strs[1].data(), strs[1].size());
+      return strs[0].size() + strs[1].size();
+    }
+    case CompactObj::ExternalRep::SERIALIZED_MAP: {
+      detail::ListpackWrap lw{static_cast<uint8_t*>(std::get<uint8_t*>(blob))};
+      return tiering::SerializedMap::Serialize(
+          lw, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
+    }
+  };
+  return 0;
+}
 
 class TieredStorage::ShardOpManager : public tiering::OpManager {
   friend class TieredStorage;
@@ -147,7 +156,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Clear IO pending flag for entry
   void ClearIoPending(OpManager::KeyRef key) {
     UnblockBackpressure(key, false);
-    if (auto pv = Find(key); pv) {
+    if (auto pv = Find(key.first, key.second); pv) {
       pv->SetStashPending(false);
       stats_.total_cancels++;
     }
@@ -166,17 +175,18 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void DeleteOffloaded(DbIndex dbid, const tiering::DiskSegment& segment);
 
  private:
-  PrimeValue* Find(OpManager::KeyRef key) {
+  PrimeValue* Find(DbIndex dbid, string_view key) {
     // TODO: Get DbContext for transaction for correct dbid and time
     // Bypass all update and stat mechanisms
-    auto it = db_slice_.GetDBTable(key.first)->prime.Find(key.second);
+    auto it = db_slice_.GetDBTable(dbid)->prime.Find(key);
     return IsValid(it) ? &it->second : nullptr;
   }
 
   // Load all values from bin by their hashes
   void Defragment(tiering::DiskSegment segment, string_view value);
 
-  void NotifyStashed(EntryId id, const io::Result<tiering::DiskSegment>& segment) override {
+  void NotifyStashed(const OwnedEntryId& id,
+                     const io::Result<tiering::DiskSegment>& segment) override {
     if (!segment) {
       VLOG(1) << "Stash failed " << segment.error().message();
       visit([this](auto id) { ClearIoPending(id); }, id);
@@ -185,7 +195,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  bool NotifyFetched(EntryId id, tiering::DiskSegment segment, tiering::Decoder* decoder) override;
+  bool NotifyFetched(const OwnedEntryId& id, tiering::DiskSegment segment,
+                     tiering::Decoder* decoder) override;
 
   bool NotifyDelete(tiering::DiskSegment segment) override;
 
@@ -215,7 +226,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     UnblockBackpressure(key, true);
-    if (auto* pv = Find(key); pv) {
+    if (auto* pv = Find(key.first, key.second); pv) {
       auto* stats = GetDbTableStats(key.first);
 
       pv->SetStashPending(false);
@@ -223,13 +234,13 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-      CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
+      StashDescriptor blobs = DetermineSerializationParams(*pv);
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
-        ts_->CoolDown(key.first, key.second, segment, rep, pv);
+        ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length, rep);
+        pv->SetExternal(segment.offset, segment.length, blobs.rep);
       }
     } else {
       LOG(DFATAL) << "Should not reach here";
@@ -291,11 +302,12 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
   }
 }
 
-bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegment segment,
+bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
+                                                  tiering::DiskSegment segment,
                                                   tiering::Decoder* decoder) {
   ++stats_.total_fetches;
 
-  if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
+  if (id == OwnedEntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
     auto* bdecoder = static_cast<tiering::BareDecoder*>(decoder);
     Defragment(segment, bdecoder->slice);
     return true;  // delete
@@ -315,8 +327,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, tiering::DiskSegme
   if (!should_upload)
     return false;
 
-  auto key = get<OpManager::KeyRef>(id);
-  auto* pv = Find(key);
+  const auto& key = get<tiering::DbKeyId>(id);
+  auto* pv = Find(key.first, key.second);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
     if (metrics.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
@@ -395,103 +407,41 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
-void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key,
+                                 const tiering::DiskSegment& segment,
                                  const tiering::Decoder& decoder,
                                  std::function<void(io::Result<tiering::Decoder*>)> cb) {
-  DCHECK(value.IsExternal());
-  DCHECK(!value.IsCool());
-  // TODO: imporve performance by avoiding one more function wrap
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), decoder, std::move(cb));
+  // TODO: improve performance by avoiding one more function wrap
+  op_manager_->Enqueue(KeyRef(dbid, key), segment, decoder, std::move(cb));
 }
 
-TieredStorage::TResult<string> TieredStorage::Read(DbIndex dbid, string_view key,
-                                                   const PrimeValue& value) {
-  util::fb2::Future<io::Result<string>> fut;
-  Read(dbid, key, value, bind(&decltype(fut)::Resolve, fut, placeholders::_1));
-  return fut;
-}
+std::optional<util::fb2::Future<bool>> TieredStorage::Stash(DbIndex dbid, string_view key,
+                                                            const StashDescriptor& blobs,
+                                                            bool provide_bp) {
+  CHECK(!bins_->IsPending(dbid, key));  // Because has stash pending is false (ShouldStash checks)
 
-void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                         std::function<void(io::Result<std::string>)> readf) {
-  auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
-    readf(res.transform([](auto* d) { return string{d->Read()}; }));
-  };
-  Read(dbid, key, value, tiering::StringDecoder{value}, std::move(cb));
-}
-
-template <typename T>
-TieredStorage::TResult<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
-                                                const PrimeValue& value,
-                                                std::function<T(std::string*)> modf) {
-  DCHECK(value.IsExternal());
-  DCHECK_EQ(value.ObjType(), OBJ_STRING);
-
-  util::fb2::Future<io::Result<T>> future;
-  auto cb = [future, modf = std::move(modf)](io::Result<tiering::Decoder*> res) mutable {
-    future.Resolve(
-        res.transform([](auto* d) { return static_cast<tiering::StringDecoder*>(d); })  //
-            .transform([&modf](auto* d) { return modf(d->Write()); }));
-  };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), tiering::StringDecoder{value},
-                       std::move(cb));
-  return future;
-}
-
-// Instantiate for size_t only - used in string_family's OpExtend.
-template TieredStorage::TResult<size_t> TieredStorage::Modify(
-    DbIndex dbid, std::string_view key, const PrimeValue& value,
-    std::function<size_t(std::string*)> modf);
-
-std::optional<util::fb2::Future<bool>> TieredStorage::TryStash(DbIndex dbid, string_view key,
-                                                               PrimeValue* value, bool provide_bp) {
-  if (!ShouldStash(*value))
-    return {};
-
-  // This invariant should always hold because ShouldStash tests for IoPending flag.
-  CHECK(!bins_->IsPending(dbid, key));
-
-  // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
-  // with a lot of underutilized disk space.
-  if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
-    ++stats_.stash_overflow_cnt;
-    return {};
-  }
-
-  auto [est_size, rep] = DetermineSerializationParams(*value);
+  size_t est_size = blobs.EstimatedSerializedSize();
   DCHECK_GT(est_size, 0u);
 
-  tiering::OpManager::EntryId id;
+  tiering::OpManager::PendingId id;
   error_code ec;
 
-  value->SetStashPending(true);
+  // value->SetStashPending(true);  // Optimistically set ahead, unset in case of error
+
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
-    if (auto prepared = op_manager_->PrepareStash(est_size); prepared) {
-      auto [offset, buf] = *prepared;
-      size_t written = Serialize(rep, *value, buf.bytes);
-      tiering::DiskSegment segment{offset, written};
-      op_manager_->Stash(id, segment, buf);
-    } else {
-      ec = prepared.error();
-    }
-  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(*value)); bin) {
-    id = bin->first;
-    // TODO(vlad): Write bin to prepared buffer instead of allocating one
-    if (auto prepared = op_manager_->PrepareStash(bin->second.length()); prepared) {
-      auto [offset, buf] = *prepared;
-      memcpy(buf.bytes.data(), bin->second.data(), bin->second.size());
-      tiering::DiskSegment segment{offset, bin->second.size()};
-      op_manager_->Stash(id, segment, buf);
-    } else {
-      ec = prepared.error();
-      bins_->ReportStashAborted(bin->first);
-    }
+    auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
+    ec = op_manager_->PrepareAndStash(id, est_size, serialize);
+  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
+    id = bin->id;
+    auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
+    ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
   } else {
-    return {};  // silently added to bin
+    return {};  // added to bin, no operations pending
   }
 
+  // Set stash pending to false on single value or whole bin
   if (ec) {
-    value->SetStashPending(false);
     LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
     return {};
@@ -531,11 +481,12 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
     std::move(node.mapped()).Resolve(false);
 
   // TODO: Don't recompute size estimate, try-delete bin first
-  size_t size = DetermineSerializationParams(*value).first;
+  auto blobs = DetermineSerializationParams(*value);
+  size_t size = blobs.EstimatedSerializedSize();
   if (OccupiesWholePages(size)) {
-    op_manager_->Delete(KeyRef(dbid, key));
+    op_manager_->CancelPending(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
-    op_manager_->Delete(*bin);
+    op_manager_->CancelPending(*bin);
   }
   value->SetStashPending(false);
 }
@@ -630,12 +581,14 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
     stats_.offloading_steps++;
-    if (ShouldStash(it->second)) {
+    auto blobs = ShouldStash(it->second);
+    if (blobs) {
       if (it->second.WasTouched()) {
         it->second.SetTouched(false);
       } else {
         stats_.offloading_stashes++;
-        TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
+        it->second.SetStashPending(true);
+        Stash(dbid, it->first.GetSlice(&tmp), *blobs, false);
       }
     }
   };
@@ -689,22 +642,32 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
   return gained;
 }
 
-bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
+auto TieredStorage::ShouldStash(const PrimeValue& pv) const -> std::optional<StashDescriptor> {
   // Check value state
   if (pv.IsExternal() || pv.HasStashPending())
-    return false;
+    return nullopt;
 
   // For now, hash offloading is conditional
   if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
-    return false;
+    return nullopt;
 
   // Estimate value size
-  auto [size, rep] = DetermineSerializationParams(pv);
-  if (size < config_.min_value_size)
-    return false;
+  StashDescriptor blobs = DetermineSerializationParams(pv);
+  size_t estimated_size = blobs.EstimatedSerializedSize();
+  if (estimated_size < config_.min_value_size)
+    return nullopt;
+
+  // Limit write depth. TODO: Provide backpressure?
+  if (op_manager_->GetStats().pending_stash_cnt >= config_.write_depth_limit) {
+    ++stats_.stash_overflow_cnt;
+    return {};
+  }
 
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  return disk_stats.allocated_bytes + tiering::kPageSize + size < disk_stats.max_file_size;
+  if (disk_stats.allocated_bytes + tiering::kPageSize + estimated_size < disk_stats.max_file_size) {
+    return blobs;
+  }
+  return nullopt;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
@@ -750,5 +713,45 @@ detail::TieredColdRecord* TieredStorage::PopCool() {
   stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + res.value.MallocUsed());
   return &res;
 }
+
+std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
+                                                       bool provide_bp, PrimeValue* pv,
+                                                       TieredStorage* ts) {
+  if (auto blobs = ts->ShouldStash(*pv); blobs) {
+    pv->SetStashPending(true);
+    return ts->Stash(dbid, key, *blobs, provide_bp);
+  }
+  return std::nullopt;
+}
+
+void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                function<void(io::Result<string_view>)> readf, TieredStorage* ts) {
+  auto cb = [readf = std::move(readf)](io::Result<tiering::StringDecoder*> res) mutable {
+    readf(res.transform([](tiering::StringDecoder* d) { return d->GetView(); }));
+  };
+  ts->Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
+}
+
+template <typename T>
+TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                       std::function<T(std::string*)> modf, TieredStorage* ts) {
+  DCHECK(value.IsExternal());
+  DCHECK_EQ(value.ObjType(), OBJ_STRING);
+
+  util::fb2::Future<io::Result<T>> future;
+
+  auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
+    future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
+  };
+  ts->Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
+
+  return future;
+}
+
+// Instantiate for size_t only - used in string_family's OpExtend.
+template TieredStorage::TResult<size_t> ModifyTiered(DbIndex dbid, std::string_view key,
+                                                     const PrimeValue& value,
+                                                     std::function<size_t(std::string*)> modf,
+                                                     TieredStorage* ts);
 
 }  // namespace dfly

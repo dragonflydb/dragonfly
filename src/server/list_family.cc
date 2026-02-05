@@ -1,22 +1,22 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include "server/list_family.h"
-
-#include "facade/cmd_arg_parser.h"
-#include "server/acl/acl_commands_def.h"
-
 extern "C" {
 #include "redis/sds.h"
 }
 
+#include <absl/functional/overload.h>
 #include <absl/strings/numbers.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/listpack.h"
 #include "core/qlist.h"
+#include "facade/cmd_arg_parser.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -61,27 +61,249 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
-ABSL_RETIRED_FLAG(bool, list_experimental_v2, true,
-                  "Enables dragonfly specific implementation of quicklist");
+ABSL_FLAG(unsigned, list_tiering_threshold, 0,
+          "Tiering threshold for lists. Default - no tiering.");
 
 namespace dfly {
 
 using namespace std;
+
 using namespace facade;
 using absl::GetFlag;
+using absl::Overload;
 using time_point = Transaction::time_point;
 
 namespace {
 
-QList* GetQLV2(const PrimeValue& mv) {
-  return (QList*)mv.RObjPtr();
+class ListWrapper {
+  using LP = detail::ListPack;
+
+  std::variant<QList*, LP> impl_;
+
+  template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
+    return std::visit(Overload{[&f](auto* s) { return f(*s); }, f}, impl_);
+  }
+
+  template <typename F> decltype(auto) VisitMut(F f) {  // Cast T* to T&
+    return std::visit(Overload{[&f](auto* s) { return f(*s); }, f}, impl_);
+  }
+
+  static QList* PromoteToQLIfNeeded(LP lp, size_t additional_size) {
+    size_t sz = lp.BytesSize();
+    if (ShouldStoreAsListPack(sz + additional_size)) {
+      return nullptr;
+    }
+    QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                              GetFlag(FLAGS_list_compress_depth));
+    if (GetFlag(FLAGS_list_tiering_threshold) > 0) {
+      ql->SetTieringParams(
+          QList::TieringParams{.node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold)});
+    }
+    if (lp.Size() > 0) {
+      ql->AppendListpack(lp.GetPointer());
+    }
+    return ql;
+  }
+
+  void PushInternal(string_view value, QList::Where where, QList& ql) {
+    ql.Push(value, where);
+  }
+
+  void PushInternal(string_view value, QList::Where where, LP& lp) {
+    if (QList* ql = PromoteToQLIfNeeded(lp, value.size()); ql) {
+      if (lp.Size() == 0) {  // otherwise we already appended it in PromoteToQLIfNeeded.
+        lpFree(lp.GetPointer());
+      }
+      ql->Push(value, where);
+      impl_ = ql;
+    } else {
+      lp.Push(value, where);
+    }
+  }
+
+  bool InsertInternal(string_view pivot, string_view elem, QList::InsertOpt insert_opt, QList& ql) {
+    return ql.Insert(pivot, elem, insert_opt);
+  }
+
+  bool InsertInternal(string_view pivot, string_view elem, QList::InsertOpt insert_opt, LP& lp) {
+    uint8_t* p = lp.Find(pivot);
+    if (!p)
+      return false;
+
+    if (QList* ql = PromoteToQLIfNeeded(lp, elem.size()); ql) {
+      DCHECK_GT(ql->Size(), 0u);  // otherwise we would not Find the pivot.
+      impl_ = ql;
+      return ql->Insert(pivot, elem, insert_opt);
+    }
+
+    lp.Insert(p, elem, insert_opt);
+    return true;
+  }
+
+  bool ReplaceInternal(long index, string_view elem, QList& ql) {
+    return ql.Replace(index, elem);
+  }
+
+  bool ReplaceInternal(long index, string_view elem, LP& lp) {
+    uint8_t* p = lp.Seek(index);
+    if (!p)
+      return false;
+
+    if (QList* ql = PromoteToQLIfNeeded(lp, elem.size()); ql) {
+      DCHECK_GT(ql->Size(), 0u);  // otherwise we would not seek
+      impl_ = ql;
+      return ql->Replace(index, elem);
+    }
+    lp.Replace(p, elem);
+    return true;
+  }
+
+ public:
+  template <typename T> explicit ListWrapper(T t) : impl_(std::forward<T>(t)) {
+  }
+
+  size_t Size() const {
+    return VisitRef([](auto& list) { return list.Size(); });
+  }
+
+  string Pop(QList::Where where) {
+    return VisitMut([where](auto& list) { return list.Pop(where); });
+  }
+
+  void Push(string_view value, QList::Where where) {
+    VisitMut([&](auto& list) { PushInternal(value, where, list); });
+  }
+
+  string First(QList::Where where) const {
+    return visit(Overload{[&](QList* ql) {
+                            auto it = ql->GetIterator(where);
+                            CHECK(it.Valid());
+                            return it.Get().to_string();
+                          },
+                          [&](const LP& lp) { return lp.First(where); }},
+                 impl_);
+  }
+
+  std::optional<string> At(long index) const {
+    return visit(Overload{[&](QList* ql) -> optional<string> {
+                            auto it = ql->GetIterator(index);
+                            if (!it.Valid())
+                              return nullopt;
+                            return it.Get().to_string();
+                          },
+                          [&](const LP& lp) { return lp.At(index); }},
+                 impl_);
+  }
+
+  vector<uint32_t> Pos(string_view element, uint32_t rank, uint32_t count, uint32_t max_len,
+                       QList::Where where) const;
+
+  bool Insert(string_view pivot, string_view elem, QList::InsertOpt insert_opt) {
+    return VisitMut([&](auto& list) { return InsertInternal(pivot, elem, insert_opt, list); });
+  }
+
+  unsigned Remove(string_view elem, unsigned count, QList::Where where);
+
+  bool Replace(long index, string_view elem) {
+    return VisitMut([&](auto& list) { return ReplaceInternal(index, elem, list); });
+  }
+
+  void Erase(long start, long count) {
+    VisitMut([&](auto& list) { list.Erase(start, count); });
+  }
+
+  void Launder(PrimeValue* pv) {
+    if (auto* lp = std::get_if<LP>(&impl_)) {
+      pv->SetRObjPtr(lp->GetPointer());
+    } else if (pv->Encoding() != kEncodingQL2) {
+      // We promoted to QList but the PrimeValue is not updated.
+      pv->SetRObjPtr(nullptr);
+      auto* ql = std::get<QList*>(impl_);
+      pv->InitRobj(OBJ_LIST, kEncodingQL2, ql);
+    }
+  }
+};
+
+vector<uint32_t> ListWrapper::Pos(string_view element, uint32_t rank, uint32_t count,
+                                  uint32_t max_len, QList::Where where) const {
+  DCHECK_GT(rank, 0u);
+
+  if (auto* lp = std::get_if<LP>(&impl_)) {
+    return lp->Pos(element, rank, count, max_len, where);
+  }
+
+  vector<uint32_t> matches;
+
+  auto* ql = std::get<QList*>(impl_);
+  auto it = ql->GetIterator(where);
+  if (!it.Valid())
+    return matches;
+
+  unsigned index = 0;
+  while (max_len == 0 || index < max_len) {
+    if (it.Get() == element) {
+      if (rank == 1) {
+        auto k = (where == QList::HEAD) ? index : ql->Size() - index - 1;
+        matches.push_back(k);
+        if (count && matches.size() >= count)
+          break;
+      } else {
+        rank--;
+      }
+    }
+    index++;
+    if (!it.Next())
+      break;
+  }
+  return matches;
 }
+
+unsigned ListWrapper::Remove(string_view elem, unsigned count, QList::Where where) {
+  // try parsing the element into an integer.
+  int64_t ival;
+  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
+  CollectionEntry collection_elem(elem.data(), elem.size());
+  if (is_int) {
+    collection_elem = CollectionEntry{ival};
+  }
+
+  if (auto* lp = std::get_if<LP>(&impl_)) {
+    return lp->Remove(collection_elem, count, where);
+  }
+
+  auto* ql = std::get<QList*>(impl_);
+  auto it = ql->GetIterator(where);
+  auto is_match = [&](const QList::Entry& entry) {
+    return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
+  };
+
+  unsigned removed = 0;
+  while (it.Valid()) {
+    QList::Entry entry = it.Get();
+    if (is_match(entry)) {
+      it = ql->Erase(it);
+      removed++;
+      if (count && removed == count)
+        break;
+    } else {
+      it.Next();
+    }
+  }
+  return removed;
+}
+
+ListWrapper GetLW(const PrimeValue& mv) {
+  if (mv.Encoding() == kEncodingQL2) {
+    return ListWrapper{static_cast<QList*>(mv.RObjPtr())};
+  }
+  return ListWrapper{detail::ListPack(static_cast<uint8_t*>(mv.RObjPtr()))};
+}
+
+enum class ListDir : uint8_t { LEFT, RIGHT };
 
 QList::Where ToWhere(ListDir dir) {
   return dir == ListDir::LEFT ? QList::HEAD : QList::TAIL;
 }
-
-enum InsertParam : uint8_t { INSERT_BEFORE, INSERT_AFTER };
 
 ListDir ParseDir(facade::CmdArgParser* parser) {
   return parser->MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
@@ -103,7 +325,7 @@ class BPopPusher {
   ListDir popdir_, pushdir_;
 };
 
-// Called as a callback from MKBlocking after we've determined which key to pop.
+// Called as a callback from BPopGeneric after we've determined which key to pop.
 std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, ListDir dir) {
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
@@ -116,10 +338,11 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   std::string value;
   size_t len;
 
-  QList* ql = GetQLV2(it->second);
+  ListWrapper lw = GetLW(it->second);
   QList::Where where = ToWhere(dir);
-  value = ql->Pop(where);
-  len = ql->Size();
+  value = lw.Pop(where);
+  lw.Launder(&it->second);
+  len = lw.Size();
 
   it_res->post_updater.Run();
 
@@ -137,6 +360,21 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   return value;
 }
 
+ListWrapper CreateOrGet(const OpArgs& op_args, string_view key, bool create, PrimeValue* pv) {
+  if (create) {
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+    if (blocking_controller) {
+      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
+    }
+
+    uint8_t* lp = lpNew(0);
+    pv->InitRobj(OBJ_LIST, kEncodingListPack, lp);
+    return ListWrapper{detail::ListPack(lp)};
+  }
+
+  return GetLW(*pv);
+}
+
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
   auto& db_slice = op_args.GetDbSlice();
@@ -145,19 +383,14 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     return src_res.status();
 
   auto src_it = src_res->it;
-  QList* srcql_v2 = nullptr;
-  QList* destql_v2 = nullptr;
   string val;
-  size_t prev_len = 0;
-
-  DCHECK_EQ(src_it->second.Encoding(), kEncodingQL2);
-  srcql_v2 = GetQLV2(src_it->second);
-  prev_len = srcql_v2->Size();
+  ListWrapper srcql_v2 = GetLW(src_it->second);
+  size_t prev_len = srcql_v2.Size();
 
   if (src == dest) {  // simple case.
-    val = srcql_v2->Pop(ToWhere(src_dir));
-    srcql_v2->Push(val, ToWhere(dest_dir));
-
+    val = srcql_v2.Pop(ToWhere(src_dir));
+    srcql_v2.Push(val, ToWhere(dest_dir));
+    srcql_v2.Launder(&src_it->second);
     return val;
   }
 
@@ -171,20 +404,13 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
   src_it = src_res->it;
 
-  if (dest_res.is_new) {
-    destql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                              GetFlag(FLAGS_list_compress_depth));
-    dest_res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, destql_v2);
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
-    if (blocking_controller) {
-      blocking_controller->Awaken(op_args.db_cntx.db_index, dest);
-    }
-  } else {
-    destql_v2 = GetQLV2(dest_res.it->second);
-  }
+  ListWrapper dest_lw = CreateOrGet(op_args, dest, dest_res.is_new, &dest_res.it->second);
 
-  val = srcql_v2->Pop(ToWhere(src_dir));
-  destql_v2->Push(val, ToWhere(dest_dir));
+  val = srcql_v2.Pop(ToWhere(src_dir));
+  srcql_v2.Launder(&src_it->second);
+
+  dest_lw.Push(val, ToWhere(dest_dir));
+  dest_lw.Launder(&dest_res.it->second);
 
   src_res->post_updater.Run();
   dest_res.post_updater.Run();
@@ -210,17 +436,12 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
   const PrimeValue& pv = it_res.value()->second;
   DCHECK_GT(pv.Size(), 0u);  // should be not-empty.
 
-  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
-  QList* ql = GetQLV2(pv);
-  auto it = ql->GetIterator(ToWhere(dir));
-  CHECK(it.Next());
-
-  return it.Get().to_string();
+  ListWrapper lw = GetLW(pv);
+  return lw.First(ToWhere(dir));
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, const facade::ArgRange& vals, bool journal_rewrite) {
-  EngineShard* es = op_args.shard;
   DbSlice::ItAndUpdater res;
 
   if (skip_notexist) {
@@ -237,29 +458,14 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   size_t len = 0;
   DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
-  QList* ql_v2 = nullptr;
-
-  if (res.is_new) {
-    ql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
-                                          GetFlag(FLAGS_list_compress_depth));
-    res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
-  } else {
-    DCHECK(res.it->second.ObjType() == OBJ_LIST && res.it->second.Encoding() == kEncodingQL2);
-    ql_v2 = GetQLV2(res.it->second);
-  }
+  ListWrapper lw = CreateOrGet(op_args, key, res.is_new, &res.it->second);
 
   QList::Where where = ToWhere(dir);
   for (string_view v : vals) {
-    ql_v2->Push(v, where);
+    lw.Push(v, where);
   }
-  len = ql_v2->Size();
-
-  if (res.is_new) {
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
-    if (blocking_controller) {
-      blocking_controller->Awaken(op_args.db_cntx.db_index, key);
-    }
-  }
+  lw.Launder(&res.it->second);
+  len = lw.Size();
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
@@ -286,8 +492,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   size_t prev_len = 0;
   StringVec res;
 
-  QList* ql = GetQLV2(it->second);
-  prev_len = ql->Size();
+  ListWrapper lw = GetLW(it->second);
+  prev_len = lw.Size();
 
   if (prev_len < count) {
     count = prev_len;
@@ -299,11 +505,12 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
 
   QList::Where where = ToWhere(dir);
   for (unsigned i = 0; i < count; ++i) {
-    string val = ql->Pop(where);
+    string val = lw.Pop(where);
     if (return_results) {
       res.push_back(std::move(val));
     }
   }
+  lw.Launder(&it->second);
 
   it_res->post_updater.Run();
 
@@ -389,8 +596,8 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
   if (!res)
     return res.status();
 
-  QList* ql = GetQLV2(res.value()->second);
-  return ql->Size();
+  ListWrapper lw = GetLW(res.value()->second);
+  return lw.Size();
 }
 
 OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index) {
@@ -398,11 +605,11 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   if (!res)
     return res.status();
 
-  QList* ql = GetQLV2(res.value()->second);
-  auto it = ql->GetIterator(index);
-  if (!it.Next())
+  ListWrapper lw = GetLW(res.value()->second);
+  optional elem = lw.At(index);
+  if (!elem)
     return OpStatus::KEY_NOTFOUND;
-  return it.Get().to_string();
+  return std::move(*elem);
 }
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
@@ -415,35 +622,19 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_
     return it_res.status();
 
   const PrimeValue& pv = (*it_res)->second;
-  vector<uint32_t> matches;
+  ListWrapper lw = GetLW(pv);
 
-  QList* ql = GetQLV2(pv);
   QList::Where where = QList::HEAD;
   if (rank < 0) {
     rank = -rank;
     where = QList::TAIL;
   }
 
-  auto it = ql->GetIterator(where);
-  unsigned index = 0;
-  while (it.Next() && (max_len == 0 || index < max_len)) {
-    if (it.Get() == element) {
-      if (rank == 1) {
-        auto k = (where == QList::HEAD) ? index : ql->Size() - index - 1;
-        matches.push_back(k);
-        if (count && matches.size() >= count)
-          break;
-      } else {
-        rank--;
-      }
-    }
-    index++;
-  }
-  return matches;
+  return lw.Pos(element, rank, count, max_len, where);
 }
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
-                       InsertParam insert_param) {
+                       QList::InsertOpt insert_opt) {
   DCHECK(key.data() && pivot.data() && elem.data());
 
   auto& db_slice = op_args.GetDbSlice();
@@ -451,14 +642,13 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
   if (!it_res)
     return it_res.status();
 
-  PrimeValue& pv = it_res->it->second;
+  ListWrapper lw = GetLW(it_res->it->second);
 
   int res = -1;
 
-  QList* ql = GetQLV2(pv);
-  QList::InsertOpt insert_opt = (insert_param == INSERT_BEFORE) ? QList::BEFORE : QList::AFTER;
-  if (ql->Insert(pivot, elem, insert_opt)) {
-    res = int(ql->Size());
+  if (lw.Insert(pivot, elem, insert_opt)) {
+    lw.Launder(&it_res->it->second);
+    res = int(lw.Size());
   }
 
   return res;
@@ -470,38 +660,17 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   if (!it_res)
     return it_res.status();
 
-  size_t len = 0;
-  unsigned removed = 0;
+  ListWrapper lw = GetLW(it_res->it->second);
 
-  int64_t ival;
-
-  // try parsing the element into an integer.
-  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
-
-  QList* ql = GetQLV2(it_res->it->second);
   QList::Where where = QList::HEAD;
-
   if (count < 0) {
     count = -count;
     where = QList::TAIL;
   }
 
-  auto it = ql->GetIterator(where);
-  auto is_match = [&](const QList::Entry& entry) {
-    return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
-  };
-
-  while (it.Next()) {
-    QList::Entry entry = it.Get();
-    if (is_match(entry)) {
-      it = ql->Erase(it);
-      removed++;
-      if (count && removed == count)
-        break;
-    }
-  }
-  len = ql->Size();
-
+  unsigned removed = lw.Remove(elem, count, where);
+  size_t len = lw.Size();
+  lw.Launder(&it_res->it->second);
   it_res->post_updater.Run();
 
   if (len == 0) {
@@ -517,11 +686,12 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
   if (!it_res)
     return it_res.status();
 
-  auto it = it_res->it;
+  ListWrapper lw = GetLW(it_res->it->second);
   OpStatus status = OpStatus::OUT_OF_RANGE;
-  QList* ql = GetQLV2(it->second);
-  if (ql->Replace(index, elem))
+  if (lw.Replace(index, elem)) {
+    lw.Launder(&it_res->it->second);
     status = OpStatus::OK;
+  }
   return status;
 }
 
@@ -558,9 +728,10 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     rtrim = llen - end - 1;
   }
 
-  QList* ql = GetQLV2(it->second);
-  ql->Erase(0, ltrim);
-  ql->Erase(-rtrim, rtrim);
+  ListWrapper lw = GetLW(it->second);
+  lw.Erase(0, ltrim);
+  lw.Erase(-rtrim, rtrim);
+  lw.Launder(&it->second);
 
   it_res->post_updater.Run();
 
@@ -643,27 +814,27 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   }
 }
 
-void RPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
+void RPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx.tx, cmd_cntx.rb);
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx->tx(), cmd_cntx->rb());
 }
 
-void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
+void BRPopLPush(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   if (timeout < 0)
-    return builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx.tx, cmd_cntx.conn_cntx);
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -681,22 +852,22 @@ void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void BLMove(CmdArgList args, const CommandContext& cmd_cntx) {
+void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
   float timeout = parser.Next<float>();
-  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   if (timeout < 0)
-    return builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res =
-      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx.tx, cmd_cntx.conn_cntx);
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx->tx(), cmd_cntx->server_conn_cntx());
 
   if (op_res) {
     return builder->SendBulkString(*op_res);
@@ -797,23 +968,22 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
 }
 
-void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, Transaction* tx,
-                 SinkReplyBuilder* builder) {
+void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return builder->SendLong(result.value());
+    return cmd_cntx->SendLong(result.value());
   }
 
-  return builder->SendError(result.status());
+  return cmd_cntx->SendError(result.status());
 }
 
-void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void PopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
 
@@ -824,20 +994,19 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
     return_arr = true;
   }
 
-  if (auto err = parser.TakeError(); err)
-    return builder->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
   };
 
-  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     case OpStatus::WRONG_TYPE:
-      return builder->SendError(kWrongTypeErr);
+      return cmd_cntx->SendError(kWrongTypeErr);
     default:;
   }
 
@@ -849,17 +1018,16 @@ void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder*
   }
 }
 
-void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                 ConnectionContext* cntx) {
+void BPopGeneric(ListDir dir, CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK_GE(args.size(), 2u);
 
   float timeout;
   auto timeout_str = ArgS(args, args.size() - 1);
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return builder->SendError("timeout is not a float or out of range");
+    return cmd_cntx->SendError("timeout is not a float or out of range");
   }
   if (timeout < 0) {
-    return builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
   }
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
@@ -868,10 +1036,12 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
     popped_value = OpBPop(t, shard, key, dir);
   };
 
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  Transaction* tx = cmd_cntx->tx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
       tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
     DVLOG(1) << "BPop " << tx->DebugId() << " popped from key " << popped_key;  // key.
     std::string_view str_arr[2] = {*popped_key, popped_value};
@@ -882,14 +1052,14 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
 
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return builder->SendError(kWrongTypeErr);
+      return cmd_cntx->SendError(kWrongTypeErr);
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
-      return builder->SendError(std::move(error));
+      return cmd_cntx->SendError(error);
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
@@ -925,10 +1095,8 @@ optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, T
   return result;
 }
 
-}  // namespace
-
-void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   CmdArgParser parser{args};
   parser.Skip(parser.Next<size_t>());  // skip numkeys and keys
@@ -939,7 +1107,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -950,7 +1118,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(cb), false /* followed by another hop */);
+  cmd_cntx->tx()->Execute(std::move(cb), false /* followed by another hop */);
 
   // Find the first existing key from command arguments
   optional<string_view> key_to_pop;
@@ -963,7 +1131,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
       continue;
 
     const auto& [found_key, is_valid_type] = *found_keys_per_shard[sid];
-    ShardArgs shard_args = cmd_cntx.tx->GetShardArgs(sid);
+    ShardArgs shard_args = cmd_cntx->tx()->GetShardArgs(sid);
 
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it) {
       if (found_key == *it && it.index() < min_index) {
@@ -977,7 +1145,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Handle errors and empty cases first
   if (!key_to_pop || found_wrong_type) {
-    cmd_cntx.tx->Conclude();
+    cmd_cntx->tx()->Conclude();
     if (found_wrong_type) {
       response_builder->SendError(kWrongTypeErr);
     } else {
@@ -998,7 +1166,7 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(cb_pop), true);
+  cmd_cntx->tx()->Execute(std::move(cb_pop), true);
 
   if (result) {
     response_builder->StartArray(2);
@@ -1009,16 +1177,16 @@ void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   CmdArgParser parser{args};
   float timeout = parser.Next<float>();
   if (auto err = parser.TakeError(); err)
-    return response_builder->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   if (timeout < 0)
-    return response_builder->SendError("timeout is negative");
+    return cmd_cntx->SendError("timeout is negative");
 
   parser.Skip(parser.Next<size_t>());  // Skip numkeys and keys
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
@@ -1028,7 +1196,7 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     pop_count = parser.Next<size_t>();
 
   if (!parser.Finalize())
-    return response_builder->SendError(parser.TakeError().MakeReply());
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
@@ -1036,9 +1204,9 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return result.status();
   };
 
-  ConnectionContext* conn_cntx = cmd_cntx.conn_cntx;
+  ConnectionContext* conn_cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx.tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
+      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
       &conn_cntx->paused);
 
   if (popped_key.ok()) {
@@ -1050,44 +1218,44 @@ void ListFamily::BLMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ListFamily::LPush(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdLPush(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, false, args, cmd_cntx);
 }
 
-void ListFamily::LPushX(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdLPushX(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, true, args, cmd_cntx);
 }
 
-void ListFamily::LPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PopGeneric(ListDir::LEFT, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdLPop(CmdArgList args, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::LEFT, args, cmd_cntx);
 }
 
-void ListFamily::RPush(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdRPush(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, false, args, cmd_cntx);
 }
 
-void ListFamily::RPushX(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdRPushX(CmdArgList args, CommandContext* cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, true, args, cmd_cntx);
 }
 
-void ListFamily::RPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  return PopGeneric(ListDir::RIGHT, args, cmd_cntx.tx, cmd_cntx.rb);
+void CmdRPop(CmdArgList args, CommandContext* cmd_cntx) {
+  return PopGeneric(ListDir::RIGHT, args, cmd_cntx);
 }
 
-void ListFamily::LLen(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cmd_cntx.rb->SendLong(result.value());
+    cmd_cntx->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cmd_cntx.rb->SendLong(0);
+    cmd_cntx->SendLong(0);
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [key, elem] = parser.Next<string_view, string_view>();
 
@@ -1116,18 +1284,17 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
     parser.Skip(1);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  if (auto err = parser.TakeError(); err)
-    return rb->SendError(err.MakeReply());
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
-  Transaction* trans = cmd_cntx.tx;
+  Transaction* trans = cmd_cntx->tx();
   auto result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1147,11 +1314,11 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLIndex(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   int32_t index;
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!absl::SimpleAtoi(index_str, &index)) {
     rb->SendError(kInvalidIntErr);
@@ -1162,7 +1329,7 @@ void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
@@ -1173,22 +1340,22 @@ void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLInsert(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
+  QList::InsertOpt ins_opt = parser.MapNext("AFTER", QList::AFTER, "BEFORE", QList::BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (auto err = parser.TakeError(); err)
-    return rb->SendError(err.MakeReply());
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   DCHECK(pivot.data() && elem.data());
 
   auto cb = [&, &pivot = pivot, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
+    return OpInsert(t->GetOpArgs(shard), key, pivot, elem, ins_opt);
   };
 
-  OpResult<int> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     return rb->SendLong(result.value_or(0));
   }
@@ -1196,33 +1363,33 @@ void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendError(result.status());
 }
 
-void ListFamily::LTrim(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLTrim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view s_str = ArgS(args, 1);
   string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    cmd_cntx.rb->SendError(kInvalidIntErr);
+    cmd_cntx->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  OpStatus st = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpStatus st = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (st == OpStatus::KEY_NOTFOUND)
     st = OpStatus::OK;
-  cmd_cntx.rb->SendError(st);
+  cmd_cntx->SendError(st);
 }
 
-void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLRange(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view s_str = ArgS(args, 1);
   std::string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
     rb->SendError(kInvalidIntErr);
     return;
@@ -1232,7 +1399,7 @@ void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  auto res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  auto res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
     return rb->SendError(res.status());
   }
@@ -1241,74 +1408,76 @@ void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void ListFamily::LRem(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLRem(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx.rb->SendError(kInvalidIntErr);
+    cmd_cntx->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx.rb->SendLong(result.value_or(0));
+    return cmd_cntx->SendLong(result.value_or(0));
   }
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
-void ListFamily::LSet(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLSet(CmdArgList args, CommandContext* cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    cmd_cntx.rb->SendError(kInvalidIntErr);
+    cmd_cntx->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   if (result) {
-    cmd_cntx.rb->SendOk();
+    cmd_cntx->rb()->SendOk();
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void ListFamily::BLPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  BPopGeneric(ListDir::LEFT, args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void CmdBLPop(CmdArgList args, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::LEFT, args, cmd_cntx);
 }
 
-void ListFamily::BRPop(CmdArgList args, const CommandContext& cmd_cntx) {
-  BPopGeneric(ListDir::RIGHT, args, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
+void CmdBRPop(CmdArgList args, CommandContext* cmd_cntx) {
+  BPopGeneric(ListDir::RIGHT, args, cmd_cntx);
 }
 
-void ListFamily::LMove(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdLMove(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
 
   if (auto err = parser.TakeError(); err)
-    return cmd_cntx.rb->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
-  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx.tx, cmd_cntx.rb);
+  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx->tx(), cmd_cntx->rb());
 }
+
+}  // namespace
 
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&ListFamily::x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
-void ListFamily::Register(CommandRegistry* registry) {
+void RegisterListFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::LIST);
   *registry
       << CI{"LPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)

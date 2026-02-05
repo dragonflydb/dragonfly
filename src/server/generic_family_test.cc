@@ -11,10 +11,8 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
-#include "server/string_family.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -78,15 +76,7 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
   auto resp = Run({"expire", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"expire", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"expire", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"expire", "key", "3600", "GT", "LT"});
@@ -109,6 +99,20 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp, IntArg(0));
   resp = Run({"ttl", "key2"});
   EXPECT_THAT(resp.GetInt(), -1);
+
+  // GT does not apply since key has no "inf" expiry
+  resp = Run({"expire", "key2", "404", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // LT applies
+  resp = Run({"expire", "key2", "404", "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), 404);
+
+  Run({"persist", "key"});
 
   // set expiry to 101
   resp = Run({"expire", "key", "101"});
@@ -142,6 +146,17 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp, IntArg(0));
   resp = Run({"ttl", "key"});
   EXPECT_THAT(resp.GetInt(), 101);
+
+  // NX with GT, first sets expiry, updates only to larger values
+  Run({"persist", "key"});
+  Run({"expire", "key", "5", "NX", "GT"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(5));
+
+  Run({"expire", "key", "3", "NX", "GT"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(5));
+
+  Run({"expire", "key", "7", "NX", "GT"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(7));
 }
 
 TEST_F(GenericFamilyTest, ExpireAtOptions) {
@@ -152,15 +167,7 @@ TEST_F(GenericFamilyTest, ExpireAtOptions) {
   Run({"set", "key", "val"});
   // NX and XX are mutually exclusive
   auto resp = Run({"expireat", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"expireat", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"expireat", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"expireat", "key", "3600", "GT", "LT"});
@@ -176,6 +183,11 @@ TEST_F(GenericFamilyTest, ExpireAtOptions) {
   test_time_s = time_s + 9;
   resp = Run({"expireat", "key", absl::StrCat(test_time_s), "NX"});
   EXPECT_THAT(resp, IntArg(0));
+
+  // NX option with expired time is not accepted and so it doesn't delete the value
+  resp = Run({"expireat", "key", absl::StrCat(TEST_current_time_ms / 1000 - 10), "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
 
   // given a key with no expiry
   Run({"set", "key2", "val"});
@@ -220,15 +232,7 @@ TEST_F(GenericFamilyTest, PExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
   auto resp = Run({"pexpire", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"pexpire", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"pexpire", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"pexpire", "key", "3600", "GT", "LT"});
@@ -292,15 +296,7 @@ TEST_F(GenericFamilyTest, PExpireAtOptions) {
   Run({"set", "key", "val"});
   // NX and XX are mutually exclusive
   auto resp = Run({"pexpireat", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and GT are mutually exclusive
-  resp = Run({"pexpireat", "key", "3600", "NX", "GT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
-
-  // NX and LT are mutually exclusive
-  resp = Run({"pexpireat", "key", "3600", "NX", "LT"});
-  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"pexpireat", "key", "3600", "GT", "LT"});
@@ -1453,6 +1449,220 @@ TEST_F(GenericFamilyTest, CopyKeyExists) {
 
   ASSERT_THAT(Run({"COPY", "source", "destination", "REPLACE"}), IntArg(1));
   EXPECT_EQ(Run({"get", "destination"}), "value1");
+}
+
+TEST_F(GenericFamilyTest, HashFieldExpiryDuringDeserialize) {
+  Run({"HSETEX", "src", "1", "field1", "value1"});
+
+  // Advance time past field TTL - now field is expired
+  AdvanceTime(2000);
+
+  Run({"RENAME", "src", "dst"});
+}
+
+TEST_F(GenericFamilyTest, SortNegativeLimit) {
+  Run({"lpush", "list-neg", "1", "2", "3", "4", "5"});
+
+  // Negative offset
+  auto resp = Run({"sort", "list-neg", "LIMIT", "-1", "2"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer"));
+
+  // Negative limit
+  resp = Run({"sort", "list-neg", "LIMIT", "0", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer"));
+
+  // Both negative
+  resp = Run({"sort", "list-neg", "LIMIT", "-1", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer"));
+}
+
+TEST_F(GenericFamilyTest, SortBy) {
+  Run({"del", "list-1"});
+  Run({"lpush", "list-1", "1", "2", "3"});
+  Run({"set", "w_1", "30"});
+  Run({"set", "w_2", "20"});
+  Run({"set", "w_3", "10"});
+
+  // standard sort
+  auto resp = Run({"sort", "list-1", "BY", "w_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "2", "1"));
+
+  // desc
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "DESC"}), RespElementsAre("1", "2", "3"));
+
+  // alpha
+  Run({"set", "s_1", "c"});
+  Run({"set", "s_2", "b"});
+  Run({"set", "s_3", "a"});
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "s_*", "ALPHA"}), RespElementsAre("3", "2", "1"));
+
+  // nosort, lpush reverses order, so 3, 2, 1 is insertion order (or close to it)
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "nosort"}), RespElementsAre("3", "2", "1"));
+
+  // missing keys -> 0
+  Run({"del", "w_1"});
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*"}), RespElementsAre("1", "3", "2"));  // 0, 10, 20
+
+  // BY pattern with LIMIT - test pagination works correctly
+  Run({"set", "w_1", "30"});  // restore w_1
+  // Sorted order: 3 (w_3=10), 2 (w_2=20), 1 (w_1=30). LIMIT 1 2 skips first, returns next 2
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*", "LIMIT", "1", "2"}), RespElementsAre("2", "1"));
+  // multiple asterisks should result in syntax error
+  ASSERT_THAT(Run({"sort", "list-1", "BY", "w_*_*"}), ErrArg("syntax error"));
+}
+
+TEST_F(GenericFamilyTest, SortGet) {
+  // Setup test data
+  Run({"del", "mylist"});
+  Run({"lpush", "mylist", "1", "2", "3"});
+  Run({"set", "obj_1", "first"});
+  Run({"set", "obj_2", "second"});
+  Run({"set", "obj_3", "third"});
+  Run({"set", "weight_1", "30"});
+  Run({"set", "weight_2", "20"});
+  Run({"set", "weight_3", "10"});
+
+  // Test 1: Basic GET with single pattern (sorted numerically: 1,2,3)
+  auto resp = Run({"sort", "mylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("first", "second", "third"));
+
+  // Test 2: GET with special # pattern (returns element itself, sorted: 1,2,3)
+  resp = Run({"sort", "mylist", "GET", "#"});
+  ASSERT_THAT(resp, RespElementsAre("1", "2", "3"));
+
+  // Test 3: Multiple GET patterns
+  resp = Run({"sort", "mylist", "GET", "#", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
+
+  // Test 4: GET with BY pattern (sorted by weight: 3(10), 2(20), 1(30))
+  resp = Run({"sort", "mylist", "BY", "weight_*", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", "second", "first"));
+
+  // Test 5: Multiple GET patterns with BY
+  resp = Run({"sort", "mylist", "BY", "weight_*", "GET", "#", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("3", "third", "2", "second", "1", "first"));
+
+  // Test 6: GET with missing keys (should return empty strings, sorted: 1,2,3)
+  Run({"del", "obj_2"});
+  resp = Run({"sort", "mylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("first", "", "third"));
+
+  // Restore obj_2 for further tests
+  Run({"set", "obj_2", "second"});
+
+  // Test 7: GET with DESC (sorted DESC: 3,2,1)
+  resp = Run({"sort", "mylist", "DESC", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", "second", "first"));
+
+  // Test 8: GET with ALPHA
+  Run({"del", "strlist"});
+  Run({"lpush", "strlist", "c", "b", "a"});
+  Run({"set", "obj_a", "alpha"});
+  Run({"set", "obj_b", "beta"});
+  Run({"set", "obj_c", "gamma"});
+  resp = Run({"sort", "strlist", "ALPHA", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("alpha", "beta", "gamma"));
+
+  // Test 9: GET with LIMIT
+  resp = Run({"sort", "mylist", "GET", "#", "GET", "obj_*", "LIMIT", "1", "2"});
+  ASSERT_THAT(resp, RespElementsAre("2", "second", "3", "third"));
+
+  // Test 10: GET with STORE
+  resp = Run({"sort", "mylist", "GET", "#", "GET", "obj_*", "STORE", "result"});
+  ASSERT_THAT(resp, IntArg(6));  // 3 elements * 2 GET patterns = 6 stored values
+  resp = Run({"lrange", "result", "0", "-1"});
+  ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
+
+  // Test 11: GET with BY nosort
+  resp = Run({"sort", "mylist", "BY", "nosort", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("third", "second", "first"));  // insertion order
+
+  // Test 12: GET pattern validation (multiple asterisks should error)
+  ASSERT_THAT(Run({"sort", "mylist", "GET", "obj_*_*"}), ErrArg("syntax error"));
+
+  // Test 13: GET with empty list
+  Run({"del", "emptylist"});
+  Run({"lpush", "emptylist", "placeholder"});
+  Run({"lpop", "emptylist"});
+  resp = Run({"sort", "emptylist", "GET", "obj_*"});
+  ASSERT_THAT(resp, ArrLen(0));
+
+  // Test 14: GET with literal pattern (no asterisk)
+  Run({"set", "fixed_key", "fixed_value"});
+  resp = Run({"sort", "mylist", "GET", "fixed_key"});
+  ASSERT_THAT(resp, RespElementsAre("fixed_value", "fixed_value", "fixed_value"));
+
+  // Test 15: SORT_RO with GET
+  resp = Run({"sort_ro", "mylist", "GET", "#", "GET", "obj_*"});
+  ASSERT_THAT(resp, RespElementsAre("1", "first", "2", "second", "3", "third"));
+}
+
+TEST_F(GenericFamilyTest, Delex) {
+  // DELEX without condition behaves like DEL
+  Run({"set", "key1", "value1"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key1"}));
+  EXPECT_THAT(Run({"get", "key1"}), ArgType(RespExpr::NIL));
+
+  // DELEX on non-existent key returns 0
+  EXPECT_EQ(0, CheckedInt({"delex", "nonexistent"}));
+
+  // DELEX IFEQ deletes when values match
+  Run({"set", "key2", "value2"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key2", "IFEQ", "value2"}));
+  EXPECT_THAT(Run({"get", "key2"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFEQ does not delete when values differ
+  Run({"set", "key3", "value3"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key3", "IFEQ", "wrongvalue"}));
+  EXPECT_EQ(Run({"get", "key3"}), "value3");
+
+  // DELEX IFNE deletes when values differ
+  Run({"set", "key4", "value4"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key4", "IFNE", "differentvalue"}));
+  EXPECT_THAT(Run({"get", "key4"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFNE does not delete when values match
+  Run({"set", "key5", "value5"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key5", "IFNE", "value5"}));
+  EXPECT_EQ(Run({"get", "key5"}), "value5");
+
+  // DELEX IFDEQ tests - get digest first and use it
+  Run({"set", "key6", "value6"});
+  auto digest = Run({"digest", "key6"});
+  string_view digest_str = ToSV(digest.GetBuf());
+  EXPECT_EQ(1, CheckedInt({"delex", "key6", "IFDEQ", string(digest_str)}));
+  EXPECT_THAT(Run({"get", "key6"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFDEQ does not delete when digests differ
+  Run({"set", "key7", "value7"});
+  EXPECT_EQ(0, CheckedInt({"delex", "key7", "IFDEQ", "0000000000000000"}));
+  EXPECT_EQ(Run({"get", "key7"}), "value7");
+
+  // DELEX IFDNE deletes when digests differ
+  Run({"set", "key8", "value8"});
+  EXPECT_EQ(1, CheckedInt({"delex", "key8", "IFDNE", "0000000000000000"}));
+  EXPECT_THAT(Run({"get", "key8"}), ArgType(RespExpr::NIL));
+
+  // DELEX IFDNE does not delete when digests match
+  Run({"set", "key9", "value9"});
+  auto digest9 = Run({"digest", "key9"});
+  string_view digest9_str = ToSV(digest9.GetBuf());
+  EXPECT_EQ(0, CheckedInt({"delex", "key9", "IFDNE", string(digest9_str)}));
+  EXPECT_EQ(Run({"get", "key9"}), "value9");
+
+  Run({"lpush", "list1", "item"});
+  EXPECT_THAT(Run({"delex", "list1", "IFEQ", "item"}), ErrArg("WRONGTYPE"));
+
+  // DELEX with invalid option returns syntax error
+  Run({"set", "key10", "value10"});
+  EXPECT_THAT(Run({"delex", "key10", "INVALID", "value"}), ErrArg("Unknown subcommand"));
+
+  // DELEX with too many arguments returns error
+  EXPECT_THAT(Run({"delex", "key", "IFEQ", "val", "extra"}), ErrArg("wrong number of arguments"));
+
+  EXPECT_THAT(Run({"delex", "key11", "randomarg"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"delex", "key12", "IFEQ"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
 }
 
 }  // namespace dfly

@@ -25,6 +25,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "facade/redis_parser.h"
+#include "facade/reply_capture.h"
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
@@ -71,9 +72,7 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
-using namespace boost::asio;
 using namespace facade;
-using absl::GetFlag;
 using absl::StrCat;
 
 namespace {
@@ -580,6 +579,13 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   {
     unsigned num_df_flows = shard_flows_.size();
+    if (last_master_sync_data && num_df_flows != last_master_sync_data->last_journal_LSNs.size()) {
+      LOG(WARNING) << "last master has different flow size: "
+                   << last_master_sync_data->last_journal_LSNs.size()
+                   << " than current: " << num_df_flows;
+      last_master_sync_data = std::nullopt;
+    }
+
     // Going out of the way to avoid using std::vector<bool>...
     auto is_full_sync = std::make_unique<bool[]>(num_df_flows);
     // The elements of this bool array are not always initialized but we call std::accumulate below
@@ -628,6 +634,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
       DVLOG(1) << "Calling Flush on all slots " << this;
 
+      passed_full_sync_ = false;
       if (slot_range_.has_value()) {
         JournalExecutor{&service_}.FlushSlots(slot_range_.value());
       } else {
@@ -659,11 +666,15 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     sync_block->Wait();
 
     // Check if we woke up due to cancellation.
-    if (!exec_st_.IsRunning())
+    if (!exec_st_.IsRunning()) {
+      RdbLoader::PerformPostLoad(&service_, true);
       return exec_st_.GetError();
+    }
 
     RdbLoader::PerformPostLoad(&service_);
   }
+
+  passed_full_sync_ = true;
 
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
@@ -713,10 +724,10 @@ error_code Replica::ConsumeRedisStream() {
   };
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
-  CmdArgVec args_vector;
-
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
+  CommandContext cmnd_ctx;
+  cmnd_ctx.Init(&null_builder, &conn_context);
   while (true) {
     // Yield if the fiber has been running for long.
     if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
@@ -745,8 +756,9 @@ error_code Replica::ConsumeRedisStream() {
       return response.error();
     }
 
-    if (!LastResponseArgs().empty()) {
-      string cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
+    const auto& last_args = LastResponseArgs();
+    if (!last_args.empty()) {
+      string cmd = absl::CHexEscape(last_args[0].GetView());
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
@@ -760,8 +772,9 @@ error_code Replica::ConsumeRedisStream() {
           }
         }
 
-        facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
-        service_.DispatchCommand(facade::ParsedArgs{args_vector}, &null_builder, &conn_context);
+        FillBackedArgs(last_args, &cmnd_ctx);
+        service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
+                                 facade::AsyncPreference::ONLY_SYNC);
       }
     }
 
@@ -997,14 +1010,14 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   TransactionReader tx_reader{journal_rec_executed_.load(std::memory_order_relaxed) - 1};
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
-  std::optional<TransactionData> tx_data;
-  while ((tx_data = tx_reader.NextTxData(&reader, cntx))) {
-    DVLOG(3) << "Lsn: " << tx_data->lsn;
+  TransactionData tx_data;
+  while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
+    DVLOG(3) << "Lsn: " << tx_data.lsn;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-    if (tx_data->opcode == journal::Op::LSN) {
+    if (tx_data.opcode == journal::Op::LSN) {
       //  Do nothing
-    } else if (tx_data->opcode == journal::Op::PING) {
+    } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       auto* journal = ServerState::tlocal()->journal();
@@ -1014,7 +1027,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         journal->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
       }
     } else {
-      const bool is_successful = ExecuteTx(std::move(*tx_data), cntx);
+      const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
       if (is_successful) {
         // We only increment upon successful execution of the transaction.
         // The reason for this is that during partial sync we sent this
@@ -1279,6 +1292,7 @@ auto Replica::GetSummary() const -> Summary {
     }
     res.psync_successes = psync_successes_;
     res.psync_attempts = psync_attempts_;
+    res.passed_full_sync = passed_full_sync_;
     return res;
   };
 
@@ -1317,16 +1331,20 @@ std::string Replica::GetCurrentPhase() const {
 }
 
 std::vector<unsigned> Replica::GetFlowMapAtIndex(size_t index) const {
-  DCHECK(index < thread_flow_map_.size());
+  // Not all proactors have flows
+  if (index >= thread_flow_map_.size()) {
+    return {};
+  }
   return thread_flow_map_[index];
 }
 
 size_t Replica::GetRecCountExecutedPerShard(const std::vector<unsigned>& indexes) const {
   size_t total_shard_lsn = 0;
   for (auto index : indexes) {
-    total_shard_lsn += shard_flows_[index]->JournalExecutedCount() + 1;
+    total_shard_lsn += shard_flows_[index]->JournalExecutedCount();
   }
-  return total_shard_lsn;
+  // Journal always starts at pos 1
+  return std::max<size_t>(1UL, total_shard_lsn);
 }
 
 uint32_t DflyShardReplica::FlowId() const {

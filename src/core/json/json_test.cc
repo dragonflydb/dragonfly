@@ -72,16 +72,20 @@ TEST_F(JsonTest, Query) {
 }
 
 TEST_F(JsonTest, Errors) {
-  auto cb = [](json_errc err, const ser_context& contexts) { return false; };
+  auto cb = [](json_errc, const ser_context&) { return false; };
 
   json_decoder<json> decoder;
   basic_json_parser<char> parser(basic_json_decode_options<char>{}, cb);
 
   std::string_view input{"\000bla"};
   parser.update(input.data(), input.size());
-  parser.parse_some(decoder);
-  parser.finish_parse(decoder);
-  parser.check_done();
+
+  std::error_code ec;
+  parser.parse_some(decoder, ec);
+
+  EXPECT_TRUE(ec);
+
+  EXPECT_EQ(ec, json_errc::unexpected_eof);
   EXPECT_FALSE(decoder.is_valid());
 }
 

@@ -13,7 +13,6 @@ extern "C" {
 }
 
 #include "base/cycle_clock.h"
-#include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/string_set.h"
@@ -32,7 +31,6 @@ namespace dfly {
 using namespace facade;
 
 using namespace std;
-using absl::GetFlag;
 
 using ResultStringVec = vector<OpResult<StringVec>>;
 using ResultSetView = OpResult<absl::flat_hash_set<std::string_view>>;
@@ -45,7 +43,7 @@ namespace {
 using NewEntries = std::variant<ArgSlice, absl::flat_hash_set<std::string_view>>;
 
 auto EntriesRange(const NewEntries& entries) {
-  return base::it::Wrap(facade::kToSV, entries);
+  return base::it::Wrap(cmn::kToSV, entries);
 }
 
 constexpr uint32_t kMaxIntSetEntries = 256;
@@ -129,7 +127,7 @@ struct StringSetWrapper {
     const uint64_t timeout_cycles = base::CycleClock::Now() + base::CycleClock::Frequency() / 10000;
 
     do {
-      auto scan_callback = [&](const sds ptr) {
+      auto scan_callback = [&](sds ptr) {
         if (string_view str{ptr, sdslen(ptr)}; scan_op.Matches(str))
           res->emplace_back(str);
       };
@@ -148,7 +146,7 @@ struct StringSetWrapper {
   }
 
   auto Range() const {
-    auto transform = [](const sds ptr) { return string_view{ptr, sdslen(ptr)}; };
+    auto transform = [](sds ptr) { return string_view{ptr, sdslen(ptr)}; };
     return base::it::Transform(transform, base::it::Range(ss->begin(), ss->end()));
   }
 
@@ -161,7 +159,7 @@ struct StringSetWrapper {
 };
 
 // returns (removed, isempty)
-pair<unsigned, bool> RemoveSet(const DbContext& db_context, facade::ArgRange vals,
+pair<unsigned, bool> RemoveSet(const DbContext& db_context, const facade::ArgRange& vals,
                                CompactObj* set) {
   if (set->Encoding() == kEncodingIntSet) {
     intset* is = (intset*)set->RObjPtr();
@@ -281,8 +279,10 @@ StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
   picks.reserve(count);
 
   size_t tries = 0;
-  while (picks.size() < count && tries++ < count * 2)
-    picks.insert(picks.end(), string{*strset->GetRandomMember()});
+  while (picks.size() < count && tries++ < count * 2) {
+    auto member = *strset->GetRandomMember();
+    picks.insert(picks.end(), {member, sdslen(member)});
+  }
 
   if constexpr (is_same_v<StringVec, C>)
     return picks;
@@ -497,12 +497,15 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  CompactObj& co = add_res.it->second;
+  PrimeValue& co = add_res.it->second;
 
   if (!add_res.is_new) {
     // for non-overwrite case it must be set.
     if (!overwrite && co.ObjType() != OBJ_SET)
       return OpStatus::WRONG_TYPE;
+
+    if (overwrite)  // Overwriting the value removes expiration
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, add_res.it);
   }
 
   if (add_res.is_new || overwrite) {
@@ -594,7 +597,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   return StringSetWrapper{co, op_args.db_cntx}.Add(vals, ttl_sec, keepttl);
 }
 
-OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange vals,
+OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const facade::ArgRange& vals,
                          bool journal_rewrite) {
   auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
@@ -909,7 +912,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     return find_res.status();
   }
 
-  CompactObj& co = find_res->it->second;
+  PrimeValue& co = find_res->it->second;
 
   const std::uint32_t size = co.Size();
   const std::uint32_t picks_count = std::min(count, size);
@@ -996,43 +999,45 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
   return res;
 }
 
-void SendNumeric(OpResult<uint32_t> result, SinkReplyBuilder* builder) {
+void SendNumeric(OpResult<uint32_t> result, CommandContext* cmd_cntx) {
   switch (result.status()) {
     case OpStatus::OK:
-      return builder->SendLong(result.value());
+      return cmd_cntx->SendLong(result.value());
     case OpStatus::WRONG_TYPE:
-      return builder->SendError(kWrongTypeErr);
+      return cmd_cntx->SendError(kWrongTypeErr);
     default:
-      return builder->SendLong(0);
+      return cmd_cntx->SendLong(0);
   }
 }
 
 struct SetReplies {
-  SetReplies(SinkReplyBuilder* builder, bool _script)
-      : rb(static_cast<RedisReplyBuilder*>(builder)), script(_script) {
-    DCHECK(dynamic_cast<RedisReplyBuilder*>(builder));
+  explicit SetReplies(CommandContext* cntx)
+      : cmd_cntx(cntx), script(cntx->server_conn_cntx()->conn_state.script_info) {
   }
 
-  template <typename T> void Send(vector<T>* sv) {
+  template <typename T> void Send(vector<T> sv) {
     if (script)  // output is sorted under scripts
-      sort(sv->begin(), sv->end());
-
-    rb->SendBulkStrArr(*sv, RedisReplyBuilder::SET);
+      sort(sv.begin(), sv.end());
+    auto replier = [vec = std::move(sv)](facade::SinkReplyBuilder* builder) {
+      auto* rb = static_cast<RedisReplyBuilder*>(builder);
+      rb->SendBulkStrArr(vec, CollectionType::SET);
+    };
+    cmd_cntx->ReplyWith(std::move(replier));
   }
 
   void Send(const ResultSetView& rsv) {
     if (!rsv)
-      return rb->SendError(rsv.status());
+      return cmd_cntx->SendError(rsv.status());
 
     SvArray arr = ToSvArray(rsv.value());
-    Send(&arr);
+    Send(std::move(arr));
   }
 
-  RedisReplyBuilder* rb;
+  CommandContext* cmd_cntx;
   bool script;
 };
 
-void SAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSAdd(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto values = args.subspan(1);
 
@@ -1040,15 +1045,15 @@ void SAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return cmd_cntx.rb->SendLong(result.value());
+    return cmd_cntx->SendLong(result.value());
   }
 
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
-void SIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view val = ArgS(args, 1);
 
@@ -1063,11 +1068,11 @@ void SIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
     return find_res.status();
   };
 
-  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx.rb);
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx);
 }
 
-void SMIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
 
@@ -1086,31 +1091,36 @@ void SMIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
     return find_res.status();
   };
 
-  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  if (result || result == OpStatus::KEY_NOTFOUND)
-    static_cast<RedisReplyBuilder*>(cmd_cntx.rb)->SendLongArr(absl::MakeConstSpan(memberships));
-  else
-    cmd_cntx.rb->SendError(result.status());
+  OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+
+  auto replier = [result, memberships = std::move(memberships)](facade::SinkReplyBuilder* builder) {
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    if (result || result == OpStatus::KEY_NOTFOUND) {
+      rb->SendLongArr(absl::MakeConstSpan(memberships));
+    } else {
+      rb->SendError(result.status());
+    }
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void SMove(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSMove(CmdArgList args, CommandContext* cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
   string_view member = ArgS(args, 2);
 
   Mover mover{src, dest, member, true};
-  mover.Find(cmd_cntx.tx);
+  mover.Find(cmd_cntx->tx());
 
-  OpResult<unsigned> result = mover.Commit(cmd_cntx.tx);
+  OpResult<unsigned> result = mover.Commit(cmd_cntx->tx());
   if (!result) {
-    return cmd_cntx.rb->SendError(result.status());
-    return;
+    return cmd_cntx->SendError(result.status());
   }
 
-  cmd_cntx.rb->SendLong(result.value());
+  cmd_cntx->SendLong(result.value());
 }
 
-void SRem(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSRem(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto vals = args.subspan(1);
 
@@ -1118,11 +1128,11 @@ void SRem(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  SendNumeric(result, cmd_cntx.rb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  SendNumeric(result, cmd_cntx);
 }
 
-void SCard(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSCard(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
@@ -1134,17 +1144,17 @@ void SCard(CmdArgList args, const CommandContext& cmd_cntx) {
     return find_res.value()->second.Size();
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  SendNumeric(result, cmd_cntx.rb);
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  SendNumeric(result, cmd_cntx);
 }
 
-void SPop(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSPop(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   unsigned count = 1;
   if (args.size() > 1) {
     string_view arg = ArgS(args, 1);
     if (!absl::SimpleAtoi(arg, &count)) {
-      cmd_cntx.rb->SendError(kInvalidIntErr);
+      cmd_cntx->SendError(kInvalidIntErr);
       return;
     }
   }
@@ -1153,26 +1163,30 @@ void SPop(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
-  if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    if (args.size() == 1) {  // SPOP key
-      if (result.status() == OpStatus::KEY_NOTFOUND) {
-        rb->SendNull();
-      } else {
-        DCHECK_EQ(1u, result.value().size());
-        rb->SendBulkString(result.value().front());
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  auto replier = [result = std::move(result),
+                  pop_single = (args.size() == 1)](facade::SinkReplyBuilder* builder) {
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    if (result || result.status() == OpStatus::KEY_NOTFOUND) {
+      if (pop_single) {  // SPOP key
+        if (result.status() == OpStatus::KEY_NOTFOUND) {
+          rb->SendNull();
+        } else {
+          DCHECK_EQ(1u, result.value().size());
+          rb->SendBulkString(result.value().front());
+        }
+      } else {  // SPOP key cnt
+        rb->SendBulkStrArr(*result, CollectionType::SET);
       }
-    } else {  // SPOP key cnt
-      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
+      return;
     }
-    return;
-  }
 
-  cmd_cntx.rb->SendError(result.status());
+    rb->SendError(result.status());
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void SDiff(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSDiff(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view src_key = ArgS(args, 0);
   ShardId src_shard = Shard(src_key, result_set.size());
@@ -1189,12 +1203,12 @@ void SDiff(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
-  SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(rsv);
+  SetReplies{cmd_cntx}.Send(rsv);
 }
 
-void SDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSDiffStore(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
@@ -1227,11 +1241,11 @@ void SDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(diff_cb), false);
+  cmd_cntx->tx()->Execute(std::move(diff_cb), false);
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    cmd_cntx.tx->Conclude();
-    cmd_cntx.rb->SendError(rsv.status());
+    cmd_cntx->tx()->Conclude();
+    cmd_cntx->SendError(rsv.status());
     return;
   }
 
@@ -1244,23 +1258,23 @@ void SDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(store_cb), true);
-  cmd_cntx.rb->SendLong(result_size);
+  cmd_cntx->tx()->Execute(std::move(store_cb), true);
+  cmd_cntx->SendLong(result_size);
 }
 
-void SMembers(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSMembers(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(&result.value());
+    SetReplies{cmd_cntx}.Send(std::move(*result));
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void SRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSRandMember(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
@@ -1268,31 +1282,35 @@ void SRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   int count = is_count ? parser.Next<int>() : 1;
 
   if (parser.HasNext())
-    return cmd_cntx.rb->SendError(WrongNumArgsError("SRANDMEMBER"));
+    return cmd_cntx->SendError(WrongNumArgsError("SRANDMEMBER"));
 
   if (auto err = parser.TakeError(); err)
-    return cmd_cntx.rb->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     return OpRandMember(t->GetOpArgs(shard), key, count);
   };
 
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (result || result == OpStatus::KEY_NOTFOUND) {
-    if (is_count) {
-      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
-    } else if (result->size()) {
-      rb->SendBulkString(result->front());
-    } else {
-      rb->SendNull();
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+
+  auto replier = [is_count, result = std::move(result)](facade::SinkReplyBuilder* builder) {
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    if (result || result == OpStatus::KEY_NOTFOUND) {
+      if (is_count) {
+        rb->SendBulkStrArr(*result, CollectionType::SET);
+      } else if (result->size()) {
+        rb->SendBulkString(result->front());
+      } else {
+        rb->SendNull();
+      }
+      return;
     }
-    return;
-  }
-  cmd_cntx.rb->SendError(result.status());
+    rb->SendError(result.status());
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void SInter(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSInter(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1301,16 +1319,16 @@ void SInter(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx.tx->GetUniqueShardCnt());
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx()->GetUniqueShardCnt());
   if (result) {
-    SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(&*result);
+    SetReplies{cmd_cntx}.Send(std::move(*result));
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
-void SInterStore(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSInterStore(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
@@ -1328,12 +1346,12 @@ void SInterStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(inter_cb), false);
+  cmd_cntx->tx()->Execute(std::move(inter_cb), false);
 
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
-    cmd_cntx.tx->Conclude();
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->tx()->Conclude();
+    cmd_cntx->SendError(result.status());
     return;
   }
 
@@ -1345,21 +1363,21 @@ void SInterStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(store_cb), true);
-  cmd_cntx.rb->SendLong(result->size());
+  cmd_cntx->tx()->Execute(std::move(store_cb), true);
+  cmd_cntx->SendLong(result->size());
 }
 
-void SInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSInterCard(CmdArgList args, CommandContext* cmd_cntx) {
   unsigned num_keys;
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(kSyntaxErr);
 
   unsigned limit = 0;
   if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
     if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
-      return cmd_cntx.rb->SendError("limit can't be negative");
+      return cmd_cntx->SendError("limit can't be negative");
   } else if (args.size() > (num_keys + 1))
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(kSyntaxErr);
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1367,16 +1385,16 @@ void SInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx.tx->GetUniqueShardCnt(), limit);
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx->tx()->GetUniqueShardCnt(), limit);
 
   if (result) {
-    return cmd_cntx.rb->SendLong(result->size());
+    return cmd_cntx->SendLong(result->size());
   }
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
-void SUnion(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSUnion(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1385,13 +1403,13 @@ void SUnion(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
   ResultSetView unionset = UnionResultVec(result_set);
-  SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(unionset);
+  SetReplies{cmd_cntx}.Send(unionset);
 }
 
-void SUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
@@ -1409,12 +1427,12 @@ void SUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(union_cb), false);
+  cmd_cntx->tx()->Execute(std::move(union_cb), false);
 
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
-    cmd_cntx.tx->Conclude();
-    cmd_cntx.rb->SendError(unionset.status());
+    cmd_cntx->tx()->Conclude();
+    cmd_cntx->SendError(unionset.status());
     return;
   }
 
@@ -1427,30 +1445,30 @@ void SUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx.tx->Execute(std::move(store_cb), true);
-  cmd_cntx.rb->SendLong(result_size);
+  cmd_cntx->tx()->Execute(std::move(store_cb), true);
+  cmd_cntx->SendLong(result_size);
 }
 
-void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSScan(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return cmd_cntx.rb->SendError("invalid cursor");
+    return cmd_cntx->SendError("invalid cursor");
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
   if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return cmd_cntx.rb->SendError(kSyntaxErr);
+    return cmd_cntx->SendError(kSyntaxErr);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
-    return cmd_cntx.rb->SendError(ops.status());
+    return cmd_cntx->SendError(ops.status());
   }
 
   const ScanOpts& scan_op = ops.value();
@@ -1459,19 +1477,22 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-    RedisReplyBuilder::ArrayScope scope{rb, 2};
-    rb->SendBulkString(absl::StrCat(cursor));
-    rb->SendBulkStrArr(*result);
+    auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
+      auto* rb = static_cast<RedisReplyBuilder*>(builder);
+      RedisReplyBuilder::ArrayScope scope{rb, 2};
+      rb->SendBulkString(absl::StrCat(cursor));
+      rb->SendBulkStrArr(*result);
+    };
+    cmd_cntx->ReplyWith(std::move(replier));
   } else {
-    cmd_cntx.rb->SendError(result.status());
+    cmd_cntx->SendError(result.status());
   }
 }
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
-void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
+void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
 
   const std::string_view key = parser.Next<std::string_view>();
@@ -1479,28 +1500,28 @@ void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   const uint32_t ttl_sec = parser.Next<uint32_t>();
 
   if (auto err = parser.TakeError(); err) {
-    return cmd_cntx.rb->SendError(err.MakeReply());
+    return cmd_cntx->SendError(err.MakeReply());
   }
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cmd_cntx.rb->SendError(kInvalidIntErr);
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   CmdArgList vals = parser.Tail();
   if (vals.empty()) {
-    return cmd_cntx.rb->SendError(WrongNumArgsError("SADDEX"));
+    return cmd_cntx->SendError(WrongNumArgsError("SADDEX"));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals, keepttl);
   };
 
-  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return cmd_cntx.rb->SendLong(result.value());
+    return cmd_cntx->SendLong(result.value());
   }
 
-  cmd_cntx.rb->SendError(result.status());
+  cmd_cntx->SendError(result.status());
 }
 
 }  // namespace
@@ -1526,7 +1547,7 @@ StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
 
 using CI = CommandId;
 
-#define HFUNC(x) SetHandler(&x)
+#define HFUNC(x) SetHandler(&Cmd##x)
 
 void SetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::SET);

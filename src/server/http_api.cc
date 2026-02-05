@@ -7,7 +7,7 @@
 #include "base/logging.h"
 #include "core/flatbuffers.h"
 #include "facade/conn_context.h"
-#include "facade/reply_builder.h"
+#include "facade/reply_capture.h"
 #include "server/main_service.h"
 #include "util/http/http_common.h"
 
@@ -15,8 +15,7 @@ namespace dfly {
 using namespace util;
 using namespace std;
 namespace h2 = boost::beast::http;
-using facade::CapturingReplyBuilder;
-
+namespace payload = facade::payload;
 namespace {
 
 bool IsVectorOfStrings(flexbuffers::Reference req) {
@@ -111,32 +110,35 @@ struct CaptureVisitor {
     absl::StrAppend(&str, v);
   }
 
-  void operator()(const CapturingReplyBuilder::SimpleString& ss) {
+  void operator()(const payload::SimpleString& ss) {
     absl::StrAppend(&str, "\"", ss, "\"");
   }
 
-  void operator()(const CapturingReplyBuilder::BulkString& bs) {
+  void operator()(const payload::BulkString& bs) {
     absl::StrAppend(&str, JsonEscape(bs));
   }
 
-  void operator()(CapturingReplyBuilder::Null) {
+  void operator()(payload::Null) {
     absl::StrAppend(&str, "null");
   }
 
-  void operator()(CapturingReplyBuilder::Error err) {
-    str = absl::StrCat(R"({"error": ")", err.first, "\"");
+  void operator()(payload::ReplyFunction&& sr) {
+  }
+
+  void operator()(const payload::Error& err) {
+    str = absl::StrCat(R"({"error": ")", err->first, "\"");
   }
 
   void operator()(facade::OpStatus status) {
     absl::StrAppend(&str, "\"", facade::StatusToMsg(status), "\"");
   }
 
-  void operator()(unique_ptr<CapturingReplyBuilder::CollectionPayload> cp) {
+  void operator()(unique_ptr<payload::CollectionPayload> cp) {
     if (!cp) {
       absl::StrAppend(&str, "null");
       return;
     }
-    if (cp->len == 0 && cp->type == facade::RedisReplyBuilder::ARRAY) {
+    if (cp->len == 0 && cp->type == facade::CollectionType::ARRAY) {
       absl::StrAppend(&str, "[]");
       return;
     }
@@ -182,15 +184,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
     return;
   }
 
-  vector<string> cmd_args;
   flexbuffers::Vector vec = doc.AsVector();
-  for (size_t i = 0; i < vec.size(); ++i) {
-    cmd_args.push_back(vec[i].AsString().c_str());
-  }
-  vector<string_view> cmd_slices(cmd_args.size());
-  for (size_t i = 0; i < cmd_args.size(); ++i) {
-    cmd_slices[i] = cmd_args[i];
-  }
 
   facade::ConnectionContext* context = (facade::ConnectionContext*)http_cntx->user_data();
   DCHECK(context);
@@ -198,7 +192,15 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   facade::CapturingReplyBuilder reply_builder;
 
   // TODO: to finish this.
-  service->DispatchCommand(facade::ParsedArgs{cmd_slices}, &reply_builder, context);
+
+  CommandContext cmd_cntx;
+
+  cmd_cntx.Init(&reply_builder, context);
+  for (size_t i = 0; i < vec.size(); ++i) {
+    cmd_cntx.PushArg(vec[i].AsString().c_str());
+  }
+  service->DispatchCommand(facade::ParsedArgs{cmd_cntx}, &cmd_cntx,
+                           facade::AsyncPreference::ONLY_SYNC);
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
   auto response = http::MakeStringResponse();

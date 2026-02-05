@@ -15,8 +15,10 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
@@ -110,6 +112,9 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
                                                          : fb2::FiberPriority::NORMAL,
                         .name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex())};
   snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal] {
+    // TODO add error processing for index serialization
+    SerializeIndexMappings();
+    SerializeGlobalHnswIndices();
     this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
     if (!use_snapshot_version_) {
@@ -157,6 +162,97 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
 // it also guarantees 100% coverage of all items that exists when the traversal started
 // and survived until it finished.
+
+void SliceSnapshot::SerializeIndexMapping(
+    uint32_t shard_id, std::string_view index_name,
+    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  // Format: [RDB_OPCODE_SHARD_DOC_INDEX, shard_id, index_name, mapping_count,
+  //          then for each mapping: key_string, doc_id]
+  if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_SHARD_DOC_INDEX); ec)
+    return;
+  if (auto ec = serializer_->SaveLen(shard_id); ec)
+    return;
+  if (auto ec = serializer_->SaveString(index_name); ec)
+    return;
+  if (auto ec = serializer_->SaveLen(mappings.size()); ec)
+    return;
+
+  for (const auto& [key, doc_id] : mappings) {
+    if (auto ec = serializer_->SaveString(key); ec)
+      return;
+    if (auto ec = serializer_->SaveLen(doc_id); ec)
+      return;
+  }
+  PushSerialized(false);
+}
+
+void SliceSnapshot::SerializeIndexMappings() {
+#ifdef WITH_SEARCH
+  if (SaveMode() == dfly::SaveMode::RDB) {
+    return;
+  }
+
+  // Get all HNSW index names from the global registry
+  absl::flat_hash_set<std::string> hnsw_index_names =
+      GlobalHnswIndexRegistry::Instance().GetIndexNames();
+
+  auto* indices = db_slice_->shard_owner()->search_indices();
+  uint32_t shard_id = db_slice_->shard_owner()->shard_id();
+
+  for (const auto& index_name : hnsw_index_names) {
+    auto* index = indices->GetIndex(index_name);
+    if (!index) {
+      continue;
+    }
+
+    auto mappings = index->SerializeKeyIndex();
+    if (mappings.empty()) {
+      continue;
+    }
+
+    SerializeIndexMapping(shard_id, index_name, mappings);
+  }
+#endif
+}
+
+void SliceSnapshot::SerializeGlobalHnswIndices() {
+#ifdef WITH_SEARCH
+  // Serialize HNSW global indices for shard 0 only
+  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB) {
+    return;
+  }
+
+  auto all_indices = GlobalHnswIndexRegistry::Instance().GetAll();
+
+  // Preallocate buffer for HNSW entry serialization.
+  std::vector<uint8_t> tmp_buf;
+
+  for (const auto& [index_key, index] : all_indices) {
+    // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
+    //          then for each node: binary encoded entry via SaveHNSWEntry]
+    if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec)
+      continue;
+    if (auto ec = serializer_->SaveString(index_key); ec)
+      continue;
+
+    size_t node_count = index->GetNodeCount();
+    if (auto ec = serializer_->SaveLen(node_count); ec)
+      continue;
+
+    constexpr size_t kBatchSize = 1000;
+    for (size_t i = 0; i < node_count; i += kBatchSize) {
+      size_t batch_end = std::min(i + kBatchSize, node_count);
+      auto nodes = index->GetNodesRange(i, batch_end);
+      for (const auto& node : nodes) {
+        tmp_buf.resize(node.TotalSize());
+        if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
+          break;
+      }
+      PushSerialized(false);
+    }
+  }
+#endif
+}
 
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
@@ -272,16 +368,23 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
 
   time_t expire_time = 0;
-  if (pv.HasExpire()) {
+  if (pk.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
-    CHECK(IsValid(eit));
-    expire_time = db_slice_->ExpireTime(eit->second);
+    if (!IsValid(eit)) {
+      LOG(DFATAL) << "Internal error, entry " << pk.ToString()
+                  << " not found in expire table, db_index: " << db_indx
+                  << ", expire table size: " << db_array_[db_indx]->expire.size()
+                  << ", prime table size: " << db_array_[db_indx]->prime.size()
+                  << util::fb2::GetStacktrace();
+    } else {
+      expire_time = db_slice_->ExpireTime(eit->second);
+    }
   }
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    SerializeExternal(db_indx, PrimeKey{pk.ToString(), true}, pv, expire_time, mc_flags);
+    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -367,7 +470,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
       }
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
-      PrimeValue pv{*res, false};
+      PrimeValue pv{*res};
       serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
     } while (!delayed_entries_.empty());
 
@@ -381,7 +484,8 @@ void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const Prim
                                       time_t expire_time, uint32_t mc_flags) {
   // We prefer avoid blocking, so we just schedule a tiered read and append
   // it to the delayed entries.
-  auto future = EngineShard::tlocal()->tiered_storage()->Read(db_index, key.ToString(), pv);
+  auto future =
+      ReadTieredString(db_index, key.ToString(), pv, EngineShard::tlocal()->tiered_storage());
   delayed_entries_.push_back({db_index, std::move(key), std::move(future), expire_time, mc_flags});
   ++type_freq_map_[RDB_TYPE_STRING];
 }

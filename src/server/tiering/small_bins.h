@@ -36,8 +36,18 @@ class SmallBins {
     bool fragmented = false, empty = false;
   };
 
-  // Bin filled with blob of serialized entries
-  using FilledBin = std::pair<BinId, std::string>;
+  // Packaged bin ready to be serialized with SerializeBin()
+  struct FilledBin {
+    friend class SmallBins;
+    BinId id;
+
+   private:
+    explicit FilledBin(BinId id) : id{id} {
+    }
+
+    unsigned bytes_ = 0;
+    tiering::EntryMap<std::string> entries_;
+  };
 
   // List of locations of values for corresponding keys of previously filled bin
   using KeySegmentList = std::vector<std::tuple<DbIndex, std::string /* key*/, DiskSegment>>;
@@ -47,7 +57,7 @@ class SmallBins {
 
   // Returns true if the entry is pending inside SmallBins.
   bool IsPending(DbIndex dbid, std::string_view key) const {
-    return current_bin_.count({dbid, std::string(key)}) > 0;
+    return current_bin_.entries_.count(std::make_pair(dbid, key)) > 0;
   }
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
@@ -70,11 +80,10 @@ class SmallBins {
   // Mainly used for defragmentation
   KeyHashDbList DeleteBin(DiskSegment segment, std::string_view value);
 
-  Stats GetStats() const;
+  // Serialize filled bin to destination buffer (4kb)
+  size_t SerializeBin(FilledBin* bin, io::MutableBytes dest);
 
- private:
-  // Flush current bin
-  FilledBin FlushBin();
+  Stats GetStats() const;
 
  private:
   struct StashInfo {
@@ -84,9 +93,7 @@ class SmallBins {
   static_assert(sizeof(StashInfo) == sizeof(unsigned));
 
   BinId last_bin_id_ = 0;
-
-  unsigned current_bin_bytes_ = 0;
-  tiering::EntryMap<std::string> current_bin_;
+  FilledBin current_bin_{last_bin_id_};
 
   // Pending stashes, their keys and value sizes
   absl::flat_hash_map<unsigned /* id */, tiering::EntryMap<DiskSegment>> pending_bins_;

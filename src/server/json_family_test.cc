@@ -1,9 +1,6 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/json_family.h"
-
 #include <absl/flags/flag.h>
 #include <absl/strings/str_replace.h>
 
@@ -11,7 +8,6 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
-#include "server/command_registry.h"
 #include "server/test_utils.h"
 
 using namespace testing;

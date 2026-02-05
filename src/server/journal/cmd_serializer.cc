@@ -170,13 +170,13 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 
   size_t commands = 0;
   container_utils::IterateSortedSet(
-      pv.GetRobjWrapper(),
+      pv,
       [&](container_utils::ContainerEntry ce, double score) {
         aggregator.AddArg(absl::StrCat(score), CommandAggregator::CommitMode::kNoCommit);
         commands += aggregator.AddArg(ce.ToString());
         return true;
       },
-      /*start=*/0, /*end=*/-1, /*reverse=*/false, /*use_score=*/true);
+      /*start=*/0, /*end=*/SIZE_MAX, /*reverse=*/false, /*use_score=*/true);
   return commands;
 }
 
@@ -242,7 +242,7 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   io::StringSink value_dump_sink;
   // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
   // = true when we are sure that all shards ignore crc during migration process
-  SerializerBase::DumpObject(serializer_.get(), pv, &value_dump_sink, false);
+  SerializerBase::DumpValue(serializer_.get(), pv, &value_dump_sink, false);
   args.push_back(value_dump_sink.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch

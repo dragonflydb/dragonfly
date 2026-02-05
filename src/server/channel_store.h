@@ -7,7 +7,7 @@
 
 #include <string_view>
 
-#include "facade/dragonfly_connection.h"
+#include "facade/connection_ref.h"
 #include "server/conn_context.h"
 
 namespace dfly {
@@ -44,9 +44,9 @@ class ChannelStore {
   friend class ChannelStoreUpdater;
 
  public:
-  struct Subscriber : public facade::Connection::WeakRef {
-    Subscriber(WeakRef ref, const std::string& pattern)
-        : facade::Connection::WeakRef(std::move(ref)), pattern(pattern) {
+  struct Subscriber : public facade::ConnectionRef {
+    Subscriber(ConnectionRef ref, const std::string& pattern)
+        : facade::ConnectionRef(std::move(ref)), pattern(pattern) {
     }
 
     // Sort by thread-id. Subscriber without owner comes first.

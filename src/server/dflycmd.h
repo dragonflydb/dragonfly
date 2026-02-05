@@ -132,8 +132,7 @@ class DflyCmd {
  public:
   DflyCmd(ServerFamily* server_family);
 
-  void Run(CmdArgList args, Transaction* tx, facade::RedisReplyBuilder* rb,
-           ConnectionContext* cntx);
+  void Run(CmdArgList args, CommandContext* cmd_cntx);
 
   void OnClose(unsigned sync_id);
 
@@ -158,44 +157,41 @@ class DflyCmd {
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
  private:
-  using RedisReplyBuilder = facade::RedisReplyBuilder;
-
   // JOURNAL [START/STOP]
   // Start or stop journaling.
   // void Journal(CmdArgList args, ConnectionContext* cntx);
 
   // THREAD [to_thread]
   // Return connection thread index or migrate to another thread.
-  void Thread(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void Thread(CmdArgList args, CommandContext* cmd_cntx);
 
   // FLOW <masterid> <syncid> <flowid> [<seqid>]
   // Register connection as flow for sync session.
   // If seqid is given, it means the client wants to try partial sync.
   // If it is possible, return Ok and prepare for a partial sync, else
   // return error and ask the replica to execute FLOW again.
-  void Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void Flow(CmdArgList args, CommandContext* cmd_cntx);
 
   // SYNC <syncid>
   // Initiate full sync.
-  void Sync(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
+  void Sync(CmdArgList args, CommandContext* cmd_cntx);
 
   // STARTSTABLE <syncid>
   // Switch to stable state replication.
-  void StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
-
+  void StartStable(CmdArgList args, CommandContext* cmd_cntx);
   // TAKEOVER <syncid>
   // Shut this master down atomically with replica promotion.
-  void TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void TakeOver(CmdArgList args, CommandContext* cmd_cntx);
 
   // EXPIRE
   // Check all keys for expiry.
-  void Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
+  void Expire(CmdArgList args, CommandContext* cmd_cntx);
 
   // REPLICAOFFSET
   // Return journal records num sent for each flow of replication.
-  void ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb);
+  void ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx);
 
-  void Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void Load(CmdArgList args, CommandContext* cmd_cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, ExecutionState* cntx, EngineShard* shard);
@@ -210,18 +206,19 @@ class DflyCmd {
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Find sync info by id or send error reply.
-  std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> GetReplicaInfoOrReply(
-      std::string_view id, facade::RedisReplyBuilder* rb) ABSL_LOCKS_EXCLUDED(mu_);
+  std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> GetReplicaInfoOrReply(std::string_view id,
+                                                                          CommandContext* cmd_cntx)
+      ABSL_LOCKS_EXCLUDED(mu_);
 
   // Check replica is in expected state and flows are set-up correctly.
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
-                                facade::RedisReplyBuilder* rb);
+                                CommandContext* cmd_cntx);
 
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
-  std::optional<LSN> ParseLsnVec(std::string_view lsn_vec, size_t flow_id,
-                                 size_t last_journal_lsn_size, facade::RedisReplyBuilder* rb);
+  std::optional<LSN> ParseLsnVec(std::string_view lsn_vec, size_t last_journal_lsn_size,
+                                 size_t flow_id, CommandContext* cmd_cntx);
 
   // Checks if LSN exists in the partial sync buffer. If not, also LOG that we can't
   // partial sync.
@@ -232,7 +229,6 @@ class DflyCmd {
   std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ServerFamily* sf_;  // Not owned
-
   uint32_t next_sync_id_ = 1;
 
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;

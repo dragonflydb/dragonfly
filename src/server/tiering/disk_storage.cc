@@ -216,7 +216,7 @@ error_code DiskStorage::RequestGrow(off_t grow_size) {
   }
 
   off_t end = alloc_.capacity();
-  backing_file_->FallocateAsync(0, end, grow_size, [=](int res) {
+  backing_file_->FallocateAsync(0, end, grow_size, [end, grow_size, this](int res) {
     auto ec = (res < 0) ? std::error_code{-res, std::system_category()} : std::error_code{};
     grow_.pending = false;
     grow_.last_err = ec;

@@ -36,41 +36,27 @@ namespace {
 thread_local uint64_t max_busy_squash_cycles_cached = 1ULL << 32;
 thread_local uint32_t log_squash_threshold_cached = 1ULL << 31;
 
-void CheckConnStateClean(const ConnectionState& state) {
-  DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
-  DCHECK(state.exec_info.body.empty());
-  DCHECK(!state.script_info);
-  DCHECK(!state.subscribe_info);
-}
-
 size_t Size(const CapturingReplyBuilder::Payload& payload) {
   size_t payload_size = sizeof(CapturingReplyBuilder::Payload);
-  return visit(
-      Overloaded{
-          [&](monostate) { return payload_size; },
-          [&](long) { return payload_size; },
-          [&](double) { return payload_size; },
-          [&](OpStatus) { return payload_size; },
-          [&](CapturingReplyBuilder::Null) { return payload_size; },
-          // ignore SSO because it's insignificant
-          [&](const CapturingReplyBuilder::SimpleString& data) {
-            return payload_size + data.size();
-          },
-          [&](const CapturingReplyBuilder::BulkString& data) { return payload_size + data.size(); },
-          [&](const CapturingReplyBuilder::Error& data) {
-            return payload_size + data.first.size() + data.second.size();
-          },
-          [&](const unique_ptr<CapturingReplyBuilder::CollectionPayload>& data) {
-            if (!data || (data->len == 0 && data->type == RedisReplyBuilder::ARRAY)) {
-              return payload_size;
-            }
-            for (const auto& pl : data->arr) {
-              payload_size += Size(pl);
-            }
-            return payload_size;
-          },
-      },
-      payload);
+  return payload_size +
+         visit(Overloaded{[](const payload::SimpleString& data) { return data.size(); },
+                          [](const payload::BulkString& data) { return data.size(); },
+                          [](const payload::Error& data) {
+                            return data->first.size() + data->second.size();
+                          },
+                          [](const unique_ptr<payload::CollectionPayload>& data) {
+                            if (!data || (data->len == 0 && data->type == CollectionType::ARRAY)) {
+                              return 0ul;
+                            }
+                            size_t res = 0;
+                            for (const auto& pl : data->arr) {
+                              res += Size(pl);
+                            }
+                            return res;
+                          },
+                          // Other payload types are small
+                          [](const auto&) { return 0ul; }},
+               payload);
 }
 
 }  // namespace
@@ -129,7 +115,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
     return SquashResult::NOT_SQUASHED;
   }
 
-  auto args = cmd->ArgList(&tmp_keylist_);
+  auto args = cmd->Slice(&tmp_keylist_);
   if (args.empty())
     return SquashResult::NOT_SQUASHED;
 
@@ -166,12 +152,11 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
 bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
-  auto args = cmd->ArgList(&tmp_keylist_);
+  auto args = cmd->Slice(&tmp_keylist_);
 
   if (opts_.verify_commands) {
     if (auto err = service_->VerifyCommandState(*cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
-      rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
@@ -182,11 +167,12 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, const Stored
     auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       rb->SendError(status);
-      rb->ConsumeLastError();
       return !opts_.error_abort;
     }
   }
-  service_->InvokeCmd(cmd->Cid(), args, CommandContext{tx, rb, cntx_});
+  CommandContext cmd_cntx{rb, cntx_};
+  cmd_cntx.SetupTx(cmd->Cid(), tx);
+  service_->InvokeCmd(args, &cmd_cntx);
   return true;
 }
 
@@ -196,12 +182,9 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 
   auto* local_tx = sinfo.local_tx.get();
   CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
-  ConnectionContext local_cntx{cntx_, local_tx};
-  if (cntx_->conn()) {
-    local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
-  }
-
   CmdArgVec arg_vec;
+  CommandContext cmd_cntx{&crb, cntx_};
+  cmd_cntx.SetupTx(nullptr, local_tx);
 
   auto move_reply = [&sinfo](CapturingReplyBuilder::Payload&& src,
                              CapturingReplyBuilder::Payload* dst) {
@@ -212,7 +195,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
   };
 
   for (auto& dispatched : sinfo.dispatched) {
-    auto args = dispatched.cmd->ArgList(&arg_vec);
+    auto args = dispatched.cmd->Slice(&arg_vec);
     if (opts_.verify_commands) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(*dispatched.cmd->Cid(), args, *cntx_); err) {
@@ -225,19 +208,14 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     crb.SetReplyMode(dispatched.cmd->ReplyMode());
 
     local_tx->MultiSwitchCmd(dispatched.cmd->Cid());
-    auto status = local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
+    auto status = local_tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
     if (status != OpStatus::OK) {
       crb.SendError(status);
     } else {
-      service_->InvokeCmd(dispatched.cmd->Cid(), args,
-                          CommandContext{local_cntx.transaction, &crb, &local_cntx});
+      cmd_cntx.UpdateCid(dispatched.cmd->Cid());
+      service_->InvokeCmd(args, &cmd_cntx);
     }
     move_reply(crb.Take(), &dispatched.reply);
-
-    // Assert commands made no persistent state changes to stub context state
-    const auto& local_state = local_cntx.conn_state;
-    DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
-    CheckConnStateClean(local_state);
   }
 
   return OpStatus::OK;
@@ -267,7 +245,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
   if (IsAtomic()) {
-    cntx_->cid = base_cid_;
     auto cb = [this](ShardId sid) { return !sharded_[sid].dispatched.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop(

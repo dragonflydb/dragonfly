@@ -14,7 +14,9 @@ extern "C" {
 #include <absl/strings/str_split.h>
 
 #include <boost/icl/interval_set.hpp>
+#include <csignal>
 #include <queue>
+#include <shared_mutex>
 #include <tuple>
 
 #include "absl/time/clock.h"
@@ -29,7 +31,6 @@ extern "C" {
 #include "util/fibers/dns_resolve.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/proactor_base.h"
-#include "util/fibers/uring_socket.h"
 
 // A load-test for DragonflyDB that fixes coordinated omission problem.
 
@@ -172,7 +173,7 @@ class ShardSlots {
   }
 
   SlotRange NextSlotRange(const tcp::endpoint& ep, size_t i) {
-    shared_lock<fb2::SharedMutex> lock(mu_);
+    std::shared_lock<fb2::SharedMutex> lock(mu_);
     const auto& shard_slot_interval = shards_slots_[ep];
     unsigned index = i % shard_slot_interval.iterative_size();
     const auto& interval = next(shard_slot_interval.begin(), index);
@@ -196,7 +197,7 @@ class ShardSlots {
   }
 
   void MoveSlot(const tcp::endpoint& src_ep, const tcp::endpoint& dst_ep, uint16_t slot_id) {
-    unique_lock<fb2::SharedMutex> lock(mu_);
+    std::unique_lock<fb2::SharedMutex> lock(mu_);
     // Remove slot from source ep
     auto& src_shard_slots = shards_slots_[src_ep];
     // If slot id doesn't exists on source ep we have moved this slot before
@@ -1166,7 +1167,11 @@ int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
   unique_ptr<ProactorPool> pp;
+#ifdef __linux__
   pp.reset(fb2::Pool::IOUring(256));
+#else
+  pp.reset(fb2::Pool::Epoll());
+#endif
   pp->Run();
   fb2::InitDnsResolver(2000);
 

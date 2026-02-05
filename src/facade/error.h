@@ -40,6 +40,8 @@ inline constexpr char kInvalidJsonPathErr[] = "invalid JSON path";
 inline constexpr char kJsonParseError[] = "failed to parse JSON";
 inline constexpr char kNanOrInfDuringIncr[] = "increment would produce NaN or Infinity";
 inline constexpr char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
+inline constexpr char kTieredIoError[] = "IO error when reading value from tiered storage";
+inline constexpr char kInvalidHllError[] = "Key is not a valid HyperLogLog string value";
 
 inline constexpr char kSyntaxErrType[] = "syntax_error";
 inline constexpr char kScriptErrType[] = "script_error";
@@ -47,5 +49,7 @@ inline constexpr char kConfigErrType[] = "config_error";
 inline constexpr char kSearchErrType[] = "search_error";
 inline constexpr char kWrongTypeErrType[] = "wrong_type";
 inline constexpr char kRestrictDenied[] = "restrict_denied";
+inline constexpr char kNoGroupErrType[] = "no_group_error";
+inline constexpr char kNoAuthErrType[] = "no_auth";
 
 }  // namespace facade

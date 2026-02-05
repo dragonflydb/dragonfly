@@ -29,6 +29,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
+#include "facade/reply_builder.h"
 #include "io/file.h"
 #include "io/file_util.h"
 #include "server/acl/acl_commands_def.h"
@@ -73,14 +74,14 @@ AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
   dbnum_ = absl::GetFlag(FLAGS_dbnum);
 }
 
-void AclFamily::Acl(CmdArgList args, const CommandContext& cmd_cntx) {
-  cmd_cntx.rb->SendError("Wrong number of arguments for acl command");
+void AclFamily::Acl(CmdArgList args, CommandContext* cmd_cntx) {
+  cmd_cntx->SendError("Wrong number of arguments for acl command");
 }
 
-void AclFamily::List(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(registry.size());
 
   for (const auto& [username, user] : registry) {
@@ -116,8 +117,13 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
     if (!connection->IsHttp() && connection->cntx()) {
-      connection->SendAclUpdateAsync(facade::Connection::AclUpdateMessage{
-          user, update_commands, update_keys, update_pub_sub, db});
+      auto* cntx = static_cast<dfly::ConnectionContext*>(connection->cntx());
+      if (user == cntx->authed_username) {
+        cntx->acl_commands = update_commands;
+        cntx->keys = update_keys;
+        cntx->pub_sub = update_pub_sub;
+        cntx->acl_db_idx = db;
+      }
     }
   };
 
@@ -128,17 +134,16 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
 
 using facade::ErrorReply;
 
-void AclFamily::SetUser(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::SetUser(CmdArgList args, CommandContext* cmd_cntx) {
   string_view username = facade::ToSV(args[0]);
   auto reg = registry_->GetRegistryWithWriteLock();
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
-  auto* builder = cmd_cntx.rb;
   auto req = ParseAclSetUser(args.subspan(1), false, has_all_keys);
 
-  auto error_case = [builder](ErrorReply&& error) { builder->SendError(error); };
+  auto error_case = [cmd_cntx](ErrorReply&& error) { cmd_cntx->SendError(error); };
 
-  auto update_case = [username, &reg, builder, this, exists](User::UpdateRequest&& req) {
+  auto update_case = [username, &reg, cmd_cntx, this, exists](User::UpdateRequest&& req) {
     auto& user = reg.registry[username];
     if (!exists) {
       User::UpdateRequest default_req;
@@ -149,7 +154,7 @@ void AclFamily::SetUser(CmdArgList args, const CommandContext& cmd_cntx) {
     const bool reset_channels = req.reset_channels;
     user.Update(std::move(req), CategoryToIdx(), reverse_cat_table_, CategoryToCommandsIndex());
     // Send ok first because the connection might get evicted
-    builder->SendOk();
+    cmd_cntx->SendOk();
     if (exists) {
       if (!reset_channels) {
         StreamUpdatesToAllProactorConnections(string(username), user.AclCommands(), user.Keys(),
@@ -166,20 +171,26 @@ void AclFamily::SetUser(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
-  return TraverseEvictImpl([&](auto* ctx) { return ctx && users.contains(ctx->authed_username); },
-                           main_listener_, pool_);
+  return TraverseEvictImpl(
+      [&](auto* ctx) {
+        auto* dfly_ctx = static_cast<dfly::ConnectionContext*>(ctx);
+        return ctx && users.contains(dfly_ctx->authed_username);
+      },
+      main_listener_, pool_);
 }
 
 void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     const UserRegistry::RegistryType& registry) {
   return TraverseEvictImpl(
       [&](auto* ctx) {
-        return ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username);
+        auto* dfly_ctx = static_cast<dfly::ConnectionContext*>(ctx);
+        return ctx && dfly_ctx->authed_username != "default" &&
+               registry.contains(dfly_ctx->authed_username);
       },
       main_listener_, pool_);
 }
 
-void AclFamily::DelUser(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::DelUser(CmdArgList args, CommandContext* cmd_cntx) {
   auto& registry = *registry_;
   absl::flat_hash_set<string_view> users;
 
@@ -194,18 +205,18 @@ void AclFamily::DelUser(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   if (users.empty()) {
-    cmd_cntx.rb->SendLong(0);
+    cmd_cntx->rb()->SendLong(0);
     return;
   }
   VLOG(1) << "Evicting open acl connections";
   EvictOpenConnectionsOnAllProactors(users);
   VLOG(1) << "Done evicting open acl connections";
-  cmd_cntx.rb->SendLong(users.size());
+  cmd_cntx->rb()->SendLong(users.size());
 }
 
-void AclFamily::WhoAmI(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
-  rb->SendBulkString(absl::StrCat("User is ", cmd_cntx.conn_cntx->authed_username));
+void AclFamily::WhoAmI(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->SendBulkString(absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
 }
 
 string AclFamily::RegistryToString() const {
@@ -237,9 +248,9 @@ string AclFamily::RegistryToString() const {
   return result;
 }
 
-void AclFamily::Save(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::Save(CmdArgList args, CommandContext* cmd_cntx) {
   auto acl_file_path = absl::GetFlag(FLAGS_aclfile);
-  auto* builder = cmd_cntx.rb;
+  auto* builder = cmd_cntx->rb();
   if (acl_file_path.empty()) {
     builder->SendError("Dragonfly is not configured to use an ACL file.");
     return;
@@ -346,22 +357,23 @@ bool AclFamily::Load() {
   return !LoadToRegistryFromFile(acl_file, nullptr);
 }
 
-void AclFamily::Load(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::Load(CmdArgList args, CommandContext* cmd_cntx) {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   if (acl_file.empty()) {
-    cmd_cntx.rb->SendError("Dragonfly is not configured to use an ACL file.");
+    rb->SendError("Dragonfly is not configured to use an ACL file.");
     return;
   }
 
-  const auto load_error = LoadToRegistryFromFile(acl_file, cmd_cntx.rb);
+  const auto load_error = LoadToRegistryFromFile(acl_file, rb);
 
   if (load_error) {
-    cmd_cntx.rb->SendError(absl::StrCat("Error loading: ", acl_file, " ", load_error.Format()));
+    rb->SendError(absl::StrCat("Error loading: ", acl_file, " ", load_error.Format()));
   }
 }
 
-void AclFamily::Log(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+void AclFamily::Log(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   if (args.size() > 1) {
     return rb->SendError(facade::OpStatus::OUT_OF_RANGE);
   }
@@ -420,10 +432,10 @@ void AclFamily::Log(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void AclFamily::Users(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::Users(CmdArgList args, CommandContext* cmd_cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   rb->StartArray(registry.size());
   for (const auto& [username, _] : registry) {
@@ -431,8 +443,8 @@ void AclFamily::Users(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void AclFamily::Cat(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+void AclFamily::Cat(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (args.size() > 1) {
     rb->SendError(facade::OpStatus::SYNTAX_ERR);
@@ -481,11 +493,11 @@ void AclFamily::Cat(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
-void AclFamily::GetUser(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::GetUser(CmdArgList args, CommandContext* cmd_cntx) {
   auto username = facade::ToSV(args[0]);
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!registry.contains(username)) {
     rb->SendNull();
@@ -534,8 +546,8 @@ void AclFamily::GetUser(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString(pub_sub);
 }
 
-void AclFamily::GenPass(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* builder = cmd_cntx.rb;
+void AclFamily::GenPass(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* builder = cmd_cntx->rb();
   if (args.length() > 1) {
     builder->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
     return;
@@ -563,8 +575,8 @@ void AclFamily::GenPass(CmdArgList args, const CommandContext& cmd_cntx) {
   builder->SendSimpleString(response);
 }
 
-void AclFamily::DryRun(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+void AclFamily::DryRun(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   auto username = facade::ArgS(args, 0);
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
@@ -584,7 +596,7 @@ void AclFamily::DryRun(CmdArgList args, const CommandContext& cmd_cntx) {
 
   const auto& user = registry.find(username)->second;
   // Stub, used to mimic connection context for a user.
-  ConnectionContext stub(nullptr, nullptr);
+  ConnectionContext stub(nullptr, acl::UserCredentials{});
   stub.acl_commands = user.AclCommandsRef();
   // "mock" without an actual connection we can't know which db is active so we skip this check
   // for DryRun.
@@ -1171,7 +1183,7 @@ void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
   CategoryToIdx(std::move(idx_store));
 }
 
-void AclFamily::Help(CmdArgList args, const CommandContext& cmd_cntx) {
+void AclFamily::Help(CmdArgList args, CommandContext* cmd_cntx) {
   string_view help_arr[] = {
       "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
       "CAT [<category>]",
@@ -1202,14 +1214,14 @@ void AclFamily::Help(CmdArgList args, const CommandContext& cmd_cntx) {
       "    Return the current connection username.",
       "HELP",
       "    Print this help."};
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx.rb);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
   return rb->SendSimpleStrArr(help_arr);
 }
 
-using MemberFunc = void (AclFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
+using MemberFunc = void (AclFamily::*)(CmdArgList args, CommandContext* cmd_cntx);
 
-CommandId::Handler3 HandlerFunc(AclFamily* acl, MemberFunc f) {
-  return [=](CmdArgList args, const CommandContext& cmd_cntx) { return (acl->*f)(args, cmd_cntx); };
+CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
+  return [=](CmdArgList args, CommandContext* cmd_cntx) { return (acl->*f)(args, cmd_cntx); };
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))

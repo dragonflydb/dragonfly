@@ -1,13 +1,9 @@
 // Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#include "server/geo_family.h"
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "server/command_registry.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -93,16 +89,18 @@ TEST_F(GeoFamilyTest, GeoDist) {
   EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
                            "37.502669", "Catania"}));
   auto resp = Run({"geodist", "Sicily", "Palermo", "Catania"});
-  EXPECT_EQ(resp, "166274.15156960033");
+  // Haswell+ CPUs use FMA instructions, yielding higher precision that breaks exact string
+  // matching. DoubleArg handles parsing safely and applies standard floating-point tolerance.
+  EXPECT_THAT(resp, DoubleArg(166274.15156960033));
 
   resp = Run({"geodist", "Sicily", "Palermo", "Catania", "km"});
-  EXPECT_EQ(resp, "166.27415156960032");
+  EXPECT_THAT(resp, DoubleArg(166.27415156960032));
 
   resp = Run({"geodist", "Sicily", "Palermo", "Catania", "MI"});
-  EXPECT_EQ(resp, "103.31822459492733");
+  EXPECT_THAT(resp, DoubleArg(103.31822459492733));
 
   resp = Run({"geodist", "Sicily", "Palermo", "Catania", "FT"});
-  EXPECT_EQ(resp, "545518.8699790037");
+  EXPECT_THAT(resp, DoubleArg(545518.8699790037));
 
   resp = Run({"geodist", "Sicily", "Foo", "Bar"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
@@ -179,9 +177,11 @@ TEST_F(GeoFamilyTest, GeoSearch) {
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre("Madrid", "0",
+          // Use DoubleArg to tolerate floating-point precision differences on Haswell+ CPUs (e.g.,
+          // 0 becoming 5.7e-15 due to FMA).
+          RespArray(ElementsAre("Madrid", DoubleArg(0),
                                 RespArray(ElementsAre(DoubleArg(3.7038), DoubleArg(40.4168))))),
-          RespArray(ElementsAre("Lisbon", DoubleArg(502.20769462704084),
+          RespArray(ElementsAre("Lisbon", DoubleArg(502.20769462704106),
                                 RespArray(ElementsAre(DoubleArg(9.1427), DoubleArg(38.7369))))))));
 
   resp = Run({"GEOSEARCH", "Europe", "FROMMEMBER", "Madrid", "BYRADIUS", "700", "KM"});
@@ -384,10 +384,10 @@ TEST_F(GeoFamilyTest, GeoRadiusByMemberUb) {
 
   auto resp = Run({"GEORADIUSBYMEMBER", "geo", "971", "200", "mi", "WITHCOORD", "WITHDIST", "COUNT",
                    "40", "ASC"});
-
-  EXPECT_THAT(resp,
-              RespArray(ElementsAre(
-                  "971", "0", RespArray(ElementsAre("-122.41940170526505", "37.77490001056578")))));
+  // Use DoubleArg(0) to tolerate tiny floating-point residuals (e.g. 5e-15) on AVX/FMA builds.
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        "971", DoubleArg(0),
+                        RespArray(ElementsAre("-122.41940170526505", "37.77490001056578")))));
 }
 
 }  // namespace dfly

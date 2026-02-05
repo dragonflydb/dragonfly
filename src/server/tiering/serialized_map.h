@@ -4,6 +4,10 @@
 
 #include <string_view>
 
+namespace dfly::detail {
+struct ListpackWrap;
+}
+
 namespace dfly::tiering {
 
 // Map built over single continuous byte slice to allow easy read operations.
@@ -49,15 +53,12 @@ struct SerializedMap {
   // Number of bytes of pure keys or values
   size_t DataBytes() const;
 
-  // Input for serialization
-  using Input = const absl::Span<const std::pair<std::string, std::string>>;
-
-  // Buffer size required for serialization
-  static size_t SerializeSize(Input);
+  // Estimate upper bound for serialization size
+  static size_t EstimateSize(size_t data_bytes, size_t entries);
 
   // Write a slice that can be used to a SerializedMap on top of it.
   // Returns number of bytes written
-  static size_t Serialize(Input, absl::Span<char> buffer);
+  static size_t Serialize(const ::dfly::detail::ListpackWrap& lw, absl::Span<char> buffer);
 
  private:
   size_t size_;

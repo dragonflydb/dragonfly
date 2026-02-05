@@ -60,10 +60,6 @@ Decoder::UploadMetrics StringDecoder::GetMetrics() const {
   };
 }
 
-std::string_view StringDecoder::Read() const {
-  return value_.view();
-}
-
 std::string* StringDecoder::Write() {
   modified_ = true;
   return value_.GetMutable();

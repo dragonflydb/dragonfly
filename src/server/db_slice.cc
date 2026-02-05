@@ -15,6 +15,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/top_keys.h"
+#include "facade/dragonfly_connection.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
@@ -187,7 +188,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
-      if (bucket_it->second.HasExpire()) {
+      if (bucket_it->first.HasExpire()) {
         string_view key = bucket_it->first.GetSlice(&scratch);
         ++checked_;
         auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(
@@ -547,6 +548,18 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
 
+    if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is still
+                                 // valid after
+                                 // PreUpdateBlocking.
+      auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
+      LOG_IF(DFATAL, fresh_it != res->exp_it)
+          << "Inconsistent state after PreUpdateBlocking for key " << key
+          << ", db_index: " << cntx.db_index
+          << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
+          << ", expire table size: " << db_arr_[cntx.db_index]->expire.size()
+          << util::fb2::GetStacktrace();
+    }
+
     return {{it, exp_it, AutoUpdater{cntx.db_index, key, it, this}}};
   } else {
     return OpStatus::KEY_NOTFOUND;
@@ -596,7 +609,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::WRONG_TYPE;
   }
 
-  if (res.it->second.HasExpire()) {  // check expiry state
+  if (res.it->first.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       events_.misses += miss_weight;
@@ -672,6 +685,17 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
+      if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is
+                                   // still valid after
+                                   // PreUpdateBlocking.
+        auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
+        LOG_IF(DFATAL, fresh_it != res->exp_it)
+            << "Inconsistent state after PreUpdateBlocking for key " << key
+            << ", db_index: " << cntx.db_index
+            << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
+            << ", expire table size: " << db_arr_[cntx.db_index]->expire.size()
+            << util::fb2::GetStacktrace();
+      }
       return ItAndUpdater{
           .it = it, .exp_it = exp_it, .post_updater{cntx.db_index, key, it, this}, .is_new = false};
     } else {
@@ -731,7 +755,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
-  PrimeKey co_key{key, true};
+  PrimeKey co_key{key};
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();
@@ -817,7 +841,7 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
     doc_del_cb_(key, cntx, it->second);
   }
 
-  if (it->second.HasExpire()) {
+  if (it->first.HasExpire()) {
     exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
     DCHECK(!exp_it.is_done());
   }
@@ -938,7 +962,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   LOG_IF(DFATAL, !fetched_items_.empty())
       << "Some operation might bumped up items outside of a transaction";
 
-  auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
+  auto cb = [flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
@@ -973,15 +997,15 @@ void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {
   size_t table_before = db.expire.mem_usage();
   CHECK(db.expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
   table_memory_ += (db.expire.mem_usage() - table_before);
-  main_it->second.SetExpire(true);
+  main_it->first.SetExpire(true);
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, const Iterator& main_it) {
-  if (main_it->second.HasExpire()) {
+  if (main_it->first.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
     CHECK_EQ(1u, db.expire.Erase(main_it->first));
-    main_it->second.SetExpire(false);
+    main_it->first.SetExpire(false);
     table_memory_ += (db.expire.mem_usage() - table_before);
     return true;
   }
@@ -994,7 +1018,7 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, const Iterator& it, uint64_t at) {
     return RemoveExpire(db_ind, it);
   }
 
-  if (!it->second.HasExpire() && at) {
+  if (!it->first.HasExpire() && at) {
     AddExpire(db_ind, it, at);
     return true;
   }
@@ -1060,8 +1084,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
   DCHECK(IsValid(prime_it));
-  // If this need to persist, then only set persist value and return
-  if (params.persist) {
+
+  if (params.persist) {  // Persist means remove expiry
     RemoveExpire(cntx.db_index, prime_it);
     return kPersistValue;
   }
@@ -1071,29 +1095,34 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::OUT_OF_RANGE;
   }
 
-  if (rel_msec <= 0) {  // implicit - don't persist
+  int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
+  bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
+
+  if (IsValid(expire_it)) {
+    current_cmp = ExpireTime(expire_it->second);
+    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
+  } else {
+    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
+  }
+
+  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_LT) && (abs_msec < current_cmp);
+  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_GT) && (abs_msec > current_cmp);
+
+  if (!satisfied)
+    return OpStatus::SKIPPED;
+
+  // If we update and the new value is already expired, delete the key
+  if (rel_msec <= 0) {
     Del(cntx, prime_it);
     return -1;
-  } else if (IsValid(expire_it) && !params.persist) {
-    int64_t current = ExpireTime(expire_it->second);
-    if (params.expire_options & ExpireFlags::EXPIRE_NX) {
-      return OpStatus::SKIPPED;
-    }
-    if ((params.expire_options & ExpireFlags::EXPIRE_LT) && current <= abs_msec) {
-      return OpStatus::SKIPPED;
-    } else if ((params.expire_options & ExpireFlags::EXPIRE_GT) && current >= abs_msec) {
-      return OpStatus::SKIPPED;
-    }
-
-    expire_it->second = FromAbsoluteTime(abs_msec);
-    return abs_msec;
-  } else {
-    if (params.expire_options & ExpireFlags::EXPIRE_XX) {
-      return OpStatus::SKIPPED;
-    }
-    AddExpire(cntx.db_index, prime_it, abs_msec);
-    return abs_msec;
   }
+
+  // Update or add expiration
+  if (IsValid(expire_it))
+    expire_it->second = FromAbsoluteTime(abs_msec);
+  else
+    AddExpire(cntx.db_index, prime_it, abs_msec);
+  return abs_msec;
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,
@@ -1115,7 +1144,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
   it->second = std::move(obj);
 
   if (expire_at_ms) {
-    it->second.SetExpire(true);
+    it->first.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
     if (IsValid(res.exp_it) && force_update) {
       res.exp_it->second = ExpirePeriod(delta);
@@ -1125,6 +1154,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
       res.exp_it = ExpIterator(exp_it, StringOrView::FromView(key));
       table_memory_ += (db.expire.mem_usage() - table_before);
     }
+  } else {
+    // we shouldn't have expiration if expire_at_ms is 0.
+    auto fresh_exp_it = db.expire.Find(it->first.AsRef());
+    LOG_IF(DFATAL, IsValid(fresh_exp_it))
+        << "Inconsistent state, entry " << key
+        << " leave stale expiration: " << fresh_exp_it->second.duration_ms();
   }
 
   return op_result;
@@ -1214,9 +1249,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
   if (!watched_keys.empty()) {
     // Check if the key is watched.
     if (auto wit = watched_keys.find(key); wit != watched_keys.end()) {
-      for (auto conn_ptr : wit->second) {
-        conn_ptr->watched_dirty.store(true, memory_order_relaxed);
-      }
+      for (auto* dirty_ptr : wit->second)
+        dirty_ptr->store(true, memory_order_relaxed);
       // No connections need to watch it anymore.
       watched_keys.erase(wit);
     }
@@ -1239,7 +1273,7 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) cons
 }
 
 DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
-  if (!it->second.HasExpire()) {
+  if (!it->first.HasExpire()) {
     LOG(DFATAL) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
   }
@@ -1258,9 +1292,8 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   // TODO: to employ multi-generation update of expire-base and the underlying values.
   int64_t expire_time = ExpireTime(expire_it->second);
 
-  // Never do expiration on replica or if expiration is disabled or global lock was taken.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
-      !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
+  // Never do expiration on replica or if expiration is disabled.
+  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
     return {it, expire_it};
   }
 
@@ -1530,16 +1563,17 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 }
 
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
-                                 ConnectionState::ExecInfo* exec_info) {
+                                 std::atomic_bool* dirty_ptr) {
   // Because we might insert while another fiber is preempted
-  db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
+  db_arr_[db_indx]->watched_keys[key].push_back(dirty_ptr);
 }
 
-void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
-  for (const auto& [db_indx, key] : exec_info->watched_keys) {
+void DbSlice::UnregisterConnectionWatches(absl::Span<const std::pair<DbIndex, std::string>> keys,
+                                          const std::atomic_bool* dirty_ptr) {
+  for (const auto& [db_indx, key] : keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
-      it->second.erase(std::remove(it->second.begin(), it->second.end(), exec_info),
+      it->second.erase(std::remove(it->second.begin(), it->second.end(), dirty_ptr),
                        it->second.end());
       if (it->second.empty())
         watched_keys.erase(it);
@@ -1549,9 +1583,8 @@ void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_
 
 void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
   for (const auto& [key, conn_list] : db_arr_[db_indx]->watched_keys) {
-    for (auto conn_ptr : conn_list) {
-      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
-    }
+    for (auto* dirty_ptr : conn_list)
+      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 
@@ -1561,9 +1594,8 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
     if (!slot_ids.Contains(sid)) {
       continue;
     }
-    for (auto conn_ptr : conn_list) {
-      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
-    }
+    for (auto* dirty_ptr : conn_list)
+      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 

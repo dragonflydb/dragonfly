@@ -12,7 +12,7 @@ class ServerFamily;
 
 class MemoryCmd {
  public:
-  MemoryCmd(ServerFamily* owner, facade::SinkReplyBuilder* builder, ConnectionContext* cntx);
+  MemoryCmd(ServerFamily* owner, CommandContext* cmd_cntx);
 
   void Run(CmdArgList args);
 
@@ -23,9 +23,8 @@ class MemoryCmd {
   void Usage(std::string_view key, bool account_key_memory_usage);
   void Track(CmdArgList args);
 
-  ConnectionContext* cntx_;
+  CommandContext* cmd_cntx_;
   ServerFamily* owner_;
-  facade::SinkReplyBuilder* builder_;
 };
 
 }  // namespace dfly
