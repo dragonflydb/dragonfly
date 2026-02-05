@@ -112,6 +112,10 @@ std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_v
   if (!element)
     return std::nullopt;
 
+  // Check if it null field
+  if (element.value().size() == 0)
+    return std::nullopt;
+
   absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
 
   if (coordinates.size() != 2)

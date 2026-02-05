@@ -3745,4 +3745,10 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
                    IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
 }
 
+TEST_F(SearchFamilyTest, BadJson) {
+  string_view kBadJson = R"({"description": "This object has no location"})";
+  Run({"FT.CREATE", "idx1", "on", "json", "schema", "$.location", "AS", "location", "GEO"});
+  Run({"JSON.SET", "bad-place", "$", kBadJson});
+}
+
 }  // namespace dfly
