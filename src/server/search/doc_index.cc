@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <queue>
+#include <ranges>
 
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
@@ -116,6 +117,12 @@ std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
   return {std::move(basic_fields), std::move(is_sortable_field)};
 }
 
+auto GetVectorFieldsView(const search::Schema& schema) {
+  return schema.fields | std::views::filter([](const auto& item) {
+           return item.second.type == search::SchemaField::VECTOR &&
+                  !(item.second.flags & search::SchemaField::NOINDEX);
+         });
+}
 }  // namespace
 
 bool FieldReference::IsJsonPath(std::string_view name) {
@@ -406,18 +413,14 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
                                               ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
   auto accessor = GetAccessor(db_cntx, *pv);
-
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : base_->schema.fields) {
-    if (field_info.type == search::SchemaField::VECTOR &&
-        !(field_info.flags & search::SchemaField::NOINDEX)) {
-      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
-          index) {
-        bool added = index->Add(global_id, *accessor, field_ident);
-        if (added && !index->IsVectorCopied()) {
-          pv->SetOmitDefrag(true);
-        }
+  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+        index) {
+      bool added = index->Add(global_id, *accessor, field_ident);
+      if (added && !index->IsVectorCopied()) {
+        pv->SetOmitDefrag(true);
       }
     }
   }
@@ -429,40 +432,22 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
   auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : base_->schema.fields) {
-    if (field_info.type == search::SchemaField::VECTOR &&
-        !(field_info.flags & search::SchemaField::NOINDEX)) {
-      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
-          index) {
-        index->Remove(global_id, *accessor, field_ident);
-      }
+  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+        index) {
+      index->Remove(global_id, *accessor, field_ident);
     }
   }
 }
 
 void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
+  // Don't run loop if no vector fields are present
+  if (std::ranges::empty(GetVectorFieldsView(base_->schema)))
+    return;
+
   auto cb = [this, index_name](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
-    auto local_id = key_index_.Find(key);
-
-    if (!local_id)
-      return;
-
-    auto doc = GetAccessor(db_cntx, pv);
-
-    GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), *local_id);
-
-    for (const auto& [field_ident, field_info] : base_->schema.fields) {
-      if (field_info.type == search::SchemaField::VECTOR &&
-          !(field_info.flags & search::SchemaField::NOINDEX)) {
-        if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
-            index) {
-          bool added = index->Add(global_id, *doc, field_ident);
-          if (added && !index->IsVectorCopied()) {
-            pv.SetOmitDefrag(true);
-          }
-        }
-      }
-    }
+    if (auto local_id = key_index_.Find(key); local_id)
+      AddDocToGlobalVectorIndex(index_name, *local_id, db_cntx, &pv);
   };
 
   TraverseAllMatching(*base_, op_args, cb);
