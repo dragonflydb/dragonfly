@@ -17,8 +17,9 @@ void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complet
   auto cb = [this, table, db_cntx = op_args.db_cntx, on_complete = std::move(on_complete)] {
     CursorLoop(table.get(), db_cntx);
 
-    // TODO: make it step by step + wire cancellation
-    index_->indices_->FinalizeInitialization();
+    // TODO: make it step by step + wire cancellation inside
+    if (state_.IsRunning())
+      index_->indices_->FinalizeInitialization();
 
     // Finish by clearing the fiber reference and calling on_complete as its last action
     {
