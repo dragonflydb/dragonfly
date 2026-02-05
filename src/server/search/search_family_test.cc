@@ -995,7 +995,7 @@ TEST_P(SortTest, BasicSort) {
   absl::InsecureBitGen gen;
   vector<string> random_strs;
   for (size_t i = 0; i < 10; i++)
-    random_strs.emplace_back(detail::GetRandomHex(gen, 7));
+    random_strs.emplace_back(GetRandomHex(gen, 7));
   sort(random_strs.begin(), random_strs.end());
 
   for (size_t i = 0; i < 10; i++)

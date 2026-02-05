@@ -1043,7 +1043,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 
   {
     absl::InsecureBitGen eng;
-    master_replid_ = detail::GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
+    master_replid_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
     DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid_.size());
   }
 

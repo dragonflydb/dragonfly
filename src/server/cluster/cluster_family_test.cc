@@ -438,7 +438,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 
   absl::InsecureBitGen eng;
   while (true) {
-    string random_key = detail::GetRandomHex(eng, 40);
+    string random_key = GetRandomHex(eng, 40);
     SlotId slot = KeySlot(random_key);
     if (slot > 10'000) {
       continue;
@@ -450,7 +450,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   }
 
   while (true) {
-    string random_key = detail::GetRandomHex(eng, 40);
+    string random_key = GetRandomHex(eng, 40);
     SlotId slot = KeySlot(random_key);
     if (slot <= 10'000) {
       continue;

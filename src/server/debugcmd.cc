@@ -88,7 +88,7 @@ struct ValueCompressInfo {
 
 std::string GenerateValue(size_t val_size, bool random_value, absl::InsecureBitGen* gen) {
   if (random_value) {
-    return detail::GetRandomHex(*gen, val_size);
+    return GetRandomHex(*gen, val_size);
   } else {
     return string(val_size, 'x');
   }

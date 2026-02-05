@@ -280,7 +280,7 @@ void SaveStagesController::SaveDfs() {
   }
 
   absl::InsecureBitGen gen;
-  std::string snapshot_id = detail::GetRandomHex(gen, 32);
+  std::string snapshot_id = GetRandomHex(gen, 32);
   // Save summary file.
   SaveDfsSingle(nullptr, snapshot_id);
 

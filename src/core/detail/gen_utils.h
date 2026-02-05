@@ -9,7 +9,7 @@
 
 #include <string>
 
-namespace dfly::detail {
+namespace dfly {
 
 inline std::string GetRandomHex(absl::InsecureBitGen& gen, size_t len, size_t len_deviation = 0) {
   static_assert(std::is_same<uint64_t, decltype(gen())>::value);
@@ -37,4 +37,4 @@ inline std::string GetRandomHex(absl::InsecureBitGen& gen, size_t len, size_t le
   return res;
 }
 
-}  // namespace dfly::detail
+}  // namespace dfly

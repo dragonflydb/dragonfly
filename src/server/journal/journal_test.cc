@@ -159,7 +159,7 @@ TEST(Journal, PendingBuf) {
   absl::InsecureBitGen gen;
 
   for (size_t i = 0; i < string_num; ++i) {
-    auto str = detail::GetRandomHex(gen, 10, 90);
+    auto str = GetRandomHex(gen, 10, 90);
     test_data.push_back(str);
     pbuf.Push(std::move(str));
   }
