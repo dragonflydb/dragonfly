@@ -5,6 +5,7 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
 
 extern "C" {
@@ -2214,8 +2215,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      // Stub: read and ignore HNSW vector index data
-      // Binary format: [index_name, elements_number,
+      // Read HNSW vector index graph data and restore directly
+      // Binary format: [index_key, elements_number,
       //   then for each node (little-endian):
       //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
       //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
@@ -2225,26 +2226,94 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
+      // Only restore if flag enabled and shard count matches (GlobalDocId encodes shard_id)
+      bool should_restore = GetFlag(FLAGS_deserialize_hnsw_index) && shard_count_ > 0 &&
+                            shard_set != nullptr && shard_count_ == shard_set->size();
+
+      // Extract index_name and field_name from index_key
+      size_t colon_pos = index_key.find(':');
+      string index_name = (colon_pos != string::npos) ? index_key.substr(0, colon_pos) : index_key;
+      string field_name = (colon_pos != string::npos) ? index_key.substr(colon_pos + 1) : "";
+
+      // Check if we can get the HNSW index (it should exist from FT.CREATE in aux)
+      auto hnsw_index = should_restore
+                            ? GlobalHnswIndexRegistry::Instance().Get(index_name, field_name)
+                            : nullptr;
+      if (should_restore && !hnsw_index) {
+        LOG(WARNING) << "HNSW index not found for restoration: " << index_key;
+        should_restore = false;
+      }
+
+      std::vector<search::HnswNodeData> nodes;
+      if (should_restore) {
+        nodes.reserve(elements_number);
+      }
+
       for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        [[maybe_unused]] uint32_t internal_id;
+        uint32_t internal_id;
         SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
-        [[maybe_unused]] uint64_t global_id;
+        uint64_t global_id;
         SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
         uint32_t level;
         SET_OR_RETURN(FetchInt<uint32_t>(), level);
 
+        search::HnswNodeData node;
+        if (should_restore) {
+          node.internal_id = internal_id;
+          node.global_id = global_id;
+          node.level = level;
+          node.levels_links.resize(level + 1);
+        }
+
         for (uint32_t lvl = 0; lvl <= level; ++lvl) {
           uint32_t links_num;
           SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
-          for (uint32_t i = 0; i < links_num; ++i) {
-            [[maybe_unused]] uint32_t link;
-            SET_OR_RETURN(FetchInt<uint32_t>(), link);
+
+          if (should_restore) {
+            node.levels_links[lvl].reserve(links_num);
           }
+
+          for (uint32_t i = 0; i < links_num; ++i) {
+            uint32_t link;
+            SET_OR_RETURN(FetchInt<uint32_t>(), link);
+            if (should_restore) {
+              node.levels_links[lvl].push_back(link);
+            }
+          }
+        }
+
+        if (should_restore) {
+          nodes.push_back(std::move(node));
         }
       }
 
-      VLOG(2) << "Ignoring HNSW vector index: " << index_key
-              << " elements_number=" << elements_number;
+      if (should_restore && !nodes.empty()) {
+        // Get metadata - it was set via SetMetadataForIndex after FT.CREATE
+        search::HnswIndexMetadata metadata = hnsw_index->GetMetadata();
+
+        if (metadata.cur_element_count == 0) {
+          // Create default metadata from graph data
+          metadata.cur_element_count = nodes.size();
+          metadata.maxlevel = -1;  // Invalid, will be set in loop
+          metadata.enterpoint_node = 0;
+          for (const auto& node : nodes) {
+            // Cast node.level to int for proper signed comparison with maxlevel (-1)
+            if (static_cast<int>(node.level) > metadata.maxlevel) {
+              metadata.maxlevel = node.level;
+              metadata.enterpoint_node = node.internal_id;
+            }
+          }
+        }
+
+        // Restore the HNSW graph directly and mark as restored
+        hnsw_index->RestoreFromNodes(nodes, metadata);
+
+        LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
+      } else if (elements_number > 0) {
+        VLOG(2) << "Skipping HNSW vector index restore: " << index_key
+                << " elements_number=" << elements_number << " shard_count_=" << shard_count_
+                << " current_shards=" << (shard_set ? shard_set->size() : 0);
+      }
       continue;
     }
 
@@ -2275,8 +2344,11 @@ error_code RdbLoader::Load(io::Source* src) {
       VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
               << " entries";
 
-      // Store the mapping to be applied after index creation
-      pending_index_mappings_.emplace_back(std::move(pim));
+      // Store the mapping to be applied after index creation (thread-safe)
+      {
+        std::lock_guard lk(search_index_mu_);
+        pending_index_mappings_.emplace_back(std::move(pim));
+      }
       continue;
     }
 
@@ -2977,19 +3049,29 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-// Static synchronization for thread-safe search index creation
+// Static storage for index key-to-DocId mappings collected from all RdbLoader instances
+std::vector<RdbLoader::PendingIndexMapping> RdbLoader::pending_index_mappings_;
+// Static synchronization for thread-safe search index creation and pending mappings
 base::SpinLock RdbLoader::search_index_mu_;
 absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
-
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
   result.swap(pending_synonym_cmds_);
   return result;
 }
 
+std::vector<RdbLoader::PendingIndexMapping> RdbLoader::TakePendingIndexMappings() {
+  // we don't need to lock here as this is called after all RdbLoader instances are done
+  std::vector<PendingIndexMapping> result;
+  result.swap(pending_index_mappings_);
+  return result;
+}
+
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   string index_name;
   string full_cmd;
+  string hnsw_field_name;
+  std::optional<search::HnswIndexMetadata> hnsw_meta;
 
   // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
   if (!def.empty() && def[0] == '{') {
@@ -3003,9 +3085,28 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
       const auto& json = *json_opt;
       index_name = json["name"].as<string>();
       string cmd = json["cmd"].as<string>();
+      hnsw_field_name = json["field"].as<string>();
 
-      // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
-      // Currently we just restore the index definition, HNSW graph will be rebuilt
+      // Parse HNSW metadata if present
+      if (json.contains("hnsw_metadata")) {
+        const auto& meta = json["hnsw_metadata"];
+        search::HnswIndexMetadata m;
+        m.max_elements = meta["max_elements"].as<size_t>();
+        m.cur_element_count = meta["cur_element_count"].as<size_t>();
+        m.maxlevel = meta["maxlevel"].as<int>();
+        m.enterpoint_node = meta["enterpoint_node"].as<size_t>();
+        m.M = meta["M"].as<size_t>();
+        m.maxM = meta["maxM"].as<size_t>();
+        m.maxM0 = meta["maxM0"].as<size_t>();
+        m.ef_construction = meta["ef_construction"].as<size_t>();
+        m.mult = meta["mult"].as<double>();
+        hnsw_meta = m;
+
+        VLOG(1) << "Parsed HNSW metadata for index " << index_name << " field " << hnsw_field_name
+                << ": max_elements=" << m.max_elements
+                << " cur_element_count=" << m.cur_element_count << " maxlevel=" << m.maxlevel
+                << " M=" << m.M;
+      }
 
       full_cmd = absl::StrCat(index_name, " ", cmd);
     } catch (const std::exception& e) {
@@ -3037,6 +3138,13 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   }
 
   LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+
+  // Store metadata on HNSW index after index creation (for later graph restoration)
+  if (hnsw_meta && !hnsw_field_name.empty()) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_field_name); index) {
+      index->SetMetadata(*hnsw_meta);
+    }
+  }
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
@@ -3057,10 +3165,40 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   }
 
   std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  std::vector<PendingIndexMapping> index_mappings = TakePendingIndexMappings();
+
   if (is_error)
     return;
 
-  // Rebuild all search indices as only their definitions are extracted from the snapshot
+  // Apply pending index key-to-DocId mappings before rebuilding indices
+  // Group mappings by shard_id for efficient dispatch
+  absl::flat_hash_map<uint32_t, std::vector<const PendingIndexMapping*>> mappings_by_shard;
+  for (const auto& pim : index_mappings) {
+    mappings_by_shard[pim.shard_id].push_back(&pim);
+  }
+
+  // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
+  for (const auto& [shard_id, shard_mappings] : mappings_by_shard) {
+    if (shard_id >= shard_set->size()) {
+      LOG(ERROR) << "Invalid shard_id in RDB: " << shard_id << " (max: " << shard_set->size() - 1
+                 << "). Skipping index mappings for this shard.";
+      continue;
+    }
+    shard_set->Add(shard_id, [shard_mappings]() {
+      EngineShard* es = EngineShard::tlocal();
+      for (const auto* pim : shard_mappings) {
+        if (auto* index = es->search_indices()->GetIndex(pim->index_name); index) {
+          index->RestoreKeyIndex(pim->mappings);
+          VLOG(1) << "Restored " << pim->mappings.size() << " key mappings for index "
+                  << pim->index_name << " on shard " << pim->shard_id;
+        }
+      }
+    });
+  }
+  // Wait for all mappings to be applied
+  shard_set->RunBriefInParallel([](EngineShard*) {});
+
+  // Rebuild all search indices - for restored HNSW indices, this will populate vectors
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
