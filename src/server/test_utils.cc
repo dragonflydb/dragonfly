@@ -629,8 +629,8 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   parser_.reset(new RESPParser{});
   auto obj = parser_->Feed(s.data(), s.size());
 
-  CHECK(obj.has_value() && !obj->Empty()) << " response: \"" << s << "\" (" << s.size()
-                                          << " chars)";
+  CHECK(obj.has_value() && !obj->Empty())
+      << " response: \"" << s << "\" (" << s.size() << " chars)";
   if (fully_consumed) {
     DCHECK_EQ(parser_->BufferPos(), s.size()) << s;
   }
