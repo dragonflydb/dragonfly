@@ -5,11 +5,11 @@
 
 #include <absl/types/span.h>
 
-#include <memory>
 #include <utility>
-#include <vector>
 
-#include "common/backed_args_fwd.h"
+namespace cmn {
+class BackedArguments;
+}  // namespace cmn
 
 namespace facade {
 
