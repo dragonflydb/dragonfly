@@ -23,6 +23,7 @@
 
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
+ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 
 namespace dfly {
 
@@ -188,7 +189,7 @@ void SliceSnapshot::SerializeIndexMapping(
 
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
-  if (SaveMode() == dfly::SaveMode::RDB) {
+  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
     return;
   }
 
@@ -218,7 +219,8 @@ void SliceSnapshot::SerializeIndexMappings() {
 void SliceSnapshot::SerializeGlobalHnswIndices() {
 #ifdef WITH_SEARCH
   // Serialize HNSW global indices for shard 0 only
-  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB) {
+  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB ||
+      !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
     return;
   }
 
@@ -248,8 +250,10 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
         if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
           break;
       }
-      PushSerialized(false);
     }
+    // Flush after completing entire index to avoid splitting HNSW data across compressed blobs.
+    // The HNSW loader expects all nodes for an index to be readable in one pass.
+    PushSerialized(false);
   }
 #endif
 }
