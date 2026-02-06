@@ -155,9 +155,11 @@ class BaseFamilyTest::TestConnWrapper {
   std::unique_ptr<TestConnection> dummy_conn_;
 
   std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
+  std::vector<std::optional<RESPObj>> resp_objs_;  // Keep RESPObj alive
 
-  std::unique_ptr<RedisParser> parser_;
+  std::unique_ptr<RESPParser> parser_;
   std::unique_ptr<SinkReplyBuilder> builder_;
+  RespExprBuilder expr_builder_;
 };
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(facade::ServiceInterface* si, Protocol proto)
@@ -623,20 +625,32 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
 RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
-  auto buf = RespExpr::buffer(&s);
 
-  auto s_copy = s;
+  parser_.reset(new RESPParser{});
+  auto obj = parser_->Feed(s.data(), s.size());
 
-  uint32_t consumed = 0;
-  parser_.reset(new RedisParser{RedisParser::Mode::CLIENT});  // Client mode.
-  RespVec res;
-  RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
-
-  CHECK_EQ(RedisParser::OK, st) << " response: \"" << s_copy << "\" (" << s_copy.size()
-                                << " chars)";
+  CHECK(obj.has_value() && !obj->Empty())
+      << " response: \"" << s << "\" (" << s.size() << " chars)";
   if (fully_consumed) {
-    DCHECK_EQ(consumed, s.size()) << s;
+    DCHECK_EQ(parser_->BufferPos(), s.size()) << s;
   }
+
+  // Store the RESPObj to keep the data alive
+  resp_objs_.emplace_back(std::move(obj));
+  auto& stored_obj = resp_objs_.back();
+
+  RespVec res;
+  if (stored_obj->GetType() == RESPObj::Type::ARRAY) {
+    auto arr = stored_obj->As<RESPArray>();
+    CHECK(arr.has_value());
+    res.reserve(arr->Size());
+    for (size_t i = 0; i < arr->Size(); ++i) {
+      res.push_back(expr_builder_.Build((*arr)[i]));
+    }
+  } else {
+    res.push_back(expr_builder_.Build(*stored_obj));
+  }
+
   return res;
 }
 
