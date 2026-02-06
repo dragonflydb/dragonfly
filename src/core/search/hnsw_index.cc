@@ -34,6 +34,11 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
                       *static_cast<const unsigned*>(param));
   }
 
+  static float CosineDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
+    return CosineDistance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
+                          *static_cast<const unsigned*>(param));
+  }
+
  public:
   explicit HnswSpace(size_t dim, VectorSimilarity sim) : dim_(dim), sim_(sim) {
   }
@@ -45,6 +50,8 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
   hnswlib::DISTFUNC<float> get_dist_func() {
     if (sim_ == VectorSimilarity::L2) {
       return L2DistanceStatic;
+    } else if (sim_ == VectorSimilarity::COSINE) {
+      return CosineDistanceStatic;
     } else {
       return IPDistanceStatic;
     }
