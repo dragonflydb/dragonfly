@@ -90,7 +90,7 @@ struct HnswlibAdapter {
       MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
       world_.markDelete(id);
     } catch (const std::exception& e) {
-      LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
+      VLOG(1) << "HnswlibAdapter::Remove failed: " << e.what();
     }
   }
 
