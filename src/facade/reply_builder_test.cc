@@ -17,7 +17,7 @@
 #include "facade/facade_test.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
-#include "facade/resp_expr_builder.h"
+#include "facade/resp_expr_test_utils.h"
 
 using namespace testing;
 using namespace std;

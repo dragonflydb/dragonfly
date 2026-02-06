@@ -8,7 +8,7 @@
 
 #include "facade/dragonfly_connection.h"
 #include "facade/memcache_parser.h"
-#include "facade/resp_expr_builder.h"
+#include "facade/resp_expr_test_utils.h"
 #include "facade/resp_parser.h"
 #include "io/io.h"
 #include "server/conn_context.h"

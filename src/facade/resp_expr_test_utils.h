@@ -11,19 +11,16 @@
 
 namespace facade {
 
-// Helper class to transform RESPObj into RespExpr
-// Manages lifetime of nested array vectors
+// Helper class to transform RESPObj into RespExpr for test utilities.
 class RespExprBuilder {
  public:
   RespExprBuilder() = default;
 
-  // Build RespExpr from RESPObj
   RespExpr Build(const RESPObj& obj);
 
  private:
   void SetStringPayload(const RESPObj& obj, RespExpr* expr);
 
-  // Stores owned array vectors to manage lifetime
   std::vector<std::unique_ptr<RespExpr::Vec>> owned_arrays_;
 };
 
