@@ -1404,11 +1404,22 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
                  "SORTABLE"}),
             "OK");
 
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
+            "OK");
+
+  auto resp =
+      Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC",
+              "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
   // Test simple
   Run({"JSON.SET", "j1", ".", R"({"value":"one"})"});
   Run({"JSON.SET", "j2", ".", R"({"value":1})"});
 
-  auto resp = Run({"FT.SEARCH", "i1", "*"});
+  resp = Run({"FT.SEARCH", "i1", "*"});
   EXPECT_THAT(resp, AreDocIds("j2"));
 
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "$.value"});
@@ -1417,9 +1428,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   // Test with two fields. One is loading
   Run({"JSON.SET", "j3", ".", R"({"value":"two","another_value":1})"});
   Run({"JSON.SET", "j4", ".", R"({"value":2,"another_value":2})"});
-
-  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
-            "OK");
 
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
@@ -1440,15 +1448,8 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   Run({"JSON.SET", "j6", ".", R"({"arr":[{"id":1},{"id":2}]})"});
   Run({"JSON.SET", "j7", ".", R"({"arr":[]})"});
 
-  resp = Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC"});
-  EXPECT_EQ(resp, "OK");
-
   resp = Run({"FT.SEARCH", "i3", "*"});
   EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
-
-  resp = Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC",
-              "SORTABLE"});
-  EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "i4", "*"});
   EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
@@ -1456,6 +1457,7 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
   EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "value", "NUMERIC", "SORTABLE"}), "OK");
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "value", "NUMERIC"}), "OK");
 
   // Test simple
   Run({"HSET", "h1", "value", "one"});
@@ -1470,8 +1472,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
   // Test with two fields. One is loading
   Run({"HSET", "h3", "value", "two", "another_value", "1"});
   Run({"HSET", "h4", "value", "2", "another_value", "2"});
-
-  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "value", "NUMERIC"}), "OK");
 
   resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@another_value"});
   EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("value", "1"), "h4",
@@ -2288,6 +2288,22 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
                  "sortable"}),
             "OK");
 
+  EXPECT_EQ(Run({"ft.create", "i2", "on", "json", "schema", "$.title", "as", "title", "text",
+                 "$.meta.tags", "as", "tags", "tag", "$.meta.score", "as", "score", "numeric"}),
+            "OK");
+
+  EXPECT_EQ(Run({"ft.create", "text_idx", "ON", "HASH", "PREFIX", "1", "text:", "SCHEMA", "content",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"ft.create", "tag_idx", "ON", "HASH", "PREFIX", "1", "tag:", "SCHEMA",
+                 "categories", "TAG", "SEPARATOR", ","}),
+            "OK");
+
+  EXPECT_EQ(Run({"ft.create", "num_idx", "ON", "HASH", "PREFIX", "1", "num:", "SCHEMA", "price",
+                 "NUMERIC", "SORTABLE"}),
+            "OK");
+
   Run({"hset", "d:1", "title", "Document with title and tags", "tags", "tag1,tag2"});
   Run({"hset", "d:2", "title", "Document with title and score", "score", "75"});
   Run({"hset", "d:3", "title", "Document with all fields", "tags", "tag2,tag3", "score", "100"});
@@ -2318,10 +2334,6 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   Run({"json.set", "j:3", ".",
        R"({"title": "Full JSON", "meta": {"tags": ["tag3"], "score": 80}})"});
 
-  EXPECT_EQ(Run({"ft.create", "i2", "on", "json", "schema", "$.title", "as", "title", "text",
-                 "$.meta.tags", "as", "tags", "tag", "$.meta.score", "as", "score", "numeric"}),
-            "OK");
-
   EXPECT_THAT(Run({"ft.search", "i2", "@title:*"}), AreDocIds("j:1", "j:3"));
   EXPECT_THAT(Run({"ft.search", "i2", "@tags:*"}), AreDocIds("j:1", "j:3"));
   EXPECT_THAT(Run({"ft.search", "i2", "@score:*"}), AreDocIds("j:2", "j:3"));
@@ -2332,10 +2344,6 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   Run({"hset", "text:2", "content", "cherry date"});
   Run({"hset", "text:3", "content", "elephant fig"});
 
-  EXPECT_EQ(Run({"ft.create", "text_idx", "ON", "HASH", "PREFIX", "1", "text:", "SCHEMA", "content",
-                 "TEXT"}),
-            "OK");
-
   EXPECT_THAT(Run({"ft.search", "text_idx", "*"}), AreDocIds("text:1", "text:2", "text:3"));
 
   // Testing tag indices with star query
@@ -2343,20 +2351,12 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   Run({"hset", "tag:2", "categories", "drink,beverage"});
   Run({"hset", "tag:3", "categories", "tech,gadget"});
 
-  EXPECT_EQ(Run({"ft.create", "tag_idx", "ON", "HASH", "PREFIX", "1", "tag:", "SCHEMA",
-                 "categories", "TAG", "SEPARATOR", ","}),
-            "OK");
-
   EXPECT_THAT(Run({"ft.search", "tag_idx", "*"}), AreDocIds("tag:1", "tag:2", "tag:3"));
 
   // Testing numeric indices with star query
   Run({"hset", "num:1", "price", "10.5"});
   Run({"hset", "num:2", "price", "20.75"});
   Run({"hset", "num:3", "price", "30.99"});
-
-  EXPECT_EQ(Run({"ft.create", "num_idx", "ON", "HASH", "PREFIX", "1", "num:", "SCHEMA", "price",
-                 "NUMERIC", "SORTABLE"}),
-            "OK");
 
   EXPECT_THAT(Run({"ft.search", "num_idx", "*"}), AreDocIds("num:1", "num:2", "num:3"));
 
@@ -3120,6 +3120,10 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
   Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TAG"});
   Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
 
+  // Another case
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TAG"});
+  Run({"ft.create", "idx4", "ON", "HASH", "SCHEMA", "num4", "NUMERIC", "str4", "TAG"});
+
   std::vector<::testing::Matcher<RespExpr>> matchers;
   for (int i = 0; i < 100; ++i) {
     // For even i str1 and str2 should match, for odd i they should not
@@ -3140,10 +3144,6 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
                    "QUERY", "@num2:[35 57]"});
 
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAreArray(matchers));
-
-  // Another case
-  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TAG"});
-  Run({"ft.create", "idx4", "ON", "HASH", "SCHEMA", "num4", "NUMERIC", "str4", "TAG"});
 
   size_t num3 = 1;
   size_t num4 = 5;
@@ -3486,6 +3486,7 @@ TEST_F(SearchFamilyTest, DropIndexWithDD) {
 
   // Create index again
   Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+  ThisFiber::Yield();
 
   // Verify index works again
   resp = Run({"FT.SEARCH", "idx", "*"});
@@ -3602,11 +3603,11 @@ TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
 }
 
 TEST_F(SearchFamilyTest, QueryStringBytesLimit) {
-  Run({"hset", "doc1", "name", "alice", "age", "30"});
-  Run({"hset", "doc2", "name", "bob", "age", "25"});
-
   EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC"}),
             "OK");
+
+  Run({"hset", "doc1", "name", "alice", "age", "30"});
+  Run({"hset", "doc2", "name", "bob", "age", "25"});
 
   absl::FlagSaver fs;
 
