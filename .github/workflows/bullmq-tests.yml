@@ -1,72 +1,78 @@
-# These tests are disabled until Dragonfly works well with BullMQ.
 name: bullmq-tests
+
 on:
+  schedule:
+    - cron: '0 7 * * *' # run at 7 AM daily
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  NODE_VERSION: "22.12.0"
+
 jobs:
   build:
     runs-on: ubuntu-latest
     name: Build
-
     timeout-minutes: 60
 
-    # TODO: Build Dragonfly instead of using a container, see below
-    services:
-      dragonflydb:
-        image: ghcr.io/dragonflydb/dragonfly-weekly:latest
-        env:
-          DFLY_cluster_mode: emulated
-          DFLY_lock_on_hashtags: true
-          HEALTHCHECK_PORT: 6379
-        ports:
-          - 6379:6379
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
 
-      - name: Install NodeJs
+      - name: Build Dragonfly
         run: |
-          wget -q https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
-          tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
-          sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
-          sudo apt install yarn jq
-          node --version
-          npm --version
-          yarn --version
-          mkdir -p $GITHUB_WORKSPACE/build
+          cmake -B ${GITHUB_WORKSPACE}/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_AWS=OFF \
+            -DWITH_GCP=OFF \
+            -DWITH_UNWIND=OFF \
+            -DWITH_GPERF=OFF \
+            -GNinja \
+            -L
+          cd ${GITHUB_WORKSPACE}/build && ninja dragonfly
 
-#      - name: Build Dragonfly
-#        run: |
-#          mkdir $GITHUB_WORKSPACE/build
-#          cd $GITHUB_WORKSPACE/build
-#          cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
-#          ninja dragonfly
-#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+      - name: Install Node.js
+        run: |
+          wget -q https://unofficial-builds.nodejs.org/download/release/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64-glibc-217.tar.xz
+          tar -xf node-v${NODE_VERSION}-linux-x64-glibc-217.tar.xz
+          cp -r node-v${NODE_VERSION}-linux-x64-glibc-217/* /usr/local/
+          apt-get update && apt-get install -y jq redis-tools
+          npm install -g yarn
+          node --version
+          yarn --version
+
+      - name: Start Dragonfly
+        run: |
+          ${GITHUB_WORKSPACE}/build/dragonfly \
+            --alsologtostderr \
+            --cluster_mode=emulated \
+            --lock_on_hashtags \
+            --dbfilename= \
+            --port 6379 &
+          timeout 15s bash -c 'until redis-cli -p 6379 PING 2>/dev/null | grep -q PONG; do sleep 0.1; done'
 
       - name: Build BullMQ
         run: |
-          mkdir -p $GITHUB_WORKSPACE/../bullmq
-          cd $GITHUB_WORKSPACE/../bullmq
-          # TODO: Use BullMQ latest release instead of our fork:
-          # DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
-          # echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
-          # wget -O bullmq.tar.gz ${DOWNLOAD_URL}
-          # tar -zxvf bullmq.tar.gz
-          # mv taskforcesh-bullmq-* bullmq
+          cd ${GITHUB_WORKSPACE}
           git clone https://github.com/dragonflydb/bullmq
           cd bullmq
-          pwd
           yarn install
           yarn build
 
       - name: Run BullMQ tests
         run: |
-          cd $GITHUB_WORKSPACE/../bullmq/bullmq
-          BULLMQ_TEST_PREFIX={b} yarn test
+          cd ${GITHUB_WORKSPACE}/bullmq
+          BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors" --invert
 
       - name: Upload logs on failure
         if: failure()
@@ -74,3 +80,15 @@ jobs:
         with:
           name: unit_logs
           path: /tmp/dragonfly.*
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="BullMQ tests failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'

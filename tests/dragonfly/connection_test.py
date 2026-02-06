@@ -1523,3 +1523,30 @@ async def test_issue_6165_squash_invalid_syntax(async_client):
     res = await pip.execute(raise_on_error=False)
     assert res[0] == True  # SET key1
     assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX
+
+
+@dfly_args({"proactor_threads": "2", "pipeline_squash": 1})
+async def test_quit_in_pipeline(df_server: DflyInstance):
+    """
+    Regression test: when QUIT is pipelined together with other commands
+    (e.g. DEL DEL ... DEL QUIT), the server must flush all preceding replies
+    before closing the connection.
+
+    Reproduces the BullMQ removeAllQueueData() pattern.
+    """
+    NUM_KEYS = 9
+    client = df_server.client()
+
+    # Setup: create NUM_KEYS keys
+    for i in range(NUM_KEYS):
+        await client.set(f"{{b}}:pqt:k{i}", "v")
+
+    # Send DEL for all keys + QUIT in one pipeline
+    pipe = client.pipeline(transaction=False)
+    for i in range(NUM_KEYS):
+        pipe.delete(f"{{b}}:pqt:k{i}")
+    pipe.execute_command("QUIT")
+    res = await pipe.execute()
+
+    assert res[:NUM_KEYS] == [1] * NUM_KEYS, f"Expected {NUM_KEYS} DEL replies, got: {res}"
+    assert res[NUM_KEYS] in (b"OK", True), f"Expected QUIT OK reply, got: {res[NUM_KEYS]}"

@@ -625,6 +625,13 @@ bool Connection::IsSending() const {
   return reply_builder_ && reply_builder_->IsSendActive();
 }
 
+void Connection::MarkForClose() {
+  if (reply_builder_) {
+    reply_builder_->CloseConnection();
+  }
+  request_shutdown_ = true;
+}
+
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
@@ -1141,13 +1148,6 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
           qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size());
       return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
-
-    if (cc_->conn_closing) {
-      if (request_shutdown_) {
-        ShutdownSelfBlocking();
-      }
-      return;
-    }
 
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
@@ -1675,8 +1675,15 @@ void Connection::AsyncFiber() {
   }
 
   DCHECK(cc_->conn_closing || reply_builder_->GetError());
+
   cc_->conn_closing = true;
   qbp.pipeline_cnd.notify_all();
+
+  // If shutdown was requested, we need to break the receive call in case the i/o fiber
+  // is blocked there. With io loop v2, we can have a different mechanism to break from recv flow.
+  if (request_shutdown_) {
+    ShutdownSelfBlocking();
+  }
 }
 
 void Connection::ShrinkPipelinePool() {

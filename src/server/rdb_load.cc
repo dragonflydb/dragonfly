@@ -737,7 +737,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     ::memcpy(copy_lp, lp, data.size());
     /* Insert the key in the radix tree. */
     int retval =
-        raxTryInsert(s->rax_tree, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
+        raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
     if (!retval) {
       zfree(copy_lp);
       LOG(ERROR) << "Listpack re-added with existing key";
@@ -817,8 +817,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
        * consumer. */
       for (const auto& rawid : cons.nack_arr) {
         uint8_t* ptr = const_cast<uint8_t*>(rawid.data());
-        streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, ptr, rawid.size());
-        if (nack == raxNotFound) {
+        streamNACK* nack = nullptr;
+        int fres = raxFind(cgroup->pel, ptr, rawid.size(), (void**)&nack);
+        if (fres == 0) {
           LOG(ERROR) << "Consumer entry not found in group global PEL";
           ec_ = RdbError(errc::rdb_file_corrupted);
           return;
@@ -2241,6 +2242,8 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
 
+  now_streamed_.clear();
+
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
   keys_loaded_ = *keys_loaded;
@@ -2604,8 +2607,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   LoadConfig config_copy = item->load_config;
   if (item->load_config.streamed && item->load_config.append) {
+    std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
-      pv_ptr = &*now_streamed_[item->key];
+      pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
@@ -2638,12 +2642,12 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     }
     LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
     stop_early_ = true;
-    now_streamed_.clear();
     return;
   }
 
   if (item->load_config.streamed) {
-    if (now_streamed_.find(item->key) == now_streamed_.end())
+    std::unique_lock lk{now_streamed_mu_};
+    if (const auto it = now_streamed_.find(item->key); it == now_streamed_.end())
       now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
