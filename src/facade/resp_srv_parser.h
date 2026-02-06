@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "common/backed_args.h"
+#include "common/backed_args_fwd.h"
 
 namespace facade {
 
