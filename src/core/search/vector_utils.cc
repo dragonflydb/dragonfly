@@ -37,17 +37,31 @@ OwnedFtVector ConvertToFtVector(string_view value) {
 
 }  // namespace
 
-// Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
-FAST_MATH float L2Distance(const float* u, const float* v, size_t dims) {
+FAST_MATH float L2Distance(const void* u, const void* v, size_t dims) {
 #ifdef WITH_SIMSIMD
   simsimd_distance_t distance = 0;
   simsimd_l2_f32(u, v, dims, &distance);
   return static_cast<float>(distance);
 #else
-  float sum = 0;
-  for (size_t i = 0; i < dims; i++)
-    sum += (u[i] - v[i]) * (u[i] - v[i]);
-  return sqrt(sum);
+  alignas(32) float au[256];
+  alignas(32) float av[256];
+
+  size_t i = 0;
+  float sum = 0.0f;
+
+  while (i < dims) {
+    size_t n = std::min<size_t>(256, dims - i);
+
+    std::memcpy(au, (const uint8_t*)u + i * sizeof(float), n * sizeof(float));
+    std::memcpy(av, (const uint8_t*)v + i * sizeof(float), n * sizeof(float));
+
+    for (size_t j = 0; j < n; ++j) {
+      float d = au[j] - av[j];
+      sum += d * d;
+    }
+    i += n;
+  }
+  return std::sqrt(sum);
 #endif
 }
 

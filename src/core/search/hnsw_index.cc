@@ -25,8 +25,7 @@ class HnswSpace : public hnswlib::SpaceInterface<float> {
   VectorSimilarity sim_;
 
   static float L2DistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
-    return L2Distance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
-                      *static_cast<const unsigned*>(param));
+    return L2Distance(pVect1, pVect2, *static_cast<const unsigned*>(param));
   }
 
   static float IPDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
