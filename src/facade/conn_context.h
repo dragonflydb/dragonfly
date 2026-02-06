@@ -6,7 +6,6 @@
 
 #include <absl/container/flat_hash_set.h>
 
-#include <memory>
 #include <string_view>
 
 #include "facade/acl_commands_def.h"

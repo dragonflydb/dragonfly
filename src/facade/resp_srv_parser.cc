@@ -7,6 +7,7 @@
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
+#include "common/backed_args.h"
 #include "common/heap_size.h"
 
 namespace facade {

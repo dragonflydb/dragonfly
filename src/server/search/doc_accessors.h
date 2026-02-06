@@ -8,7 +8,6 @@
 #include <absl/types/span.h>
 
 #include <string>
-#include <utility>
 
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
