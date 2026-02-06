@@ -18,6 +18,7 @@
 #include "server/rdb_save.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
@@ -313,7 +314,15 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   time_t expire_time = 0;
   if (pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
-    expire_time = db_slice_->ExpireTime(eit);
+    if (!IsValid(eit)) {
+      LOG(DFATAL) << "Internal error, entry " << pk.ToString()
+                  << " not found in expire table, db_index: " << db_indx
+                  << ", expire table size: " << db_array_[db_indx]->expire.size()
+                  << ", prime table size: " << db_array_[db_indx]->prime.size()
+                  << util::fb2::GetStacktrace();
+    } else {
+      expire_time = db_slice_->ExpireTime(eit);
+    }
   }
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
