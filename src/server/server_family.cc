@@ -30,7 +30,6 @@
 #include "facade/error.h"
 #include "server/common.h"
 #include "server/slowlog.h"
-#include "util/fibers/synchronization.h"
 
 extern "C" {
 #include "redis/redis_aux.h"

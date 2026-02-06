@@ -71,7 +71,7 @@ ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
-ABSL_DECLARE_FLAG(facade::MemoryBytesFlag, maxmemory);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "

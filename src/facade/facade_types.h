@@ -12,7 +12,6 @@
 #include "common/arg_range.h"
 #include "common/backed_args.h"
 #include "facade/op_status.h"
-#include "strings/human_readable.h"
 
 namespace facade {
 
@@ -205,8 +204,6 @@ constexpr unsigned long long operator""_KB(unsigned long long x) {
 }
 
 void ResetStats();
-
-using MemoryBytesFlag = strings::MemoryBytesFlag;
 
 // Constants for socket bufring.
 constexpr uint16_t kRecvSockGid = 0;
