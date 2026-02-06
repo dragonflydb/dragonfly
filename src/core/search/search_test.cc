@@ -190,6 +190,7 @@ class SearchTest : public ::testing::Test {
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
     for (DocId i = 0; i < entries_.size(); i++)
       index.Add(i, entries_[i].first);
+    index.FinalizeInitialization();
 
     SearchAlgorithm search_algo{};
     if (!search_algo.Init(query_, &params_)) {

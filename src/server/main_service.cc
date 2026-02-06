@@ -93,7 +93,7 @@ ABSL_FLAG(bool, admin_nopass, false,
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
+ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database, until data starts to be evicted "
           "(according to eviction policy). With tiering, this value defines only the size in RAM, "
           "and not the whole dataset (RAM + SSD). "
@@ -1065,10 +1065,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                          FLAGS_scheduler_background_warrant),
       []() { UpdateSchedulerFlagsOnThread(); });
 
-  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
-    // TODO: reduce code reliance on constant direct access of max_memory_limit
-    max_memory_limit.store(flag.value, memory_order_relaxed);
-  });
+  config_registry.RegisterSetter<strings::MemoryBytesFlag>(
+      "maxmemory", [](const strings::MemoryBytesFlag& flag) {
+        // TODO: reduce code reliance on constant direct access of max_memory_limit
+        max_memory_limit.store(flag.value, memory_order_relaxed);
+      });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("background_snapshotting");
@@ -1177,7 +1178,6 @@ void Service::Shutdown() {
 
   // to shutdown all the runtime components that depend on EngineShard
   cluster_family_.Shutdown();
-
   server_family_.Shutdown();
 
   shutdown_watchdog.emplace(pp_);
@@ -1188,10 +1188,6 @@ void Service::Shutdown() {
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
-
-#ifdef WITH_SEARCH
-  SearchFamily::Shutdown();
-#endif
 
   Transaction::Shutdown();
 
@@ -1574,7 +1570,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmd_cntx->SendError("Internal Error");
-    cmd_cntx->rb()->CloseConnection();
+    dfly_cntx->conn()->MarkForClose();
   }
 
   return res;
@@ -1955,11 +1951,9 @@ void Service::Quit(CmdArgList args, CommandContext* cmd_cntx) {
   if (cmd_cntx->rb()->GetProtocol() == Protocol::REDIS)
     cmd_cntx->rb()->SendOk();
 
-  cmd_cntx->rb()->CloseConnection();
-
   auto* cntx = cmd_cntx->server_conn_cntx();
   DeactivateMonitoring(cntx);
-  cntx->conn()->ShutdownSelfBlocking();
+  cmd_cntx->conn()->MarkForClose();
 }
 
 void Service::Multi(CmdArgList args, CommandContext* cmd_cntx) {

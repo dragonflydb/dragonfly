@@ -21,15 +21,21 @@ struct IndexBuilder {
   explicit IndexBuilder(ShardDocIndex* index) : index_{index} {
   }
 
-  // Start building provided index in worker fiber.
-  // Calls `on_complete` from worker fiber at the end.
-  // This PR does not have cancellation because it's used only in sync mode
+  // Start building and call `on_complete` on finish from worker fiber
   void Start(const OpArgs& op_args, std::function<void()> on_complete);
 
- private:
-  // Main fiber function
-  void MainLoopFb(DbTable* table, DbContext db_cntx);
+  // Cancel building and wait for worker to finish. Safe to delete after
+  // TODO: Maybe implement nonblocking version?
+  void Cancel();
 
+  // Get fiber reference. Temporary to polyfill sync construction places
+  util::fb2::Fiber Worker();
+
+ private:
+  // Loop with cursor over table and add entries
+  void CursorLoop(DbTable* table, DbContext db_cntx);
+
+  dfly::ExecutionState state_;
   ShardDocIndex* index_;
   util::fb2::Fiber fiber_;
 };

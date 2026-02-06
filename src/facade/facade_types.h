@@ -4,19 +4,14 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/types/span.h>
-
 #include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
 
-#include "base/iterator.h"
 #include "common/arg_range.h"
 #include "common/backed_args.h"
 #include "facade/op_status.h"
-#include "strings/human_readable.h"
 
 namespace facade {
 
@@ -152,97 +147,6 @@ inline std::string_view ArgS(ArgSlice args, size_t i) {
   return args[i];
 }
 
-struct ConnectionStats {
-  size_t read_buf_capacity = 0;                // total capacity of input buffers
-  uint64_t dispatch_queue_entries = 0;         // total count of all pending
-                                               // messages (data + administrative messages)
-  size_t dispatch_queue_bytes = 0;             // total size of memory used by all pending
-                                               // messages (pipeline data queue + dispatch queue)
-  size_t dispatch_queue_subscriber_bytes = 0;  // total size of all publish messages
-                                               // (subset of dispatch_queue_bytes)
-
-  size_t pipeline_cmd_cache_bytes = 0;
-
-  uint64_t io_read_cnt = 0;
-  size_t io_read_bytes = 0;
-
-  uint64_t command_cnt_main = 0;
-  uint64_t command_cnt_other = 0;
-  uint64_t pipelined_cmd_cnt = 0;
-  uint64_t pipelined_cmd_latency = 0;  // in microseconds
-
-  // in microseconds, time spent waiting for the pipelined commands to start executing
-  uint64_t pipelined_wait_latency = 0;
-  uint64_t conn_received_cnt = 0;
-
-  uint32_t num_conns_main = 0;
-  uint32_t num_conns_other = 0;
-  uint32_t num_blocked_clients = 0;
-
-  // number of times the connection yielded due to max_busy_read_usec limit
-  uint32_t num_read_yields = 0;
-  uint64_t num_migrations = 0;
-  uint64_t num_recv_provided_calls = 0;
-
-  // Number of times the tls connection was closed by the time we started reading from it.
-  uint64_t tls_accept_disconnects = 0;  // number of TLS socket disconnects during the handshake
-                                        //
-  uint64_t handshakes_started = 0;
-  uint64_t handshakes_completed = 0;
-
-  // Number of events when the pipeline queue was over the limit and was throttled.
-  uint64_t pipeline_throttle_count = 0;
-  uint64_t pipeline_dispatch_calls = 0;
-  uint64_t pipeline_dispatch_commands = 0;
-  uint64_t pipeline_dispatch_flush_usec = 0;
-
-  uint64_t skip_pipeline_flushing = 0;  // number of times we skipped flushing the pipeline
-
-  ConnectionStats& operator+=(const ConnectionStats& o);
-};
-
-struct ReplyStats {
-  struct SendStats {
-    int64_t count = 0;
-    int64_t total_duration = 0;
-
-    SendStats& operator+=(const SendStats& other) {
-      static_assert(sizeof(SendStats) == 16u);
-
-      count += other.count;
-      total_duration += other.total_duration;
-      return *this;
-    }
-  };
-
-  // Send() operations that are written to sockets
-  SendStats send_stats;
-
-  size_t io_write_cnt = 0;
-  size_t io_write_bytes = 0;
-  absl::flat_hash_map<std::string, uint64_t> err_count;
-  size_t script_error_count = 0;
-
-  // This variable can be updated directly from shard threads when they allocate memory for replies.
-  std::atomic<size_t> squashing_current_reply_size{0};
-
-  ReplyStats() = default;
-  ReplyStats(ReplyStats&& other) noexcept;
-  ReplyStats& operator+=(const ReplyStats& other);
-  ReplyStats& operator=(const ReplyStats& other);
-};
-
-struct FacadeStats {
-  ConnectionStats conn_stats;
-  ReplyStats reply_stats;
-
-  FacadeStats& operator+=(const FacadeStats& other) {
-    conn_stats += other.conn_stats;
-    reply_stats += other.reply_stats;
-    return *this;
-  }
-};
-
 struct ErrorReply {
   explicit ErrorReply(std::string&& msg, std::string_view kind = {})
       : message{std::move(msg)}, kind{kind} {
@@ -299,11 +203,7 @@ constexpr unsigned long long operator""_KB(unsigned long long x) {
   return 1024L * x;
 }
 
-inline thread_local FacadeStats* tl_facade_stats = nullptr;
-
 void ResetStats();
-
-using MemoryBytesFlag = strings::MemoryBytesFlag;
 
 // Constants for socket bufring.
 constexpr uint16_t kRecvSockGid = 0;

@@ -3,6 +3,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"

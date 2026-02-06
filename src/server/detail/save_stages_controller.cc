@@ -11,6 +11,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"

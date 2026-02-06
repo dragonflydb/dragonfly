@@ -20,7 +20,6 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
-#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/snapshot.h"
@@ -29,7 +28,6 @@
 #include "server/tiering/op_manager.h"
 #include "server/tiering/serialized_map.h"
 #include "server/tiering/small_bins.h"
-#include "server/tx_base.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -89,7 +87,7 @@ tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
 TieredStorage::StashDescriptor DetermineSerializationParams(const PrimeValue& pv) {
   switch (pv.ObjType()) {
     case OBJ_STRING: {
-      if (pv.IsInline())
+      if (!pv.HasAllocated())
         return {};
       auto strs = pv.GetRawString();
       return {strs, CompactObj::ExternalRep::STRING};

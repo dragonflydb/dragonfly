@@ -5,12 +5,13 @@
 #include "server/search/search_family.h"
 
 #include <absl/flags/flag.h>
+#include <absl/strings/str_format.h>
 
 #include <algorithm>
 
-#include "absl/strings/str_format.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
@@ -291,12 +292,14 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(
-      info,
-      IsArray(_, _, _, IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1),
-              "index_options", RespArray(IsEmpty()), "attributes",
-              IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
-              "num_docs", IntArg(15)));
+
+  auto descriptor_matcher =
+      IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1);
+  auto schema_matcher = IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT"));
+
+  EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
+                            "attributes", schema_matcher, "num_docs", IntArg(15), "indexing",
+                            IntArg(0), "percent_indexed", "1"));
 }
 
 TEST_F(SearchFamilyTest, Stats) {
@@ -321,6 +324,84 @@ TEST_F(SearchFamilyTest, Stats) {
                           50 * 2 * 1 /* posting list entries */;
   EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
   EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
+}
+
+// Test how asynchronous indexing indexes documents and reports its progress
+TEST_F(SearchFamilyTest, Indexing) {
+  // Create documents
+#ifdef NDEBUG
+  constexpr size_t kNumDocs = 10'000;
+#else
+  constexpr size_t kNumDocs = 1'000;
+#endif
+
+  for (size_t i = 0; i < kNumDocs; i++) {
+    Run({"hset", absl::StrCat("doc-", i), "t", absl::StrCat("some long text at ", i), "v1",
+         absl::StrCat(i / 10), "v2", absl::StrCat(i / 1000)});
+  }
+
+  string_view create_cmd[] = {"ft.create", "i1", "schema", "v1", "numeric", "t", "text"};
+
+  // Drop immediately to check cancel
+  {
+    Run(create_cmd);
+    for (size_t i = 0; i < 3; i++)
+      ThisFiber::Yield();
+    Run({"ft.dropindex", "i1"});
+  }
+
+  // Update with ft.alter to check restart
+  {
+    Run(create_cmd);
+    for (size_t i = 0; i < 5; i++)
+      ThisFiber::Yield();
+    Run({"ft.alter", "i1", "schema", "add", "v2", "numeric"});
+  }
+
+  // loop and wait for index construction
+  absl::Time deadline = absl::Now() + absl::Seconds(10);
+  size_t iterations = 0;
+  bool seen_full = false;
+  while (true) {
+    auto resp = Run({"ft.info", "i1"});
+    auto arr = resp.GetVec();
+
+    auto find_field = [&arr](string_view field) {
+      return ++std::find_if(arr.begin(), arr.end(), [field](const auto& i) { return i == field; });
+    };
+
+    auto num_docs = find_field("num_docs");
+    auto indexing = find_field("indexing");
+    auto percent_indexed = find_field("percent_indexed");
+
+    if (indexing->GetInt() == 0) {
+      EXPECT_THAT(*num_docs, IntArg(kNumDocs));
+      EXPECT_EQ(*percent_indexed, "1");
+      break;
+    }
+
+    // Check basic invariants
+    EXPECT_FALSE(seen_full);
+    seen_full |= num_docs->GetInt() == kNumDocs;
+    EXPECT_THAT(*indexing, IntArg(1));
+    EXPECT_NE(*percent_indexed, "1");  // change once we have estimations
+
+    // Check search doesn't return any errors
+    resp = Run({"ft.search", "i1", "@v1:[10 20]"});
+    EXPECT_THAT(resp, Not(ErrArg("")));
+
+    iterations++;
+    ASSERT_LE(absl::Now(), deadline);
+  }
+
+  EXPECT_GT(iterations, 0u);  // ensure we observed indexing-in-progress state at least once
+
+  auto resp = Run({"ft.search", "i1", "@v1:[10 20]", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, IntArg(110));
+
+  // check added with alter field v2 is fully indexed
+  resp = Run({"ft.search", "i1", "@v2:[0 10000]", "LIMIT", "0", "0"});
+  EXPECT_THAT(resp, IntArg(kNumDocs));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -582,14 +663,14 @@ TEST_F(SearchFamilyTest, TagEscapeCharacters) {
 }
 
 TEST_F(SearchFamilyTest, Numbers) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "i", "numeric", "j", "numeric"}), "OK");
+
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {
       auto key = absl::StrCat("i", i, "j", j);
       Run({"hset", key, "i", absl::StrCat(i), "j", absl::StrCat(j)});
     }
   }
-
-  EXPECT_EQ(Run({"ft.create", "i1", "schema", "i", "numeric", "j", "numeric"}), "OK");
 
   // Test simple ranges:
   EXPECT_THAT(Run({"ft.search", "i1", "@i:[5 5] @j:[5 5]"}), AreDocIds("i5j5"));
@@ -914,7 +995,7 @@ TEST_P(SortTest, BasicSort) {
   absl::InsecureBitGen gen;
   vector<string> random_strs;
   for (size_t i = 0; i < 10; i++)
-    random_strs.emplace_back(dfly::GetRandomHex(gen, 7));
+    random_strs.emplace_back(GetRandomHex(gen, 7));
   sort(random_strs.begin(), random_strs.end());
 
   for (size_t i = 0; i < 10; i++)
@@ -1043,16 +1124,16 @@ TEST_F(SearchFamilyTest, DocsEditing) {
 }
 
 TEST_F(SearchFamilyTest, AggregateGroupBy) {
+  auto resp = Run(
+      {"ft.create", "i1", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC", "text", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
   Run({"hset", "key:1", "word", "item1", "foo", "10", "text", "\"first key\"", "non_indexed_value",
        "1"});
   Run({"hset", "key:2", "word", "item2", "foo", "20", "text", "\"second key\"", "non_indexed_value",
        "2"});
   Run({"hset", "key:3", "word", "item1", "foo", "40", "text", "\"third key\"", "non_indexed_value",
        "3"});
-
-  auto resp = Run(
-      {"ft.create", "i1", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC", "text", "TEXT"});
-  EXPECT_EQ(resp, "OK");
 
   resp = Run(
       {"ft.aggregate", "i1", "*", "GROUPBY", "1", "@word", "REDUCE", "COUNT", "0", "AS", "count"});
@@ -1130,11 +1211,11 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
 }
 
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
+  Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
   for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
     Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",
          absl::StrCat(i)});
   }
-  Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
 
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
@@ -1298,13 +1379,13 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
                                          IsMap("foo_total", "10", "word", "item1")));
 
-  // Test JSON
-  Run({"JSON.SET", "j1", ".", R"({"word":"item1","foo":10,"text":"first key"})"});
-  Run({"JSON.SET", "j2", ".", R"({"word":"item2","foo":20,"text":"second key"})"});
-
   resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.word", "AS", "word", "TAG", "$.foo",
               "AS", "foo", "NUMERIC", "$.text", "AS", "text", "TEXT"});
   EXPECT_EQ(resp, "OK");
+
+  // Test JSON
+  Run({"JSON.SET", "j1", ".", R"({"word":"item1","foo":10,"text":"first key"})"});
+  Run({"JSON.SET", "j2", ".", R"({"word":"item2","foo":20,"text":"second key"})"});
 
   resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "foo", "text", "GROUPBY", "2", "@word",
               "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"});
@@ -1319,15 +1400,26 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
-  // Test simple
-  Run({"JSON.SET", "j1", ".", R"({"value":"one"})"});
-  Run({"JSON.SET", "j2", ".", R"({"value":1})"});
-
   EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC",
                  "SORTABLE"}),
             "OK");
 
-  auto resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
+            "OK");
+
+  auto resp =
+      Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC",
+              "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test simple
+  Run({"JSON.SET", "j1", ".", R"({"value":"one"})"});
+  Run({"JSON.SET", "j2", ".", R"({"value":1})"});
+
+  resp = Run({"FT.SEARCH", "i1", "*"});
   EXPECT_THAT(resp, AreDocIds("j2"));
 
   resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "$.value"});
@@ -1336,9 +1428,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   // Test with two fields. One is loading
   Run({"JSON.SET", "j3", ".", R"({"value":"two","another_value":1})"});
   Run({"JSON.SET", "j4", ".", R"({"value":2,"another_value":2})"});
-
-  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
-            "OK");
 
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
@@ -1359,26 +1448,20 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   Run({"JSON.SET", "j6", ".", R"({"arr":[{"id":1},{"id":2}]})"});
   Run({"JSON.SET", "j7", ".", R"({"arr":[]})"});
 
-  resp = Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC"});
-  EXPECT_EQ(resp, "OK");
-
   resp = Run({"FT.SEARCH", "i3", "*"});
   EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
-
-  resp = Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC",
-              "SORTABLE"});
-  EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "i4", "*"});
   EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
+  EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "value", "NUMERIC", "SORTABLE"}), "OK");
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "value", "NUMERIC"}), "OK");
+
   // Test simple
   Run({"HSET", "h1", "value", "one"});
   Run({"HSET", "h2", "value", "1"});
-
-  EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "value", "NUMERIC", "SORTABLE"}), "OK");
 
   auto resp = Run({"FT.SEARCH", "i1", "*"});
   EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("value", "1")));
@@ -1389,8 +1472,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
   // Test with two fields. One is loading
   Run({"HSET", "h3", "value", "two", "another_value", "1"});
   Run({"HSET", "h4", "value", "2", "another_value", "2"});
-
-  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "value", "NUMERIC"}), "OK");
 
   resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@another_value"});
   EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("value", "1"), "h4",
@@ -1404,19 +1485,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
-  Run({"JSON.SET", "j1", ".", R"({"data":1,"name":"doc_with_int"})"});
-  Run({"JSON.SET", "j2", ".", R"({"data":"1","name":"doc_with_int_as_string"})"});
-  Run({"JSON.SET", "j3", ".", R"({"data":"string","name":"doc_with_string"})"});
-  Run({"JSON.SET", "j4", ".",
-       R"({"data":["first", "second", "third"],"name":"doc_with_strings"})"});
-  Run({"JSON.SET", "j5", ".", R"({"name":"no_data"})"});
-  Run({"JSON.SET", "j6", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
-  Run({"JSON.SET", "j7", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
-  Run({"JSON.SET", "j8", ".", R"({"data":null,"name":"doc_with_null"})"});
-  Run({"JSON.SET", "j9", ".", R"({"data":[null, null, null],"name":"doc_with_nulls"})"});
-  Run({"JSON.SET", "j10", ".", R"({"data":true,"name":"doc_with_boolean"})"});
-  Run({"JSON.SET", "j11", ".", R"({"data":[true, false, true],"name":"doc_with_booleans"})"});
-
   auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
 
@@ -1442,6 +1510,19 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
               "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
   EXPECT_EQ(resp, "OK");
 
+  Run({"JSON.SET", "j1", ".", R"({"data":1,"name":"doc_with_int"})"});
+  Run({"JSON.SET", "j2", ".", R"({"data":"1","name":"doc_with_int_as_string"})"});
+  Run({"JSON.SET", "j3", ".", R"({"data":"string","name":"doc_with_string"})"});
+  Run({"JSON.SET", "j4", ".",
+       R"({"data":["first", "second", "third"],"name":"doc_with_strings"})"});
+  Run({"JSON.SET", "j5", ".", R"({"name":"no_data"})"});
+  Run({"JSON.SET", "j6", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
+  Run({"JSON.SET", "j7", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+  Run({"JSON.SET", "j8", ".", R"({"data":null,"name":"doc_with_null"})"});
+  Run({"JSON.SET", "j9", ".", R"({"data":[null, null, null],"name":"doc_with_nulls"})"});
+  Run({"JSON.SET", "j10", ".", R"({"data":true,"name":"doc_with_boolean"})"});
+  Run({"JSON.SET", "j11", ".", R"({"data":[true, false, true],"name":"doc_with_booleans"})"});
+
   resp = Run({"FT.SEARCH", "i1", "*"});
   EXPECT_THAT(resp, AreDocIds("j1", "j5", "j6", "j8", "j9"));
 
@@ -1465,17 +1546,6 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
-  Run({"HSET", "j1", "data", "1", "name", "doc_with_int"});
-  Run({"HSET", "j2", "data", "1", "name", "doc_with_int_as_string"});
-  Run({"HSET", "j3", "data", "string", "name", "doc_with_string"});
-  Run({"HSET", "j4", "name", "no_data"});
-  Run({"HSET", "j5", "data", "5,4,3", "name", "doc_with_fake_vector"});
-  Run({"HSET", "j6", "data", "[5,4,3]", "name", "doc_with_fake_vector_as_string"});
-
-  // Vector [1, 2, 3]
-  std::string vector = std::string("\x3f\x80\x00\x00\x40\x00\x00\x00\x40\x40\x00\x00", 12);
-  Run({"HSET", "j7", "data", vector, "name", "doc_with_vector [1, 2, 3]"});
-
   auto resp = Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "data", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
 
@@ -1497,6 +1567,17 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
   resp = Run({"FT.CREATE", "i7", "ON", "HASH", "SCHEMA", "data", "VECTOR", "FLAT", "6", "TYPE",
               "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"HSET", "j1", "data", "1", "name", "doc_with_int"});
+  Run({"HSET", "j2", "data", "1", "name", "doc_with_int_as_string"});
+  Run({"HSET", "j3", "data", "string", "name", "doc_with_string"});
+  Run({"HSET", "j4", "name", "no_data"});
+  Run({"HSET", "j5", "data", "5,4,3", "name", "doc_with_fake_vector"});
+  Run({"HSET", "j6", "data", "[5,4,3]", "name", "doc_with_fake_vector_as_string"});
+
+  // Vector [1, 2, 3]
+  std::string vector = std::string("\x3f\x80\x00\x00\x40\x00\x00\x00\x40\x40\x00\x00", 12);
+  Run({"HSET", "j7", "data", vector, "name", "doc_with_vector [1, 2, 3]"});
 
   resp = Run({"FT.SEARCH", "i1", "*"});
   EXPECT_THAT(resp, AreDocIds("j2", "j1", "j4"));
@@ -1521,6 +1602,11 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
 }
 
 TEST_F(SearchFamilyTest, WrongVectorFieldType) {
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
+           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
   Run({"JSON.SET", "j1", ".",
        R"({"vector_field": [0.1, 0.2, 0.3], "name": "doc_with_correct_dim"})"});
   Run({"JSON.SET", "j2", ".", R"({"vector_field": [0.1, 0.2], "name": "doc_with_small_dim"})"});
@@ -1539,24 +1625,23 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
        R"({"vector_field":[true, false, true], "name": "doc_with_booleans"})"});
   Run({"JSON.SET", "j12", ".", R"({"vector_field":1, "name": "doc_with_int"})"});
 
-  auto resp =
-      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
-           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
-  EXPECT_EQ(resp, "OK");
-
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4", "j8"));
 }
 
 // Test that FT.AGGREGATE prints only needed fields
 TEST_F(SearchFamilyTest, AggregateResultFields) {
-  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
-  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
-  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
-
   auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT", "SORTABLE",
                    "$.b", "AS", "b", "TEXT", "$.c", "AS", "c", "TEXT"});
   EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.id", "AS", "id", "NUMERIC", "$.number",
+              "AS", "number", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
+  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
+  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
 
   resp = Run({"FT.AGGREGATE", "i1", "*"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
@@ -1591,16 +1676,14 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
   Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
   Run({"JSON.SET", "j5", ".", R"({"id":2})"});
 
-  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.id", "AS", "id", "NUMERIC", "$.number",
-              "AS", "number", "NUMERIC"});
-  EXPECT_EQ(resp, "OK");
-
   resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "@id", "@number"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("id", "1", "number", "4"), IsMap("id", "2"), IsMap(),
                                          IsMap(), IsMap()));
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByJson) {
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
   Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
   Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
   Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
@@ -1610,9 +1693,6 @@ TEST_F(SearchFamilyTest, AggregateSortByJson) {
   Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
   Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
   Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
-
-  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
-       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
 
   // Test sorting by name (DESC) and number (ASC)
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "DESC", "@number", "ASC"});
@@ -1703,6 +1783,8 @@ TEST_F(SearchFamilyTest, AggregateSortByJson) {
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
   Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
   Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
   Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
@@ -1712,9 +1794,6 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
   Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
   Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
-
-  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
-       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
 
   // Test SORTBY with invalid argument count
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "999", "@name", "@number", "DESC"});
@@ -1743,10 +1822,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
-  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
-
   Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
        "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
 
   // Test SORTBY with field name without '@'
   auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "name"});
@@ -1766,9 +1845,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
 }
 
 TEST_F(SearchFamilyTest, InvalidSearchOptions) {
-  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
        "AS", "field2", "TEXT"});
+
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
 
   /* Test with an empty query and LOAD. TODO: Add separate test for query syntax
   auto resp = Run({"FT.SEARCH", "idx", "", "LOAD", "1", "@field1"});
@@ -1808,14 +1888,14 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
 }
 
 TEST_F(SearchFamilyTest, KnnSearchOptions) {
-  Run({"JSON.SET", "doc:1", ".", R"({"vector": [0.1, 0.2, 0.3, 0.4]})"});
-  Run({"JSON.SET", "doc:2", ".", R"({"vector": [0.5, 0.6, 0.7, 0.8]})"});
-  Run({"JSON.SET", "doc:3", ".", R"({"vector": [0.9, 0.1, 0.4, 0.3]})"});
-
   auto resp = Run({"FT.CREATE", "my_index", "ON",  "JSON",   "PREFIX",          "1",     "doc:",
                    "SCHEMA",    "$.vector", "AS",  "vector", "VECTOR",          "FLAT",  "6",
                    "TYPE",      "FLOAT32",  "DIM", "4",      "DISTANCE_METRIC", "COSINE"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "doc:1", ".", R"({"vector": [0.1, 0.2, 0.3, 0.4]})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"vector": [0.5, 0.6, 0.7, 0.8]})"});
+  Run({"JSON.SET", "doc:3", ".", R"({"vector": [0.9, 0.1, 0.4, 0.3]})"});
 
   std::string query_vector("\x00\x00\x00\x3f\x00\x00\x00\x40\x00\x00\x00\x41\x00\x00\x80\x42", 16);
 
@@ -1856,17 +1936,17 @@ TEST_F(SearchFamilyTest, KnnSearchOptions) {
 }
 
 TEST_F(SearchFamilyTest, KnnWithSortBy) {
+  Run({"FT.CREATE", "i1",      "ON",     "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",     "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT32", "DIM",    "1",    "DISTANCE_METRIC", "L2",   "$.d",
+       "AS",        "d",       "NUMERIC"});
+
   vector<string> doc_ids(100);
   for (size_t i = 0; i < doc_ids.size(); i++) {
     doc_ids[i] = absl::StrCat("d:", i);
     auto v = absl::StrFormat(R"({"v": [%d.0], "d": %d})", i, i);
     Run({"JSON.SET", doc_ids[i], ".", v});
   }
-
-  Run({"FT.CREATE", "i1",      "ON",     "JSON", "PREFIX",          "1",    "d:",
-       "SCHEMA",    "$.v",     "AS",     "v",    "VECTOR",          "FLAT", "6",
-       "TYPE",      "FLOAT32", "DIM",    "1",    "DISTANCE_METRIC", "L2",   "$.d",
-       "AS",        "d",       "NUMERIC"});
 
   // We first select knn_limit closest values and then sort in REVERSE by distance
   // on a non-sortable field. The result should be first cut off by knn_limit and then sorted
@@ -1884,9 +1964,10 @@ TEST_F(SearchFamilyTest, KnnWithSortBy) {
 }
 
 TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
-  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
        "AS", "field2", "TEXT"});
+
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
 
   // Test GROUPBY with no arguments
   auto resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY"});
@@ -2207,6 +2288,22 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
                  "sortable"}),
             "OK");
 
+  EXPECT_EQ(Run({"ft.create", "i2", "on", "json", "schema", "$.title", "as", "title", "text",
+                 "$.meta.tags", "as", "tags", "tag", "$.meta.score", "as", "score", "numeric"}),
+            "OK");
+
+  EXPECT_EQ(Run({"ft.create", "text_idx", "ON", "HASH", "PREFIX", "1", "text:", "SCHEMA", "content",
+                 "TEXT"}),
+            "OK");
+
+  EXPECT_EQ(Run({"ft.create", "tag_idx", "ON", "HASH", "PREFIX", "1", "tag:", "SCHEMA",
+                 "categories", "TAG", "SEPARATOR", ","}),
+            "OK");
+
+  EXPECT_EQ(Run({"ft.create", "num_idx", "ON", "HASH", "PREFIX", "1", "num:", "SCHEMA", "price",
+                 "NUMERIC", "SORTABLE"}),
+            "OK");
+
   Run({"hset", "d:1", "title", "Document with title and tags", "tags", "tag1,tag2"});
   Run({"hset", "d:2", "title", "Document with title and score", "score", "75"});
   Run({"hset", "d:3", "title", "Document with all fields", "tags", "tag2,tag3", "score", "100"});
@@ -2237,10 +2334,6 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   Run({"json.set", "j:3", ".",
        R"({"title": "Full JSON", "meta": {"tags": ["tag3"], "score": 80}})"});
 
-  EXPECT_EQ(Run({"ft.create", "i2", "on", "json", "schema", "$.title", "as", "title", "text",
-                 "$.meta.tags", "as", "tags", "tag", "$.meta.score", "as", "score", "numeric"}),
-            "OK");
-
   EXPECT_THAT(Run({"ft.search", "i2", "@title:*"}), AreDocIds("j:1", "j:3"));
   EXPECT_THAT(Run({"ft.search", "i2", "@tags:*"}), AreDocIds("j:1", "j:3"));
   EXPECT_THAT(Run({"ft.search", "i2", "@score:*"}), AreDocIds("j:2", "j:3"));
@@ -2251,10 +2344,6 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   Run({"hset", "text:2", "content", "cherry date"});
   Run({"hset", "text:3", "content", "elephant fig"});
 
-  EXPECT_EQ(Run({"ft.create", "text_idx", "ON", "HASH", "PREFIX", "1", "text:", "SCHEMA", "content",
-                 "TEXT"}),
-            "OK");
-
   EXPECT_THAT(Run({"ft.search", "text_idx", "*"}), AreDocIds("text:1", "text:2", "text:3"));
 
   // Testing tag indices with star query
@@ -2262,20 +2351,12 @@ TEST_F(SearchFamilyTest, SearchNonNullFields) {
   Run({"hset", "tag:2", "categories", "drink,beverage"});
   Run({"hset", "tag:3", "categories", "tech,gadget"});
 
-  EXPECT_EQ(Run({"ft.create", "tag_idx", "ON", "HASH", "PREFIX", "1", "tag:", "SCHEMA",
-                 "categories", "TAG", "SEPARATOR", ","}),
-            "OK");
-
   EXPECT_THAT(Run({"ft.search", "tag_idx", "*"}), AreDocIds("tag:1", "tag:2", "tag:3"));
 
   // Testing numeric indices with star query
   Run({"hset", "num:1", "price", "10.5"});
   Run({"hset", "num:2", "price", "20.75"});
   Run({"hset", "num:3", "price", "30.99"});
-
-  EXPECT_EQ(Run({"ft.create", "num_idx", "ON", "HASH", "PREFIX", "1", "num:", "SCHEMA", "price",
-                 "NUMERIC", "SORTABLE"}),
-            "OK");
 
   EXPECT_THAT(Run({"ft.search", "num_idx", "*"}), AreDocIds("num:1", "num:2", "num:3"));
 
@@ -2501,17 +2582,6 @@ TEST_F(SearchFamilyTest, SortIndexGetAllResults) {
 }
 
 TEST_F(SearchFamilyTest, JsonWithNullFields) {
-  // Create JSON documents with null values in different field types
-  Run({"JSON.SET", "doc:1", ".",
-       R"({"text_field": "sample text", "tag_field": "tag1,tag2", "num_field": 100})"});
-  Run({"JSON.SET", "doc:2", ".", R"({"text_field": null, "tag_field": "tag3", "num_field": 200})"});
-  Run({"JSON.SET", "doc:3", ".",
-       R"({"text_field": "another text", "tag_field": null, "num_field": 300})"});
-  Run({"JSON.SET", "doc:4", ".",
-       R"({"text_field": "more text", "tag_field": "tag4,tag5", "num_field": null})"});
-  Run({"JSON.SET", "doc:5", ".", R"({"text_field": null, "tag_field": null, "num_field": null})"});
-  Run({"JSON.SET", "doc:6", ".", R"({"other_field": "not indexed field"})"});
-
   // Create indices for text, tag, and numeric fields (non-sortable)
   EXPECT_EQ(Run({"FT.CREATE", "idx:regular", "ON", "JSON", "SCHEMA", "$.text_field", "AS",
                  "text_field", "TEXT", "$.tag_field", "AS", "tag_field", "TAG", "$.num_field", "AS",
@@ -2524,6 +2594,17 @@ TEST_F(SearchFamilyTest, JsonWithNullFields) {
                  "$.tag_field",  "AS",           "tag_field",  "TAG",     "SORTABLE",
                  "$.num_field",  "AS",           "num_field",  "NUMERIC", "SORTABLE"}),
             "OK");
+
+  // Create JSON documents with null values in different field types
+  Run({"JSON.SET", "doc:1", ".",
+       R"({"text_field": "sample text", "tag_field": "tag1,tag2", "num_field": 100})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"text_field": null, "tag_field": "tag3", "num_field": 200})"});
+  Run({"JSON.SET", "doc:3", ".",
+       R"({"text_field": "another text", "tag_field": null, "num_field": 300})"});
+  Run({"JSON.SET", "doc:4", ".",
+       R"({"text_field": "more text", "tag_field": "tag4,tag5", "num_field": null})"});
+  Run({"JSON.SET", "doc:5", ".", R"({"text_field": null, "tag_field": null, "num_field": null})"});
+  Run({"JSON.SET", "doc:6", ".", R"({"other_field": "not indexed field"})"});
 
   // Test @field:* searches on non-sortable index
   EXPECT_THAT(Run({"FT.SEARCH", "idx:regular", "@text_field:*"}),
@@ -2588,11 +2669,11 @@ TEST_F(SearchFamilyTest, RenameDocumentBetweenIndices) {
 }
 
 TEST_F(SearchFamilyTest, JsonSetIndexesBug) {
-  auto resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
+  auto resp = Run(
+      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run(
-      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
+  resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"JSON.SET", "j1", "$", R"({"asd}"})"});
@@ -2646,8 +2727,6 @@ TEST_F(SearchFamilyTest, SearchReindexWriteSearchRace) {
 TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
   GTEST_SKIP() << "The usage of ignored options is now wrong - it skips supported ones!";
 
-  Run({"HSET", "doc:1", "title", "Test Document"});
-
   // Create an index with various options, some of which should be ignored
   // INDEXMISSING and INDEXEMPTY are supported by default
   auto resp = Run({"FT.CREATE",
@@ -2674,17 +2753,19 @@ TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
   // Check that the response is OK, indicating the index was created successfully
   EXPECT_THAT(resp, "OK");
 
+  Run({"HSET", "doc:1", "title", "Test Document"});
+
   // Verify that the index was created correctly
   resp = Run({"FT.SEARCH", "idx", "*"});
   EXPECT_THAT(resp, AreDocIds("doc:1"));
 }
 
 TEST_F(SearchFamilyTest, JsonDelIndexesBug) {
-  auto resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
+  auto resp = Run(
+      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run(
-      {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
+  resp = Run({"JSON.SET", "j1", "$", R"({"text":"some text"})"});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"JSON.DEL", "j1", "$.text"});
@@ -2790,7 +2871,7 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
                                                  "type", "NUMERIC", "blocksize", "2"),
                                          IsArray("identifier", "number2", "attribute", "number2",
                                                  "type", "NUMERIC", "blocksize", "1024")),
-                            "num_docs", IntArg(0)));
+                            "num_docs", IntArg(0), _, _, _, _));
 
   // Add a document to the index
   for (int i = 1; i <= 5; ++i) {
@@ -3039,6 +3120,10 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
   Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "str1", "TAG"});
   Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num2", "NUMERIC", "str2", "TEXT"});
 
+  // Another case
+  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TAG"});
+  Run({"ft.create", "idx4", "ON", "HASH", "SCHEMA", "num4", "NUMERIC", "str4", "TAG"});
+
   std::vector<::testing::Matcher<RespExpr>> matchers;
   for (int i = 0; i < 100; ++i) {
     // For even i str1 and str2 should match, for odd i they should not
@@ -3059,10 +3144,6 @@ TEST_F(SearchFamilyTest, AggregateWithLoadFromQueries) {
                    "QUERY", "@num2:[35 57]"});
 
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAreArray(matchers));
-
-  // Another case
-  Run({"ft.create", "idx3", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "str3", "TAG"});
-  Run({"ft.create", "idx4", "ON", "HASH", "SCHEMA", "num4", "NUMERIC", "str4", "TAG"});
 
   size_t num3 = 1;
   size_t num4 = 5;
@@ -3405,6 +3486,7 @@ TEST_F(SearchFamilyTest, DropIndexWithDD) {
 
   // Create index again
   Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "name", "TEXT"});
+  ThisFiber::Yield();
 
   // Verify index works again
   resp = Run({"FT.SEARCH", "idx", "*"});
@@ -3521,11 +3603,11 @@ TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
 }
 
 TEST_F(SearchFamilyTest, QueryStringBytesLimit) {
-  Run({"hset", "doc1", "name", "alice", "age", "30"});
-  Run({"hset", "doc2", "name", "bob", "age", "25"});
-
   EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "age", "NUMERIC"}),
             "OK");
+
+  Run({"hset", "doc1", "name", "alice", "age", "30"});
+  Run({"hset", "doc2", "name", "bob", "age", "25"});
 
   absl::FlagSaver fs;
 
@@ -3662,6 +3744,150 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
                    "user2", "$jones", IsMap("last_name", "jones", "first_name", "bob", "age", "36"),
                    "user1", "$jones",
                    IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
+}
+
+// GEO index tests for FT.SEARCH with HASH and JSON documents
+
+TEST_F(SearchFamilyTest, GeoSearchHash) {
+  auto resp =
+      Run({"FT.CREATE", "geo_idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add documents with geo coordinates as "lon,lat" or "lon lat" format
+  Run({"HSET", "city:1", "name", "Mountain View", "location", "-122.08, 37.386"});
+  Run({"HSET", "city:2", "name", "Palo Alto", "location", "-122.143, 37.444"});
+  Run({"HSET", "city:3", "name", "San Jose", "location", "-121.886, 37.338"});
+  Run({"HSET", "city:4", "name", "San Francisco", "location", "-122.419, 37.774"});
+
+  // Search within 30 miles of Mountain View - should find nearby cities
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 30 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+
+  // Search within 50 miles - should include San Francisco
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+
+  // Search with very small radius - only exact match
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 1 km]"});
+  EXPECT_THAT(resp, AreDocIds("city:1"));
+
+  // Search with wildcard - return all geo indexed docs
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+
+  // Combine geo search with text search
+  resp = Run({"FT.SEARCH", "geo_idx", "San* @location:[-122.08 37.386 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:3", "city:4"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchJson) {
+  auto resp = Run({"FT.CREATE", "geo_idx", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+                   "$.location", "AS", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Add JSON documents with geo coordinates
+  Run({"JSON.SET", "city:1", ".", R"({"name":"Mountain View","location":"-122.08, 37.386"})"});
+  Run({"JSON.SET", "city:2", ".", R"({"name":"Palo Alto","location":"-122.143, 37.444"})"});
+  Run({"JSON.SET", "city:3", ".", R"({"name":"San Jose","location":"-121.886, 37.338"})"});
+  Run({"JSON.SET", "city:4", ".", R"({"name":"San Francisco","location":"-122.419, 37.774"})"});
+
+  // Search within 30 miles of Mountain View
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 30 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+
+  // Search within 50 miles - should include San Francisco
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+
+  // Search with kilometers
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 50 km]"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3"));
+
+  // Search with wildcard
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("city:1", "city:2", "city:3", "city:4"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchInvalidValues) {
+  auto resp =
+      Run({"FT.CREATE", "geo_idx", "ON", "HASH", "SCHEMA", "name", "TEXT", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test documents with invalid geo values are excluded from index
+  Run({"HSET", "d:1", "name", "valid", "location", "-122.08, 37.386"});
+  Run({"HSET", "d:2", "name", "invalid_text", "location", "not a coordinate"});
+  Run({"HSET", "d:3", "name", "missing_lon", "location", ", 37.386"});
+  Run({"HSET", "d:4", "name", "missing_lat", "location", "-122.08,"});
+  Run({"HSET", "d:7", "name", "empty", "location", ""});
+  Run({"HSET", "d:8", "name", "no_location"});
+  Run({"HSET", "d:9", "name", "space_format", "location", "-122.08,  37.386"});
+
+  // Only valid coordinates should be indexed (d:1 and d:9)
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("d:1", "d:9"));
+
+  // Search should only find valid documents
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[-122.08 37.386 100 mi]"});
+  EXPECT_THAT(resp, AreDocIds("d:1", "d:9"));
+
+  // All documents should still be searchable by other fields
+  // TODO: failed to add - silent skip?
+  // resp = Run({"FT.SEARCH", "geo_idx", "*"});
+  // EXPECT_THAT(resp, AreDocIds("d:1", "d:2", "d:3", "d:4", "d:5", "d:6", "d:7", "d:8", "d:9"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchInvalidValuesJson) {
+  auto resp = Run({"FT.CREATE", "geo_idx", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+                   "$.location", "AS", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test JSON documents with various invalid geo values
+  Run({"JSON.SET", "j:1", ".", R"({"name":"valid","location":"-122.08, 37.386"})"});
+  Run({"JSON.SET", "j:2", ".", R"({"name":"invalid_text","location":"not a coordinate"})"});
+  Run({"JSON.SET", "j:3", ".", R"({"name":"number","location":12345})"});
+  Run({"JSON.SET", "j:4", ".", R"({"name":"null_value","location":null})"});
+  Run({"JSON.SET", "j:5", ".", R"({"name":"array","location":["-122.08", "37.386"]})"});
+  Run({"JSON.SET", "j:6", ".", R"({"name":"no_location"})"});
+  Run({"JSON.SET", "j:7", ".", R"({"name":"empty_string","location":""})"});
+  Run({"JSON.SET", "j:8", ".", R"({"name":"valid 2","location":"-122.08, 37.386"})"});
+
+  // Only valid coordinates should be indexed
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:8"));
+
+  // All documents should still be searchable via full-text
+  // TODO: failed to add - silent skip?
+  // resp = Run({"FT.SEARCH", "geo_idx", "*"});
+  // EXPECT_THAT(resp, AreDocIds("j:1", "j:2", "j:3", "j:4", "j:5", "j:6", "j:7", "j:8"));
+}
+
+TEST_F(SearchFamilyTest, GeoSearchUnits) {
+  auto resp = Run({"FT.CREATE", "geo_idx", "ON", "HASH", "SCHEMA", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Test different distance units: m, km, mi, ft
+  // TODO: support lowercase
+  // TODO: support query with without dot for coord (i.e.) 0.0 0.0
+  Run({"HSET", "p:1", "location", "0, 0"});      // Origin
+  Run({"HSET", "p:2", "location", "0.001, 0"});  // ~111 meters east
+  Run({"HSET", "p:3", "location", "0.01, 0"});   // ~1.11 km east
+  Run({"HSET", "p:4", "location", "0.1, 0"});    // ~11.1 km east
+
+  // Test meters
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 200 M]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
+
+  // Test kilometers
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 2 KM]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2", "p:3"));
+
+  // Test miles
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 10 MI]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2", "p:3", "p:4"));
+
+  // Test feet
+  resp = Run({"FT.SEARCH", "geo_idx", "@location:[0.0 0.0 500 FT]"});
+  EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
 }  // namespace dfly

@@ -4,6 +4,7 @@
 #include "core/json/detail/interned_blob.h"
 
 #include <glog/logging.h>
+#include <mimalloc.h>
 
 #include "core/detail/stateless_allocator.h"
 
@@ -67,7 +68,7 @@ void InternedBlobHandle::DecrRefCount() {  // NOLINT - non-const, mutates via pt
 }
 
 size_t InternedBlobHandle::MemUsed() const {
-  return blob_ ? Size() + kHeaderSize + 1 : 0;
+  return blob_ ? mi_usable_size(blob_ - kHeaderSize) : 0;
 }
 
 void InternedBlobHandle::Destroy(InternedBlobHandle& handle) {
@@ -76,10 +77,6 @@ void InternedBlobHandle::Destroy(InternedBlobHandle& handle) {
     StatelessAllocator<char>{}.deallocate(handle.blob_ - kHeaderSize, to_destroy);
     handle.blob_ = nullptr;
   }
-}
-
-InternedBlobHandle::operator std::string_view() const {
-  return blob_ ? std::string_view{blob_, Size()} : "";
 }
 
 }  // namespace dfly::detail

@@ -9,11 +9,13 @@
 #include <openssl/ssl.h>
 #endif
 
+#include <absl/functional/bind_front.h>
+
 #include <string>
 
-#include "absl/functional/bind_front.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 
 ABSL_FLAG(std::string, tls_cert_file, "", "cert file for tls connections");

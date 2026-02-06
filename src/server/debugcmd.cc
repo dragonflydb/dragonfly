@@ -3,6 +3,8 @@
 //
 #include "server/debugcmd.h"
 
+#include "core/detail/gen_utils.h"
+
 #define HUF_STATIC_LINKING_ONLY
 
 extern "C" {

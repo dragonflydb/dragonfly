@@ -23,6 +23,7 @@
 
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
+ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 
 namespace dfly {
 
@@ -112,6 +113,8 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
                                                          : fb2::FiberPriority::NORMAL,
                         .name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex())};
   snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal] {
+    // TODO add error processing for index serialization
+    SerializeIndexMappings();
     SerializeGlobalHnswIndices();
     this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
@@ -161,10 +164,63 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // it also guarantees 100% coverage of all items that exists when the traversal started
 // and survived until it finished.
 
+void SliceSnapshot::SerializeIndexMapping(
+    uint32_t shard_id, std::string_view index_name,
+    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  // Format: [RDB_OPCODE_SHARD_DOC_INDEX, shard_id, index_name, mapping_count,
+  //          then for each mapping: key_string, doc_id]
+  if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_SHARD_DOC_INDEX); ec)
+    return;
+  if (auto ec = serializer_->SaveLen(shard_id); ec)
+    return;
+  if (auto ec = serializer_->SaveString(index_name); ec)
+    return;
+  if (auto ec = serializer_->SaveLen(mappings.size()); ec)
+    return;
+
+  for (const auto& [key, doc_id] : mappings) {
+    if (auto ec = serializer_->SaveString(key); ec)
+      return;
+    if (auto ec = serializer_->SaveLen(doc_id); ec)
+      return;
+  }
+  PushSerialized(false);
+}
+
+void SliceSnapshot::SerializeIndexMappings() {
+#ifdef WITH_SEARCH
+  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+    return;
+  }
+
+  // Get all HNSW index names from the global registry
+  absl::flat_hash_set<std::string> hnsw_index_names =
+      GlobalHnswIndexRegistry::Instance().GetIndexNames();
+
+  auto* indices = db_slice_->shard_owner()->search_indices();
+  uint32_t shard_id = db_slice_->shard_owner()->shard_id();
+
+  for (const auto& index_name : hnsw_index_names) {
+    auto* index = indices->GetIndex(index_name);
+    if (!index) {
+      continue;
+    }
+
+    auto mappings = index->SerializeKeyIndex();
+    if (mappings.empty()) {
+      continue;
+    }
+
+    SerializeIndexMapping(shard_id, index_name, mappings);
+  }
+#endif
+}
+
 void SliceSnapshot::SerializeGlobalHnswIndices() {
 #ifdef WITH_SEARCH
   // Serialize HNSW global indices for shard 0 only
-  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB) {
+  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB ||
+      !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
     return;
   }
 
@@ -194,8 +250,10 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
         if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
           break;
       }
-      ThrottleIfNeeded();
     }
+    // Flush after completing entire index to avoid splitting HNSW data across compressed blobs.
+    // The HNSW loader expects all nodes for an index to be readable in one pass.
+    PushSerialized(false);
   }
 #endif
 }

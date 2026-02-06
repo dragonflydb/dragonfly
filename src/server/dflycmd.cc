@@ -17,6 +17,7 @@
 #include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"

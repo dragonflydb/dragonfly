@@ -51,3 +51,7 @@ constexpr uint32_t DF_MASK_FLAG_MC_FLAGS = (1 << 1);
 // zero_level_links,
 //          higher_level_links_num (only if level > 0), higher_level_links (only if level > 0)]
 constexpr uint8_t RDB_OPCODE_VECTOR_INDEX = 222;
+
+// Opcode to store ShardDocIndex key-to-DocId mapping for search indices
+// Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
+constexpr uint8_t RDB_OPCODE_SHARD_DOC_INDEX = 223;

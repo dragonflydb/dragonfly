@@ -14,6 +14,7 @@ extern "C" {
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
 #include "base/spinlock.h"
+#include "core/search/base.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
@@ -343,6 +344,15 @@ class RdbLoader : protected RdbLoaderBase {
   static std::vector<std::string> pending_synonym_cmds_;
   static base::SpinLock search_index_mu_;  // guards created_search_indices_
   static absl::flat_hash_set<std::string> created_search_indices_;
+
+  // Pending index key-to-DocId mappings to apply after indices are created
+  struct PendingIndexMapping {
+    uint32_t shard_id;
+    std::string index_name;
+    std::vector<std::pair<std::string, search::DocId>> mappings;
+  };
+  std::vector<PendingIndexMapping> pending_index_mappings_;
+
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;

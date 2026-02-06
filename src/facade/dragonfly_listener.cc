@@ -275,7 +275,6 @@ bool Listener::ReconfigureTLS() {
     ctx_ = ctx;
   } else {
     ctx_ = nullptr;
-    cert_info_ = TLSCertificateInfo{};
   }
 
   if (prev_ctx) {
