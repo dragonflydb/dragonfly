@@ -111,7 +111,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
+  void SerializeEntry(DbIndex db_index, PrimeTable::bucket_iterator it, const PrimeKey& pk,
+                      const PrimeValue& pv);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);

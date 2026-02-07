@@ -4,6 +4,7 @@
 
 #include "server/snapshot.h"
 
+#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
@@ -258,29 +259,62 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   serialize_bucket_running_ = true;
 
   unsigned result = 0;
+  auto it2 = it;
+  for (it2.AdvanceIfNotOccupied(); !it2.is_done(); ++it2) {
+    if (!it->second.HasExpire())
+      continue;
+    auto eit = db_array_[db_index]->expire.Find(it2->first);
+    if (!IsValid(eit)) {
+      string key = it2->first.ToString();
+      LOG(DFATAL) << "Internal error, entry " << absl::CEscape(key) << " "
+                  << it2.bucket_cursor().token() << " " << it2.is_done()
+                  << " not found in expire table, db_index: " << db_index
+                  << ", type: " << it2->second.ObjType()
+                  << ", expire table size: " << db_array_[db_index]->expire.size()
+                  << ", prime table size: " << db_array_[db_index]->prime.size();
+    }
+  }
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
     // might preempt due to big value serialization.
-    SerializeEntry(db_index, it->first, it->second);
+    SerializeEntry(db_index, it, it->first, it->second);
   }
   serialize_bucket_running_ = false;
   return result;
 }
 
-void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
+void SliceSnapshot::SerializeEntry(DbIndex db_indx, PrimeTable::bucket_iterator it,
+                                   const PrimeKey& pk, const PrimeValue& pv) {
   if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
+    return SerializeEntry(db_indx, it, pk, pv.GetCool().record->value);
 
   time_t expire_time = 0;
   if (pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
     if (!IsValid(eit)) {
-      LOG(DFATAL) << "Internal error, entry " << pk.ToString()
+      string key = pk.ToString();
+      LOG(DFATAL) << "Internal error, entry " << absl::CEscape(key) << " "
+                  << it.bucket_cursor().token() << " " << it.is_done()
                   << " not found in expire table, db_index: " << db_indx
+                  << ", type: " << pv.ObjType()
                   << ", expire table size: " << db_array_[db_indx]->expire.size()
-                  << ", prime table size: " << db_array_[db_indx]->prime.size()
-                  << util::fb2::GetStacktrace();
+                  << ", prime table size: " << db_array_[db_indx]->prime.size();
+      auto it2 = db_array_[db_indx]->prime.Find(key);
+      if (IsValid(it2)) {
+        LOG(ERROR) << "Entry found in prime table, obj type: " << it->second.ObjType()
+                   << ", cursor: " << it2.bucket_cursor().token()
+                   << ", has_expire: " << it2->second.HasExpire();
+        if (it2->second.HasExpire()) {
+          auto eit2 = db_array_[db_indx]->expire.Find(it2->first);
+          if (IsValid(eit2)) {
+            LOG(ERROR) << "Expire entry found in expire table, expire: "
+                       << eit2->second.duration_ms();
+          } else {
+            LOG(ERROR) << "Expire entry not found in expire table";
+          }
+        }
+      }
     } else {
       expire_time = db_slice_->ExpireTime(eit->second);
     }
