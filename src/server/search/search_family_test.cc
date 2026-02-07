@@ -4256,4 +4256,108 @@ TEST_F(SearchFamilyTest, GeoSearchUnits) {
   EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
+TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
+  // Test 1: Correct geo field definition and usage with HASH
+  auto resp =
+      Run({"FT.CREATE", "idx_hash", "ON", "HASH", "SCHEMA", "name", "TEXT", "coords", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // Documents with correct geo fields
+  Run({"HSET", "h:1", "name", "Location_A", "coords", "-122.4194, 37.7749"});
+  Run({"HSET", "h:2", "name", "Location_B", "coords", "-118.2437, 34.0522"});
+
+  // Verify correct geo fields are indexed properly
+  resp = Run({"FT.SEARCH", "idx_hash", "@coords:*"});
+  EXPECT_THAT(resp, AreDocIds("h:1", "h:2"));
+
+  // Test geo search with correct fields
+  resp = Run({"FT.SEARCH", "idx_hash", "@coords:[-122.4194 37.7749 50 mi]"});
+  EXPECT_THAT(resp, AreDocIds("h:1"));
+
+  // Test 2: Missing geo fields
+  Run({"HSET", "h:3", "name", "No_Coords"});  // Missing coords field entirely
+
+  // Documents with missing geo fields should not appear in geo queries
+  resp = Run({"FT.SEARCH", "idx_hash", "@coords:*"});
+  EXPECT_THAT(resp, AreDocIds("h:1", "h:2"));
+
+  // But should still be searchable by text fields
+  resp = Run({"FT.SEARCH", "idx_hash", "@name:No_Coords"});
+  EXPECT_THAT(resp, AreDocIds("h:3"));
+
+  // Test 3: Incorrect geo field formats
+  Run({"HSET", "h:4", "name", "Empty_Coords", "coords", ""});  // Empty coords field
+  Run({"HSET", "h:5", "name", "Invalid_Text", "coords", "not a coordinate"});
+  Run({"HSET", "h:6", "name", "Out_of_Range_Lat", "coords", "-122.0, 91.0"});  // Lat > 90
+  Run({"HSET", "h:7", "name", "Out_of_Range_Lon", "coords", "181.0, 45.0"});   // Lon > 180
+  Run({"HSET", "h:8", "name", "Missing_Lon", "coords", ", 37.7749"});
+  Run({"HSET", "h:9", "name", "Missing_Lat", "coords", "-122.4194,"});
+  Run({"HSET", "h:10", "name", "Single_Value", "coords", "-122.4194"});
+  Run({"HSET", "h:11", "name", "Too_Many_Values", "coords", "-122.4194, 37.7749, 100"});
+  Run({"HSET", "h:12", "name", "Special_Chars", "coords", "abc#@!, xyz!@#"});
+
+  // Verify incorrect formats are not indexed in geo field
+  resp = Run({"FT.SEARCH", "idx_hash", "@coords:*"});
+  EXPECT_THAT(resp, AreDocIds("h:1", "h:2"));
+
+  // Verify incorrect formats are not indexed at all
+  resp = Run({"FT.SEARCH", "idx_hash", "*"});
+  EXPECT_THAT(resp, AreDocIds("h:1", "h:2", "h:3"));
+
+  // Test 4: Correct geo field definition with JSON
+  resp = Run({"FT.CREATE", "idx_json", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+              "$.location", "AS", "location", "GEO"});
+  EXPECT_EQ(resp, "OK");
+
+  // JSON documents with correct geo fields
+  Run({"JSON.SET", "j:1", ".", R"({"name":"City_A","location":"-122.4194, 37.7749"})"});
+  Run({"JSON.SET", "j:2", ".", R"({"name":"City_B","location":"-118.2437, 34.0522"})"});
+
+  // Verify correct geo fields are indexed
+  resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+
+  // Test 5: JSON documents with missing geo fields
+  Run({"JSON.SET", "j:3", ".", R"({"name":"No_Location"})"});  // Missing location field
+  Run({"JSON.SET", "j:4", ".", R"({"name":"Null_Location","location":null})"});  // Null value
+
+  // Missing/null geo fields should not appear in geo queries
+  resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+
+  // But should be searchable by text
+  resp = Run({"FT.SEARCH", "idx_json", "@name:*Location"});
+  EXPECT_THAT(resp, AreDocIds("j:3", "j:4"));
+
+  // Test 6: JSON documents with incorrect geo field types/formats
+  Run({"JSON.SET", "j:5", ".", R"({"name":"Empty_Location","location":""})"});  // Empty string
+  Run({"JSON.SET", "j:6", ".", R"({"name":"Number_Type","location":12345})"});
+  Run({"JSON.SET", "j:7", ".", R"({"name":"Boolean_Type","location":true})"});
+  Run({"JSON.SET", "j:8", ".", R"({"name":"Array_Type","location":["-122.4", "37.7"]})"});
+  Run({"JSON.SET", "j:9", ".", R"({"name":"Object_Type","location":{"lon":-122.4,"lat":37.7}})"});
+  Run({"JSON.SET", "j:10", ".", R"({"name":"Invalid_Format","location":"invalid coords"})"});
+  Run({"JSON.SET", "j:11", ".", R"({"name":"Out_of_Range","location":"200, 100"})"});
+
+  // Verify incorrect types/formats are not indexed as geo
+  resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+
+  // Documents with incorrect geo formats should still be searchable by text
+  resp = Run({"FT.SEARCH", "idx_json", "@name:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:2", "j:3", "j:4"));
+
+  // Test 7: Adding multiple locations for same document should index all locations
+  Run({"JSON.SET", "j:12", ".",
+       R"({"name":"Multi_Locations","location":["-123.00, 12.00", "-124.0, 12.0"]})"});
+  resp = Run({"FT.SEARCH", "idx_json", "@location:[-123.00 12.00 1 m]"});
+  EXPECT_THAT(resp, AreDocIds("j:12"));
+  resp = Run({"FT.SEARCH", "idx_json", "@location:[-124.00 12.00 1 m]"});
+  EXPECT_THAT(resp, AreDocIds("j:12"));
+
+  // Deleting multi location document should remove all locations
+  Run({"JSON.DEL", "j:12"});
+  resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+}
+
 }  // namespace dfly
