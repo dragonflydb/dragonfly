@@ -261,18 +261,19 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   unsigned result = 0;
   auto it2 = it;
   for (it2.AdvanceIfNotOccupied(); !it2.is_done(); ++it2) {
-    if (!it->second.HasExpire())
+    if (!it2->second.HasExpire())
       continue;
     auto eit = db_array_[db_index]->expire.Find(it2->first);
-    if (!IsValid(eit)) {
-      string key = it2->first.ToString();
-      LOG(DFATAL) << "Internal error, entry " << absl::CEscape(key) << " "
-                  << it2.bucket_cursor().token() << " " << it2.is_done()
-                  << " not found in expire table, db_index: " << db_index
-                  << ", type: " << it2->second.ObjType()
-                  << ", expire table size: " << db_array_[db_index]->expire.size()
-                  << ", prime table size: " << db_array_[db_index]->prime.size();
-    }
+    if (IsValid(eit))
+      continue;
+
+    string key = it2->first.ToString();
+    LOG(DFATAL) << "Internal error, entry " << absl::CHexEscape(key) << " " << it2.segment_id()
+                << ", " << it2.bucket_id() << ", " << it2.slot_id()
+                << " not found in exp_table, db_index: " << db_index
+                << ", type: " << it2->second.ObjType()
+                << ", expire table size: " << db_array_[db_index]->expire.size()
+                << ", prime table size: " << db_array_[db_index]->prime.size();
   }
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
