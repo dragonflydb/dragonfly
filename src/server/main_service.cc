@@ -121,10 +121,6 @@ ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
 
-ABSL_RETIRED_FLAG(uint32_t, uring_wake_mode, 1, "DEPRECATED");
-
-ABSL_RETIRED_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "DEPRECATED");
-
 ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
 ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
           "Sleep probability of background fibers on reaching budget");
@@ -961,6 +957,15 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSl
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 
+bool ShouldLogError(const CommandId& cid, string_view reason, CmdArgList tail_args) {
+  if (absl::StartsWith(reason, "-BUSYGROUP"))
+    return false;
+
+  if (cid.name() != "CLIENT")
+    return true;
+  return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.front(), "maint_notifications");
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1650,7 +1655,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
       res = DispatchResult::OOM;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    if (!absl::StartsWith(reason, "-BUSYGROUP")) {
+    if (ShouldLogError(*cid, reason, tail_args)) {
       LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
     }
   }
