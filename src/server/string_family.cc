@@ -1318,7 +1318,6 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 struct IncrDecrCmd : public dfly::cmd::SimpleContext<IncrDecrCmd> {
-  using PrepareResult = dfly::cmd::SimpleContext<IncrDecrCmd>::PrepareResult;
   PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override;
   OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const;
   void Reply(SinkReplyBuilder* rb) override;
