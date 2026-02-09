@@ -1105,9 +1105,6 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 }
 
 ASYNC_CMD(Del) {
-  bool async_unlink_ = false;
-  mutable atomic_uint32_t result_{0};
-
   PrepareResult Prepare(ArgSlice args, CommandContext * cmd_cntx) override {
     if (cmd_cntx->cid()->name() == "UNLINK")
       async_unlink_ = absl::GetFlag(FLAGS_unlink_experimental_async);
@@ -1129,6 +1126,10 @@ ASYNC_CMD(Del) {
       rb->SendLong(del_cnt);
     }
   }
+
+ private:
+  bool async_unlink_ = false;
+  mutable atomic_uint32_t result_{0};
 };
 
 void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {

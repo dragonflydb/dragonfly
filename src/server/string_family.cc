@@ -1322,6 +1322,8 @@ struct IncrDecrCmd : public dfly::cmd::SimpleContext<IncrDecrCmd> {
   PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override;
   OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const;
   void Reply(SinkReplyBuilder* rb) override;
+
+ private:
   int64_t val_ = 0;
   mutable OpResult<int64_t> op_res_ = OpStatus::OK;
   bool skip_on_missing_ = false;
