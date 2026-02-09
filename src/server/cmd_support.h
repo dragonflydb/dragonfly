@@ -100,18 +100,4 @@ struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
 // Example: ASYNC_CMD(Get) { ... };
 #define ASYNC_CMD(Name) struct Cmd##Name : public ::dfly::cmd::SimpleContext<Cmd##Name>
 
-// Use for commands that inherit from a custom base class with NO extra template arguments.
-// (e.g., Base<Derived>)
-// This macro does NOT include the 'struct' keyword. You must prefix it manually to force
-// clang-format to treat the block as a class definition.
-// Example: struct ASYNC_CMD_BASE(MSet,SetBase) { ... };
-#define ASYNC_CMD_BASE(Name, Base) Cmd##Name : public Base<Cmd##Name>
-
-// Use for commands that inherit from a custom base class WITH extra template arguments. (e.g.,
-// Base<Derived, Arg1, Arg2...>).
-// This macro does NOT include the 'struct' keyword. You must prefix it manually.
-// Using this allows passing compile-time configuration to the base class.
-// Example: struct ASYNC_CMD_BASE_T(Incr, IncrDecrBase, 1, false) { ... };
-#define ASYNC_CMD_BASE_T(Name, Base, ...) Cmd##Name : public Base<Cmd##Name, __VA_ARGS__>
-
 }  // namespace dfly::cmd

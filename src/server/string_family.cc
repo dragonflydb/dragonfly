@@ -1317,93 +1317,84 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-// Case 1 (INCR/DECR): Compile-time optimization - If FixedVal != 0, the compiler uses it directly
-// and discards the parsing logic.
-// Case 2 (INCRBY/DECRBY): Runtime parsing. - If FixedVal == 0, we parse the user argument. If
-// Negate is true, we flip the sign.
-template <typename Derived, int64_t FixedVal, bool Negate>
-struct IncrDecrBase : public dfly::cmd::SimpleContext<Derived> {
+struct IncrDecrCmd : public dfly::cmd::SimpleContext<IncrDecrCmd> {
+  using PrepareResult = dfly::cmd::SimpleContext<IncrDecrCmd>::PrepareResult;
+  PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override;
+  OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const;
+  void Reply(SinkReplyBuilder* rb) override;
   int64_t val_ = 0;
   mutable OpResult<int64_t> op_res_ = OpStatus::OK;
   bool skip_on_missing_ = false;
-
-  using PrepareResult = typename dfly::cmd::SimpleContext<Derived>::PrepareResult;
-  PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override {
-    skip_on_missing_ = (cmd_cntx->mc_command() != nullptr);
-    // case 1: INCR / DECR
-    if constexpr (FixedVal != 0) {
-      val_ = FixedVal;
-    }
-    // case 2: INCRBY / DECRBY
-    else {
-      string_view sval = args[1];
-      if (!absl::SimpleAtoi(sval, &val_)) {
-        return facade::ErrorReply{facade::kInvalidIntErr};
-      }
-      if constexpr (Negate) {
-        if (val_ == INT64_MIN) {
-          return facade::ErrorReply{facade::kIncrOverflow};
-        }
-        val_ = -val_;
-      }
-    }
-
-    DVLOG(2) << "Incr/Decr val=" << val_;
-    return this->SingleHop();
-  }
-
-  OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const {
-    auto res = OpIncrBy(op_args, *args.begin(), val_, skip_on_missing_);
-    op_res_ = res;
-    return res.status();
-  }
-
-  void Reply(SinkReplyBuilder* rb) override {
-    // Handle success
-    if (op_res_) {
-      if (this->cmd_cntx->mc_command()) {
-        rb->SendSimpleString(absl::StrCat(op_res_.value()));
-      } else {
-        rb->SendLong(op_res_.value());
-      }
-      return;
-    }
-
-    // Handle special MC error case (KEY_NOTFOUND)
-    if (this->cmd_cntx->mc_command() && op_res_.status() == OpStatus::KEY_NOTFOUND) {
-      MCRender mc_render(this->cmd_cntx->mc_command()->cmd_flags);
-      rb->SendSimpleString(mc_render.RenderNotFound());
-      return;
-    }
-
-    // Handle common errors for both MC/Redis
-    switch (op_res_.status()) {
-      case OpStatus::OUT_OF_RANGE:
-        rb->SendError(kIncrOverflow);
-        break;
-      case OpStatus::INVALID_VALUE:
-        rb->SendError(kInvalidIntErr);
-        break;
-      case OpStatus::WRONG_TYPE:
-        rb->SendError(kWrongTypeErr);
-        break;
-      case OpStatus::OUT_OF_MEMORY:
-        rb->SendError(kOutOfMemory);
-        break;
-      default:
-        rb->SendError(absl::StrCat("internal error during increment status=",
-                                   static_cast<uint16_t>(op_res_.status())));
-        break;
-    }
-  }
 };
 
-struct ASYNC_CMD_BASE_T(Incr, IncrDecrBase, 1, false) {};   // Increase by 1 (FixedVal = 1)
-struct ASYNC_CMD_BASE_T(Decr, IncrDecrBase, -1, false) {};  // Decrease by 1 (FixedVal = -1)
-// Increase by user-specified value (Negate = false)
-struct ASYNC_CMD_BASE_T(IncrBy, IncrDecrBase, 0, false) {};
-// Decrease by user-specified value (Negate = true)
-struct ASYNC_CMD_BASE_T(DecrBy, IncrDecrBase, 0, true) {};
+IncrDecrCmd::PrepareResult IncrDecrCmd::Prepare(ArgSlice args, CommandContext* cmd_cntx) {
+  string_view name = cmd_cntx->cid()->name();
+  bool fixed_val = !absl::EndsWith(name, "BY");
+  bool negate = absl::StartsWith(name, "DECR");
+  skip_on_missing_ = (cmd_cntx->mc_command() != nullptr);
+
+  if (fixed_val) {
+    val_ = negate ? -1 : 1;
+  } else {
+    string_view sval = args[1];
+    if (!absl::SimpleAtoi(sval, &val_)) {
+      return facade::ErrorReply{facade::kInvalidIntErr};
+    }
+    if (negate) {
+      if (val_ == INT64_MIN) {
+        return facade::ErrorReply{facade::kIncrOverflow};
+      }
+      val_ = -val_;
+    }
+  }
+
+  return SingleHop();
+}
+
+OpStatus IncrDecrCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const {
+  auto res = OpIncrBy(op_args, *args.begin(), val_, skip_on_missing_);
+  op_res_ = res;
+  return res.status();
+}
+
+void IncrDecrCmd::Reply(SinkReplyBuilder* rb) {
+  // Handle success
+  if (op_res_) {
+    if (this->cmd_cntx->mc_command()) {
+      rb->SendSimpleString(absl::StrCat(op_res_.value()));
+    } else {
+      rb->SendLong(op_res_.value());
+    }
+    return;
+  }
+
+  // Handle special MC error case (KEY_NOTFOUND)
+  if (this->cmd_cntx->mc_command() && op_res_.status() == OpStatus::KEY_NOTFOUND) {
+    MCRender mc_render(this->cmd_cntx->mc_command()->cmd_flags);
+    rb->SendSimpleString(mc_render.RenderNotFound());
+    return;
+  }
+
+  // Handle common errors for both MC/Redis
+  switch (op_res_.status()) {
+    case OpStatus::OUT_OF_RANGE:
+      rb->SendError(kIncrOverflow);
+      break;
+    case OpStatus::INVALID_VALUE:
+      rb->SendError(kInvalidIntErr);
+      break;
+    case OpStatus::WRONG_TYPE:
+      rb->SendError(kWrongTypeErr);
+      break;
+    case OpStatus::OUT_OF_MEMORY:
+      rb->SendError(kOutOfMemory);
+      break;
+    default:
+      rb->SendError(absl::StrCat("internal error during increment status=",
+                                 static_cast<uint16_t>(op_res_.status())));
+      break;
+  }
+}
 
 void CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
@@ -1762,7 +1753,6 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 }  // namespace
-
 #define HFUNC(x) SetHandler(&Cmd##x)
 
 void RegisterStringFamily(CommandRegistry* registry) {
@@ -1778,11 +1768,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
       << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
-      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(CmdIncr::Run, true)
-      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(CmdDecr::Run, true)
-      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(CmdIncrBy::Run, true)
+      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
+      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
+      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
+      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
       << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
-      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(CmdDecrBy::Run, true)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
