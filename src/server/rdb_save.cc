@@ -49,9 +49,6 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-ABSL_RETIRED_FLAG(bool, stream_rdb_encode_v2, true,
-                  "Retired. Uses format, compatible with redis 7.2 and Dragonfly v1.26+");
-
 // Flip this value to 'true' in March 2026.
 ABSL_FLAG(bool, rdb_sbf_chunked, false, "Enable new save format for saving SBFs in chunks.");
 
