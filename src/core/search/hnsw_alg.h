@@ -4,8 +4,6 @@
 #include <hnswlib/visited_list_pool.h>
 #include <mimalloc.h>
 
-#include <optional>
-
 #pragma once
 
 namespace dfly::search {

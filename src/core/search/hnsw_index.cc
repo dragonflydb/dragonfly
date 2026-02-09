@@ -255,6 +255,9 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
     }
   }
 
+  // For HnswVectorIndex if we didn't add vector to index we should return false. Compared to
+  // other in-shard index implementations where returning false removes document here we only
+  // control if key should or shouldn't be ommited from defragmentation process.
   return false;
 }
 
