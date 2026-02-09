@@ -1355,7 +1355,7 @@ struct IncrDecrBase : public dfly::cmd::SimpleContext<Derived> {
   OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const {
     auto res = OpIncrBy(op_args, *args.begin(), val_, skip_on_missing_);
     op_res_ = res;
-    return OpStatus::OK;
+    return res.status();
   }
 
   void Reply(SinkReplyBuilder* rb) override {
@@ -1391,7 +1391,7 @@ struct IncrDecrBase : public dfly::cmd::SimpleContext<Derived> {
         rb->SendError(kOutOfMemory);
         break;
       default:
-        rb->SendError(absl::StrCat("ERR internal error during increment status=",
+        rb->SendError(absl::StrCat("internal error during increment status=",
                                    static_cast<uint16_t>(op_res_.status())));
         break;
     }
