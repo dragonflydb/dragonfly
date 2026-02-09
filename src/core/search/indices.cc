@@ -634,7 +634,7 @@ void GeoIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) 
 
 std::vector<DocId> GeoIndex::RadiusSearch(double lon, double lat, double radius,
                                           std::string_view unit) {
-  std::vector<DocId> results;
+  std::set<DocId> unique_results;
 
   // Get radius in meters
   double converted_radius = ConvertToRadiusInMeters(radius, unit);
@@ -662,23 +662,23 @@ std::vector<DocId> GeoIndex::RadiusSearch(double lon, double lat, double radius,
   boost::geometry::model::box<point> box;
   boost::geometry::envelope(buffer_polygon, box);
 
-  rtree_->query(
-      boost::geometry::index::within(box),
-      boost::make_function_output_iterator([&results, &p, &converted_radius](auto const& val) {
-        if (haversine_.apply(val.first, p) <= converted_radius) {
-          results.push_back(val.second);
-        }
-      }));
+  rtree_->query(boost::geometry::index::within(box),
+                boost::make_function_output_iterator(
+                    [&unique_results, &p, &converted_radius](auto const& val) {
+                      if (haversine_.apply(val.first, p) <= converted_radius) {
+                        unique_results.insert(val.second);
+                      }
+                    }));
 
   // TODO: we should return sorted results by radius distance
-  return results;
+  return {unique_results.begin(), unique_results.end()};
 }
 
 std::vector<DocId> GeoIndex::GetAllDocsWithNonNullValues() const {
-  std::vector<DocId> results;
+  std::set<DocId> unique_results;
   std::for_each(boost::geometry::index::begin(*rtree_), boost::geometry::index::end(*rtree_),
-                [&results](auto const& val) { results.push_back(val.second); });
-  return results;
+                [&unique_results](auto const& val) { unique_results.insert(val.second); });
+  return {unique_results.begin(), unique_results.end()};
 }
 
 }  // namespace dfly::search

@@ -4349,9 +4349,18 @@ TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 7: Adding multiple locations for same document should index all locations
   Run({"JSON.SET", "j:12", ".",
        R"({"name":"Multi_Locations","location":["-123.00, 12.00", "-124.0, 12.0"]})"});
+
   resp = Run({"FT.SEARCH", "idx_json", "@location:[-123.00 12.00 1 m]"});
   EXPECT_THAT(resp, AreDocIds("j:12"));
+
   resp = Run({"FT.SEARCH", "idx_json", "@location:[-124.00 12.00 1 m]"});
+  EXPECT_THAT(resp, AreDocIds("j:12"));
+
+  // Check that we return only one document even if multiple locations match
+  resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
+  EXPECT_THAT(resp, AreDocIds("j:1", "j:2", "j:12"));
+
+  resp = Run({"FT.SEARCH", "idx_json", "@location:[-124.00 12.00 1000 km]"});
   EXPECT_THAT(resp, AreDocIds("j:12"));
 
   // Deleting multi location document should remove all locations
