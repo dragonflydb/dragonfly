@@ -94,9 +94,10 @@ struct HnswlibAdapter {
 
   void Remove(GlobalDocId id) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    std::optional<std::string> error_message = world_.markDelete(id);
-    if (error_message) {
-      VLOG(1) << "HnswlibAdapter::Remove error: " << *error_message;
+    HnswErrorStatus status = world_.markDelete(id);
+    if (status != HnswErrorStatus::SUCCESS) {
+      VLOG(1) << "HnswlibAdapter::Remove failed with status: " << int8_t(status)
+              << " for global id: " << id;
     }
   }
 

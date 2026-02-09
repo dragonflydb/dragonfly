@@ -10,6 +10,13 @@
 
 namespace dfly::search {
 
+enum class HnswErrorStatus : int8_t {
+  SUCCESS = 0,
+  /* markDelete errors */
+  LABEL_NOT_FOUND,
+  ELEMENT_ALREADY_DELETED,
+};
+
 template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInterface<dist_t> {
  public:
   using tableint = hnswlib::tableint;
@@ -898,21 +905,21 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   /*
    * Marks an element with the given label deleted, does NOT really change the current graph.
    */
-  std::optional<std::string> markDelete(labeltype label) {
+  HnswErrorStatus markDelete(labeltype label) {
     // lock all operations with element by label
     std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
 
     std::unique_lock<std::mutex> lock_table(label_lookup_lock);
     auto search = label_lookup_.find(label);
     if (search == label_lookup_.end()) {
-      return std::make_optional<std::string>("Label not found");
+      return HnswErrorStatus::LABEL_NOT_FOUND;
     }
     tableint internalId = search->second;
     lock_table.unlock();
     if (!markDeletedInternal(internalId)) {
-      return std::make_optional<std::string>("The requested to delete element is already deleted");
+      return HnswErrorStatus::ELEMENT_ALREADY_DELETED;
     }
-    return std::nullopt;
+    return HnswErrorStatus::SUCCESS;
   }
 
   /*
