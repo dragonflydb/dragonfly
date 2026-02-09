@@ -10,7 +10,6 @@
 #include <atomic>
 #include <memory>
 #include <system_error>
-#include <utility>
 #include <vector>
 
 #include "facade/facade_types.h"
