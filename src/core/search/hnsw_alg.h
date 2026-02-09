@@ -4,6 +4,8 @@
 #include <hnswlib/visited_list_pool.h>
 #include <mimalloc.h>
 
+#include <optional>
+
 #pragma once
 
 namespace dfly::search {
@@ -896,19 +898,21 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   /*
    * Marks an element with the given label deleted, does NOT really change the current graph.
    */
-  void markDelete(labeltype label) {
+  std::optional<std::string> markDelete(labeltype label) {
     // lock all operations with element by label
     std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
 
     std::unique_lock<std::mutex> lock_table(label_lookup_lock);
     auto search = label_lookup_.find(label);
     if (search == label_lookup_.end()) {
-      throw std::runtime_error("Label not found");
+      return std::make_optional<std::string>("Label not found");
     }
     tableint internalId = search->second;
     lock_table.unlock();
-
-    markDeletedInternal(internalId);
+    if (!markDeletedInternal(internalId)) {
+      return std::make_optional<std::string>("The requested to delete element is already deleted");
+    }
+    return std::nullopt;
   }
 
   /*
@@ -916,7 +920,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
    * whereas maxM0_ has to be limited to the lower 16 bits, however, still large enough in almost
    * all cases.
    */
-  void markDeletedInternal(tableint internalId) {
+  bool markDeletedInternal(tableint internalId) {
     assert(internalId < cur_element_count);
     if (!isMarkedDeleted(internalId)) {
       unsigned char* ll_cur = ((unsigned char*)get_linklist0(internalId)) + 2;
@@ -926,8 +930,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         std::unique_lock<std::mutex> lock_deleted_elements(deleted_elements_lock);
         deleted_elements.insert(internalId);
       }
+      return true;
     } else {
-      throw std::runtime_error("The requested to delete element is already deleted");
+      return false;
     }
   }
 

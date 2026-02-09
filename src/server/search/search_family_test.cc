@@ -3679,7 +3679,7 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   Run({"HSET", "doc2", "even", "no", "pos", FloatToBytes(2.0f)});
   Run({"HSET", "doc3", "even", "yes", "pos", FloatToBytes(3.0f)});
 
-  // Add a documents without the vector field
+  // Add documents without the vector field
   Run({"HSET", "doc4", "even", "yes"});
   Run({"HSET", "doc5", "even", "maybe"});
 

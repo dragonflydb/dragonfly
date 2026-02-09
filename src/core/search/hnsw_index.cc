@@ -93,11 +93,10 @@ struct HnswlibAdapter {
   }
 
   void Remove(GlobalDocId id) {
-    try {
-      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-      world_.markDelete(id);
-    } catch (const std::exception& e) {
-      VLOG(1) << "HnswlibAdapter::Remove: " << e.what();
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    std::optional<std::string> error_message = world_.markDelete(id);
+    if (error_message) {
+      VLOG(1) << "HnswlibAdapter::Remove error: " << *error_message;
     }
   }
 
@@ -245,15 +244,17 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
     auto owned_vector = std::get<OwnedFtVector>(*vector_ptr).first.get();
     if (owned_vector) {
       adapter_->Add(owned_vector, id);
+      return true;
     }
   } else {
     auto borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
     if (borrowed_vector) {
       adapter_->Add(borrowed_vector, id);
+      return true;
     }
   }
 
-  return true;
+  return false;
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
