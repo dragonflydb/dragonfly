@@ -978,4 +978,12 @@ TEST_F(StringFamilyTest, Digest) {
   EXPECT_THAT(Run({"digest", "list"}), ErrArg("WRONGTYPE"));
 }
 
+TEST_F(StringFamilyTest, MSetNxOddArgs) {
+  auto resp = Run({"msetnx", "key", "value", "key2"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"mset", "key", "value", "key2"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
 }  // namespace dfly

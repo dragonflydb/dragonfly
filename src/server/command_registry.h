@@ -147,6 +147,15 @@ class CommandId : public facade::CommandId {
     return can_be_monitored_;
   }
 
+  CommandId&& SetInterleavedStep(int8_t step) && {
+    interleave_step_ = step;
+    return std::move(*this);
+  }
+
+  int8_t interleaved_step() const {
+    return interleave_step_;
+  }
+
   CommandId&& SetHandler(Handler f, bool async_support = false) && {
     support_async_ |= async_support;
     handler_ = std::move(f);
@@ -205,6 +214,7 @@ class CommandId : public facade::CommandId {
   bool is_alias_{false};
   bool can_be_monitored_{true};
   bool support_async_{false};
+  int8_t interleave_step_{0};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;

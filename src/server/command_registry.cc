@@ -169,6 +169,7 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
   cloned.implicit_acl_ = implicit_acl_;
+  cloned.interleave_step_ = interleave_step_;
   cloned.is_alias_ = true;
 
   // explicit sharing of the object since it's an alias we can do that.
@@ -204,10 +205,8 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
     return facade::ErrorReply{prefix + facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
-  if ((opt_mask() & CO::INTERLEAVED_KEYS)) {
-    if ((name() == "JSON.MSET" && tail_args.size() % 3 != 0) ||
-        (name() == "MSET" && tail_args.size() % 2 != 0))
-      return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  if (interleave_step_ && tail_args.size() % interleave_step_ != 0) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
   if (validator_)

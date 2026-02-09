@@ -2236,7 +2236,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
       << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
       << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
       << CI{"JSON.SET", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
-      << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
+      << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.SetInterleavedStep(3).HFUNC(MSet)
       << CI{"JSON.MERGE", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(Merge);
 }
 

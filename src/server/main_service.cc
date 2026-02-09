@@ -2730,7 +2730,7 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
 
     rb->SendLong(cid.first_key_pos());
     rb->SendLong(cid.last_key_pos());
-    rb->SendLong(cid.opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1);
+    rb->SendLong(cid.interleaved_step() ? cid.interleaved_step() : 1);
 
     {
       const auto& table = acl_family_.GetRevTable();

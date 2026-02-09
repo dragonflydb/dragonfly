@@ -1769,8 +1769,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
-      << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
-      << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
+      << CI{"MSET", kMSetMask, -3, 1, -1}.SetInterleavedStep(2).HFUNC(MSet)
+      << CI{"MSETNX", kMSetMask, -3, 1, -1}.SetInterleavedStep(2).HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
       << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
       << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
