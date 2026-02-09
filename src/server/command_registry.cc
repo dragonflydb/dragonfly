@@ -153,6 +153,11 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   else if (base::_in(name_, {"SPUBLISH", "SSUBSCRIBE", "SUNSUBSCRIBE"}))
     kind_pubsub_ = CO::PubSubKind::SHARDED;
   can_be_monitored_ = (opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC";
+
+  if (base::_in(name_, {"MSET", "MSETNX"}))
+    interleave_step_ = 2;
+  else if (name_ == "JSON.MSET")
+    interleave_step_ = 3;
 }
 
 CommandId::~CommandId() {

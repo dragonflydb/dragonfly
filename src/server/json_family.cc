@@ -2206,8 +2206,7 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
 // TODO: Add sensible defaults/categories to json commands
 
 void RegisterJsonFamily(CommandRegistry* registry) {
-  constexpr size_t kMsetFlags =
-      CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
+  constexpr size_t kMsetFlags = CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, -2, acl::JSON}.HFUNC(MGet);
@@ -2236,7 +2235,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
       << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
       << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
       << CI{"JSON.SET", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
-      << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.SetInterleavedStep(3).HFUNC(MSet)
+      << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
       << CI{"JSON.MERGE", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(Merge);
 }
 

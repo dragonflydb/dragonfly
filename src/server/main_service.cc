@@ -841,7 +841,6 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case BLOCKING:
       return "blocking";
     case HIDDEN:
-    case INTERLEAVED_KEYS:
     case GLOBAL_TRANS:
     case STORE_LAST_KEY:
     case VARIADIC_KEYS:
