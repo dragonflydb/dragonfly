@@ -3060,17 +3060,18 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (is_error)
     return;
 
+  // Update synonyms before building indices
+  for (auto& syn_cmd : synonym_cmds) {
+    LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
+  }
+
   // Start index building for all indices
+  // TODO: don't build all indices concurrently or limit cumulative budget
   shard_set->RunBriefInParallel([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
     es->search_indices()->RebuildAllIndices(op_args);
   });
-
-  // Now execute all pending synonym commands after indices are rebuilt
-  for (auto& syn_cmd : synonym_cmds) {
-    LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
-  }
 }
 
 }  // namespace dfly
