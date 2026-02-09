@@ -96,7 +96,7 @@ struct HnswlibAdapter {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
     HnswErrorStatus status = world_.markDelete(id);
     if (status != HnswErrorStatus::SUCCESS) {
-      VLOG(1) << "HnswlibAdapter::Remove failed with status: " << int8_t(status)
+      VLOG(1) << "HnswlibAdapter::Remove failed with status: " << static_cast<int>(status)
               << " for global id: " << id;
     }
   }
