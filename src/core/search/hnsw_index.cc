@@ -250,16 +250,7 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
   } else {
     auto borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
     if (borrowed_vector) {
-      // We requires 4-byte aligned memory for vectors. Borrowing vectors is used with HSET objects
-      // but if we need to copy vector data we should also make copy of vector that is going to be
-      // added to avoid potential issues with unaligned memory access.
-      if (copy_vector_) {
-        std::vector<float> vector_copy(dim_);
-        std::memcpy(vector_copy.data(), borrowed_vector, dim_ * sizeof(float));
-        adapter_->Add(vector_copy.data(), id);
-      } else {
-        adapter_->Add(borrowed_vector, id);
-      }
+      adapter_->Add(borrowed_vector, id);
       return true;
     }
   }

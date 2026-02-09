@@ -1041,12 +1041,14 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
   }
 
-  void updatePoint(const void* dataPoint, tableint internalId, float updateNeighborProbability) {
+  void updatePoint(const void* dataPointIn, tableint internalId, float updateNeighborProbability) {
     if (copy_vector_) {
-      memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
+      memcpy(getDataByInternalId(internalId), dataPointIn, data_size_);
     } else {
-      memcpy(getDataPtrByInternalId(internalId), &dataPoint, sizeof(void*));
+      memcpy(getDataPtrByInternalId(internalId), &dataPointIn, sizeof(void*));
     }
+
+    const void* dataPoint = getDataByInternalId(internalId);
 
     int maxLevelCopy = maxlevel_;
     tableint entryPointCopy = enterpoint_node_;
@@ -1209,7 +1211,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     return result;
   }
 
-  tableint addPoint(const void* data_point, labeltype label, int level) {
+  tableint addPoint(const void* data_point_in, labeltype label, int level) {
     tableint cur_c = 0;
     {
       // Checking if the element with the same label already exists
@@ -1230,7 +1232,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         if (isMarkedDeleted(existingInternalId)) {
           unmarkDeletedInternal(existingInternalId);
         }
-        updatePoint(data_point, existingInternalId, 1.0);
+        updatePoint(data_point_in, existingInternalId, 1.0);
 
         return existingInternalId;
       }
@@ -1269,10 +1271,12 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
 
     if (copy_vector_) {
-      memcpy(getDataByInternalId(cur_c), data_point, data_size_);
+      memcpy(getDataByInternalId(cur_c), data_point_in, data_size_);
     } else {
-      memcpy(getDataPtrByInternalId(cur_c), &data_point, sizeof(void*));
+      memcpy(getDataPtrByInternalId(cur_c), &data_point_in, sizeof(void*));
     }
+
+    const void* data_point = getDataByInternalId(cur_c);
 
     if (curlevel) {
       linkLists_[cur_c] = (char*)mi_malloc(size_links_per_element_ * curlevel + 1);
