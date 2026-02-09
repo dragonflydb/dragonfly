@@ -733,9 +733,10 @@ TEST_F(SearchFamilyTest, Numbers) {
 }
 
 TEST_F(SearchFamilyTest, TestLimit) {
+  Run({"ft.create", "i1", "SCHEMA", "match", "text"});
+
   for (unsigned i = 0; i < 20; i++)
     Run({"hset", to_string(i), "match", "all"});
-  Run({"ft.create", "i1", "SCHEMA", "match", "text"});
 
   // Default limit is 10
   auto resp = Run({"ft.search", "i1", "all"});

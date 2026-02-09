@@ -391,6 +391,19 @@ void ClientGetName(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void ClientInfo(CmdArgList args, CommandContext* cmd_cntx) {
+  if (!args.empty()) {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
+  }
+  auto* conn = cmd_cntx->conn();
+  string info = conn->GetClientInfo();
+
+  // redis-py (5expects these fields. We append dummy values to keep the output parsable.
+  absl::StrAppend(&info, " db=", cmd_cntx->server_conn_cntx()->db_index(), "\r\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  return rb->SendBulkString(info);
+}
+
 void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
                 CommandContext* cmd_cntx) {
   if (!args.empty()) {
@@ -2481,6 +2494,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made to specified local address",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "INFO",
+      "    Return information about the current client connection.",
       "LIST",
       "    Return information about client connections.",
       "UNPAUSE",
@@ -2512,6 +2527,8 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
     return ClientSetName(sub_args, cmd_cntx);
   } else if (sub_cmd == "GETNAME") {
     return ClientGetName(sub_args, cmd_cntx);
+  } else if (sub_cmd == "INFO") {
+    return ClientInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
