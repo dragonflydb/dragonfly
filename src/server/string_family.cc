@@ -21,6 +21,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -719,38 +720,6 @@ OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_vi
     return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
   });
 }
-
-void IncrByGeneric(string_view key, int64_t val, CommandContext* cmd_cntx) {
-  bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
-    return res;
-  };
-
-  OpResult<int64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-
-  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
-
-  switch (result.status()) {
-    case OpStatus::OK:
-      cmd_cntx->SendLong(result.value());
-      break;
-    case OpStatus::INVALID_VALUE:
-      cmd_cntx->SendError(kInvalidIntErr);
-      break;
-    case OpStatus::OUT_OF_RANGE:
-      cmd_cntx->SendError(kIncrOverflow);
-      break;
-    case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderNotFound());
-      break;
-    default:
-      cmd_cntx->SendError(result.status());
-      break;
-  }
-}
-
 struct GetAndTouchParams {
   const Transaction* t;
   EngineShard* shard;
@@ -1348,21 +1317,93 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, cmd_cntx);
-}
+// Case 1 (INCR/DECR): Compile-time optimization - If FixedVal != 0, the compiler uses it directly
+// and discards the parsing logic.
+// Case 2 (INCRBY/DECRBY): Runtime parsing. - If FixedVal == 0, we parse the user argument. If
+// Negate is true, we flip the sign.
+template <typename Derived, int64_t FixedVal, bool Negate>
+struct IncrDecrBase : public dfly::cmd::SimpleContext<Derived> {
+  int64_t val_ = 0;
+  mutable OpResult<int64_t> op_res_ = OpStatus::OK;
+  bool skip_on_missing_ = false;
 
-void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
-  int64_t val;
+  using PrepareResult = typename dfly::cmd::SimpleContext<Derived>::PrepareResult;
+  PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override {
+    skip_on_missing_ = (cmd_cntx->mc_command() != nullptr);
+    // case 1: INCR / DECR
+    if constexpr (FixedVal != 0) {
+      val_ = FixedVal;
+    }
+    // case 2: INCRBY / DECRBY
+    else {
+      string_view sval = args[1];
+      if (!absl::SimpleAtoi(sval, &val_)) {
+        return facade::ErrorReply{facade::kInvalidIntErr};
+      }
+      if constexpr (Negate) {
+        if (val_ == INT64_MIN) {
+          return facade::ErrorReply{facade::kIncrOverflow};
+        }
+        val_ = -val_;
+      }
+    }
 
-  if (!absl::SimpleAtoi(sval, &val)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+    DVLOG(2) << "Incr/Decr val=" << val_;
+    return this->SingleHop();
   }
-  return IncrByGeneric(key, val, cmd_cntx);
-}
+
+  OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const {
+    auto res = OpIncrBy(op_args, *args.begin(), val_, skip_on_missing_);
+    op_res_ = res;
+    return OpStatus::OK;
+  }
+
+  void Reply(SinkReplyBuilder* rb) override {
+    // Handle success
+    if (op_res_) {
+      if (this->cmd_cntx->mc_command()) {
+        rb->SendSimpleString(absl::StrCat(op_res_.value()));
+      } else {
+        rb->SendLong(op_res_.value());
+      }
+      return;
+    }
+
+    // Handle special MC error case (KEY_NOTFOUND)
+    if (this->cmd_cntx->mc_command() && op_res_.status() == OpStatus::KEY_NOTFOUND) {
+      MCRender mc_render(this->cmd_cntx->mc_command()->cmd_flags);
+      rb->SendSimpleString(mc_render.RenderNotFound());
+      return;
+    }
+
+    // Handle common errors for both MC/Redis
+    switch (op_res_.status()) {
+      case OpStatus::OUT_OF_RANGE:
+        rb->SendError(kIncrOverflow);
+        break;
+      case OpStatus::INVALID_VALUE:
+        rb->SendError(kInvalidIntErr);
+        break;
+      case OpStatus::WRONG_TYPE:
+        rb->SendError(kWrongTypeErr);
+        break;
+      case OpStatus::OUT_OF_MEMORY:
+        rb->SendError(kOutOfMemory);
+        break;
+      default:
+        rb->SendError(absl::StrCat("ERR internal error during increment status=",
+                                   static_cast<uint16_t>(op_res_.status())));
+        break;
+    }
+  }
+};
+
+struct ASYNC_CMD_BASE_T(Incr, IncrDecrBase, 1, false) {};   // Increase by 1 (FixedVal = 1)
+struct ASYNC_CMD_BASE_T(Decr, IncrDecrBase, -1, false) {};  // Decrease by 1 (FixedVal = -1)
+// Increase by user-specified value (Negate = false)
+struct ASYNC_CMD_BASE_T(IncrBy, IncrDecrBase, 0, false) {};
+// Decrease by user-specified value (Negate = true)
+struct ASYNC_CMD_BASE_T(DecrBy, IncrDecrBase, 0, true) {};
 
 void CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
@@ -1380,32 +1421,12 @@ void CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   OpResult<double> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
+    DVLOG(2) << "CmdIncrByFloat error: " << key << " status=" << result.status();
     return cmd_cntx->SendError(result.status());
   }
 
   rb->SendDouble(result.value());
-}
-
-void CmdDecr(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, cmd_cntx);
-}
-
-void CmdDecrBy(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
-  int64_t val;
-
-  if (!absl::SimpleAtoi(sval, &val)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
-  if (val == INT64_MIN) {
-    return cmd_cntx->SendError(kIncrOverflow);
-  }
-
-  return IncrByGeneric(key, -val, cmd_cntx);
 }
 
 // Reorder per-shard results according to argument order of primary command
@@ -1757,11 +1778,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
       << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
-      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(Incr)
-      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(Decr)
-      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrBy)
+      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(CmdIncr::Run, true)
+      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(CmdDecr::Run, true)
+      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(CmdIncrBy::Run, true)
       << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
-      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
+      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(CmdDecrBy::Run, true)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
