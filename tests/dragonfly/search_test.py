@@ -488,6 +488,11 @@ async def test_index_persistence(df_server):
     i1 = client.ft("i1")
     i2 = client.ft("i2")
 
+    while (await i1.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
+    while (await i2.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
+
     info_1_new = await i1.info()
     info_2_new = await i2.info()
 
@@ -632,7 +637,10 @@ async def test_synonym_persistence(df_server):
     df_server.start()
     client = aioredis.Redis(port=df_server.port)
     await wait_available_async(client)
+
     idx = client.ft("idx")
+    while (await idx.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
 
     # Verify synonyms still work after restart
     assert (await idx.search(Query("car"))).total == 2

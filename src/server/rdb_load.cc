@@ -3040,7 +3040,6 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
-  // FT.SYNUPDATE command - defer execution until after RebuildAllIndices
   // Add to shared static vector (may be called from multiple RdbLoader instances)
   pending_synonym_cmds_.push_back(std::move(def));
 }
@@ -3060,11 +3059,6 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (is_error)
     return;
 
-  // Update synonyms before building indices
-  for (auto& syn_cmd : synonym_cmds) {
-    LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
-  }
-
   // Start index building for all indices
   // TODO: don't build all indices concurrently or limit cumulative budget
   shard_set->RunBriefInParallel([](EngineShard* es) {
@@ -3072,6 +3066,11 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
     es->search_indices()->RebuildAllIndices(op_args);
   });
+
+  // Issue FT.SYNUPDATE while the index is building
+  for (auto& syn_cmd : synonym_cmds) {
+    LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
+  }
 }
 
 }  // namespace dfly
