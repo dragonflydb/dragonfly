@@ -19,7 +19,7 @@ SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
 TIMEOUT="500"
 FUZZ_TARGET="$BUILD_DIR/dragonfly"
-AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
+AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-1}"
 
 print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -68,7 +68,7 @@ show_config() {
     echo "  Proactor threads: ${AFL_PROACTOR_THREADS}"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
-    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 2)"
+    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 1)"
     echo ""
 }
 
@@ -115,6 +115,11 @@ run_fuzzer() {
     # AFL_HANG_TMOUT: Only consider it a hang if no response for 60 seconds
     # This prevents false positives from slow but legitimate operations
     export AFL_HANG_TMOUT=60000
+
+    # Dragonfly has ~350K edges, default AFL++ bitmap is 64KB (massive collisions).
+    # Use 512KB bitmap to reduce hash collisions and improve stability.
+    export AFL_MAP_SIZE=524288
+
     exec "${AFL_CMD[@]}"
 }
 
