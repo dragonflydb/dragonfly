@@ -1780,8 +1780,7 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
 #define HFUNC(x) SetHandler(&Cmd##x)
 
 void RegisterStringFamily(CommandRegistry* registry) {
-  constexpr uint32_t kMSetMask =
-      CO::JOURNALED | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
+  constexpr uint32_t kMSetMask = CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL;
 
   registry->StartFamily(acl::STRING);
   *registry

@@ -2200,8 +2200,7 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
 // TODO: Add sensible defaults/categories to json commands
 
 void RegisterJsonFamily(CommandRegistry* registry) {
-  constexpr size_t kMsetFlags =
-      CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
+  constexpr size_t kMsetFlags = CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, -2, acl::JSON}.HFUNC(MGet);
