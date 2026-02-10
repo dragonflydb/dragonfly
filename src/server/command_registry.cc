@@ -219,6 +219,7 @@ void CommandId::ResetStats(unsigned thread_index) {
   command_stats_[thread_index] = {0, 0};
   if (hdr_histogram* h = latency_histogram_; h != nullptr) {
     hdr_reset(h);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 }
 
@@ -229,7 +230,7 @@ void CommandId::RecordLatency(unsigned tid, uint64_t latency_usec) const {
   ent.second += latency_usec;
 
   if (latency_histogram_) {
-    hdr_record_value(latency_histogram_, latency_usec);
+    hdr_record_value_atomic(latency_histogram_, latency_usec);
   }
 }
 
