@@ -1523,3 +1523,56 @@ async def test_issue_6165_squash_invalid_syntax(async_client):
     res = await pip.execute(raise_on_error=False)
     assert res[0] == True  # SET key1
     assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX
+
+
+@dfly_args({"proactor_threads": "2", "pipeline_squash": 1})
+async def test_quit_in_pipeline(df_server: DflyInstance):
+    """
+    Regression test: when QUIT is pipelined together with other commands
+    (e.g. DEL DEL ... DEL QUIT), the server must flush all preceding replies
+    before closing the connection.
+
+    Reproduces the BullMQ removeAllQueueData() pattern.
+    """
+    NUM_KEYS = 9
+    client = df_server.client()
+
+    # Setup: create NUM_KEYS keys
+    for i in range(NUM_KEYS):
+        await client.set(f"{{b}}:pqt:k{i}", "v")
+
+    # Send DEL for all keys + QUIT in one pipeline
+    pipe = client.pipeline(transaction=False)
+    for i in range(NUM_KEYS):
+        pipe.delete(f"{{b}}:pqt:k{i}")
+    pipe.execute_command("QUIT")
+    res = await pipe.execute()
+
+    assert res[:NUM_KEYS] == [1] * NUM_KEYS, f"Expected {NUM_KEYS} DEL replies, got: {res}"
+    assert res[NUM_KEYS] in (b"OK", True), f"Expected QUIT OK reply, got: {res[NUM_KEYS]}"
+
+
+async def test_tls_partial_header_read(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
+):
+    server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
+
+    # Connect with raw socket and send only 1 byte (less than the 2-byte TLS header check)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect(("localhost", server.port))
+        # Send 1 byte (less than the 2-byte TLS header that dragonfly expects)
+        sock.send(b"\x16")
+        # Close immediately after sending partial data
+        time.sleep(0.1)  # Give server time to process
+    finally:
+        sock.close()
+
+    # If the server crashes due to UB, it will fail. Otherwise this test passes.
+    # The server should handle this gracefully without crashing.
+    await asyncio.sleep(0.5)  # Give server time to handle the connection
+
+    # Verify server is still alive by making a valid connection
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    assert await client.ping()
