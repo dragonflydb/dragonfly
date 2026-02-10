@@ -1962,8 +1962,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
 
-  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", MetricType::COUNTER,
-                     &resp->body());
   AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
                             m.shard_stats.defrag_task_invocation_total, MetricType::COUNTER,
                             &resp->body());
