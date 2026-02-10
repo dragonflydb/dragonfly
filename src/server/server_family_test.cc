@@ -300,9 +300,9 @@ return 'OK';
       EXPECT_THAT(args, ElementsAreArray({"EXEC", "num_cmds: 3", "is_write: 1"}));
       found++;
     } else if (args[0] == "EVAL") {
-      const auto sha = "ea97fb927f670f29099dae16910f219d3fcc9cb9";
-      EXPECT_THAT(args,
-                  ElementsAreArray({"EVAL", sha, "num_cmds: 6", "is_write: 1", "lock_tags: 3"}));
+      const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
+      EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "is_write: 1", "lock_tags: 3",
+                                          "3", "first", "second", "third", "second"}));
       found++;
     }
   }
