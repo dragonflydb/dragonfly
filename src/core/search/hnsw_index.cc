@@ -132,11 +132,6 @@ struct HnswlibAdapter {
     metadata.cur_element_count = world_.cur_element_count.load();
     metadata.maxlevel = world_.maxlevel_;
     metadata.enterpoint_node = world_.enterpoint_node_;
-    metadata.M = world_.M_;
-    metadata.maxM = world_.maxM_;
-    metadata.maxM0 = world_.maxM0_;
-    metadata.ef_construction = world_.ef_construction_;
-    metadata.mult = world_.mult_;
     return metadata;
   }
 
