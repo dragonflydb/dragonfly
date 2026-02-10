@@ -141,6 +141,7 @@ class BaseFamilyTest::TestConnWrapper {
     sink_.Clear();
     resp_objs_.clear();
     tmp_str_vec_.clear();
+    expr_builder_.Clear();
   }
 
   TestConnection* conn() {

@@ -17,6 +17,10 @@ class RespExprBuilder {
  public:
   RespExpr BuildExpr(const RESPObj& obj);
 
+  void Clear() {
+    owned_arrays_.clear();
+  }
+
  private:
   void SetStringPayload(const RESPObj& obj, RespExpr* expr);
 
