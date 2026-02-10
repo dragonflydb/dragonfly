@@ -1049,6 +1049,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     const void* dataPoint = getDataByInternalId(internalId);
+    assert(dataPoint != nullptr);
 
     int maxLevelCopy = maxlevel_;
     tableint entryPointCopy = enterpoint_node_;
@@ -1277,6 +1278,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     const void* data_point = getDataByInternalId(cur_c);
+    assert(data_point != nullptr);
 
     if (curlevel) {
       linkLists_[cur_c] = (char*)mi_malloc(size_links_per_element_ * curlevel + 1);
