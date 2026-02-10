@@ -634,7 +634,10 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   CHECK(obj.has_value()) << "Failed to parse response: \"" << s << "\" (" << s.size() << " chars)";
 
   if (fully_consumed) {
-    DCHECK_EQ(parser.BufferPos(), s.size()) << s;
+    size_t buf_pos = parser.BufferPos();
+    // After parsing, if successful, buf_pos can be 0 when the internal buffer is cleared
+    buf_pos = obj && !buf_pos ? s.size() : buf_pos;
+    DCHECK_EQ(buf_pos, s.size()) << s;
   }
 
   resp_objs_.push_back(std::move(*obj));
