@@ -1836,7 +1836,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     }
 
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
-                       MetricType::HISTOGRAM, &command_metrics);
+                       MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
