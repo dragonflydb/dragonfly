@@ -3679,6 +3679,10 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   Run({"HSET", "doc2", "even", "no", "pos", FloatToBytes(2.0f)});
   Run({"HSET", "doc3", "even", "yes", "pos", FloatToBytes(3.0f)});
 
+  // Add documents without the vector field
+  Run({"HSET", "doc4", "even", "yes"});
+  Run({"HSET", "doc5", "even", "maybe"});
+
   // Query vector (2.0f - should find doc2 closest, but filtered to "yes" docs)
   string query_vec = FloatToBytes(2.0f);
 
@@ -3687,6 +3691,14 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
               query_vec});
   // Should return documents with "even": "yes" sorted by vector distance to 2.0
   EXPECT_THAT(resp, AreDocIds("doc3", "doc1"));
+
+  // Verify that document without field is added to tag but not in hnsw vector index
+  resp = Run({"FT.SEARCH", "knn_idx", "@even:{maybe}"});
+  EXPECT_THAT(resp, AreDocIds("doc5"));
+
+  resp = Run({"FT.SEARCH", "knn_idx", "@even:{maybe} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
+              query_vec});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(SearchFamilyTest, KnnHnswCosineDistanceCalculation) {

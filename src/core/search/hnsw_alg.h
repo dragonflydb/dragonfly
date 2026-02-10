@@ -8,6 +8,13 @@
 
 namespace dfly::search {
 
+enum class HnswErrorStatus : int8_t {
+  SUCCESS = 0,
+  /* markDelete errors */
+  LABEL_NOT_FOUND,
+  ELEMENT_ALREADY_DELETED,
+};
+
 template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInterface<dist_t> {
  public:
   using tableint = hnswlib::tableint;
@@ -76,8 +83,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   std::mutex deleted_elements_lock;               // lock for deleted_elements
   std::unordered_set<tableint> deleted_elements;  // contains internal ids of deleted elements
 
-  char* null_vector_{nullptr};  // Static null vector that is used when data pointer is null
-
   HierarchicalNSW(hnswlib::SpaceInterface<dist_t>* s) {
   }
 
@@ -135,12 +140,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         throw std::runtime_error("Not enough memory");
     }
 
-    // If null vector pointer is provided we can use this for all null vectors
-    null_vector_ = (char*)mi_malloc(data_size_);
-    if (null_vector_ == nullptr)
-      throw std::runtime_error("Not enough memory");
-    memset(null_vector_, 0, data_size_);
-
     cur_element_count = 0;
 
     visited_list_pool_ = std::unique_ptr<VisitedListPool>(new VisitedListPool(1, max_elements));
@@ -171,7 +170,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       mi_free(data_vector_memory_);
     }
-    mi_free(null_vector_);
     mi_free(linkLists_);
     linkLists_ = nullptr;
     cur_element_count = 0;
@@ -838,10 +836,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
           input.read(data_vector_memory_, cur_element_count * data_size_);
         }
 
-        null_vector_ = (char*)mi_malloc(data_size_);
-        if (null_vector_ == nullptr)
-            throw std::runtime_error("Not enough memory: loadIndex failed to allocate null vector");
-
         size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
 
         size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
@@ -909,19 +903,21 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   /*
    * Marks an element with the given label deleted, does NOT really change the current graph.
    */
-  void markDelete(labeltype label) {
+  HnswErrorStatus markDelete(labeltype label) {
     // lock all operations with element by label
     std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
 
     std::unique_lock<std::mutex> lock_table(label_lookup_lock);
     auto search = label_lookup_.find(label);
     if (search == label_lookup_.end()) {
-      throw std::runtime_error("Label not found");
+      return HnswErrorStatus::LABEL_NOT_FOUND;
     }
     tableint internalId = search->second;
     lock_table.unlock();
-
-    markDeletedInternal(internalId);
+    if (!markDeletedInternal(internalId)) {
+      return HnswErrorStatus::ELEMENT_ALREADY_DELETED;
+    }
+    return HnswErrorStatus::SUCCESS;
   }
 
   /*
@@ -929,7 +925,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
    * whereas maxM0_ has to be limited to the lower 16 bits, however, still large enough in almost
    * all cases.
    */
-  void markDeletedInternal(tableint internalId) {
+  bool markDeletedInternal(tableint internalId) {
     assert(internalId < cur_element_count);
     if (!isMarkedDeleted(internalId)) {
       unsigned char* ll_cur = ((unsigned char*)get_linklist0(internalId)) + 2;
@@ -939,8 +935,9 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         std::unique_lock<std::mutex> lock_deleted_elements(deleted_elements_lock);
         deleted_elements.insert(internalId);
       }
+      return true;
     } else {
-      throw std::runtime_error("The requested to delete element is already deleted");
+      return false;
     }
   }
 

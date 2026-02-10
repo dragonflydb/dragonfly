@@ -79,7 +79,7 @@ struct HnswlibAdapter {
       try {
         MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
         absl::ReaderMutexLock resize_lock(&resize_mutex_);
-        world_.addPoint(data ? data : world_.null_vector_, id);
+        world_.addPoint(data, id);
         return;
       } catch (const std::exception& e) {
         std::string error_msg = e.what();
@@ -93,11 +93,11 @@ struct HnswlibAdapter {
   }
 
   void Remove(GlobalDocId id) {
-    try {
-      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-      world_.markDelete(id);
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "HnswlibAdapter::Remove exception: " << e.what();
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    HnswErrorStatus status = world_.markDelete(id);
+    if (status != HnswErrorStatus::SUCCESS) {
+      VLOG(1) << "HnswlibAdapter::Remove failed with status: " << static_cast<int>(status)
+              << " for global id: " << id;
     }
   }
 
@@ -242,14 +242,23 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
   }
 
   if (std::holds_alternative<OwnedFtVector>(*vector_ptr)) {
-    const auto& owned_vector = std::get<OwnedFtVector>(*vector_ptr);
-    adapter_->Add(owned_vector.first.get(), id);
+    auto owned_vector = std::get<OwnedFtVector>(*vector_ptr).first.get();
+    if (owned_vector) {
+      adapter_->Add(owned_vector, id);
+      return true;
+    }
   } else {
-    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
-    adapter_->Add(borrowed_vector, id);
+    auto borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
+    if (borrowed_vector) {
+      adapter_->Add(borrowed_vector, id);
+      return true;
+    }
   }
 
-  return true;
+  // For HnswVectorIndex if we didn't add vector to index we should return false. Compared to
+  // other in-shard index implementations where returning false removes document here we only
+  // control if key should or shouldn't be ommited from defragmentation process.
+  return false;
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
