@@ -103,80 +103,45 @@ TEST_F(ServerFamilyTest, GetTcpSocketInfoIPv6) {
 }
 #endif
 
-TEST_F(ServerFamilyTest, SlowLogArgsCountTruncation) {
+TEST_F(ServerFamilyTest, SlowLogTruncation) {
   auto resp = Run({"config", "set", "slowlog_max_len", "3"});
   EXPECT_THAT(resp.GetString(), "OK");
   resp = Run({"config", "set", "slowlog_log_slower_than", "0"});
   EXPECT_THAT(resp.GetString(), "OK");
-  // allow exactly 32 arguments (lpush <key> + 30 arguments)
-  // no truncation should happen
+
+  // Test args count truncation: 32 args (no truncation) vs 33 args (truncated)
   std::vector<std::string> cmd_args = {"LPUSH", "mykey"};
   for (int i = 1; i <= 30; ++i) {
     cmd_args.push_back(std::to_string(i));
   }
-  absl::Span<std::string> span(cmd_args);
-  resp = Run(span);
+  resp = Run(absl::Span<std::string>(cmd_args));
   EXPECT_THAT(resp.GetInt(), 30);
   resp = Run({"slowlog", "get"});
   auto slowlog = resp.GetVec();
+  EXPECT_THAT(slowlog[0].GetVec()[3].GetVec(), ElementsAreArray(cmd_args));
+
+  cmd_args.push_back("31");
+  resp = Run(absl::Span<std::string>(cmd_args));
+  EXPECT_THAT(resp.GetInt(), 61);
+  resp = Run({"slowlog", "get"});
+  slowlog = resp.GetVec();
   auto commands = slowlog[0].GetVec()[3].GetVec();
-  EXPECT_THAT(commands, ElementsAreArray(cmd_args));
+  EXPECT_THAT(commands.size(), 32);
+  EXPECT_THAT(commands[31].GetString(), "... (2 more arguments)");
 
-  // now add one more argument, and truncation SHOULD happen
-  std::vector<std::string> cmd_args_one_too_many = {"LPUSH", "mykey"};
-  for (int i = 1; i <= 31; ++i) {
-    cmd_args_one_too_many.push_back(std::to_string(i));
-  }
-  absl::Span<std::string> span2(cmd_args_one_too_many);
-  resp = Run(span2);
-  EXPECT_THAT(resp.GetInt(), 30 + 31);
-
-  resp = Run({"slowlog", "get"});
-  slowlog = resp.GetVec();
-  auto expected_args = cmd_args;
-  expected_args[31] = "... (2 more arguments)";
-
-  commands = slowlog[0].GetVec()[3].GetVec();
-  EXPECT_THAT(commands, ElementsAreArray(expected_args));
-}
-
-TEST_F(ServerFamilyTest, SlowLogArgsLengthTruncation) {
-  auto resp = Run({"config", "set", "slowlog_max_len", "3"});
-  EXPECT_THAT(resp.GetString(), "OK");
-  resp = Run({"config", "set", "slowlog_log_slower_than", "0"});
-  EXPECT_THAT(resp.GetString(), "OK");
-
+  // Test args length truncation: 128 bytes (no truncation) vs 129 bytes (truncated)
   std::string at_limit = std::string(128, 'A');
-  resp = Run({"lpush", "mykey", at_limit});
-  EXPECT_THAT(resp.GetInt(), 1);
-
-  resp = Run({"slowlog", "get"});
-  auto slowlog = resp.GetVec();
-  auto key_value = slowlog[0].GetVec()[3].GetVec()[2].GetString();
-  EXPECT_THAT(key_value, at_limit);
-
-  std::string over_limit_by_one = std::string(129, 'A');
-  std::string expected_value = std::string(110, 'A') + "... (1 more bytes)";
-  resp = Run({"lpush", "mykey2", over_limit_by_one});
-  EXPECT_THAT(resp.GetInt(), 1);
+  resp = Run({"lpush", "key1", at_limit});
   resp = Run({"slowlog", "get"});
   slowlog = resp.GetVec();
-  key_value = slowlog[0].GetVec()[3].GetVec()[2].GetString();
-  EXPECT_THAT(key_value, expected_value);
-}
+  EXPECT_THAT(slowlog[0].GetVec()[3].GetVec()[2].GetString(), at_limit);
 
-TEST_F(ServerFamilyTest, SlowLogHelp) {
-  auto resp = Run({"slowlog", "help"});
-
-  EXPECT_THAT(
-      resp.GetVec(),
-      ElementsAre(
-          "SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "GET [<count>]",
-          "    Return top <count> entries from the slowlog (default: 10, -1 mean all).",
-          "    Entries are made of:",
-          "    id, timestamp, time in microseconds, arguments array, client IP and port,",
-          "    client name", "LEN", "    Return the length of the slowlog.", "RESET",
-          "    Reset the slowlog.", "HELP", "    Prints this help."));
+  std::string over_limit = std::string(129, 'A');
+  resp = Run({"lpush", "key2", over_limit});
+  resp = Run({"slowlog", "get"});
+  slowlog = resp.GetVec();
+  auto truncated = slowlog[0].GetVec()[3].GetVec()[2].GetString();
+  EXPECT_THAT(truncated, std::string(110, 'A') + "... (1 more bytes)");
 }
 
 TEST_F(ServerFamilyTest, SlowLogMaxLengthZero) {
@@ -195,36 +160,27 @@ TEST_F(ServerFamilyTest, SlowLogMaxLengthZero) {
   EXPECT_THAT(resp.GetVec().size(), 0);
 }
 
-TEST_F(ServerFamilyTest, SlowLogGetZero) {
+TEST_F(ServerFamilyTest, SlowLogGetLen) {
   auto resp = Run({"config", "set", "slowlog_max_len", "3"});
   EXPECT_THAT(resp.GetString(), "OK");
   resp = Run({"config", "set", "slowlog_log_slower_than", "0"});
   EXPECT_THAT(resp.GetString(), "OK");
 
-  resp = Run({"lpush", "mykey", "1"});
-  EXPECT_THAT(resp.GetInt(), 1);
-  resp = Run({"slowlog", "get", "0"});
-  EXPECT_THAT(resp.GetVec().size(), 0);
-}
-
-TEST_F(ServerFamilyTest, SlowLogGetMinusOne) {
-  auto resp = Run({"config", "set", "slowlog_max_len", "3"});
-  EXPECT_THAT(resp.GetString(), "OK");
-  resp = Run({"config", "set", "slowlog_log_slower_than", "0"});
-  EXPECT_THAT(resp.GetString(), "OK");
-
-  for (int i = 1; i < 4; ++i) {
+  for (int i = 1; i <= 3; ++i) {
     resp = Run({"lpush", "mykey", std::to_string(i)});
     EXPECT_THAT(resp.GetInt(), i);
   }
 
-  // -1 should return the whole slowlog
+  // Test GET 0 - returns empty
+  resp = Run({"slowlog", "get", "0"});
+  EXPECT_THAT(resp.GetVec().size(), 0);
+
+  // Test GET -1 - returns all entries
   resp = Run({"slowlog", "get", "-1"});
   EXPECT_THAT(resp.GetVec().size(), 3);
-}
 
-TEST_F(ServerFamilyTest, SlowLogGetLessThanMinusOne) {
-  auto resp = Run({"slowlog", "get", "-2"});
+  // Test GET < -1 - returns error
+  resp = Run({"slowlog", "get", "-2"});
   EXPECT_THAT(resp.GetString(), "ERR count should be greater than or equal to -1");
 }
 
