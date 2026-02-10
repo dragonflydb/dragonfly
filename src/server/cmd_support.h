@@ -95,6 +95,9 @@ struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
   CommandContext* cmd_cntx;
 };
 
+// Use for standard commands that inherit directly from SimpleContext.
+// This macro includes the 'struct' keyword automatically.
+// Example: ASYNC_CMD(Get) { ... };
 #define ASYNC_CMD(Name) struct Cmd##Name : public ::dfly::cmd::SimpleContext<Cmd##Name>
 
 }  // namespace dfly::cmd

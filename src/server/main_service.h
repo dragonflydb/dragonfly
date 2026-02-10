@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <utility>
-
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
