@@ -43,6 +43,7 @@ vector<string> FormatExecSlowlog(const ConnectionState& state) {
 vector<string> FormatEvalSlowlog(const ConnectionState& state) {
   const auto& sinfo = *state.script_info;
   return {
+      sinfo.stats.sha,
       absl::StrCat("num_cmds: ", sinfo.stats.num_commands),
       absl::StrCat("is_write: ", !sinfo.read_only),
       absl::StrCat("lock_tags: ", sinfo.lock_tags.size()),

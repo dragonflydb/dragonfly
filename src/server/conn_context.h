@@ -132,6 +132,7 @@ struct ConnectionState {
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
 
     struct Stats {
+      std::string sha;  // TODO: avoid copy via char[40]?
       unsigned num_commands = 0;
     } stats;
   };

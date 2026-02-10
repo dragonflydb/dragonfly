@@ -2235,6 +2235,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
+  sinfo->stats.sha = eval_args.sha;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2262,7 +2263,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo]() { interpreter->ResetStack(); };
+  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
+    interpreter->ResetStack();
+    cmd_cntx->SetupTx(cid, cmd_cntx->tx());
+  };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     // It might be that there are no declared keys, but there is only a single shard
