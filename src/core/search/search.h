@@ -84,6 +84,10 @@ struct SchemaField {
     size_t block_size = RangeTree::kDefaultMaxRangeBlockSize;
   };
 
+  bool IsIndexableHnswField() const {
+    return type == VECTOR && !(flags & NOINDEX) && std::get<VectorParams>(special_params).use_hnsw;
+  }
+
   using ParamsVariant =
       std::variant<std::monostate, VectorParams, TagParams, TextParams, NumericParams>;
 

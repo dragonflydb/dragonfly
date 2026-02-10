@@ -1691,12 +1691,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     } else {
       end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    if (cid->opt_mask() & CO::INTERLEAVED_KEYS) {
-      if (cid->name() == "JSON.MSET") {
-        step = 3;
-      } else {
-        step = 2;
-      }
+    if (cid->interleaved_step()) {
+      step = cid->interleaved_step();
     } else {
       step = 1;
     }

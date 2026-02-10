@@ -32,8 +32,11 @@ struct IndexBuilder {
   util::fb2::Fiber Worker();
 
  private:
-  // Loop with cursor over table and add entries
+  // Loop with cursor over table and add entries to regular index
   void CursorLoop(DbTable* table, DbContext db_cntx);
+
+  // Loop with cursor over table and add entries to global HNSW vector indices
+  void VectorLoop(DbTable* table, DbContext db_cntx);
 
   dfly::ExecutionState state_;
   ShardDocIndex* index_;
