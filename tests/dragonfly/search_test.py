@@ -826,7 +826,10 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     replica_idx = c_replica.ft("all_types_idx")
 
     # Wait for replication and async indexing (especially HNSW vectors) to complete
+    timeout = time.time() + 30  # 30 second timeout
     while (await replica_idx.info())["indexing"] == 1:
+        if time.time() > timeout:
+            raise TimeoutError("Indexing did not complete within 30 seconds")
         await asyncio.sleep(0.05)
 
     # Verify all search types work on replica
