@@ -22,6 +22,7 @@
 #include "server/common.h"
 #include "server/search/aggregator.h"
 #include "server/search/index_join.h"
+#include "server/stats.h"
 #include "server/table.h"
 
 namespace dfly {

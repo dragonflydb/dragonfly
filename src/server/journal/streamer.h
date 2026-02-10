@@ -9,6 +9,7 @@
 #include "server/common.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
+#include "server/transaction_types.h"
 
 namespace dfly {
 
