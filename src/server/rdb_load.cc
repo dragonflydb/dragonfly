@@ -3041,7 +3041,6 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
-  // FT.SYNUPDATE command - defer execution until after RebuildAllIndices
   // Add to shared static vector (may be called from multiple RdbLoader instances)
   pending_synonym_cmds_.push_back(std::move(def));
 }
@@ -3061,14 +3060,15 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (is_error)
     return;
 
-  // Rebuild all search indices as only their definitions are extracted from the snapshot
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+  // Start index building for all indices
+  // TODO: don't build all indices concurrently or limit cumulative budget
+  shard_set->RunBriefInParallel([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args, true);
+    es->search_indices()->RebuildAllIndices(op_args);
   });
 
-  // Now execute all pending synonym commands after indices are rebuilt
+  // Issue FT.SYNUPDATE while the index is building
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

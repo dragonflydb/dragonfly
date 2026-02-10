@@ -117,11 +117,9 @@ std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
   return {std::move(basic_fields), std::move(is_sortable_field)};
 }
 
-auto GetVectorFieldsView(const search::Schema& schema) {
-  return schema.fields | std::views::filter([](const auto& item) {
-           return item.second.type == search::SchemaField::VECTOR &&
-                  !(item.second.flags & search::SchemaField::NOINDEX);
-         });
+auto GetIndexedHnswFields(const search::Schema& schema) {
+  return schema.fields |
+         std::views::filter([](const auto& item) { return item.second.IsIndexableHnswField(); });
 }
 }  // namespace
 
@@ -293,7 +291,7 @@ ShardDocIndex::~ShardDocIndex() {
   CancelBuilder();
 }
 
-void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool sync) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   CancelBuilder();
 
   key_index_ = DocKeyIndex{};
@@ -306,11 +304,6 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
             << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
     builder_.reset();
   });
-
-  // Temporary. In the future rdb loader will construct indices at the start
-  if (sync) {
-    builder_->Worker().JoinIfNeeded();
-  }
 }
 
 void ShardDocIndex::CancelBuilder() {
@@ -408,14 +401,13 @@ void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeVal
   indices_->Remove(id, *accessor);
 }
 
-void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
-                                              ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
   auto accessor = GetAccessor(db_cntx, *pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
-    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
         index) {
       bool added = index->Add(global_id, *accessor, field_ident);
       if (added && !index->IsVectorCopied()) {
@@ -425,31 +417,17 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(std::string_view index_name,
   }
 }
 
-void ShardDocIndex::RemoveDocFromGlobalVectorIndex(std::string_view index_name,
-                                                   ShardDocIndex::DocId doc_id,
+void ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
                                                    const DbContext& db_cntx, const PrimeValue& pv) {
   auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : GetVectorFieldsView(base_->schema)) {
-    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
         index) {
       index->Remove(global_id, *accessor, field_ident);
     }
   }
-}
-
-void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
-  // Don't run loop if no vector fields are present
-  if (std::ranges::empty(GetVectorFieldsView(base_->schema)))
-    return;
-
-  auto cb = [this, index_name](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
-    if (auto local_id = key_index_.Find(key); local_id)
-      AddDocToGlobalVectorIndex(index_name, *local_id, db_cntx, &pv);
-  };
-
-  TraverseAllMatching(*base_, op_args, cb);
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
@@ -815,11 +793,9 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
     JsonAccessor::RemoveFieldFromCache(fident);
 }
 
-void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool sync) {
-  for (auto& [index_name, ptr] : indices_) {
-    ptr->Rebuild(op_args, &local_mr_, sync);
-    ptr->RebuildGlobalVectorIndices(index_name, op_args);
-  }
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+  for (auto& [index_name, ptr] : indices_)
+    ptr->Rebuild(op_args, &local_mr_);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {
@@ -836,7 +812,7 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeVal
     if (index->Matches(key, pv->ObjType())) {
       std::optional<search::DocId> doc_id = index->AddDoc(key, db_cntx, *pv);
       if (doc_id) {
-        index->AddDocToGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
+        index->AddDocToGlobalVectorIndex(*doc_id, db_cntx, pv);
       }
     }
   }
@@ -848,7 +824,7 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const
     if (index->Matches(key, pv.ObjType())) {
       std::optional<search::DocId> doc_id = index->GetDocId(key, db_cntx);
       if (doc_id) {
-        index->RemoveDocFromGlobalVectorIndex(index_name, *doc_id, db_cntx, pv);
+        index->RemoveDocFromGlobalVectorIndex(*doc_id, db_cntx, pv);
         index->RemoveDoc(*doc_id, db_cntx, pv);
       }
     }

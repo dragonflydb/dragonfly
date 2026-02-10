@@ -323,8 +323,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 #pragma GCC diagnostic pop
 #endif
 
-ParseResult<DocIndex> CreateDocIndex(CmdArgParser* parser) {
+ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser) {
   DocIndex index{};
+  index.name = name;
 
   while (parser->HasNext()) {
     auto option_parser =
@@ -1227,7 +1228,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 
   bool is_cross_shard = parser.Check("CSS");
 
-  auto parsed_index = CreateDocIndex(&parser);
+  auto parsed_index = CreateDocIndex(idx_name, &parser);
   if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
@@ -1277,9 +1278,6 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
-        if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
-          index->RebuildGlobalVectorIndices(idx_name, tx->GetOpArgs(es));
-        }
         return OpStatus::OK;
       },
       true);
