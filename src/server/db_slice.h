@@ -15,6 +15,7 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
+#include "server/transaction_types.h"
 #include "server/tx_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"

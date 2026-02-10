@@ -7,8 +7,9 @@
 #include <string>
 #include <variant>
 
-#include "server/common.h"
+#include "common/backed_args.h"
 #include "server/table.h"
+#include "server/transaction_types.h"
 
 namespace dfly {
 namespace journal {
