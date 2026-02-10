@@ -139,6 +139,8 @@ class BaseFamilyTest::TestConnWrapper {
 
   void ClearSink() {
     sink_.Clear();
+    resp_objs_.clear();
+    tmp_str_vec_.clear();
   }
 
   TestConnection* conn() {
@@ -156,7 +158,8 @@ class BaseFamilyTest::TestConnWrapper {
 
   std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
 
-  std::unique_ptr<RedisParser> parser_;
+  RespExprBuilder expr_builder_;
+  std::vector<RESPObj> resp_objs_;
   std::unique_ptr<SinkReplyBuilder> builder_;
 };
 
@@ -623,20 +626,30 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
 RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
-  auto buf = RespExpr::buffer(&s);
 
-  auto s_copy = s;
+  RESPParser parser;
+  auto obj = parser.Feed(s.data(), s.size());
 
-  uint32_t consumed = 0;
-  parser_.reset(new RedisParser{RedisParser::Mode::CLIENT});  // Client mode.
-  RespVec res;
-  RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
+  CHECK(obj.has_value()) << "Failed to parse response: \"" << s << "\" (" << s.size() << " chars)";
 
-  CHECK_EQ(RedisParser::OK, st) << " response: \"" << s_copy << "\" (" << s_copy.size()
-                                << " chars)";
   if (fully_consumed) {
-    DCHECK_EQ(consumed, s.size()) << s;
+    DCHECK_EQ(parser.BufferPos(), s.size()) << s;
   }
+
+  resp_objs_.push_back(std::move(*obj));
+
+  RespVec res;
+  if (resp_objs_.back().GetType() == RESPObj::Type::ARRAY) {
+    auto arr = resp_objs_.back().As<RESPArray>();
+    if (arr.has_value()) {
+      for (size_t i = 0; i < arr->Size(); ++i) {
+        res.push_back(expr_builder_.BuildExpr((*arr)[i]));
+      }
+    }
+  } else {
+    res.push_back(expr_builder_.BuildExpr(resp_objs_.back()));
+  }
+
   return res;
 }
 
