@@ -23,7 +23,6 @@
 #include "server/journal/types.h"
 #include "server/namespaces.h"
 #include "server/table.h"
-#include "server/transaction_types.h"
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 

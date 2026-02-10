@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "facade/facade_types.h"
+#include "server/common_types.h"
+#include "server/stats.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 

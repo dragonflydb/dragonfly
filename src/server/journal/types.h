@@ -8,8 +8,8 @@
 #include <variant>
 
 #include "common/backed_args.h"
+#include "server/common_types.h"
 #include "server/table.h"
-#include "server/transaction_types.h"
 
 namespace dfly {
 namespace journal {

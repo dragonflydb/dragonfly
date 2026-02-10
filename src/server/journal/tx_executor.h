@@ -7,7 +7,6 @@
 
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "server/transaction_types.h"
 
 namespace dfly {
 

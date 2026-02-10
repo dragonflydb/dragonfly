@@ -18,7 +18,6 @@
 #include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/protocol_client.h"
-#include "server/transaction_types.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 

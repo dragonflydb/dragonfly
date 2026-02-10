@@ -18,7 +18,6 @@
 #include "server/namespaces.h"
 #include "server/replica.h"
 #include "server/server_state.h"
-#include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/future.h"
 
