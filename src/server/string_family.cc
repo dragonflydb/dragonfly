@@ -688,28 +688,52 @@ struct GetReplies {
   RedisReplyBuilder* rb;
 };
 
-void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view value = ArgS(args, 1);
-  VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
+struct ExtendCmd : public dfly::cmd::SimpleContext<ExtendCmd> {
+  PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override;
+  OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const;
+  void Reply(SinkReplyBuilder* rb) override;
 
-  if (cmd_cntx->mc_command() == nullptr) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpExtend(t->GetOpArgs(shard), key, value, prepend);
-    };
+ private:
+  string_view value_;
+  mutable OpResult<TResultOrT<size_t>> redis_res_ = OpStatus::OK;
+  mutable OpResult<bool> mc_res_ = OpStatus::OK;
+  bool is_mc_ = false;
+  bool is_prepend_ = false;
+};
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    GetReplies{rb}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+ExtendCmd::PrepareResult ExtendCmd::Prepare(ArgSlice args, CommandContext* cmd_cntx) {
+  string_view name = cmd_cntx->cid()->name();
+  is_prepend_ = (name == "PREPEND");
+  is_mc_ = (cmd_cntx->mc_command() != nullptr);
+  value_ = args[1];
+  DVLOG(2) << (is_prepend_ ? "Prepend" : "Append") << " key=" << args[0]
+           << " value_len=" << value_.size();
+  return this->SingleHop();
+}
+
+OpStatus ExtendCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const {
+  string_view key = *args.begin();
+
+  if (is_mc_) {
+    mc_res_ = ExtendOrSkip(op_args, key, value_, is_prepend_);
+    return mc_res_.status();
   } else {
-    // Memcached skips if key is missing
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
-    };
-
-    OpResult<bool> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-    MCRender render(cmd_cntx->mc_command()->cmd_flags);
-    cmd_cntx->SendSimpleString(render.RenderStored(result.value_or(false)));
+    redis_res_ = OpExtend(op_args, key, value_, is_prepend_);
+    return redis_res_.status();
   }
+}
+
+void ExtendCmd::Reply(SinkReplyBuilder* rb) {
+  if (is_mc_) {
+    if (mc_res_) {
+      MCRender render(this->cmd_cntx->mc_command()->cmd_flags);
+      rb->SendSimpleString(render.RenderStored(mc_res_.value()));
+    } else {
+      rb->SendError(mc_res_.status());
+    }
+    return;
+  }
+  GetReplies{rb}.Send(std::move(redis_res_));
 }
 
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
@@ -1243,14 +1267,6 @@ void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
 }
 
-void CmdAppend(CmdArgList args, CommandContext* cmd_cntx) {
-  ExtendGeneric(args, false, cmd_cntx);
-}
-
-void CmdPrepend(CmdArgList args, CommandContext* cmd_cntx) {
-  ExtendGeneric(args, true, cmd_cntx);
-}
-
 void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
@@ -1767,8 +1783,10 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
-      << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
-      << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
+      << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetHandler(ExtendCmd::Run,
+                                                                                  true)
+      << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetHandler(ExtendCmd::Run,
+                                                                                   true)
       << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
       << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
       << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
