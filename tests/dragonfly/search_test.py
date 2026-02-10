@@ -819,14 +819,15 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
     await wait_available_async(c_replica)
 
-    # Wait for replication to complete and index to be rebuilt
-    await asyncio.sleep(2)
-
     # Verify index exists on replica
     indices = await c_replica.execute_command("FT._LIST")
     assert b"all_types_idx" in indices or "all_types_idx" in indices
 
     replica_idx = c_replica.ft("all_types_idx")
+
+    # Wait for replication and async indexing (especially HNSW vectors) to complete
+    while (await replica_idx.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
 
     # Verify all search types work on replica
 
