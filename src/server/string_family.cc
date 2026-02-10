@@ -1545,7 +1545,9 @@ void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
 // GAT key [keys...]
 // The expiry argument is stored in mc_command()->expire_ts
 void CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
-  DCHECK(cmd_cntx->mc_command());
+  if (!cmd_cntx->mc_command()) {
+    return cmd_cntx->SendError("GAT is a memcache-only command");
+  }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
   const DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
