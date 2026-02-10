@@ -141,10 +141,17 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
                          uint32_t mc_flags);
 
-  // Helper function that flushes the serialized items into the RecordStream.
+  // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
+  // during big value serialization (e.g. huge sets/lists or large strings).
+  // The Data is already extracted from the serializer ensuring correct plumbing.
   // Can block.
-  using FlushState = SerializerBase::FlushState;
-  size_t FlushSerialized(FlushState flush_state);
+  void HandleFlushData(std::string data);
+
+  // Calls serializer_->FlushToSink() to extract the remaining data from the serializer
+  // and process it via HandleFlushData().
+  // Used for explicit flushes at safe points (e.g. between entries).
+  // Can block.
+  size_t FlushSerialized();
 
   // An entry whose value must be awaited
   struct DelayedEntry {

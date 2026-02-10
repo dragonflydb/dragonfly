@@ -10,6 +10,8 @@
 
 #include <queue>
 
+#include "io/file.h"
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/intset.h"
@@ -211,9 +213,11 @@ SerializerBase::SerializerBase(CompressionMode compression_mode)
     : compression_mode_(compression_mode), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
 
-RdbSerializer::RdbSerializer(CompressionMode compression_mode,
-                             std::function<void(size_t, SerializerBase::FlushState)> flush_fun)
-    : SerializerBase(compression_mode), flush_fun_(std::move(flush_fun)) {
+RdbSerializer::RdbSerializer(CompressionMode compression_mode, FlushFun flush_fun,
+                             size_t flush_threshold)
+    : SerializerBase(compression_mode),
+      flush_fun_(std::move(flush_fun)),
+      flush_threshold_(flush_threshold) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -1776,8 +1780,13 @@ size_t RdbSerializer::GetTempBufferSize() const {
 }
 
 void RdbSerializer::FlushIfNeeded(SerializerBase::FlushState flush_state) {
-  if (flush_fun_) {
-    flush_fun_(SerializedLen(), flush_state);
+  if (flush_fun_ && SerializedLen() > flush_threshold_) {
+    io::StringFile sfile;
+    auto ec = FlushToSink(&sfile, flush_state);
+    CHECK(!ec);  // StringFile writes always succeed
+    if (!sfile.val.empty()) {
+      flush_fun_(std::move(sfile.val), flush_state);
+    }
   }
 }
 

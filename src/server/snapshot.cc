@@ -92,20 +92,20 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
   }
 
-  const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
-  std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
-  if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
-    flush_fun = [this, flush_threshold](size_t bytes_serialized,
-                                        RdbSerializer::FlushState flush_state) {
-      if (bytes_serialized > flush_threshold) {
-        size_t serialized = FlushSerialized(flush_state);
-        VLOG(2) << "FlushSerialized " << serialized << " bytes";
-        auto& stats = ServerState::tlocal()->stats;
-        ++stats.big_value_preemptions;
-      }
-    };
+  size_t flush_threshold = 0;
+  RdbSerializer::FlushFun flush_fun;
+  if (allow_flush == SnapshotFlush::kAllow) {
+    flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
+    if (flush_threshold != 0) {
+      // The callback receives data directly from the serializer, no need to call back into it.
+      flush_fun = [this](std::string data, RdbSerializer::FlushState flush_state) {
+        HandleFlushData(std::move(data));
+        VLOG(2) << "HandleFlushData via callback";
+        ++ServerState::tlocal()->stats.big_value_preemptions;
+      };
+    }
   }
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun, flush_threshold);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -396,15 +396,11 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
-  io::StringFile sfile;
-  error_code ec = serializer_->FlushToSink(&sfile, flush_state);
-  CHECK(!ec);  // always succeeds
+void SliceSnapshot::HandleFlushData(std::string data) {
+  if (data.empty())
+    return;
 
-  size_t serialized = sfile.val.size();
-  if (serialized == 0)
-    return 0;
-
+  size_t serialized = data.size();
   uint64_t id = rec_id_++;
 
   if (use_background_mode_) {
@@ -427,7 +423,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  consumer_->ConsumeData(std::move(sfile.val), cntx_);
+  consumer_->ConsumeData(std::move(data), cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;
@@ -442,6 +438,15 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   }
 
   VLOG(2) << "Pushed with Serialize() " << serialized;
+}
+
+size_t SliceSnapshot::FlushSerialized() {
+  io::StringFile sfile;
+  error_code ec = serializer_->FlushToSink(&sfile, SerializerBase::FlushState::kFlushEndEntry);
+  CHECK(!ec);  // always succeeds
+
+  size_t serialized = sfile.val.size();
+  HandleFlushData(std::move(sfile.val));
   return serialized;
 }
 
@@ -450,7 +455,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushSerialized(FlushState::kFlushEndEntry);
+  size_t serialized = FlushSerialized();
 
   if (!delayed_entries_.empty()) {
     // Async bucket serialization might have accumulated some delayed values.
@@ -479,7 +484,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     } while (!delayed_entries_.empty());
 
     // blocking point.
-    serialized += FlushSerialized(FlushState::kFlushEndEntry);
+    serialized += FlushSerialized();
   }
   return serialized > 0;
 }

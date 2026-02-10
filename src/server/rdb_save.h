@@ -240,8 +240,13 @@ class SerializerBase {
 
 class RdbSerializer : public SerializerBase {
  public:
-  explicit RdbSerializer(CompressionMode compression_mode,
-                         std::function<void(size_t, FlushState)> flush_fun = {});
+  // flush_fun is called when internal buffer exceeds flush_threshold during large value
+  // serialization. The callback receives the extracted data directly, eliminating the need to call
+  // back into the serializer.
+  using FlushFun = std::function<void(std::string, FlushState)>;
+
+  explicit RdbSerializer(CompressionMode compression_mode, FlushFun flush_fun = {},
+                         size_t flush_threshold = 0);
 
   ~RdbSerializer();
 
@@ -291,7 +296,8 @@ class RdbSerializer : public SerializerBase {
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
-  std::function<void(size_t, FlushState)> flush_fun_;
+  FlushFun flush_fun_;
+  size_t flush_threshold_ = 0;
 };
 
 }  // namespace dfly
