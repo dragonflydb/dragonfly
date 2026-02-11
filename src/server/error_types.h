@@ -52,7 +52,7 @@ using AggregateError = AggregateValue<std::error_code>;
 // Thread safe utility to store the first non OK status.
 using AggregateStatus = AggregateValue<facade::OpStatus>;
 static_assert(bool(facade::OpStatus::OK) == false,
-              "Default intitialization should be a falsy OK value");
+              "Default initialization should be a falsy OK value");
 
 // Error wrapper, that stores error_code and optional string message.
 class GenericError {
