@@ -6,6 +6,8 @@
 
 #include "redis/sds.h"
 
+#define HLL_REGISTERS 16384
+
 /* This version of hyperloglog, forked from Redis, only supports using the dense format of HLL.
  * The reason is that it is of a fixed size, which makes it easier to integrate into Dragonfly.
  * We do support converting of existing sprase-encoded HLL into dense-encoded, which can be useful
@@ -27,7 +29,6 @@ enum HllValidness isValidHLL(struct HllBufferPtr hll_ptr);
 
 size_t getDenseHllSize();
 size_t getSparseHllInitSize();
-
 
 int initSparseHll(struct HllBufferPtr hll_ptr);
 /* Writes into `hll_ptr` an empty dense-encoded HLL.
@@ -61,10 +62,9 @@ int64_t pfcountMulti(struct HllBufferPtr* hlls, size_t hlls_count);
  * `out_hll` *can* be one of the elements in `in_hlls`. */
 int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBufferPtr out_hll);
 
-
 /* PFDEBUG helpers. */
-/* Reads all HLL_REGISTERS (16384) register values from a dense HLL into regs_out.
- * Returns 0 on success, -1 if not a valid dense HLL. */
+/* Reads all HLL_REGISTERS (16384) register values from a dense-encoded HLL into regs_out.
+ * Returns 0 on success, -1 if the HLL is unstable or not dense-encoded. */
 int pfDebugGetReg(struct HllBufferPtr hll_ptr, int* regs_out);
 
 /* Decodes a sparse HLL into human-readable format written to out_buf.

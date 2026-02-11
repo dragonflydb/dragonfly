@@ -6,6 +6,7 @@ extern "C" {
 #include "redis/hyperloglog.h"
 }
 
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
@@ -331,7 +332,7 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
   string_view subcmd = ArgS(args, 0);
   string_view key = ArgS(args, 1);
 
-  if (strcasecmp(subcmd.data(), "GETREG") == 0) {
+  if (absl::EqualsIgnoreCase(subcmd, "GETREG")) {
     auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<vector<int>> {
       auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
       auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
@@ -343,7 +344,7 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
       if (!ConvertToDenseIfNeeded(&hll)) {
         return OpStatus::CORRUPTED_HLL;
       }
-      vector<int> regs(16384);
+      vector<int> regs(HLL_REGISTERS);
       if (pfDebugGetReg(StringToHllPtr(hll), regs.data()) != 0) {
         return OpStatus::INVALID_VALUE;
       }
@@ -357,12 +358,20 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
       for (int val : regs) {
         rb->SendLong(val);
       }
-    } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-      rb->SendError("The specified key does not exist");
     } else {
-      rb->SendError(kInvalidHllError);
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
     }
-  } else if (strcasecmp(subcmd.data(), "DECODE") == 0) {
+  } else if (absl::EqualsIgnoreCase(subcmd, "DECODE")) {
     auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
       auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
       auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
@@ -373,25 +382,36 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
       it.value()->second.GetString(&hll);
       int enc = pfDebugGetEncoding(StringToHllPtr(hll));
       if (enc != 1) {
-        return OpStatus::INVALID_VALUE;
+        return OpStatus::INVALID_VALUE;  // Not sparse
       }
-      char buf[64 * 1024];
-      int res = pfDebugDecode(StringToHllPtr(hll), buf, sizeof(buf));
+      vector<char> buf(64 * 1024);
+      int res = pfDebugDecode(StringToHllPtr(hll), buf.data(), buf.size());
       if (res != 0) {
         return OpStatus::INVALID_VALUE;
       }
-      return string(buf);
+      return string(buf.data());
     };
 
     auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     if (result.ok()) {
       rb->SendBulkString(result.value());
-    } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-      rb->SendError("The specified key does not exist");
     } else {
-      rb->SendError("HLL encoding is not sparse");
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        case OpStatus::INVALID_VALUE:
+          rb->SendError("HLL encoding is not sparse");
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
     }
-  } else if (strcasecmp(subcmd.data(), "ENCODING") == 0) {
+  } else if (absl::EqualsIgnoreCase(subcmd, "ENCODING")) {
     auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
       auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
       auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
@@ -399,8 +419,9 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
         return it.status();
       }
       string hll;
-      string_view hll_view = it.value()->second.GetSlice(&hll);
-      return pfDebugGetEncoding(StringToHllPtr(hll_view));
+      // Use GetString to ensure we have a contiguous string for StringToHllPtr
+      it.value()->second.GetString(&hll);
+      return pfDebugGetEncoding(StringToHllPtr(hll));
     };
 
     auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -412,12 +433,20 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
       } else {
         rb->SendError(kInvalidHllError);
       }
-    } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-      rb->SendError("The specified key does not exist");
     } else {
-      rb->SendError(kInvalidHllError);
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
     }
-  } else if (strcasecmp(subcmd.data(), "TODENSE") == 0) {
+  } else if (absl::EqualsIgnoreCase(subcmd, "TODENSE")) {
     auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
       auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
       auto res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_STRING);
@@ -443,10 +472,18 @@ void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
     auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     if (result.ok()) {
       rb->SendLong(result.value());
-    } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-      rb->SendError("The specified key does not exist");
     } else {
-      rb->SendError(kInvalidHllError);
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
     }
   } else {
     rb->SendError(absl::StrCat("Unknown PFDEBUG subcommand '", subcmd, "'"));
