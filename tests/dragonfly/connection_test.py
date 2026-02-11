@@ -1607,3 +1607,24 @@ async def test_quit_in_pipeline(df_server: DflyInstance):
 
     assert res[:NUM_KEYS] == [1] * NUM_KEYS, f"Expected {NUM_KEYS} DEL replies, got: {res}"
     assert res[NUM_KEYS] in (b"OK", True), f"Expected QUIT OK reply, got: {res[NUM_KEYS]}"
+
+
+async def test_tls_partial_header_read(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
+):
+    server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
+
+    # Connect with raw socket and send only 1 byte (less than the 2-byte TLS header check)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect(("localhost", server.port))
+        # Send 1 byte (less than the 2-byte TLS header that dragonfly expects)
+        sock.send(b"\x16")
+
+    # If the server crashes due to UB, it will fail. Otherwise this test passes.
+    # The server should handle this gracefully without crashing.
+    await asyncio.sleep(0.5)  # Give server time to handle the connection
+
+    # Verify server is still alive by making a valid connection
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    assert await client.ping()
