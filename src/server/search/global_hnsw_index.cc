@@ -42,11 +42,11 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
 
   // We make a copy of vector data when:
   // 1. Data type is JSON. This is because JSON object is not represented as contiguous memory.
-  // 2. Data type is HASH and vector data memory size is smaller than treshold for ListPack
+  // 2. Data type is HASH and vector data memory size is smaller than threshold for listpack
   // encoding.
-  //    We use pessimistic approach for decision and expect that ONLY VECTOR data field is used.
+  //    We use pesimistic approach for decision and expect that ONLY VECTOR data field is used.
   //    When HSET object is created function `IsGoodForListpack` decides if object should be encoded
-  //    as ListPack or StringMap. Problem with ListPack encoding is that vector memory, if
+  //    as listpack or StringMap. Problem with listpack encoding is that vector memory, if
   //    referenced, can have wrong alignment for vector distance operations.
   const bool copy_vector =
       (data_type == DocIndex::JSON) || (params.dim * 4 < server.max_listpack_map_bytes);
