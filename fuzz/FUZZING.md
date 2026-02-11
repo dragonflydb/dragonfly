@@ -42,8 +42,8 @@ cd fuzz
 ./run_fuzzer.sh
 ```
 
-By default the fuzzer uses 1 proactor thread for deterministic execution, which
-maximizes AFL++ stability. Override with `AFL_PROACTOR_THREADS=2` if needed.
+The fuzzer uses 2 proactor threads by default to maximize race condition
+detection. Override with `AFL_PROACTOR_THREADS=N` if needed.
 
 ## AFL_PERSISTENT_RECORD (Stateful Crash Replay)
 
@@ -105,10 +105,13 @@ nc localhost 6379 < artifacts/resp/default/crashes/id:000000,...
 
 ## Seed Corpus
 
-The `seeds/resp/` directory contains 35 seed files covering major command families:
+The `seeds/resp/` directory contains 54 seed files covering all major command families:
 string, list, hash, set, sorted set, stream, JSON, bitfield, bitops, geo,
-HyperLogLog, Bloom filter, transactions, pub/sub, scripting, scan, key ops
-(COPY, RENAME, SORT), and server introspection (CLIENT, CONFIG, MEMORY, OBJECT).
+HyperLogLog, Bloom filter, transactions, pub/sub, scripting, search (FT.*),
+ACL, scan, key/expire operations, and server introspection.
+
+Seeds use multi-command sequences that first create state then exercise
+operations on it, ensuring deep code path coverage beyond the parser.
 
 To add a new seed, create a file with valid RESP-encoded commands using `\n` line endings:
 

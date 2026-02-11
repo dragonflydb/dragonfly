@@ -19,7 +19,7 @@ SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
 TIMEOUT="500"
 FUZZ_TARGET="$BUILD_DIR/dragonfly"
-AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-1}"
+AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
 
 print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -68,7 +68,7 @@ show_config() {
     echo "  Proactor threads: ${AFL_PROACTOR_THREADS}"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
-    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 1)"
+    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 2)"
     echo ""
 }
 
