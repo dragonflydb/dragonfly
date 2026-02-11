@@ -378,13 +378,18 @@ void JournalStreamer::ThrottleIfNeeded() {
   }
 }
 
-void JournalStreamer::WaitForInflightToComplete() {
+void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
+  const auto start = chrono::steady_clock::now();
+  const auto max_timeout = start + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
   while (in_flight_bytes_) {
     auto next = chrono::steady_clock::now() + 1s;
     std::cv_status status =
         waker_.await_until([this] { return this->in_flight_bytes_ == 0; }, next);
     LOG_IF(WARNING, status == std::cv_status::timeout)
         << "Waiting for inflight bytes " << in_flight_bytes_;
+
+    if (with_timeout && next >= max_timeout)
+      cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
 
@@ -512,6 +517,10 @@ void RestoreStreamer::SendFinalize(long attempt) {
           << ", throttle on db update: " << stats_.throttle_on_db_update
           << ", throttle usec on db update: " << stats_.throttle_usec_on_db_update
           << ", iter_skips: " << stats_.iter_skips;
+
+  // Drain all pending journal data before sending the finalize marker.
+  // At this point client pause is active, so no new entries can arrive.
+  WaitForInflightToComplete(true);
 
   journal::Entry entry(journal::Op::LSN, attempt);
 

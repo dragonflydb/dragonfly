@@ -59,7 +59,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return cntx_->IsRunning();
   }
 
-  void WaitForInflightToComplete();
+  void WaitForInflightToComplete(bool with_timeout = false);
 
   size_t inflight_bytes() const {
     return in_flight_bytes_;
@@ -120,10 +120,6 @@ class RestoreStreamer : public JournalStreamer {
   bool Cancel() override;
 
   void SendFinalize(long attempt);
-
-  // Expose methods for migration synchronization
-  using JournalStreamer::UsedBytes;
-  using JournalStreamer::WaitForInflightToComplete;
 
  private:
   void OnDbChange(DbIndex db_index, const ChangeReq& req);
