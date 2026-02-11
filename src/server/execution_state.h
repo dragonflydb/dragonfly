@@ -124,7 +124,7 @@ class ExecutionState {
   // If this is the first error that occured, then the error handler is run
   // and the context state set to ERROR.
   // If the state is CANCELLED does nothing
-  template <typename... T> GenericError ReportError(T... ts) {
+  template <typename... T> GenericError ReportError(T&&... ts) {
     return ReportErrorInternal(GenericError{std::forward<T>(ts)...});
   }
 
