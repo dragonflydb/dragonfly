@@ -227,4 +227,34 @@ TEST_F(HllFamilyTest, MergeWithInvalidHllFormat) {
               ErrArg("INVALIDOBJ Corrupted HLL object detected."));
 }
 
+TEST_F(HllFamilyTest, PFDebugEncoding) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a", "b", "c"}), 1);
+  auto resp = Run({"pfdebug", "encoding", "key"});
+  EXPECT_EQ(resp, "dense");
+}
+
+TEST_F(HllFamilyTest, PFDebugGetReg) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a", "b", "c"}), 1);
+  auto resp = Run({"pfdebug", "getreg", "key"});
+  EXPECT_THAT(resp, ArrLen(16384));
+}
+
+TEST_F(HllFamilyTest, PFDebugToDense) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a"}), 1);
+  // Dragonfly stores HLLs as dense internally, so TODENSE should return 0
+  auto resp = Run({"pfdebug", "todense", "key"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(HllFamilyTest, PFDebugUnknown) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a"}), 1);
+  auto resp = Run({"pfdebug", "badcmd", "key"});
+  EXPECT_THAT(resp, ErrArg("Unknown PFDEBUG subcommand 'badcmd'"));
+}
+
+TEST_F(HllFamilyTest, PFDebugNonExistent) {
+  auto resp = Run({"pfdebug", "encoding", "nonexistent"});
+  EXPECT_THAT(resp, ErrArg("The specified key does not exist"));
+}
+
 }  // namespace dfly

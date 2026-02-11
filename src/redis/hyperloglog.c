@@ -1433,3 +1433,72 @@ int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBuffer
 
   return C_OK;
 }
+
+int pfDebugGetReg(struct HllBufferPtr hll_ptr, int* regs_out) {
+  struct hllhdr* hdr = (struct hllhdr*)hll_ptr.hll;
+  if (hdr->encoding != HLL_DENSE) {
+    return -1;
+  }
+  int j;
+  for (j = 0; j < HLL_REGISTERS; j++) {
+    uint8_t val;
+    HLL_DENSE_GET_REGISTER(val, hdr->registers, j);
+    regs_out[j] = val;
+  }
+  return 0;
+}
+
+int pfDebugDecode(struct HllBufferPtr hll_ptr, char* out_buf, size_t out_buf_size) {
+  struct hllhdr* hdr = (struct hllhdr*)hll_ptr.hll;
+  if (hdr->encoding != HLL_SPARSE) {
+    return -1;
+  }
+
+  uint8_t* p = hll_ptr.hll;
+  uint8_t* end = p + hll_ptr.size;
+  p += HLL_HDR_SIZE;
+
+  size_t pos = 0;
+  while (p < end) {
+    int runlen, regval;
+    int written;
+
+    if (HLL_SPARSE_IS_ZERO(p)) {
+      runlen = HLL_SPARSE_ZERO_LEN(p);
+      p++;
+      written = snprintf(out_buf + pos, out_buf_size - pos, "z:%d ", runlen);
+    } else if (HLL_SPARSE_IS_XZERO(p)) {
+      runlen = HLL_SPARSE_XZERO_LEN(p);
+      p += 2;
+      written = snprintf(out_buf + pos, out_buf_size - pos, "Z:%d ", runlen);
+    } else {
+      runlen = HLL_SPARSE_VAL_LEN(p);
+      regval = HLL_SPARSE_VAL_VALUE(p);
+      p++;
+      written = snprintf(out_buf + pos, out_buf_size - pos, "v:%d,%d ", regval, runlen);
+    }
+
+    if (written < 0 || pos + written >= out_buf_size) {
+      return -2;
+    }
+    pos += written;
+  }
+
+  /* Remove trailing space. */
+  if (pos > 0 && out_buf[pos - 1] == ' ') {
+    out_buf[pos - 1] = '\0';
+  } else {
+    out_buf[pos] = '\0';
+  }
+  return 0;
+}
+
+int pfDebugGetEncoding(struct HllBufferPtr hll_ptr) {
+  struct hllhdr* hdr = (struct hllhdr*)hll_ptr.hll;
+  if (hdr->encoding == HLL_DENSE) {
+    return 0;
+  } else if (hdr->encoding == HLL_SPARSE) {
+    return 1;
+  }
+  return -1;
+}
