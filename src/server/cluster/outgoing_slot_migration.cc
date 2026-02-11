@@ -91,6 +91,54 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.Run();
   }
 
+  // Wait for journal streamer to flush all pending changes and stabilize
+  void WaitForCompletion() {
+    using namespace std::chrono_literals;
+
+    // Wait for a stabilization period where no new data arrives
+    // This ensures the journal streamer has captured all ongoing writes
+    constexpr auto kStabilizationPeriod = 100ms;
+    constexpr int kMaxAttempts = 100;
+
+    size_t last_bytes = 0;
+    int stable_count = 0;
+
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+      // Exit early if an error occurred
+      if (!exec_st_.IsRunning()) {
+        VLOG(1) << "Migration stream interrupted by error after " << attempt << " attempts";
+        return;
+      }
+
+      // First wait for any inflight data to complete
+      streamer_.WaitForInflightToComplete();
+
+      // Check current pending bytes
+      size_t current_bytes = streamer_.UsedBytes();
+
+      // If no data is pending and it's been stable for at least 2 iterations, we're done
+      if (current_bytes == 0 && last_bytes == 0 && stable_count >= 1) {
+        VLOG(1) << "Migration stream stabilized after " << attempt << " attempts";
+        break;
+      }
+
+      // Track stability
+      if (current_bytes == last_bytes) {
+        stable_count++;
+      } else {
+        stable_count = 0;
+      }
+
+      last_bytes = current_bytes;
+      ThisFiber::SleepFor(kStabilizationPeriod);
+    }
+
+    // Final flush - only if no error occurred
+    if (exec_st_.IsRunning()) {
+      streamer_.WaitForInflightToComplete();
+    }
+  }
+
   void Cancel() {
     // Shutdown socket and allow IO loops to return.
     ShutdownSocket();
@@ -307,6 +355,13 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([](auto& migration) { migration->RunSync(); });
+
+    if (!exec_st_.IsRunning()) {
+      continue;
+    }
+
+    // Wait for all pending journal entries to be flushed before finalizing
+    OnAllShards([](auto& migration) { migration->WaitForCompletion(); });
 
     if (!exec_st_.IsRunning()) {
       continue;

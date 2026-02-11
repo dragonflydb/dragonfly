@@ -121,6 +121,10 @@ class RestoreStreamer : public JournalStreamer {
 
   void SendFinalize(long attempt);
 
+  // Expose methods for migration synchronization
+  using JournalStreamer::UsedBytes;
+  using JournalStreamer::WaitForInflightToComplete;
+
  private:
   void OnDbChange(DbIndex db_index, const ChangeReq& req);
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
