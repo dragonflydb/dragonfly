@@ -14,7 +14,7 @@
 #include "facade/redis_parser.h"
 #include "io/io_buf.h"
 #include "server/cluster/cluster_defs.h"
-#include "server/common.h"
+#include "server/error_types.h"
 #include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/protocol_client.h"

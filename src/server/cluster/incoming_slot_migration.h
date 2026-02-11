@@ -5,7 +5,7 @@
 
 #include "helio/util/fiber_socket_base.h"
 #include "server/cluster/cluster_defs.h"
-#include "server/common.h"
+#include "server/error_types.h"
 
 namespace dfly {
 class Service;

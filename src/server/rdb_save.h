@@ -15,7 +15,7 @@ extern "C" {
 #include "base/pod_array.h"
 #include "io/io.h"
 #include "io/io_buf.h"
-#include "server/common.h"
+#include "server/error_types.h"
 #include "server/detail/compressor.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
