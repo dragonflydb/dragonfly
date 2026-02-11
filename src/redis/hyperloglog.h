@@ -28,7 +28,6 @@ enum HllValidness isValidHLL(struct HllBufferPtr hll_ptr);
 size_t getDenseHllSize();
 size_t getSparseHllInitSize();
 
-
 int initSparseHll(struct HllBufferPtr hll_ptr);
 /* Writes into `hll_ptr` an empty dense-encoded HLL.
  * Returns 0 upon success, or a negative number when `hll_ptr.size` is different from
@@ -61,8 +60,9 @@ int64_t pfcountMulti(struct HllBufferPtr* hlls, size_t hlls_count);
  * `out_hll` *can* be one of the elements in `in_hlls`. */
 int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBufferPtr out_hll);
 
-/* Runs internal HyperLogLog self-test. Returns 0 on success.
- * On failure returns -1 and writes error message to err_buf. */
-int pfSelfTest(char* err_buf, size_t err_buf_size);
+/* Performs a self-test of the HLL algorithm.
+ * Returns 0 on success, -1 on error (with error message in err_buf).
+ * iterations: number of insertions for approximation error test (default 10000000). */
+int pfSelfTest(char* err_buf, size_t err_buf_size, int64_t iterations);
 
 #endif

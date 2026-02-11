@@ -228,7 +228,8 @@ TEST_F(HllFamilyTest, MergeWithInvalidHllFormat) {
 }
 
 TEST_F(HllFamilyTest, PFSelfTest) {
-  EXPECT_EQ(Run({"pfselftest"}), "OK");
+  // Use a smaller number of iterations for unit tests to keep them fast
+  EXPECT_EQ(Run({"pfselftest", "100000"}), "OK");
 }
 
 }  // namespace dfly

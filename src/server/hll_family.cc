@@ -326,8 +326,20 @@ void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
 void PFSelfTest(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  int64_t iterations = 10000000;
+
+  if (args.size() > 1) {
+    if (args.size() > 2) {
+      return rb->SendError(kSyntaxErr);
+    }
+    string_view arg = ArgS(args, 1);
+    if (!absl::SimpleAtoi(arg, &iterations) || iterations <= 0) {
+      return rb->SendError(kInvalidIntErr);
+    }
+  }
+
   char err_buf[256];
-  int result = pfSelfTest(err_buf, sizeof(err_buf));
+  int result = pfSelfTest(err_buf, sizeof(err_buf), iterations);
   if (result == 0) {
     rb->SendOk();
   } else {
@@ -343,7 +355,7 @@ void RegisterHllFamily(CommandRegistry* registry) {
   *registry << CI{"PFADD", CO::FAST | CO::JOURNALED, -3, 1, 1}.SetHandler(PFAdd)
             << CI{"PFCOUNT", CO::READONLY, -2, 1, -1}.SetHandler(PFCount)
             << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1}.SetHandler(PFMerge)
-            << CI{"PFSELFTEST", CO::ADMIN | CO::LOADING, 1, 0, 0}.SetHandler(PFSelfTest);
+            << CI{"PFSELFTEST", CO::ADMIN | CO::LOADING, -1, 0, 0}.SetHandler(PFSelfTest);
 }
 
 }  // namespace dfly
