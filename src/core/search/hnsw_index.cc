@@ -441,7 +441,6 @@ std::vector<HnswNodeData> HnswVectorIndex::GetNodesRange(size_t start, size_t en
 void HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
                                        const HnswIndexMetadata& metadata) {
   adapter_->RestoreFromNodes(nodes, metadata);
-  restored_ = true;
 }
 
 bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,
