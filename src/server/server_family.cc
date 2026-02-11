@@ -391,6 +391,19 @@ void ClientGetName(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void ClientInfo(CmdArgList args, CommandContext* cmd_cntx) {
+  if (!args.empty()) {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
+  }
+  auto* conn = cmd_cntx->conn();
+  string info = conn->GetClientInfo();
+
+  // redis-py (5expects these fields. We append dummy values to keep the output parsable.
+  absl::StrAppend(&info, " db=", cmd_cntx->server_conn_cntx()->db_index(), "\r\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  return rb->SendBulkString(info);
+}
+
 void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
                 CommandContext* cmd_cntx) {
   if (!args.empty()) {
@@ -1485,7 +1498,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
   return result;
 }
 
-enum MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
+enum class MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
 const char* MetricTypeName(MetricType type) {
   switch (type) {
@@ -1836,7 +1849,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     }
 
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
-                       MetricType::HISTOGRAM, &command_metrics);
+                       MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
@@ -1962,13 +1975,13 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
 
-  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
-                            m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_task_invocation_total, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
-                            m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_attempt_total, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
-                            m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
@@ -2481,6 +2494,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made to specified local address",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "INFO",
+      "    Return information about the current client connection.",
       "LIST",
       "    Return information about client connections.",
       "UNPAUSE",
@@ -2512,6 +2527,8 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
     return ClientSetName(sub_args, cmd_cntx);
   } else if (sub_cmd == "GETNAME") {
     return ClientGetName(sub_args, cmd_cntx);
+  } else if (sub_cmd == "INFO") {
+    return ClientInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
