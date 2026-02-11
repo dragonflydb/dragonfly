@@ -1601,15 +1601,10 @@ async def test_tls_partial_header_read(
     server.start()
 
     # Connect with raw socket and send only 1 byte (less than the 2-byte TLS header check)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect(("localhost", server.port))
         # Send 1 byte (less than the 2-byte TLS header that dragonfly expects)
         sock.send(b"\x16")
-        # Close immediately after sending partial data
-        time.sleep(0.1)  # Give server time to process
-    finally:
-        sock.close()
 
     # If the server crashes due to UB, it will fail. Otherwise this test passes.
     # The server should handle this gracefully without crashing.
