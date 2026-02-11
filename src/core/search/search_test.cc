@@ -956,13 +956,13 @@ TEST_P(HnswSerializationTest, RoundTrip) {
 
   HnswVectorIndex original(params, /*copy_vector=*/true);
 
-  // Build deterministic vectors and populate the original index
-  srand(42);
+  std::mt19937 rng(42);
+  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
   vector<MockedDocument> docs(num_elements);
   for (size_t i = 0; i < num_elements; i++) {
     vector<float> coords(dim);
     for (size_t d = 0; d < dim; d++)
-      coords[d] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+      coords[d] = dist(rng);
     docs[i] = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
     original.Add(i, docs[i], "vec");
   }
@@ -984,6 +984,15 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   HnswVectorIndex restored(params, /*copy_vector=*/true);
   restored.SetMetadata(metadata);
   restored.RestoreFromNodes(nodes, metadata);
+
+  // Before UpdateVectorData, all nodes must be marked deleted.
+  // KNN should safely return empty results (no crash from nullptr dereference).
+  if (num_elements > 0) {
+    vector<float> probe(dim, 0.5f);
+    auto pre_results = restored.Knn(probe.data(), 10, std::nullopt);
+    EXPECT_TRUE(pre_results.empty()) << "All nodes should be deleted before UpdateVectorData";
+  }
+
   for (size_t i = 0; i < num_elements; i++)
     restored.UpdateVectorData(i, docs[i], "vec");
 

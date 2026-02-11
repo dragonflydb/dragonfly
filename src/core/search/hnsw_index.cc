@@ -257,8 +257,6 @@ struct HnswlibAdapter {
 
     // Restore each node - directly set up memory and fields
     size_t restored_count = 0;
-    std::vector<size_t> restored_internal_ids;  // Track for cleanup on abort
-    restored_internal_ids.reserve(nodes.size());
 
     for (const auto& node : nodes) {
       size_t internal_id = node.internal_id;
@@ -281,16 +279,11 @@ struct HnswlibAdapter {
              world_.size_data_per_element_);
       world_.setExternalLabel(internal_id, node.global_id);
 
-      // Initialize vector data to a safe default. This prevents crashes during KNN search
-      // if UpdateVectorData is not called for this node (e.g., document was deleted).
-      // In copy mode: zero the vector memory. In borrowed mode: set pointer to nullptr.
+      // In copy mode, zero the vector memory so distance computations don't use
+      // uninitialized data for nodes that are marked deleted.
       if (world_.copy_vector_) {
         char* data_ptr = world_.data_vector_memory_ + internal_id * world_.data_size_;
         memset(data_ptr, 0, world_.data_size_);
-      } else {
-        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
-        char* null_ptr = nullptr;
-        memcpy(ptr_location, &null_ptr, sizeof(void*));
       }
 
       // Allocate upper layer links if needed
@@ -317,12 +310,16 @@ struct HnswlibAdapter {
         std::copy(node.levels_links[lvl].begin(), node.levels_links[lvl].end(), links);
       }
 
-      restored_internal_ids.push_back(internal_id);
-      ++restored_count;
+      // Track restored count so markDeletedInternal can validate internal_id bounds.
+      world_.cur_element_count.store(++restored_count);
+
+      // Mark node as deleted until UpdateVectorData provides valid vector data.
+      // This prevents crashes from dereferencing uninitialised data pointers
+      // (especially in borrowed-vector mode).
+      world_.markDeletedInternal(internal_id);
     }
 
-    // Set the metadata for the graph - use actual restored count for consistency
-    world_.cur_element_count.store(restored_count);
+    // Set the metadata for the graph
     world_.maxlevel_ = metadata.maxlevel;
     world_.enterpoint_node_ = metadata.enterpoint_node;
 
@@ -353,6 +350,13 @@ struct HnswlibAdapter {
       // Borrowed mode: store pointer to external data
       char* ptr_location = world_.getDataPtrByInternalId(internal_id);
       memcpy(ptr_location, &data, sizeof(void*));
+    }
+
+    // Unmark deleted so the node participates in KNN searches now that it
+    // has valid vector data. During RestoreFromNodes all nodes are marked
+    // deleted by default to prevent dereferencing uninitialised data.
+    if (world_.isMarkedDeleted(internal_id)) {
+      world_.unmarkDeletedInternal(internal_id);
     }
   }
 
