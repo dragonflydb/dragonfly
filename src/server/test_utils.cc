@@ -139,8 +139,6 @@ class BaseFamilyTest::TestConnWrapper {
 
   void ClearSink() {
     sink_.Clear();
-    resp_objs_.clear();
-    tmp_str_vec_.clear();
     expr_builder_.Clear();
   }
 
@@ -160,7 +158,6 @@ class BaseFamilyTest::TestConnWrapper {
   std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
 
   RespExprBuilder expr_builder_;
-  std::vector<RESPObj> resp_objs_;
   std::unique_ptr<SinkReplyBuilder> builder_;
 };
 
@@ -640,19 +637,31 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
     DCHECK_EQ(buf_pos, s.size()) << s;
   }
 
-  resp_objs_.push_back(std::move(*obj));
+  // Build expressions from the parsed object. We must consume the RESPObj before
+  // freeing it, since BuildExpr copies string data into owned_strings_.
+  auto& parsed = *obj;
 
+  // The old RedisParser unwraps top-level arrays: elements go directly into res.
+  // We match that behavior here for compatibility with existing tests.
   RespVec res;
-  if (resp_objs_.back().GetType() == RESPObj::Type::ARRAY) {
-    auto arr = resp_objs_.back().As<RESPArray>();
-    if (arr.has_value()) {
+  auto type = parsed.GetType();
+  if (type == RESPObj::Type::ARRAY || type == RESPObj::Type::MAP || type == RESPObj::Type::SET) {
+    auto arr = parsed.As<RESPArray>();
+    if (arr.has_value() && arr->Size() != SIZE_MAX) {
       for (size_t i = 0; i < arr->Size(); ++i) {
         res.push_back(expr_builder_.BuildExpr((*arr)[i]));
       }
+    } else {
+      // Null aggregate (e.g. *-1\r\n) — produce a NIL_ARRAY entry.
+      res.push_back(expr_builder_.BuildExpr(parsed));
     }
   } else {
-    res.push_back(expr_builder_.BuildExpr(resp_objs_.back()));
+    res.push_back(expr_builder_.BuildExpr(parsed));
   }
+
+  // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
+  // reply data on this thread. All needed string data has been copied into
+  // expr_builder_.owned_strings_.
 
   return res;
 }

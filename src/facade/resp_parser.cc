@@ -4,9 +4,72 @@
 
 #include "facade/resp_parser.h"
 
+#include <cstring>
+
 #include "base/logging.h"
 
+extern "C" {
+#include "redis/read.h"
+}
+
 namespace facade {
+
+namespace {
+
+// File-scope storage for original createNil and createArray from the default hiredis functions.
+void* (*g_original_create_nil)(const redisReadTask*) = nullptr;
+void* (*g_original_create_array)(const redisReadTask*, size_t) = nullptr;
+
+// Custom createNil callback that preserves the distinction between null bulk strings ($-1)
+// and null arrays (*-1). The default hiredis createNil discards task->type and always
+// creates REDIS_REPLY_NIL, losing the information that the nil came from an aggregate type.
+// For aggregate nils we create the reply as the original aggregate type with SIZE_MAX elements.
+void* CreateNilPreservingType(const redisReadTask* task) {
+  int type = task->type;
+  bool is_aggregate = (type == REDIS_REPLY_ARRAY || type == REDIS_REPLY_MAP ||
+                       type == REDIS_REPLY_SET || type == REDIS_REPLY_PUSH);
+
+  if (is_aggregate) {
+    // Use the default createArray with 0 elements — it allocates via the correct
+    // allocator (zmalloc) and sets up parent linkage.
+    void* obj = g_original_create_array(task, 0);
+    if (obj == nullptr)
+      return nullptr;
+    // SIZE_MAX sentinel for "null aggregate".
+    static_cast<redisReply*>(obj)->elements = SIZE_MAX;
+    return obj;
+  }
+
+  // Non-aggregate nil ($-1): delegate to the original createNil.
+  return g_original_create_nil(task);
+}
+
+// Custom function table: identical to the default except for createNil.
+redisReplyObjectFunctions g_custom_functions = {};
+
+void InitCustomFunctions() {
+  static bool initialized = false;
+  if (initialized)
+    return;
+
+  // Extract default function pointers from a temporary default reader.
+  redisReader* tmp = redisReaderCreate();
+  g_custom_functions = *tmp->fn;
+  g_original_create_nil = tmp->fn->createNil;
+  g_original_create_array = tmp->fn->createArray;
+  redisReaderFree(tmp);
+
+  // Override createNil with our version that preserves aggregate nil type info.
+  g_custom_functions.createNil = CreateNilPreservingType;
+  initialized = true;
+}
+
+}  // namespace
+
+RESPParser::RESPParser() {
+  InitCustomFunctions();
+  reader_ = redisReaderCreateWithFunctions(&g_custom_functions);
+}
 
 RESPObj::RESPObj(RESPObj&& other) noexcept
     : reply_(other.reply_), needs_to_free_(other.needs_to_free_) {
