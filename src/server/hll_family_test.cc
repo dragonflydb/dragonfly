@@ -227,4 +227,8 @@ TEST_F(HllFamilyTest, MergeWithInvalidHllFormat) {
               ErrArg("INVALIDOBJ Corrupted HLL object detected."));
 }
 
+TEST_F(HllFamilyTest, PFSelfTest) {
+  EXPECT_EQ(Run({"pfselftest"}), "OK");
+}
+
 }  // namespace dfly

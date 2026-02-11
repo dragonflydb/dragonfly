@@ -61,4 +61,8 @@ int64_t pfcountMulti(struct HllBufferPtr* hlls, size_t hlls_count);
  * `out_hll` *can* be one of the elements in `in_hlls`. */
 int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBufferPtr out_hll);
 
+/* Runs internal HyperLogLog self-test. Returns 0 on success.
+ * On failure returns -1 and writes error message to err_buf. */
+int pfSelfTest(char* err_buf, size_t err_buf_size);
+
 #endif

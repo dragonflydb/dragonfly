@@ -32,6 +32,8 @@
 #include "redis/hyperloglog.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "redis/redis_aux.h"
@@ -1432,4 +1434,92 @@ int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBuffer
   HLL_INVALIDATE_CACHE(hdr);
 
   return C_OK;
+}
+
+#define HLL_TEST_CYCLES 1000
+
+int pfSelfTest(char* err_buf, size_t err_buf_size) {
+  unsigned int j, i;
+  uint8_t hll_buf[HLL_DENSE_SIZE + 1];
+  struct hllhdr* hdr = (struct hllhdr*)hll_buf;
+  uint8_t bytecounters[HLL_REGISTERS];
+
+  /* Test 1: access registers.
+   * The test is conceived to test that the different counters of our data
+   * structure are accessible and that setting their values both result in
+   * the correct value to be retained and not affect adjacent values. */
+  memset(hll_buf, 0, sizeof(hll_buf));
+  for (j = 0; j < HLL_TEST_CYCLES; j++) {
+    /* Set the HLL counters and an array of unsigned bytes of the
+     * same size to the same set of random values. */
+    for (i = 0; i < HLL_REGISTERS; i++) {
+      unsigned int r = rand() & HLL_REGISTER_MAX;
+      bytecounters[i] = r;
+      HLL_DENSE_SET_REGISTER(hdr->registers, i, r);
+    }
+    /* Check that we are able to retrieve the same values. */
+    for (i = 0; i < HLL_REGISTERS; i++) {
+      unsigned int val;
+      HLL_DENSE_GET_REGISTER(val, hdr->registers, i);
+      if (val != bytecounters[i]) {
+        snprintf(err_buf, err_buf_size,
+                 "TESTFAILED Register %d should be %d but is %d", i,
+                 (int)bytecounters[i], (int)val);
+        return -1;
+      }
+    }
+  }
+
+  /* Test 2: approximation error.
+   * The test adds unique elements and checks that the estimated value
+   * is always within reasonable bounds. */
+  memset(hll_buf, 0, sizeof(hll_buf));
+  hdr->magic[0] = 'H';
+  hdr->magic[1] = 'Y';
+  hdr->magic[2] = 'L';
+  hdr->magic[3] = 'L';
+  hdr->encoding = HLL_DENSE;
+  memset(hdr->notused, 0, sizeof(hdr->notused));
+  HLL_INVALIDATE_CACHE(hdr);
+
+  double relerr = 1.04 / sqrt(HLL_REGISTERS);
+  int64_t checkpoint = 1;
+  uint64_t seed = (uint64_t)rand() | (uint64_t)rand() << 32;
+  uint64_t ele;
+  struct HllBufferPtr hll_ptr = {.hll = hll_buf, .size = HLL_DENSE_SIZE};
+
+  for (j = 1; j <= 10000000; j++) {
+    ele = j ^ seed;
+    hllDenseAdd(hdr->registers, (unsigned char*)&ele, sizeof(ele));
+
+    /* Check error. */
+    if (j == checkpoint) {
+      int64_t count = pfcountSingle(hll_ptr);
+      if (count < 0) {
+        snprintf(err_buf, err_buf_size, "TESTFAILED pfcountSingle returned error");
+        return -1;
+      }
+      int64_t abserr = checkpoint - count;
+      uint64_t maxerr = ceil(relerr * 6 * checkpoint);
+
+      /* Adjust the max error we expect for cardinality 10
+       * since from time to time it is statistically likely to get
+       * much higher error due to collision, resulting into a false
+       * positive. */
+      if (j == 10)
+        maxerr = 1;
+
+      if (abserr < 0)
+        abserr = -abserr;
+      if (abserr > (int64_t)maxerr) {
+        snprintf(err_buf, err_buf_size,
+                 "TESTFAILED Too big error. card:%llu abserr:%llu",
+                 (unsigned long long)checkpoint, (unsigned long long)abserr);
+        return -1;
+      }
+      checkpoint *= 10;
+    }
+  }
+
+  return 0;
 }
