@@ -430,7 +430,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   seq_cond_.notify_all();
 
   if (!use_background_mode_) {
-    // serializer_->Flush can be quite slow for large values or due compression, therefore
+    // serializer_->Flush can be quite slow for large values or due to compression, therefore
     // we counter-balance CPU over-usage by sleeping.
     // We measure running_cycles before the preemption points, because they reset the counter.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
