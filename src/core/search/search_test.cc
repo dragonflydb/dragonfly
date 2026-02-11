@@ -22,6 +22,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
+#include "core/search/hnsw_index.h"
 #include "core/search/query_driver.h"
 #include "core/search/stateless_allocator.h"
 #include "core/search/vector_utils.h"
@@ -917,6 +918,141 @@ TEST_F(KnnTest, AutoResize) {
 
   EXPECT_EQ(indices.GetAllDocs().size(), 100);
 }
+
+// Parameterized HNSW serialization round-trip test.
+// Parameters: {num_elements, dim, similarity}
+struct HnswSerParam {
+  size_t num_elements;
+  size_t dim;
+  VectorSimilarity sim;
+
+  friend std::ostream& operator<<(std::ostream& os, const HnswSerParam& p) {
+    const char* sim_name[] = {"L2", "IP", "COSINE"};
+    return os << p.num_elements << "el_" << p.dim << "d_" << sim_name[static_cast<int>(p.sim)];
+  }
+};
+
+class HnswSerializationTest : public ::testing::TestWithParam<HnswSerParam> {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+};
+
+TEST_P(HnswSerializationTest, RoundTrip) {
+  const auto [num_elements, dim, sim] = GetParam();
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = dim;
+  params.sim = sim;
+  params.capacity = std::max<size_t>(num_elements, 10);
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex original(params, /*copy_vector=*/true);
+
+  // Build deterministic vectors and populate the original index
+  srand(42);
+  vector<MockedDocument> docs(num_elements);
+  for (size_t i = 0; i < num_elements; i++) {
+    vector<float> coords(dim);
+    for (size_t d = 0; d < dim; d++)
+      coords[d] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+    docs[i] = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+    original.Add(i, docs[i], "vec");
+  }
+
+  // Serialize
+  auto metadata = original.GetMetadata();
+  ASSERT_EQ(metadata.cur_element_count, num_elements);
+
+  auto nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  ASSERT_EQ(nodes.size(), num_elements);
+
+  // Verify node data integrity
+  for (const auto& node : nodes) {
+    EXPECT_EQ(node.levels_links.size(), static_cast<size_t>(node.level + 1));
+    EXPECT_GT(node.TotalSize(), 0u);
+  }
+
+  // Deserialize into a fresh index
+  HnswVectorIndex restored(params, /*copy_vector=*/true);
+  restored.SetMetadata(metadata);
+  restored.RestoreFromNodes(nodes, metadata);
+  for (size_t i = 0; i < num_elements; i++)
+    restored.UpdateVectorData(i, docs[i], "vec");
+
+  // Metadata must match
+  auto rm = restored.GetMetadata();
+  EXPECT_EQ(rm.cur_element_count, metadata.cur_element_count);
+  EXPECT_EQ(rm.maxlevel, metadata.maxlevel);
+  EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
+
+  // Graph links must be identical
+  auto restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  ASSERT_EQ(restored_nodes.size(), nodes.size());
+  for (size_t i = 0; i < nodes.size(); i++) {
+    EXPECT_EQ(restored_nodes[i].internal_id, nodes[i].internal_id);
+    EXPECT_EQ(restored_nodes[i].global_id, nodes[i].global_id);
+    EXPECT_EQ(restored_nodes[i].level, nodes[i].level);
+    ASSERT_EQ(restored_nodes[i].levels_links.size(), nodes[i].levels_links.size());
+    for (size_t lvl = 0; lvl < nodes[i].levels_links.size(); lvl++)
+      EXPECT_EQ(restored_nodes[i].levels_links[lvl], nodes[i].levels_links[lvl]);
+  }
+
+  if (num_elements == 0)
+    return;
+
+  // KNN results must match for several queries
+  auto compare_knn = [&](vector<float> query, size_t k) {
+    auto orig = original.Knn(query.data(), k, std::nullopt);
+    auto rest = restored.Knn(query.data(), k, std::nullopt);
+    ASSERT_EQ(orig.size(), rest.size());
+    for (size_t j = 0; j < orig.size(); j++) {
+      EXPECT_EQ(orig[j].second, rest[j].second);
+      EXPECT_NEAR(orig[j].first, rest[j].first, 1e-5);
+    }
+  };
+
+  size_t k = std::min<size_t>(num_elements, 10);
+  compare_knn(vector<float>(dim, 0.0f), k);
+  compare_knn(vector<float>(dim, 0.5f), k);
+  compare_knn(vector<float>(dim, 1.0f), k);
+
+  // Filtered KNN must also match
+  vector<GlobalDocId> allowed;
+  for (size_t i = 0; i < num_elements; i += 2)
+    allowed.push_back(i);
+  size_t fk = std::min<size_t>(allowed.size(), 5);
+  vector<float> q(dim, 0.5f);
+  auto orig_f = original.Knn(q.data(), fk, std::nullopt, allowed);
+  auto rest_f = restored.Knn(q.data(), fk, std::nullopt, allowed);
+  ASSERT_EQ(orig_f.size(), rest_f.size());
+  for (size_t i = 0; i < orig_f.size(); i++) {
+    EXPECT_EQ(orig_f[i].second, rest_f[i].second);
+    EXPECT_NEAR(orig_f[i].first, rest_f[i].first, 1e-5);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
+                         testing::Values(HnswSerParam{0, 2, VectorSimilarity::L2},
+                                         HnswSerParam{10, 2, VectorSimilarity::L2},
+                                         HnswSerParam{1000, 4, VectorSimilarity::L2},
+                                         HnswSerParam{10000, 8, VectorSimilarity::L2},
+                                         HnswSerParam{10, 3, VectorSimilarity::COSINE},
+                                         HnswSerParam{1000, 4, VectorSimilarity::COSINE},
+                                         HnswSerParam{10, 2, VectorSimilarity::IP},
+                                         HnswSerParam{1000, 4, VectorSimilarity::IP}),
+                         [](const testing::TestParamInfo<HnswSerParam>& info) {
+                           std::ostringstream name;
+                           name << info.param;
+                           return name.str();
+                         });
 
 TEST_F(SearchTest, GeoSearch) {
   auto schema = MakeSimpleSchema({{"name", SchemaField::TEXT}, {"location", SchemaField::GEO}});
