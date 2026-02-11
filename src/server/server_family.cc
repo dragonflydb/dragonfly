@@ -1485,7 +1485,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
   return result;
 }
 
-enum MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
+enum class MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
 const char* MetricTypeName(MetricType type) {
   switch (type) {
@@ -1836,7 +1836,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     }
 
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
-                       MetricType::HISTOGRAM, &command_metrics);
+                       MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
@@ -1962,13 +1962,13 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
 
-  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
-                            m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_task_invocation_total, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
-                            m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_attempt_total, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
-                            m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
