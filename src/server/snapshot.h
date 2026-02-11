@@ -143,8 +143,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
-  // The Data is already extracted from the serializer ensuring correct plumbing.
-  // Can block.
+  // The data has already been extracted from the serializer and is owned here, ensuring correct
+  // plumbing and making it safe to move.
   void HandleFlushData(std::string data);
 
   // Calls serializer_->Flush() to extract the remaining data from the serializer
