@@ -147,7 +147,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Can block.
   void HandleFlushData(std::string data);
 
-  // Calls serializer_->FlushToSink() to extract the remaining data from the serializer
+  // Calls serializer_->Flush() to extract the remaining data from the serializer
   // and process it via HandleFlushData().
   // Used for explicit flushes at safe points (e.g. between entries).
   // Can block.

@@ -93,19 +93,19 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   }
 
   size_t flush_threshold = 0;
-  RdbSerializer::FlushFun flush_fun;
+  RdbSerializer::ConsumeFun consume_fun;
   if (allow_flush == SnapshotFlush::kAllow) {
     flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
     if (flush_threshold != 0) {
       // The callback receives data directly from the serializer, no need to call back into it.
-      flush_fun = [this](std::string data, RdbSerializer::FlushState flush_state) {
+      consume_fun = [this](std::string data) {
         HandleFlushData(std::move(data));
         VLOG(2) << "HandleFlushData via callback";
         ++ServerState::tlocal()->stats.big_value_preemptions;
       };
     }
   }
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun, flush_threshold);
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -430,8 +430,8 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   seq_cond_.notify_all();
 
   if (!use_background_mode_) {
-    // FlushToSink can be quite slow for large values or due compression, therefore
-    // we counter-balance CPU over-usage by forcing sleep.
+    // serializer_->Flush can be quite slow for large values or due compression, therefore
+    // we counter-balance CPU over-usage by sleeping.
     // We measure running_cycles before the preemption points, because they reset the counter.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
     ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
@@ -441,12 +441,10 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 }
 
 size_t SliceSnapshot::FlushSerialized() {
-  io::StringFile sfile;
-  error_code ec = serializer_->FlushToSink(&sfile, SerializerBase::FlushState::kFlushEndEntry);
-  CHECK(!ec);  // always succeeds
+  std::string blob = serializer_->Flush(SerializerBase::FlushState::kFlushEndEntry);
 
-  size_t serialized = sfile.val.size();
-  HandleFlushData(std::move(sfile.val));
+  size_t serialized = blob.size();
+  HandleFlushData(std::move(blob));
   return serialized;
 }
 
