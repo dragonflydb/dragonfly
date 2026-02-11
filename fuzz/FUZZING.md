@@ -45,27 +45,30 @@ cd fuzz
 The fuzzer uses 2 proactor threads by default to maximize race condition
 detection. Override with `AFL_PROACTOR_THREADS=N` if needed.
 
-## AFL_PERSISTENT_RECORD (Stateful Crash Replay)
+## Crash Replay (AFL_PERSISTENT_RECORD)
 
-Dragonfly uses AFL++ persistent mode for performance. This means multiple fuzzing iterations run within the same process, and the server accumulates state between iterations.
+Dragonfly uses AFL++ persistent mode where the server accumulates state between
+iterations. A crash at iteration 5000 may depend on state built by inputs 1-4999.
 
-**Problem:** When a crash occurs, AFL++ only saves the last input. But the crash may depend on state accumulated from previous inputs.
-
-**Solution:** `AFL_PERSISTENT_RECORD` saves the last N inputs before a crash, enabling replay of the full sequence.
-
-### Enable Recording
+**Solution:** `run_fuzzer.sh` syncs `AFL_PERSISTENT_RECORD` with `afl_loop_limit`
+(default: 10000). The server restarts every N iterations, and the last N inputs
+are always recorded. This guarantees that on any crash, the **full state history**
+of the current process is available for replay.
 
 ```bash
-# Set number of inputs to record before crash (e.g., last 100 inputs)
-AFL_PERSISTENT_RECORD=100 ./run_fuzzer.sh
+# Default: 10000 iterations, all recorded
+./run_fuzzer.sh
+
+# Custom limit (lower = more restarts, faster replay; higher = deeper state)
+AFL_LOOP_LIMIT=5000 ./run_fuzzer.sh
 ```
 
 When a crash occurs, AFL++ saves files in the crashes directory:
 ```
-crashes/RECORD:000000,cnt:000000  (input N-99)
-crashes/RECORD:000000,cnt:000001  (input N-98)
+crashes/RECORD:000000,cnt:000000  (first input after server start)
+crashes/RECORD:000000,cnt:000001  (second input)
 ...
-crashes/RECORD:000000,cnt:000099  (crashing input)
+crashes/RECORD:000000,cnt:000NNN  (crashing input)
 ```
 
 ### Replay Recorded Crash
