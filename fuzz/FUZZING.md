@@ -2,14 +2,12 @@
 
 ## Install AFL++
 
-For effective fuzzing with crash replay support, AFL++ must be built from source with `AFL_PERSISTENT_RECORD` enabled.
+AFL++ must be built from source with `AFL_PERSISTENT_RECORD` enabled for crash replay.
 
 ```bash
-# Install dependencies
 sudo apt update
 sudo apt install llvm-18-dev clang-18 lld-18 gcc-13-plugin-dev
 
-# Build AFL++ with AFL_PERSISTENT_RECORD support
 git clone --depth=1 --branch v4.34c https://github.com/AFLplusplus/AFLplusplus.git
 cd AFLplusplus
 
@@ -26,11 +24,7 @@ sudo make install
 sudo afl-system-config
 ```
 
-Sets core_pattern and CPU governors for optimal AFL++ performance.
-
 ## Build Dragonfly
-
-The build automatically enables ASAN and UBSAN for maximum bug detection.
 
 ```bash
 cmake -B build-dbg -DUSE_AFL=ON -DCMAKE_BUILD_TYPE=Debug -GNinja
@@ -44,81 +38,66 @@ cd fuzz
 ./run_fuzzer.sh
 ```
 
-The fuzzer uses 2 proactor threads by default to maximize race condition
-detection. Override with `AFL_PROACTOR_THREADS=N` if needed.
+Uses 1 proactor thread by default for stable coverage feedback.
+Override with `AFL_PROACTOR_THREADS=N` if needed.
 
-## Crash Replay (AFL_PERSISTENT_RECORD)
+## Crash Replay
 
-Dragonfly uses AFL++ persistent mode where the server accumulates state between
-iterations. A crash at iteration 5000 may depend on state built by inputs 1-4999.
+Dragonfly uses AFL++ persistent mode — the server accumulates state across
+iterations. A crash at iteration 5000 depends on state built by inputs 1–4999.
 
-**Solution:** `run_fuzzer.sh` syncs `AFL_PERSISTENT_RECORD` with `afl_loop_limit`
-(default: 10000). The server restarts every N iterations, and the last N inputs
-are always recorded. This guarantees that on any crash, the **full state history**
-of the current process is available for replay.
+`run_fuzzer.sh` syncs `AFL_PERSISTENT_RECORD` with `afl_loop_limit`
+(default: 10000). The server restarts every N iterations and the last N inputs
+are recorded, so the full state history is always available on crash.
 
-```bash
-# Default: 10000 iterations, all recorded
-./run_fuzzer.sh
-
-# Custom limit (lower = more restarts, faster replay; higher = deeper state)
-AFL_LOOP_LIMIT=5000 ./run_fuzzer.sh
+When a crash occurs, AFL++ saves:
 ```
-
-When a crash occurs, AFL++ saves files in the crashes directory:
-```
-crashes/RECORD:000000,cnt:000000  (first input after server start)
-crashes/RECORD:000000,cnt:000001  (second input)
+crashes/id:000000,sig:06,...           # the crashing input
+crashes/RECORD:000000,cnt:000000      # first input after server start
+crashes/RECORD:000000,cnt:000001      # second input
 ...
-crashes/RECORD:000000,cnt:000NNN  (crashing input)
+crashes/RECORD:000000,cnt:NNNNNN      # input before the crash
 ```
 
-### Replay Recorded Crash
+### Replay
 
 ```bash
-# Set directory containing RECORD files
-export AFL_PERSISTENT_DIR=./artifacts/resp/default/crashes
+# Start dragonfly (debug build, without AFL++)
+./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=""
 
-# Replay specific record (e.g., record 000000)
-AFL_PERSISTENT_REPLAY=000000 ./build-dbg/dragonfly --port=6379
+# Replay crash 000000
+python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
 ```
 
-This replays all recorded inputs in sequence, reproducing the exact state that led to the crash.
+### Package crash for sharing
 
-### Manual Replay (Alternative)
+```bash
+cd fuzz
+./package_crash.sh 000000
+```
 
-If AFL_PERSISTENT_REPLAY doesn't work, replay manually:
+Creates `crash-000000.tar.gz` with all RECORD files and a replay script.
+
+Creates `crash-000000.tar.gz` containing crash data and `replay_crash.py`.
+The recipient runs:
 
 ```bash
 # Start dragonfly
-./build-dbg/dragonfly --port=6379 &
+./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=""
 
-# Send each recorded input in order
-for f in $(ls crashes/RECORD:000000,cnt:* | sort); do
-    nc localhost 6379 < "$f"
-done
-```
-
-## Replay Simple Crash
-
-For crashes that don't depend on accumulated state:
-
-```bash
-./build-dbg/dragonfly --port=6379 &
-nc localhost 6379 < artifacts/resp/default/crashes/id:000000,...
+# Extract and replay
+tar xzf crash-000000.tar.gz
+cd crash-000000
+python3 replay_crash.py crashes 000000
 ```
 
 ## Seed Corpus
 
-The `seeds/resp/` directory contains 54 seed files covering all major command families:
-string, list, hash, set, sorted set, stream, JSON, bitfield, bitops, geo,
-HyperLogLog, Bloom filter, transactions, pub/sub, scripting, search (FT.*),
-ACL, scan, key/expire operations, and server introspection.
+`seeds/resp/` contains seed files covering major command families:
+string, list, hash, set, sorted set, transactions, pub/sub, geo, HyperLogLog,
+Bloom filter, bitops, copy, rename, sort, scan, and server introspection.
 
-Seeds use multi-command sequences that first create state then exercise
-operations on it, ensuring deep code path coverage beyond the parser.
-
-To add a new seed, create a file with valid RESP-encoded commands using `\n` line endings:
+To add a new seed, create a file with RESP-encoded commands:
 
 ```
 *3
