@@ -134,7 +134,7 @@ struct ConnectionState {
     struct Stats {
       std::string sha;            // TODO: avoid copy via char[40]?
       unsigned num_commands = 0;  // total number of command executed
-      // TODO: Latency measurement only possible with squasing info (or use atomic for everything?)
+      // TODO: Latency measurement only possible with squashing info (or use atomic for everything?)
       // uint64_t command_time_us = 0;
     } stats;
   };

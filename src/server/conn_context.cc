@@ -41,6 +41,9 @@ vector<string> FormatExecSlowlog(const ConnectionState& state) {
 }
 
 vector<string> FormatEvalSlowlog(const ConnectionState& state) {
+  if (!state.script_info)  // EVAL failed to initailize (error)
+    return {};
+
   const auto& sinfo = *state.script_info;
   return {
       sinfo.stats.sha,
@@ -331,6 +334,7 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
     }
     tail_args = aux_slice;
   }
+
   ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
                                               conn->RemoteEndpointStr(), execution_time_usec,
                                               absl::GetCurrentTimeNanos() / 1000);

@@ -1678,11 +1678,10 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
   // Cleanup multi state after dispatching and latency recording finished
   if (auto mck = cid->MultiControlKind(); mck) {
-    auto* conn_cntx = static_cast<ConnectionContext*>(cntx->conn()->cntx());
     if (*mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
-      MultiCleanup(conn_cntx);
+      MultiCleanup(cntx);
     else if (*mck == CO::MultiControlKind::EVAL)
-      conn_cntx->conn_state.script_info.reset();
+      cntx->conn_state.script_info.reset();
   }
 
   return res;
@@ -2267,6 +2266,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
+  // Reset cid to EVAL[] as the context is reused during command dispatch
   absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
     interpreter->ResetStack();
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
