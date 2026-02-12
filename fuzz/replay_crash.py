@@ -7,7 +7,7 @@ This script replays them in order against a running Dragonfly instance.
 
 Usage:
     # Start dragonfly in another terminal:
-    ./build-dbg/dragonfly --port 6379 --logtostderr --proactor_threads 2
+    ./build-dbg/dragonfly --port 6379 --logtostderr --proactor_threads 1
 
     # Replay crash:
     python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
@@ -20,40 +20,25 @@ import sys
 
 
 def send_input(host, port, data):
-    """Send data over 2 concurrent TCP connections. Mirrors SendFuzzInputToServer.
-
-    The fuzzer opens 2 connections per iteration to create concurrent command
-    processing and trigger race conditions with 2 proactor threads.
-    """
-    socks = []
+    """Send data over TCP. Mirrors SendFuzzInputToServer."""
     try:
-        for _ in range(2):
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.2)
-            s.connect((host, port))
-            socks.append(s)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect((host, port))
     except ConnectionRefusedError:
-        for s in socks:
-            s.close()
         print("\033[0;31m[ERROR]\033[0m Connection refused — is Dragonfly running?")
         sys.exit(1)
+
+    try:
+        s.sendall(data)
     except Exception:
         pass
 
-    # Send on both connections concurrently
-    for s in socks:
-        try:
-            s.sendall(data)
-        except Exception:
-            pass
-
-    # Read responses
-    for s in socks:
-        try:
-            s.recv(4096)
-        except Exception:
-            pass
-        s.close()
+    try:
+        s.recv(4096)
+    except Exception:
+        pass
+    s.close()
 
 
 def main():

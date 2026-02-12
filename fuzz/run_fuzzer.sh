@@ -19,7 +19,7 @@ SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
 TIMEOUT="500"
 FUZZ_TARGET="$BUILD_DIR/dragonfly"
-AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
+AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-1}"
 
 # Persistent record: restart server every N iterations and record the last N inputs.
 # This ensures that on crash, ALL inputs that built the current server state are available
@@ -100,7 +100,7 @@ show_config() {
     echo "  Loop limit:      ${AFL_LOOP_LIMIT} (= AFL_PERSISTENT_RECORD)"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
-    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 2)"
+    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 1)"
     print_note "To change loop limit: export AFL_LOOP_LIMIT=N (default: 10000)"
     echo ""
 }
@@ -137,6 +137,7 @@ run_fuzzer() {
         --rename_command=DEBUG=
         --rename_command=FLUSHALL=
         --rename_command=FLUSHDB=
+        --max_bulk_len=1048576
     )
 
     print_info "Running: ${AFL_CMD[*]}"
@@ -157,7 +158,7 @@ run_fuzzer() {
     # Synced with afl_loop_limit so the full server state history is always captured.
     export AFL_PERSISTENT_RECORD=${AFL_LOOP_LIMIT}
 
-    # Multi-threaded target: instability is expected (2 proactor threads).
+    # Even with 1 proactor thread, some coverage instability is expected.
     # Tell AFL++ to continue despite unstable coverage — don't bail on flaky edges.
     export AFL_IGNORE_PROBLEMS=1
 

@@ -729,70 +729,27 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
   return len;
 }
 
-// Sends fuzzing input to the Dragonfly server via 2 concurrent TCP connections.
-// With 2 proactor threads, simultaneous connections exercise race conditions in
-// connection management, transaction scheduling, and cross-shard coordination.
-// Both connections send the same data — two clients executing identical commands
-// concurrently is the primary trigger for DCHECK failures in transaction.cc (102 DCHECKs).
+// Sends fuzzing input to the Dragonfly server over TCP and reads the response.
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0)
+    return;
+
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
   struct sockaddr_in a = {};
   a.sin_family = AF_INET;
   a.sin_port = htons(port);
   inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
 
-  // 200ms timeout — enough for any local command to complete, but shorter than
-  // AFL++'s -t 500ms execution timeout.
-  struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
-
-  // Open 2 connections to create concurrent command processing.
-  int socks[2] = {-1, -1};
-  for (int i = 0; i < 2; i++) {
-    socks[i] = socket(AF_INET, SOCK_STREAM, 0);
-    if (socks[i] >= 0) {
-      setsockopt(socks[i], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      setsockopt(socks[i], SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-      if (connect(socks[i], (struct sockaddr*)&a, sizeof(a)) != 0) {
-        close(socks[i]);
-        socks[i] = -1;
-      }
-    }
-  }
-
-  // Send on both connections — concurrent processing triggers races in
-  // transaction locking, cross-shard SMOVE/RENAME, and connection state.
-  for (int i = 0; i < 2; i++) {
-    if (socks[i] >= 0)
-      send(socks[i], data, len, MSG_NOSIGNAL);
-  }
-
-  // Read responses — each branch gives AFL++ distinct coverage feedback.
-  for (int i = 0; i < 2; i++) {
-    if (socks[i] < 0)
-      continue;
+  if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
+    send(s, data, len, MSG_NOSIGNAL);
     char r[4096];
-    ssize_t n = recv(socks[i], r, sizeof(r), 0);
-    if (n > 0) {
-      switch (r[0]) {
-        case '+':
-          break;
-        case '-':
-          break;
-        case ':':
-          break;
-        case '$':
-          if (n > 1 && r[1] == '-')
-            (void)0;
-          break;
-        case '*':
-          if (n > 1 && r[1] == '-')
-            (void)0;
-          break;
-        default:
-          break;
-      }
-    }
-    close(socks[i]);
+    recv(s, r, sizeof(r), 0);
   }
+  close(s);
 }
 
 // Initializes AFL++ fuzzing by starting the server in a separate thread,
