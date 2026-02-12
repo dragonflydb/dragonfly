@@ -41,7 +41,7 @@ vector<string> FormatExecSlowlog(const ConnectionState& state) {
 }
 
 vector<string> FormatEvalSlowlog(const ConnectionState& state) {
-  if (!state.script_info)  // EVAL failed to initailize (error)
+  if (!state.script_info)  // EVAL failed to initialize (error)
     return {};
 
   const auto& sinfo = *state.script_info;
