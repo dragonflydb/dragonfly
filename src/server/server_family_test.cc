@@ -220,6 +220,52 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
   EXPECT_THAT(resp.GetInt(), 0);
 }
 
+// Test how slowlog captures additional information about heavy commands
+TEST_F(ServerFamilyTest, SlowLogExecEval) {
+  Run({"config", "set", "slowlog_log_slower_than", "0"});
+
+  // Run EXEC
+  {
+    Run({"multi"});
+    Run({"set", "first", "ok"});
+    Run({"set", "second", "ok"});
+    Run({"get", "third"});
+    Run({"exec"});
+  }
+
+  // Run EVAL
+  {
+    const std::string_view script = R"(
+for i, key in ipairs(KEYS) do
+  redis.call('GET', key)
+end
+for i, key in ipairs(KEYS) do
+  redis.call('SET', key, 'some-data')
+end
+return 'OK';
+    )";
+    auto resp = Run({"EVAL", script, "3", "first", "second", "third", "second"});
+    EXPECT_EQ(resp, "OK");
+  }
+
+  size_t found = 0;
+  auto resp = Run({"slowlog", "get"});
+  for (const auto& entry : resp.GetVec()) {
+    const auto& args = entry.GetVec()[3].GetVec();
+    if (args[0] == "EXEC") {
+      EXPECT_THAT(args, ElementsAreArray({"EXEC", "num_cmds: 3", "is_write: 1"}));
+      found++;
+    } else if (args[0] == "EVAL") {
+      const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
+      EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "is_write: 1", "lock_tags: 3",
+                                          "3", "first", "second", "third", "second"}));
+      found++;
+    }
+  }
+
+  EXPECT_EQ(found, 2);
+}
+
 TEST_F(ServerFamilyTest, ClientPause) {
   auto start = absl::Now();
   Run({"CLIENT", "PAUSE", "50"});
