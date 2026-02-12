@@ -90,7 +90,7 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | storage.requests | string | `"128Mi"` | Volume size to request for the PVC |
 | storage.storageClassName | string | `""` | Global StorageClass for Persistent Volume(s) |
 | memcached.enabled | bool | `false` | Enable Memcached protocol support. When enabled, --memcached_port arg is auto-added, container port exposed, and memcached port added to the Service. |
-| memcached.port | int | `11211` | Memcached port number |
+| memcached.port | int | `11211` | Memcached port number. Must not be the same as service.port. |
 | tls.cert | string | `""` | TLS certificate |
 | tls.createCerts | bool | `false` | use cert-manager to automatically create the certificate |
 | tls.duration | string | `"87600h0m0s"` | duration or ttl of the validity of the created certificate |
