@@ -1,4 +1,4 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -31,7 +31,7 @@ class RespExprBuilder {
   std::vector<std::unique_ptr<RespExpr::Vec>> owned_arrays_;
   // Own copies of string data so we don't hold references to zmalloc-allocated
   // hiredis replies (which must be freed on the same thread they were allocated).
-  std::vector<std::unique_ptr<std::string>> owned_strings_;
+  std::vector<std::unique_ptr<char[]>> owned_strings_;
 };
 
 }  // namespace facade

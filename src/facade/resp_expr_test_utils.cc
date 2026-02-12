@@ -1,10 +1,11 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #include "facade/resp_expr_test_utils.h"
 
 #include <cstddef>
+#include <cstring>
 
 namespace facade {
 
@@ -69,8 +70,9 @@ void RespExprBuilder::SetStringPayload(const RESPObj& obj, RespExpr* expr) {
   auto sv = obj.As<std::string_view>().value_or(std::string_view{});
   // Copy the string data so we don't hold references into zmalloc-allocated
   // hiredis replies. The replies can then be freed on their allocating thread.
-  auto owned = std::make_unique<std::string>(sv);
-  expr->u = RespExpr::Buffer{reinterpret_cast<const uint8_t*>(owned->data()), owned->size()};
+  auto owned = std::make_unique<char[]>(sv.size());
+  memcpy(owned.get(), sv.data(), sv.size());
+  expr->u = RespExpr::Buffer{reinterpret_cast<const uint8_t*>(owned.get()), sv.size()};
   expr->has_support = true;
   owned_strings_.emplace_back(std::move(owned));
 }
