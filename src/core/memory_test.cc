@@ -182,12 +182,12 @@ TEST_F(MiHeapTest, FullBinQueueCollection) {
   }
 }
 
-// Test that verifies memory is reclaimed when a heap is abandoned (deleted without freeing
-// allocations). This tests the MI_ABANDON case where mimalloc should properly reclaim pages
-// from the abandoned heap.
+// Test that verifies memory accounting and reclamation behavior when allocations are made in
+// one thread and freed in another after the allocating thread exits. This exercises the
+// MI_ABANDON / cross-thread free handling where mimalloc should properly reclaim pages from
+// the abandoned thread heap once collection runs.
 //
-// This test uses a dedicated arena to isolate the abandoned heap's memory and verify
-// reclamation by checking arena-specific statistics.
+// This test uses the default heap and verifies reclamation by checking its statistics.
 TEST_F(MiHeapTest, AbandonedHeapReclamation) {
   constexpr size_t block_size = 128;
   constexpr size_t num_blocks = 2000;
