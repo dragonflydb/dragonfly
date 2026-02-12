@@ -22,8 +22,15 @@ endif
 # all the release builds are performed by gcc.
 LINKER_FLAGS += -static-libstdc++ -static-libgcc
 
+# Optional ASAN support: make ASAN=1 release
+ifdef ASAN
+SANITIZE_COMPILE_FLAGS = -fsanitize=address -Wno-maybe-uninitialized
+SANITIZE_LINK_FLAGS = -fsanitize=address
+endif
+
 HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
-			  -DCMAKE_EXE_LINKER_FLAGS="$(LINKER_FLAGS)" \
+			  -DCMAKE_CXX_FLAGS="$(SANITIZE_COMPILE_FLAGS)" \
+			  -DCMAKE_EXE_LINKER_FLAGS="$(LINKER_FLAGS) $(SANITIZE_LINK_FLAGS)" \
               -DBoost_USE_STATIC_LIBS=$(HELIO_USE_STATIC_LIBS) \
               -DOPENSSL_USE_STATIC_LIBS=$(HELIO_OPENSSL_USE_STATIC_LIBS) \
               -DENABLE_GIT_VERSION=$(HELIO_ENABLE_GIT_VERSION) \

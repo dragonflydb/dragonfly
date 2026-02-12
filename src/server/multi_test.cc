@@ -893,6 +893,10 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
   }
 }
 
+TEST_F(MultiTest, ScriptFlagsInvalidSha) {
+  EXPECT_THAT(Run({"script", "flags", "short", "allow-undeclared-keys"}), ErrArg(""));
+}
+
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
   --!df flags=allow-undeclared-keys

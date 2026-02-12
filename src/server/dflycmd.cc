@@ -37,8 +37,6 @@
 #include "util/fibers/synchronization.h"
 using namespace std;
 
-ABSL_RETIRED_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
-                  "Do partial sync in case lsn diff is less than the given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);

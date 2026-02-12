@@ -919,6 +919,13 @@ TEST_F(DflyEngineTest, MemoryUsage) {
   EXPECT_GT(*resp.GetInt(), 100000);
 }
 
+// MEMORY USAGE without a key caused a DCHECK crash in CmdArgParser destructor
+// because the parser error was never consumed.
+TEST_F(DflyEngineTest, MemoryUsageNoKey) {
+  auto resp = Run({"memory", "usage"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 TEST_F(DflyEngineTest, DebugObject) {
   Run({"set", "key", "value"});
   Run({"lpush", "l1", "a", "b"});
