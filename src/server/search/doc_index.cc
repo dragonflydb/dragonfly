@@ -264,6 +264,32 @@ std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::S
   return result;
 }
 
+void ShardDocIndex::DocKeyIndex::Restore(
+    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  // Find max doc_id to size the keys_ vector appropriately
+  DocId max_id = 0;
+  for (const auto& [key, doc_id] : mappings) {
+    max_id = std::max(max_id, doc_id);
+  }
+
+  // Resize keys_ to accommodate all doc_ids
+  keys_.resize(max_id + 1);
+  last_id_ = max_id + 1;
+
+  // Restore the mappings
+  for (const auto& [key, doc_id] : mappings) {
+    keys_[doc_id] = key;
+    ids_[key] = doc_id;
+  }
+
+  // Build free_ids_ list for any gaps in the id sequence
+  for (DocId id = 0; id <= max_id; ++id) {
+    if (keys_[id].empty()) {
+      free_ids_.push_back(id);
+    }
+  }
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
@@ -428,6 +454,101 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
       index->Remove(global_id, *accessor, field_ident);
     }
   }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
+  // Don't run loop if no vector fields are present
+  if (std::ranges::empty(GetIndexedHnswFields(base_->schema)))
+    return;
+
+  // Check if any vector index was restored from RDB - if so, iterate by index keys
+  // which is more efficient than traversing the entire database
+  bool any_restored = false;
+  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+        index && index->IsRestored()) {
+      any_restored = true;
+      break;
+    }
+  }
+
+  if (any_restored) {
+    // Iterate by index keys - more efficient for restored indices
+    LOG(INFO) << "Restoring vector index '" << index_name << "' from serialized graph on shard "
+              << EngineShard::tlocal()->shard_id();
+    RebuildGlobalVectorIndicesByIndexKeys(index_name, op_args);
+  } else {
+    // Iterate by database - needed when building new index
+    LOG(INFO) << "Rebuilding vector index '" << index_name << "' from database on shard "
+              << EngineShard::tlocal()->shard_id() << " (no serialized graph available)";
+    RebuildGlobalVectorIndicesByDatabase(index_name, op_args);
+  }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index_name,
+                                                          const OpArgs& op_args) {
+  auto& db_slice = op_args.GetDbSlice();
+  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
+
+  size_t processed = 0;
+  size_t successful_updates = 0;
+  size_t failed_updates = 0;
+  size_t missing_documents = 0;
+
+  for (const auto& [key, local_id] : key_index_.GetDocKeysMap()) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
+    if (!it || !IsValid(it->it)) {
+      ++missing_documents;
+      continue;
+    }
+
+    PrimeValue& pv = it->it->second;
+    auto doc = GetAccessor(op_args.db_cntx, pv);
+    GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
+
+    for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+          index) {
+        bool success = index->UpdateVectorData(global_id, *doc, field_ident);
+        if (success) {
+          ++successful_updates;
+          if (!index->IsVectorCopied()) {
+            pv.SetOmitDefrag(true);
+          }
+        } else {
+          ++failed_updates;
+        }
+      }
+    }
+
+    // Yield periodically to avoid blocking the fiber
+    if (++processed % 1000 == 0) {
+      util::ThisFiber::Yield();
+    }
+  }
+
+  // Note: SetRestored(false) is called after all shards complete restoration (in PerformPostLoad)
+
+  // Log summary of vector restoration
+  size_t total_docs = key_index_.GetDocKeysMap().size();
+  if (failed_updates > 0 || missing_documents > 0) {
+    LOG(WARNING) << "Restored vectors for index " << index_name << ": " << successful_updates
+                 << " successful, " << failed_updates << " failed (missing vector field), "
+                 << missing_documents << " missing documents out of " << total_docs << " total";
+  } else {
+    VLOG(1) << "Restored vectors for index " << index_name << ": " << successful_updates << "/"
+            << total_docs << " documents";
+  }
+}
+
+void ShardDocIndex::RebuildGlobalVectorIndicesByDatabase(std::string_view index_name,
+                                                         const OpArgs& op_args) {
+  auto cb = [this](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
+    if (auto local_id = key_index_.Find(key); local_id)
+      AddDocToGlobalVectorIndex(*local_id, db_cntx, &pv);
+  };
+
+  TraverseAllMatching(*base_, op_args, cb);
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
@@ -796,6 +917,23 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
   for (auto& [index_name, ptr] : indices_)
     ptr->Rebuild(op_args, &local_mr_);
+}
+
+void ShardDocIndices::WaitForIndexBuild() {
+  // Busy-wait with yields until all builders complete
+  bool any_building;
+  do {
+    any_building = false;
+    for (auto& [index_name, ptr] : indices_) {
+      if (ptr->builder_) {
+        any_building = true;
+        break;
+      }
+    }
+    if (any_building) {
+      util::ThisFiber::Yield();
+    }
+  } while (any_building);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {

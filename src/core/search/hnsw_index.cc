@@ -441,12 +441,14 @@ std::vector<HnswNodeData> HnswVectorIndex::GetNodesRange(size_t start, size_t en
 void HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
                                        const HnswIndexMetadata& metadata) {
   adapter_->RestoreFromNodes(nodes, metadata);
+  restored_ = true;
 }
 
 bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,
                                        std::string_view field) {
   auto vector_ptr = doc.GetVector(field, dim_);
-  if (!vector_ptr) {
+  if (!vector_ptr ||
+      *vector_ptr == search::DocumentAccessor::VectorInfo(search::BorrowedFtVector(nullptr))) {
     // Document doesn't have the vector field - mark node as deleted to prevent
     // "ghost" nodes with invalid vector data from participating in searches
     LOG(WARNING) << "UpdateVectorData: document " << id

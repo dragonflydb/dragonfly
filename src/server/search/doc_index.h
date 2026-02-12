@@ -254,6 +254,9 @@ class ShardDocIndex {
     // Serialization: returns pairs of (key, doc_id) for all active mappings
     std::vector<std::pair<std::string, DocId>> Serialize() const;
 
+    // Restore key-to-docId mappings from serialized data (RDB load)
+    void Restore(const std::vector<std::pair<std::string, search::DocId>>& mappings);
+
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -325,6 +328,9 @@ class ShardDocIndex {
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       const PrimeValue& pv);
 
+  // Rebuild global vector indices, choosing strategy based on whether they were restored from RDB
+  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
+
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
   SerializedEntryWithKey SerializeDocWithKey(
@@ -342,12 +348,23 @@ class ShardDocIndex {
     return key_index_.Serialize();
   }
 
+  // Restore key-to-docId mappings from serialized data (RDB load)
+  void RestoreKeyIndex(const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+    key_index_.Restore(mappings);
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
   // Cancel builder if in progress
   void CancelBuilder();
+
+  // Helper methods for RebuildGlobalVectorIndices
+  // Iterates by index keys - more efficient for restored indices
+  void RebuildGlobalVectorIndicesByIndexKeys(std::string_view index_name, const OpArgs& op_args);
+  // Iterates by database - needed when building new index
+  void RebuildGlobalVectorIndicesByDatabase(std::string_view index_name, const OpArgs& op_args);
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
@@ -387,6 +404,9 @@ class ShardDocIndices {
 
   // Rebuild all indices
   void RebuildAllIndices(const OpArgs& op_args);
+
+  // Wait for all index builders to complete
+  void WaitForIndexBuild();
 
   std::vector<std::string> GetIndexNames() const;
 
