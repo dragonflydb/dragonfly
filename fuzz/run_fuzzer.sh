@@ -47,6 +47,31 @@ check_requirements() {
     fi
 }
 
+setup_system() {
+    # AFL++ requires core dumps to go to a file, not a pipe (like systemd-coredump).
+    local core_pattern
+    core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null || true)
+    if [[ "$core_pattern" == "|"* ]]; then
+        print_info "Setting core_pattern to 'core' (was piped to external utility)..."
+        echo core | sudo tee /proc/sys/kernel/core_pattern > /dev/null 2>&1 || {
+            print_warning "Could not set core_pattern. Run: echo core | sudo tee /proc/sys/kernel/core_pattern"
+            exit 1
+        }
+    fi
+
+    # Set CPU governor to performance if possible, otherwise skip the check.
+    if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+        local gov
+        gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true)
+        if [[ "$gov" != "performance" ]]; then
+            echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1 || {
+                print_note "Could not set CPU governor, using AFL_SKIP_CPUFREQ=1"
+                export AFL_SKIP_CPUFREQ=1
+            }
+        fi
+    fi
+}
+
 setup_directories() {
     print_info "Setting up directories..."
     mkdir -p "${OUTPUT_DIR}"
@@ -132,11 +157,20 @@ run_fuzzer() {
     # Synced with afl_loop_limit so the full server state history is always captured.
     export AFL_PERSISTENT_RECORD=${AFL_LOOP_LIMIT}
 
+    # Multi-threaded target: instability is expected (2 proactor threads).
+    # Tell AFL++ to continue despite unstable coverage — don't bail on flaky edges.
+    export AFL_IGNORE_PROBLEMS=1
+
+    # More aggressive havoc mutations from the start — don't wait for deterministic
+    # stages to finish. Useful for protocol fuzzing where random mutations find new paths.
+    export AFL_EXPAND_HAVOC_NOW=1
+
     exec "${AFL_CMD[@]}"
 }
 
 main() {
     check_requirements
+    setup_system
     setup_directories
     show_config
     run_fuzzer

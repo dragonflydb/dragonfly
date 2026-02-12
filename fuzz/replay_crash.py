@@ -20,22 +20,40 @@ import sys
 
 
 def send_input(host, port, data):
-    """Send data over TCP, read response, close. Mirrors SendFuzzInputToServer."""
+    """Send data over 2 concurrent TCP connections. Mirrors SendFuzzInputToServer.
+
+    The fuzzer opens 2 connections per iteration to create concurrent command
+    processing and trigger race conditions with 2 proactor threads.
+    """
+    socks = []
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2.0)
-        s.connect((host, port))
-        s.sendall(data)
-        try:
-            s.recv(4096)
-        except socket.timeout:
-            pass
-        s.close()
+        for _ in range(2):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            s.connect((host, port))
+            socks.append(s)
     except ConnectionRefusedError:
+        for s in socks:
+            s.close()
         print("\033[0;31m[ERROR]\033[0m Connection refused — is Dragonfly running?")
         sys.exit(1)
     except Exception:
         pass
+
+    # Send on both connections concurrently
+    for s in socks:
+        try:
+            s.sendall(data)
+        except Exception:
+            pass
+
+    # Read responses
+    for s in socks:
+        try:
+            s.recv(4096)
+        except Exception:
+            pass
+        s.close()
 
 
 def main():

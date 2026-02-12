@@ -729,56 +729,69 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
   return len;
 }
 
-// Sends fuzzing input to the Dragonfly server and reads the response.
-// This executes one fuzzing iteration by:
-// 1. Creating a TCP socket connection to the server
-// 2. Sending the fuzzed data
-// 3. Reading a response (with timeout to prevent hangs)
-// The function uses short timeouts to keep fuzzing fast and prevent AFL++ from stalling.
+// Sends fuzzing input to the Dragonfly server via 2 concurrent TCP connections.
+// With 2 proactor threads, simultaneous connections exercise race conditions in
+// connection management, transaction scheduling, and cross-shard coordination.
+// Both connections send the same data — two clients executing identical commands
+// concurrently is the primary trigger for DCHECK failures in transaction.cc (102 DCHECKs).
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
-  int s = socket(AF_INET, SOCK_STREAM, 0);
-  if (s >= 0) {
-    // 200ms timeout — enough for any local command to complete, but shorter than
-    // AFL++'s -t 500ms execution timeout. With 2s timeout, blocking commands
-    // (SUBSCRIBE, MONITOR) exceed AFL's 500ms limit, causing process kills and
-    // fork server restarts that destroy throughput.
-    struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  struct sockaddr_in a = {};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
 
-    struct sockaddr_in a = {};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
-      send(s, data, len, 0);
-      char r[4096];
-      ssize_t n = recv(s, r, sizeof(r), 0);
-      if (n > 0) {
-        // Parse RESP response type — each branch gives AFL++ distinct coverage.
-        // Without this, all seeds produce identical bitmaps because syscalls
-        // (send/recv/close) are not instrumented by AFL++.
-        switch (r[0]) {
-          case '+':  // Simple string (+OK, +PONG)
-            break;
-          case '-':  // Error (-ERR ...)
-            break;
-          case ':':  // Integer (:1)
-            break;
-          case '$':  // Bulk string ($5\r\nhello\r\n)
-            if (n > 1 && r[1] == '-')
-              (void)0;  // Null bulk string ($-1)
-            break;
-          case '*':  // Array (*2\r\n...)
-            if (n > 1 && r[1] == '-')
-              (void)0;  // Null array (*-1)
-            break;
-          default:  // Inline or garbage
-            break;
-        }
+  // 200ms timeout — enough for any local command to complete, but shorter than
+  // AFL++'s -t 500ms execution timeout.
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
+
+  // Open 2 connections to create concurrent command processing.
+  int socks[2] = {-1, -1};
+  for (int i = 0; i < 2; i++) {
+    socks[i] = socket(AF_INET, SOCK_STREAM, 0);
+    if (socks[i] >= 0) {
+      setsockopt(socks[i], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+      setsockopt(socks[i], SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+      if (connect(socks[i], (struct sockaddr*)&a, sizeof(a)) != 0) {
+        close(socks[i]);
+        socks[i] = -1;
       }
     }
-    close(s);
+  }
+
+  // Send on both connections — concurrent processing triggers races in
+  // transaction locking, cross-shard SMOVE/RENAME, and connection state.
+  for (int i = 0; i < 2; i++) {
+    if (socks[i] >= 0)
+      send(socks[i], data, len, MSG_NOSIGNAL);
+  }
+
+  // Read responses — each branch gives AFL++ distinct coverage feedback.
+  for (int i = 0; i < 2; i++) {
+    if (socks[i] < 0)
+      continue;
+    char r[4096];
+    ssize_t n = recv(socks[i], r, sizeof(r), 0);
+    if (n > 0) {
+      switch (r[0]) {
+        case '+':
+          break;
+        case '-':
+          break;
+        case ':':
+          break;
+        case '$':
+          if (n > 1 && r[1] == '-')
+            (void)0;
+          break;
+        case '*':
+          if (n > 1 && r[1] == '-')
+            (void)0;
+          break;
+        default:
+          break;
+      }
+    }
+    close(socks[i]);
   }
 }
 
