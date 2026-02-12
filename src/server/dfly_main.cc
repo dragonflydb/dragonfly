@@ -738,10 +738,11 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s >= 0) {
-    // 2s timeout — generous to let the server fully process the command.
-    // Shorter timeouts cause premature connection close, changing server behavior
-    // and producing crashes that don't reproduce on a real Dragonfly.
-    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+    // 200ms timeout — enough for any local command to complete, but shorter than
+    // AFL++'s -t 500ms execution timeout. With 2s timeout, blocking commands
+    // (SUBSCRIBE, MONITOR) exceed AFL's 500ms limit, causing process kills and
+    // fork server restarts that destroy throughput.
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
