@@ -9,6 +9,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
+#include "server/search/global_hnsw_index.h"
 
 namespace dfly::search {
 
@@ -69,6 +70,19 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
   });
   if (!any_vector || !state_.IsRunning())
     return;
+
+  // If any HNSW index was restored from RDB, use UpdateVectorData instead of Add
+  for (const auto& [_, field_info] : index_->base_->schema.fields) {
+    if (!field_info.IsIndexableHnswField())
+      continue;
+    if (auto idx =
+            GlobalHnswIndexRegistry::Instance().Get(index_->base_->name, field_info.short_name);
+        idx && idx->IsRestored()) {
+      OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
+      index_->RebuildGlobalVectorIndices(index_->base_->name, op_args);
+      return;
+    }
+  }
 
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
