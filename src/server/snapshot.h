@@ -34,15 +34,16 @@ struct Entry;
 //              |                      Socket is left open in journal streaming mode
 //              ▼
 // ┌──────────────────────────┐          ┌─────────────────────────┐
-// │     SerializeEntry       │ ◄────────┤     OnJournalEntry      │
-// └─────────────┬────────────┘          └─────────────────────────┘
-//               │
-//         PushBytes                  Default buffer gets flushed on iteration,
-//               │                    temporary on destruction
-//               ▼
-// ┌──────────────────────────────┐
-// │     push_cb(buffer)       │
-// └──────────────────────────────┘
+// │     SerializeEntry       │          │  ConsumeJournalChange   │
+// └─────────────┬────────────┘          └────────────┬────────────┘
+//               │                                    │
+//         PushBytes                                  │   into serializer buffer)
+//               │                                    ▼
+//               ▼                        ┌──────────────────────────┐
+//               ▼                        │     WriteJournalEntry    │
+// ┌──────────────────────────────┐       │  (appends journal entry  │
+// │     push_cb(buffer)          │       │   into serializer buffer)│
+// └──────────────────────────────┘       └──────────────────────────┘
 
 // SliceSnapshot is used for iterating over a shard at a specified point-in-time
 // and submitting all values to an output sink.
@@ -130,9 +131,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // DbSlice moved listener
   void OnMoved(DbIndex db_index, const DbSlice::MovedItemsVec& items);
   bool IsPositionSerialized(DbIndex db_index, PrimeTable::Cursor cursor);
-
-  // Journal listener
-  void OnJournalEntry(const journal::JournalItem& item, bool allow_flush);
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
