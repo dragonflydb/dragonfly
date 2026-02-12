@@ -1412,13 +1412,13 @@ namespace {
 // search_indices always gets simple "index_name cmd" restore commands.
 // For summary shards, hnsw_index_metadata gets JSON with HNSW graph metadata,
 // and search_synonyms gets synonym group restore commands.
-void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
+void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
                           [[maybe_unused]] StringVec* search_indices,
                           [[maybe_unused]] StringVec* search_synonyms,
                           [[maybe_unused]] StringVec* hnsw_index_metadata,
                           [[maybe_unused]] bool is_summary) {
 #ifdef WITH_SEARCH
-  auto* indices = shard->search_indices();
+  auto* indices = shard.search_indices();
   for (const auto& index_name : indices->GetIndexNames()) {
     auto* index = indices->GetIndex(index_name);
     auto index_info = index->GetInfo();
@@ -1430,7 +1430,8 @@ void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
     if (!is_summary)
       continue;
 
-    // Collect HNSW metadata for vector field (first one found)
+    // Collect HNSW metadata for vector field (first one found), for now we don't support multiple
+    // vector fields per index serialization
     for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
       if (finfo.type == search::SchemaField::VECTOR &&
           !(finfo.flags & search::SchemaField::NOINDEX)) {
@@ -1472,7 +1473,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   if (!is_summary) {
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (shard->shard_id() == 0)
-        CollectSearchIndices(shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
+        CollectSearchIndices(*shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
                              is_summary);
     });
     return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
@@ -1490,7 +1491,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (shard->shard_id() == 0)
-      CollectSearchIndices(shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
+      CollectSearchIndices(*shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
                            is_summary);
 
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
