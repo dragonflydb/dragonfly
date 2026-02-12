@@ -1195,7 +1195,7 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
       return false;
     }
 
-    if (arr[0].type == RespExpr::STRING) {
+    if (arr[start].type == RespExpr::STRING) {
       string s0 = arr[start].GetString();
       string s1 = arr[start + 1].GetString();
       string s2 = arr[start + 2].GetString();
