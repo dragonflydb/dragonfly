@@ -7,9 +7,9 @@ import random
 import redis.asyncio as aioredis
 
 from . import dfly_args
-from .seeder import DebugPopulateSeeder
-from .utility import info_tick_timer, wait_for_replicas_state
-from .instance import DflyInstanceFactory
+from .seeder import DebugPopulateSeeder, Seeder as SeederV2
+from .utility import info_tick_timer, wait_for_replicas_state, check_all_replicas_finished
+from .instance import DflyInstance, DflyInstanceFactory
 
 BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiered/backing"}
 
@@ -103,7 +103,14 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "tiered_storage_write_depth": 1500,
     }
 )
-async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceFactory):
+async def test_replication(
+    async_client: aioredis.Redis, df_server: DflyInstance, df_factory: DflyInstanceFactory
+):
+    """
+    Test replication with tiered storage for strings
+    """
+
+    # Start replica
     replica = df_factory.create(
         proactor_threads=2,
         cache_mode=True,
@@ -114,11 +121,27 @@ async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceF
     )
     replica.start()
     replica_client = replica.client()
-    await async_client.execute_command("debug", "populate", "800000", "key", "2000")
-    await replica_client.replicaof(
-        "localhost", async_client.connection_pool.connection_kwargs["port"]
-    )
+
+    # Fill master with values
+    seeder = DebugPopulateSeeder(key_target=800000, data_size=2000, samples=100, types=["STRING"])
+    await seeder.run(async_client)
+
+    # Get some keys
+    keys = await async_client.keys()
+
+    async def fill_job():
+        i = 0
+        for key in keys:
+            await async_client.append(key, f":{i}:")
+            i += 1
+
+    fill_task = asyncio.create_task(fill_job())
+
+    # Start replication
+    await replica_client.replicaof("localhost", df_server.port)
     logging.info("Waiting for replica to sync")
+
+    # Wait for replication to finish
     try:
         async with async_timeout.timeout(200):
             await wait_for_replicas_state(replica_client)
@@ -128,3 +151,11 @@ async def test_full_sync(async_client: aioredis.Redis, df_factory: DflyInstanceF
         pytest.fail(
             f"Replica did not sync in time. \nmaster: {master_info} \n\nreplica: {replica_info}"
         )
+
+    # cancel filler and wait for replica to catch up
+    fill_task.cancel()
+    await check_all_replicas_finished([replica_client], async_client)
+
+    # Check that everything is in sync
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [async_client, replica_client]))
+    assert len(set(hashes)) == 1
