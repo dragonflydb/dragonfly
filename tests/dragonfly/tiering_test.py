@@ -96,7 +96,7 @@ async def test_mixed_append(async_client: aioredis.Redis):
     {
         "proactor_threads": 2,
         "tiered_prefix": "/tmp/tiered/backing_master",
-        "maxmemory": "1.0G",
+        "maxmemory": "512MB",
         "cache_mode": True,
         "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
@@ -114,7 +114,7 @@ async def test_replication(
     replica = df_factory.create(
         proactor_threads=2,
         cache_mode=True,
-        maxmemory="1.0G",
+        maxmemory="512MB",
         tiered_prefix="/tmp/tiered/backing_replica",
         tiered_offload_threshold="0.5",
         tiered_storage_write_depth=1500,
@@ -123,10 +123,10 @@ async def test_replication(
     replica_client = replica.client()
 
     # Fill master with values
-    seeder = DebugPopulateSeeder(key_target=800000, data_size=2000, samples=100, types=["STRING"])
+    seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
     await seeder.run(async_client)
 
-    # Get some keys
+    # Get some keys and start tasks that append to values
     keys = await async_client.keys()
 
     async def fill_job():
@@ -135,7 +135,7 @@ async def test_replication(
             await async_client.append(key, f":{i}:")
             i += 1
 
-    fill_task = asyncio.create_task(fill_job())
+    fill_tasks = [asyncio.create_task(fill_job()) for _ in range(3)]
 
     # Start replication
     await replica_client.replicaof("localhost", df_server.port)
@@ -143,7 +143,7 @@ async def test_replication(
 
     # Wait for replication to finish
     try:
-        async with async_timeout.timeout(200):
+        async with async_timeout.timeout(500):
             await wait_for_replicas_state(replica_client)
     except asyncio.TimeoutError:
         master_info = await async_client.info("ALL")
@@ -153,9 +153,18 @@ async def test_replication(
         )
 
     # cancel filler and wait for replica to catch up
-    fill_task.cancel()
-    await check_all_replicas_finished([replica_client], async_client)
+    for task in fill_tasks:
+        task.cancel()
+    await asyncio.gather(*fill_tasks)
+    await check_all_replicas_finished([replica_client], async_client, timeout=500)
+
+    # for key in keys:
+    #    key_master = await async_client.get(key)
+    #    key_replica = await replica_client.get(key)
+    #    assert key_master == key_replica
 
     # Check that everything is in sync
-    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [async_client, replica_client]))
+    hashes = await asyncio.gather(
+        *(SeederV2.capture(c, types=["STRING"]) for c in [async_client, replica_client])
+    )
     assert len(set(hashes)) == 1

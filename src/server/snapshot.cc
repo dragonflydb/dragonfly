@@ -452,12 +452,16 @@ bool SliceSnapshot::PushSerialized(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
     return false;
 
-  // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushSerialized();
+  // Locked while delayed values are being serialized and pushed to the consumer
+  static thread_local LocalLatch delayed_latch{};
 
+  size_t serialized = 0;
   if (!delayed_entries_.empty()) {
+    std::lock_guard lk{delayed_latch};
+    RdbSerializer delayed_serializer{compression_mode_};
+
     // Async bucket serialization might have accumulated some delayed values.
-    // Because we can finally block in this function, we'll await and serialize them
+    // Because we can finally block in this function, we'll await and serialize them.
     do {
       // We may call PushSerialized from multiple fibers concurrently, so we need to
       // ensure that we are not serializing the same entry concurrently.
@@ -478,12 +482,20 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       PrimeValue pv{*res};
-      serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
+      delayed_serializer.SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
     } while (!delayed_entries_.empty());
 
-    // blocking point.
-    serialized += FlushSerialized();
+    std::string blob = delayed_serializer.Flush(SerializerBase::FlushState::kFlushEndEntry);
+    serialized += blob.size();
+    HandleFlushData(std::move(blob));
   }
+
+  // We must wait for all tiered values to be serialized before proceeding with any other writes
+  delayed_latch.Wait();
+
+  // Flush any of the leftovers to avoid interleavings
+  serialized += FlushSerialized();
+
   return serialized > 0;
 }
 
