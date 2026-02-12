@@ -1,0 +1,13 @@
+*3
+$8
+FUNCTION
+$4
+LOAD
+$56
+#!lua name=mylib
+redis.register_function('myfunc', function() return 1 end)
+*2
+$8
+FUNCTION
+$4
+LIST

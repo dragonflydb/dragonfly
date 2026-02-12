@@ -86,11 +86,11 @@ run_fuzzer() {
     echo ""
 
     AFL_CMD=(
-        afl-fuzz -D
+        afl-fuzz
         -l 2
         -o "${OUTPUT_DIR}"
         -t "${TIMEOUT}"
-        -m none
+        -m 4096
         -i "${CORPUS_DIR}"
     )
 
@@ -132,14 +132,6 @@ run_fuzzer() {
     # Record the last N inputs before a crash for replay.
     # Synced with afl_loop_limit so the full server state history is always captured.
     export AFL_PERSISTENT_RECORD=${AFL_LOOP_LIMIT}
-
-    # ASAN configuration for fuzzing: disable leak detection (too noisy in persistent mode),
-    # abort on error (so AFL++ sees the crash), symbolize for readable stack traces.
-    export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:symbolize=0:detect_odr_violation=0"
-    export UBSAN_OPTIONS="halt_on_error=1:abort_on_error=1:print_stacktrace=1"
-
-    # Remove memory limit - ASAN needs much more virtual memory
-    # (the -m 4096 flag was set above, but ASAN uses ~20TB virtual address space)
 
     exec "${AFL_CMD[@]}"
 }
