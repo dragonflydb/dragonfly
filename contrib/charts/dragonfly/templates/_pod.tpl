@@ -74,7 +74,7 @@ containers:
       - name: dragonfly
         containerPort: 6379
         protocol: TCP
-      {{- if .Values.memcached.enabled }}
+      {{- if and .Values.memcached .Values.memcached.enabled }}
       - name: memcached
         containerPort: {{ .Values.memcached.port }}
         protocol: TCP
@@ -88,7 +88,7 @@ containers:
     {{- end }}
     args:
       - "--alsologtostderr"
-    {{- if .Values.memcached.enabled }}
+    {{- if and .Values.memcached .Values.memcached.enabled }}
       - "--memcached_port={{ .Values.memcached.port }}"
     {{- end }}
     {{- with .Values.extraArgs }}

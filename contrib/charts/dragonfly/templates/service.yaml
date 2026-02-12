@@ -25,7 +25,7 @@ spec:
       targetPort: {{ .Values.service.targetPort }}
       protocol: TCP
       name: dragonfly
-    {{- if .Values.memcached.enabled }}
+    {{- if and .Values.memcached .Values.memcached.enabled }}
     - port: {{ .Values.memcached.port }}
       targetPort: memcached
       protocol: TCP
