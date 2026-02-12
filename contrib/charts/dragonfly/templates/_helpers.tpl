@@ -77,7 +77,7 @@ Create the name of the service account to use
 Validate memcached configuration
 */}}
 {{- define "dragonfly.validateMemcached" -}}
-{{- if .Values.memcached.enabled }}
+{{- if and .Values.memcached .Values.memcached.enabled }}
 {{- if eq (int .Values.memcached.port) (int .Values.service.port) }}
 {{- fail "memcached.port must not be the same as service.port (default 6379). Please use a different port for memcached." }}
 {{- end }}
