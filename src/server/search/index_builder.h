@@ -21,8 +21,10 @@ struct IndexBuilder {
   explicit IndexBuilder(ShardDocIndex* index) : index_{index} {
   }
 
-  // Start building and call `on_complete` on finish from worker fiber
-  void Start(const OpArgs& op_args, std::function<void()> on_complete);
+  // Start building and call `on_complete` on finish from worker fiber.
+  // If `is_restored` is true, VectorLoop will use UpdateVectorData instead of Add
+  // for HNSW indices (restored from RDB). This flag is passed from PerformPostLoad.
+  void Start(const OpArgs& op_args, bool is_restored, std::function<void()> on_complete);
 
   // Cancel building and wait for worker to finish. Safe to delete after
   // TODO: Maybe implement nonblocking version?
@@ -40,6 +42,7 @@ struct IndexBuilder {
 
   dfly::ExecutionState state_;
   ShardDocIndex* index_;
+  bool is_restored_ = false;
   util::fb2::Fiber fiber_;
 };
 
