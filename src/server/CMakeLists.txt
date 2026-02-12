@@ -35,7 +35,7 @@ endif()
 # Define transaction library
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
             cluster_support.cc common.cc command_registry.cc
-            stats.cc
+            execution_state.cc stats.cc
             ${DF_JOURNAL_SRCS}
             server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc
