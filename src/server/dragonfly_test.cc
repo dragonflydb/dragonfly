@@ -1066,4 +1066,30 @@ TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
   EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
 
+// Regression test: MONITOR queued inside MULTI/EXEC + rapid connection close
+// triggers Check failed: cc_ in Connection::SendAsync via DispatchMonitor.
+TEST_F(DflyEngineTest, MonitorInMultiExecClose) {
+  for (int i = 0; i < 100; i++) {
+    string id = StrCat("mon", i);
+
+    // MULTI -> MONITOR (queued) -> SET -> EXEC
+    // EXEC executes MONITOR (registers connection as monitor), then calls
+    // DispatchMonitor which sends an async brief callback to all threads.
+    Run(id, {"MULTI"});
+    Run(id, {"MONITOR"});
+    Run(id, {"SET", "a", "1"});
+    Run(id, {"EXEC"});
+
+    // RESET deactivates monitoring (same as connection close).
+    Run(id, {"RESET"});
+
+    // From another connection, trigger DispatchMonitor. If the monitor
+    // connection was not properly removed, this crashes with DCHECK(cc_).
+    Run({"SET", "b", "2"});
+
+    // Drain all pending brief callbacks.
+    pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  }
+}
+
 }  // namespace dfly
