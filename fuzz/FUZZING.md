@@ -30,6 +30,8 @@ Sets core_pattern and CPU governors for optimal AFL++ performance.
 
 ## Build Dragonfly
 
+The build automatically enables ASAN and UBSAN for maximum bug detection.
+
 ```bash
 cmake -B build-dbg -DUSE_AFL=ON -DCMAKE_BUILD_TYPE=Debug -GNinja
 ninja -C build-dbg dragonfly

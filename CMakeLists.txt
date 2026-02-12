@@ -73,10 +73,11 @@ if(USE_AFL)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
 
-  # Force disable sanitizers when fuzzing (AFL++ incompatible with ASAN/UBSAN)
-  message(STATUS "Disabling sanitizers (incompatible with AFL++ fuzzing)")
-  set(WITH_ASAN OFF CACHE BOOL "Disable ASAN for fuzzing" FORCE)
-  set(WITH_USAN OFF CACHE BOOL "Disable UBSAN for fuzzing" FORCE)
+  # AFL++ LTO supports ASAN/UBSAN via AFL_USE_ASAN=1 / AFL_USE_UBSAN=1 env vars.
+  # Enable sanitizers for fuzzing - they catch memory bugs that otherwise silently corrupt.
+  message(STATUS "Enabling sanitizers for AFL++ fuzzing (ASAN + UBSAN)")
+  set(WITH_ASAN ON CACHE BOOL "Enable ASAN for fuzzing" FORCE)
+  set(WITH_USAN ON CACHE BOOL "Enable UBSAN for fuzzing" FORCE)
 
   # Disable AWS and GCP for fuzzing builds (not needed, reduces build time)
   message(STATUS "Disabling AWS and GCP integrations for fuzzing")
