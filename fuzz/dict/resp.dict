@@ -165,12 +165,9 @@
 "1"
 "-1"
 
-# Number patterns
-"0"
-"1"
+# Number patterns (0, 1, -1 already above)
 "100"
 "1000"
-"-1"
 "-100"
 
 # Special arguments
@@ -185,12 +182,10 @@
 "COUNT"
 "MATCH"
 
-# Common RESP command patterns
-"*1\x0d\x0a$4\x0d\x0aPING\x0d\x0a"
-"*2\x0d\x0a$3\x0d\x0aGET\x0d\x0a$3\x0d\x0akey\x0d\x0a"
-"*3\x0d\x0a$3\x0d\x0aSET\x0d\x0a$3\x0d\x0akey\x0d\x0a$5\x0d\x0avalue\x0d\x0a"
-"*2\x0d\x0a$3\x0d\x0aDEL\x0d\x0a$3\x0d\x0akey\x0d\x0a"
-"*2\x0d\x0a$6\x0d\x0aEXISTS\x0d\x0a$3\x0d\x0akey\x0d\x0a"
+# Small RESP framing patterns (larger patterns removed — AFL++ warned about >33B tokens)
+"*1\x0d\x0a$"
+"*2\x0d\x0a$"
+"*3\x0d\x0a$"
 
 # Scripting commands
 "EVAL"
@@ -387,8 +382,7 @@
 "COMMAND COUNT"
 "COMMAND INFO"
 
-# Scan operations
-"HSCAN"
+# Scan operations (HSCAN already above)
 "SSCAN"
 "ZSCAN"
 
@@ -446,12 +440,9 @@
 "BYSCORE"
 "BYLEX"
 "CH"
-"INCR"
 "KEEPTTL"
 "EXAT"
 "PXAT"
-"PERSIST"
-"GET"
 "ENCODING"
 "REFCOUNT"
 
@@ -479,8 +470,6 @@
 "\x0d\x0d\x0a\x0a"
 "\x00\x01\x02\x03"
 
-# RESP edge cases
-"*0\x0d\x0a$1\x0d\x0a"
-"*1\x0d\x0a$0\x0d\x0a\x0d\x0a"
-"*1\x0d\x0a$-1\x0d\x0a"
-"*2\x0d\x0a$0\x0d\x0a\x0d\x0a$0\x0d\x0a\x0d\x0a"
+# RESP edge cases (small fragments only)
+"$0\x0d\x0a\x0d\x0a"
+"$-1\x0d\x0a"

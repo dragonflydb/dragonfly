@@ -87,7 +87,6 @@ run_fuzzer() {
 
     AFL_CMD=(
         afl-fuzz
-        -l 2
         -o "${OUTPUT_DIR}"
         -t "${TIMEOUT}"
         -m 4096

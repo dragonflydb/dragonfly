@@ -738,8 +738,10 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s >= 0) {
-    // Set timeout for command processing (2 seconds for complex commands)
-    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};  // 2s
+    // 2s timeout — generous to let the server fully process the command.
+    // Shorter timeouts cause premature connection close, changing server behavior
+    // and producing crashes that don't reproduce on a real Dragonfly.
+    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -749,9 +751,31 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
     if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
       send(s, data, len, 0);
-      // Just read once - don't wait for full response
       char r[4096];
-      recv(s, r, sizeof(r), 0);  // Single read, timeout after 100ms
+      ssize_t n = recv(s, r, sizeof(r), 0);
+      if (n > 0) {
+        // Parse RESP response type — each branch gives AFL++ distinct coverage.
+        // Without this, all seeds produce identical bitmaps because syscalls
+        // (send/recv/close) are not instrumented by AFL++.
+        switch (r[0]) {
+          case '+':  // Simple string (+OK, +PONG)
+            break;
+          case '-':  // Error (-ERR ...)
+            break;
+          case ':':  // Integer (:1)
+            break;
+          case '$':  // Bulk string ($5\r\nhello\r\n)
+            if (n > 1 && r[1] == '-')
+              (void)0;  // Null bulk string ($-1)
+            break;
+          case '*':  // Array (*2\r\n...)
+            if (n > 1 && r[1] == '-')
+              (void)0;  // Null array (*-1)
+            break;
+          default:  // Inline or garbage
+            break;
+        }
+      }
     }
     close(s);
   }
