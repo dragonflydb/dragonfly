@@ -48,10 +48,10 @@ index f96e60d0..5cb7c1ff 100644
    // free all current thread delayed blocks.
 @@ -160,7 +159,7 @@ static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
    _mi_heap_collect_retired(heap, force);
- 
+
    // collect all pages owned by this thread
 -  mi_heap_visit_pages(heap, &mi_heap_page_collect, &collect, NULL);
-+  mi_heap_visit_pages(heap, MI_BIN_HUGE, &mi_heap_page_collect, &collect, NULL);
++  mi_heap_visit_pages(heap, collect == MI_NORMAL ? MI_BIN_HUGE : MI_BIN_FULL, &mi_heap_page_collect, &collect, NULL);
    mi_assert_internal( collect != MI_ABANDON || mi_atomic_load_ptr_acquire(mi_block_t,&heap->thread_delayed_free) == NULL );
  
    // collect abandoned segments (in particular, purge expired parts of segments in the abandoned segment list)
