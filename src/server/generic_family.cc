@@ -319,7 +319,8 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
 }
 
 OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
-  io::StringSink sink;
+  string str_res;
+
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
     auto res =
@@ -328,12 +329,12 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
       return OpStatus::IO_ERROR;
 
     // TODO: allow saving string directly without proxy object
-    SerializerBase::DumpValue(PrimeValue{*res}, &sink);
+    str_res = SerializerBase::DumpValue(PrimeValue{*res});
   } else {
-    SerializerBase::DumpValue(pv, &sink);
+    str_res = SerializerBase::DumpValue(pv);
   }
 
-  return std::move(sink).str();
+  return {std::move(str_res)};
 }
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
