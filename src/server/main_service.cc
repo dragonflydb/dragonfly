@@ -1635,6 +1635,15 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   TrackIfNeeded(cmd_cntx);
   auto* tx = cmd_cntx->tx();
 
+  // For EVAL[] and EXEC/DISCARD, clean up state.
+  // We don't do it directly in commands to allow some introspection after execution (slowlog).
+  absl::Cleanup mck_cleanup = [cntx, cid, mck = cid->MultiControlKind()]() {
+    if (mck && *mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
+      MultiCleanup(cntx);
+    else if (mck && *mck == CO::MultiControlKind::EVAL)
+      cntx->conn_state.script_info.reset();
+  };
+
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
@@ -1674,14 +1683,6 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
 
   if (tx && !cntx->conn_state.exec_info.IsRunning() && cntx->conn_state.script_info == nullptr) {
     cntx->last_command_debug.clock = tx->txid();
-  }
-
-  // Cleanup multi state after dispatching and latency recording finished
-  if (auto mck = cid->MultiControlKind(); mck) {
-    if (*mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
-      MultiCleanup(cntx);
-    else if (*mck == CO::MultiControlKind::EVAL)
-      cntx->conn_state.script_info.reset();
   }
 
   return res;
