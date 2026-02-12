@@ -171,8 +171,13 @@ void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 }
 
 void ScriptMgr::ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  string_view sha = ArgS(args, 1);
+  if (sha.size() != ScriptKey{}.size()) {
+    return builder->SendError(kSyntaxErr);
+  }
+
   lock_guard lk{mu_};
-  ScriptKey key{ArgS(args, 1)};
+  ScriptKey key{sha};
   auto& data = db_[key];
 
   for (auto flag : args.subspan(2)) {
