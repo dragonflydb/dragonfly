@@ -147,7 +147,10 @@ void MemoryCmd::Run(CmdArgList args) {
     return Stats();
   }
 
-  if (parser.Check("USAGE") && args.size() > 1) {
+  if (parser.Check("USAGE")) {
+    if (!parser.HasNext()) {
+      return cmd_cntx_->SendError(kSyntaxErr);
+    }
     string_view key = parser.Next();
     bool account_key_memory_usage = !parser.Check("WITHOUTKEY");
     return Usage(key, account_key_memory_usage);

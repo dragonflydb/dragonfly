@@ -978,4 +978,20 @@ TEST_F(StringFamilyTest, Digest) {
   EXPECT_THAT(Run({"digest", "list"}), ErrArg("WRONGTYPE"));
 }
 
+// GAT is a memcache-only command. Sending it via Redis RESP protocol should return an error
+// instead of crashing (DCHECK on mc_command()).
+TEST_F(StringFamilyTest, GatViaRedisProtocol) {
+  Run({"set", "key", "val"});
+  auto resp = Run({"GAT", "key"});
+  EXPECT_THAT(resp, ErrArg("memcache-only"));
+}
+
+TEST_F(StringFamilyTest, MSetNxOddArgs) {
+  auto resp = Run({"msetnx", "key", "value", "key2"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"mset", "key", "value", "key2"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
 }  // namespace dfly

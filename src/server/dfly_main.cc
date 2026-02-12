@@ -849,13 +849,6 @@ void PrintBasicUsageInfo() {
 }
 
 void ParseFlagsFromEnv() {
-  if (getenv("DFLY_PASSWORD")) {
-    LOG(FATAL) << "DFLY_PASSWORD environment variable was deprecated in favor of DFLY_requirepass";
-  }
-
-  // Allowed environment variable names that can have
-  // DFLY_ prefix, but don't necessarily have an ABSL flag created
-  absl::flat_hash_set<std::string_view> ignored_environment_flag_names = {"DEV_ENV", "PASSWORD"};
   const auto& flags = absl::GetAllFlags();
   for (char** env = environ; *env != nullptr; env++) {
     constexpr string_view kPrefix = "DFLY_";
@@ -866,9 +859,10 @@ void ParseFlagsFromEnv() {
       pair<string_view, string_view> environ_pair =
           absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), absl::MaxSplits('=', 1));
       const auto& [flag_name, flag_value] = environ_pair;
-      if (ignored_environment_flag_names.contains(flag_name)) {
-        continue;
+      if (flag_name == "DEV_ENV") {
+        continue;  // DFLY_DEV_ENV is used to skip version check.
       }
+
       auto entry = flags.find(flag_name);
       if (entry != flags.end()) {
         if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {

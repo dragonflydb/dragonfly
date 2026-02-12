@@ -192,7 +192,7 @@ struct AggregateParams {
 
 // Stores basic info about a document index.
 struct DocIndex {
-  enum DataType { HASH, JSON };
+  enum DataType : uint8_t { HASH, JSON };
 
   // Get numeric OBJ_ code
   uint8_t GetObjCode() const;
@@ -200,6 +200,7 @@ struct DocIndex {
   // Return true if the following document (key, obj_code) is tracked by this index.
   bool Matches(std::string_view key, unsigned obj_code) const;
 
+  std::string name;
   search::Schema schema;
   search::IndicesOptions options;
   std::vector<std::string> prefixes;
@@ -317,11 +318,10 @@ class ShardDocIndex {
     return key_index_;
   }
 
-  void AddDocToGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
-                                 const DbContext& db_cntx, PrimeValue* pv);
-  void RemoveDocFromGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
-                                      const DbContext& db_cntx, const PrimeValue& pv);
-  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
+  void AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+                                 PrimeValue* pv);
+  void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+                                      const PrimeValue& pv);
 
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
@@ -342,7 +342,7 @@ class ShardDocIndex {
 
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool sync = false);
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
   // Cancel builder if in progress
   void CancelBuilder();
@@ -384,7 +384,7 @@ class ShardDocIndices {
   void DropAllIndices();
 
   // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args, bool sync = false);
+  void RebuildAllIndices(const OpArgs& op_args);
 
   std::vector<std::string> GetIndexNames() const;
 
