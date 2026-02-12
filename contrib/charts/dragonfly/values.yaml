@@ -107,7 +107,8 @@ memcached:
   # -- Enable Memcached protocol support. When enabled, --memcached_port arg is automatically added,
   # a named container port 'memcached' is exposed, and memcached port is added to the Service.
   enabled: false
-  # -- Memcached port number
+  # -- Memcached port number. Must not be the same as service.port (default 6379),
+  #    otherwise Dragonfly will fail to start due to a port conflict.
   port: 11211
 
 tls:
