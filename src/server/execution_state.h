@@ -6,7 +6,6 @@
 
 #include <atomic>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <system_error>
 
@@ -151,8 +150,7 @@ class ExecutionState {
   ErrHandler err_handler_;
   util::fb2::Fiber err_handler_fb_;
 
-  // We use regular mutexes to be able to call ReportError directly from I/O callbacks.
-  mutable std::mutex err_mu_;  // protects err_ and err_handler_
+  mutable util::fb2::Mutex err_mu_;  // protects err_ and err_handler_
 };
 
 }  // namespace dfly

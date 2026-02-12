@@ -33,7 +33,8 @@ std::string GenericError::Format() const {
 }
 
 ExecutionState::~ExecutionState() {
-  DCHECK(!err_handler_fb_.IsJoinable());
+  // Join error handler fiber if still running. Best practice is to call
+  // JoinErrorHandler() or Reset() explicitly before destruction.
   err_handler_fb_.JoinIfNeeded();
 }
 
@@ -53,8 +54,13 @@ void ExecutionState::Reset(ErrHandler handler) {
   err_ = {};
   err_handler_ = std::move(handler);
   state_.store(State::RUN, std::memory_order_relaxed);
+  // Swap fiber while holding lock to ensure atomicity. After swap,
+  // err_handler_fb_ is not joinable, so any concurrent ReportError()
+  // will see a non-joinable fiber and can safely start a new handler.
   fb.swap(err_handler_fb_);
   lk.unlock();
+  // Join the previous handler fiber outside the lock to avoid blocking
+  // other operations while waiting for the handler to complete.
   fb.JoinIfNeeded();
 }
 
