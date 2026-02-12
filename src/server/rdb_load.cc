@@ -2244,15 +2244,9 @@ error_code RdbLoader::Load(io::Source* src) {
       auto hnsw_index = should_restore
                             ? GlobalHnswIndexRegistry::Instance().Get(index_name, field_name)
                             : nullptr;
+
       if (should_restore && !hnsw_index) {
-        LOG(INFO) << "Waiting for HNSW index " << index_key << " to be registered";
-        for (int attempt = 0; attempt < 100 && !hnsw_index; ++attempt) {
-          ThisFiber::SleepFor(10ms);
-          hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
-        }
-      }
-      if (should_restore && !hnsw_index) {
-        LOG(WARNING) << "HNSW index not found for restoration: " << index_key;
+        LOG(ERROR) << "HNSW index not found for restoration: " << index_key;
         should_restore = false;
       }
 
@@ -2314,7 +2308,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
         CHECK(metadata);
 
-        // Restore the HNSW graph directly and mark as restored
+        // Restore the HNSW graph structure (links between nodes)
         hnsw_index->RestoreFromNodes(nodes, *metadata);
 
         LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
@@ -3010,7 +3004,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context) {
+                              string_view error_context, bool ignore_dispatch_errors = false) {
   facade::CapturingReplyBuilder crb;
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
@@ -3059,9 +3053,11 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
                            facade::AsyncPreference::ONLY_SYNC);
 
-  auto response = crb.Take();
-  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
+  if (!ignore_dispatch_errors) {
+    auto response = crb.Take();
+    if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
+      LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
+    }
   }
 }
 
@@ -3088,31 +3084,11 @@ RdbLoader::TakePendingIndexMappings() {
   // we don't need to lock here as this is called after all RdbLoader instances are done
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> result;
   result.swap(pending_index_mappings_);
-  return result;
+  return std::move(pending_index_mappings_);
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  // Simple format: "index_name cmd"
-  size_t space_pos = def.find(' ');
-  if (space_pos == string::npos) {
-    LOG(ERROR) << "Invalid search index definition: " << def;
-    return;
-  }
-  string index_name = def.substr(0, space_pos);
-
-  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
-  // We track which indices we've already attempted to create to avoid race conditions where
-  // multiple threads see the index doesn't exist and all try to create it.
-  {
-    std::lock_guard lk(search_index_mu_);
-    auto [it, inserted] = created_search_indices_.insert(index_name);
-    if (!inserted) {
-      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
-      return;
-    }
-  }
-
-  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
 }
 
 void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
@@ -3154,9 +3130,12 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
     return;
 
+  // Capture before clearing — indicates HNSW graphs were loaded and need restore path
+  bool has_hnsw_restore;
   // Clear the created indices tracking set for next load
   {
     std::lock_guard lk(search_index_mu_);
+    has_hnsw_restore = !pending_hnsw_metadata_.empty();
     created_search_indices_.clear();
     pending_hnsw_metadata_.clear();
   }
@@ -3169,46 +3148,24 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
 
   if (shard_set != nullptr && !index_mappings.empty()) {
     // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
-    for (const auto& [shard_id, shard_mappings] : index_mappings) {
-      if (shard_id >= shard_set->size()) {
-        LOG(ERROR) << "Invalid shard_id in RDB: " << shard_id << " (max: " << shard_set->size() - 1
-                   << "). Skipping index mappings for this shard.";
-        continue;
-      }
-      shard_set->Add(shard_id, [&shard_mappings]() {
-        EngineShard* es = EngineShard::tlocal();
-        for (const auto& pim : shard_mappings) {
-          if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
-            index->RestoreKeyIndex(pim.mappings);
-            VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
-                    << pim.index_name << " on shard " << es->shard_id();
-          }
+    shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
+      auto it = index_mappings.find(es->shard_id());
+      if (it == index_mappings.end())
+        return;
+      for (const auto& pim : it->second) {
+        if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
+          index->RestoreKeyIndex(pim.mappings);
+          VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
+                  << pim.index_name << " on shard " << es->shard_id();
         }
-      });
-    }
-    // Wait for all mappings to be applied
-    shard_set->RunBriefInParallel([](EngineShard*) {});
+      }
+    });
   }
-
-  // Rebuild all search indices - for restored HNSW indices, VectorLoop will
-  // use UpdateVectorData instead of Add
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+  shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args);
+    es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
   });
-
-  // Wait for all index builders to complete before proceeding.
-  // Use RunBlockingInParallel (not AwaitRunningOnShardQueue) because the builder's VectorLoop
-  // needs the shard FiberQueue to run its shard_set->Await callback. If WaitForIndexBuild held
-  // the FiberQueue slot, VectorLoop's callback could never execute, causing a deadlock.
-  shard_set->RunBlockingInParallel(
-      [](EngineShard* es) { es->search_indices()->WaitForIndexBuild(); });
-
-  // Clear restored flags on all HNSW indices now that all shards finished
-  for (const auto& [key, index] : GlobalHnswIndexRegistry::Instance().GetAll()) {
-    index->SetRestored(false);
-  }
 
   // Now execute all pending synonym commands after indices are rebuilt
   for (auto& syn_cmd : synonym_cmds) {

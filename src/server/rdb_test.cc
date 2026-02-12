@@ -789,6 +789,19 @@ TEST_P(HnswRestoreTest, RestoreVectorSearchIndexHnsw) {
   LOG(INFO) << "Reloading from " << save_info.file_name << " - expecting HNSW index restoration";
   EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
 
+  // Wait for async index building to complete on both indices
+  auto is_indexing_done = [this](string_view idx_name) {
+    auto resp = Run({"FT.INFO", idx_name});
+    auto arr = resp.GetVec();
+    auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+    return it != arr.end() && (++it)->GetInt() == 0;
+  };
+
+  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("vec_idx"); },
+                                 std::chrono::milliseconds(10000)));
+  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("only_vec_idx"); },
+                                 std::chrono::milliseconds(10000)));
+
   // Verify text search still works on the restored index
   auto search = Run({"FT.SEARCH", "vec_idx", "doc1"});
   ASSERT_THAT(search, ArgType(RespExpr::ARRAY));

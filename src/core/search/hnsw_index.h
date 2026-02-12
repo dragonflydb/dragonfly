@@ -78,22 +78,11 @@ class HnswVectorIndex {
   // This populates the vector data for a node that already has graph links
   bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field);
 
-  // Mark index as restored from RDB (should use UpdateVectorData instead of Add)
-  void SetRestored(bool restored) {
-    restored_ = restored;
-  }
-
-  bool IsRestored() const {
-    return restored_;
-  }
-
  private:
   bool copy_vector_;
   size_t dim_;
   VectorSimilarity sim_;
   std::unique_ptr<HnswlibAdapter> adapter_;
-
-  bool restored_ = false;
 };
 
 }  // namespace dfly::search

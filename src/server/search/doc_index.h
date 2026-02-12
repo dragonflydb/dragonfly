@@ -328,8 +328,10 @@ class ShardDocIndex {
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       const PrimeValue& pv);
 
-  // Rebuild global vector indices, choosing strategy based on whether they were restored from RDB
-  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
+  // Rebuild global vector indices, choosing strategy based on whether they were restored from RDB.
+  // When `from_restored` is true, uses the efficient ByIndexKeys path (UpdateVectorData).
+  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args,
+                                  bool from_restored = false);
 
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
@@ -355,7 +357,7 @@ class ShardDocIndex {
 
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
 
   // Cancel builder if in progress
   void CancelBuilder();
@@ -403,10 +405,7 @@ class ShardDocIndices {
   void DropAllIndices();
 
   // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args);
-
-  // Wait for all index builders to complete
-  void WaitForIndexBuild();
+  void RebuildAllIndices(const OpArgs& op_args, bool is_restored = false);
 
   std::vector<std::string> GetIndexNames() const;
 

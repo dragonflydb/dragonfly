@@ -266,6 +266,7 @@ std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::S
 
 void ShardDocIndex::DocKeyIndex::Restore(
     const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+  DCHECK(ids_.empty()) << "Restore should only be called on an empty DocKeyIndex";
   // Find max doc_id to size the keys_ vector appropriately
   DocId max_id = 0;
   for (const auto& [key, doc_id] : mappings) {
@@ -317,15 +318,20 @@ ShardDocIndex::~ShardDocIndex() {
   CancelBuilder();
 }
 
-void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored) {
   CancelBuilder();
 
-  key_index_ = DocKeyIndex{};
+  // When restoring, preserve key_index_ populated by RestoreKeyIndex() so that DocIds
+  // match the GlobalDocIds stored in the serialized HNSW graph. CursorLoop will use
+  // the existing DocIds to add documents to the regular indices.
+  if (!is_restored) {
+    key_index_ = DocKeyIndex{};
+  }
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
   // Create builder and start indexing
   builder_ = std::make_unique<search::IndexBuilder>(this);
-  builder_->Start(op_args, [this] {
+  builder_->Start(op_args, is_restored, [this] {
     VLOG(1) << "Indexed " << key_index_.Size()
             << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
     builder_.reset();
@@ -456,23 +462,13 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
   }
 }
 
-void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
+void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args,
+                                               bool from_restored) {
   // Don't run loop if no vector fields are present
   if (std::ranges::empty(GetIndexedHnswFields(base_->schema)))
     return;
 
-  // Check if any vector index was restored from RDB - if so, iterate by index keys
-  // which is more efficient than traversing the entire database
-  bool any_restored = false;
-  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
-        index && index->IsRestored()) {
-      any_restored = true;
-      break;
-    }
-  }
-
-  if (any_restored) {
+  if (from_restored) {
     // Iterate by index keys - more efficient for restored indices
     LOG(INFO) << "Restoring vector index '" << index_name << "' from serialized graph on shard "
               << EngineShard::tlocal()->shard_id();
@@ -526,8 +522,6 @@ void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index
       util::ThisFiber::Yield();
     }
   }
-
-  // Note: SetRestored(false) is called after all shards complete restoration (in PerformPostLoad)
 
   // Log summary of vector restoration
   size_t total_docs = key_index_.GetDocKeysMap().size();
@@ -914,26 +908,14 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
     JsonAccessor::RemoveFieldFromCache(fident);
 }
 
-void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
-  for (auto& [index_name, ptr] : indices_)
-    ptr->Rebuild(op_args, &local_mr_);
-}
-
-void ShardDocIndices::WaitForIndexBuild() {
-  // Busy-wait with yields until all builders complete
-  bool any_building;
-  do {
-    any_building = false;
-    for (auto& [index_name, ptr] : indices_) {
-      if (ptr->builder_) {
-        any_building = true;
-        break;
-      }
-    }
-    if (any_building) {
-      util::ThisFiber::Yield();
-    }
-  } while (any_building);
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {
+  for (auto& [index_name, ptr] : indices_) {
+    // Only use the restore path for indices that have populated key mappings.
+    // Key mappings are only serialized for HNSW indices and only when shard counts match,
+    // so non-HNSW indices or mismatched-shard restores correctly fall back to full rebuild.
+    bool index_restored = is_restored && ptr->key_index_.Size() > 0;
+    ptr->Rebuild(op_args, &local_mr_, index_restored);
+  }
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {
