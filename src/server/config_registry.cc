@@ -10,7 +10,6 @@
 
 #include "base/logging.h"
 #include "core/glob_matcher.h"
-#include "server/common.h"
 #include "strings/human_readable.h"
 
 namespace dfly {

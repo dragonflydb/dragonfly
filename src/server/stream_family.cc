@@ -21,6 +21,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/execution_state.h"
 #include "server/family_utils.h"
 #include "server/transaction.h"
 

@@ -11,6 +11,7 @@
 #include <optional>
 
 #include "server/conn_context.h"
+#include "server/execution_state.h"
 
 namespace facade {
 class SinkReplyBuilder;
