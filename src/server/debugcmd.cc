@@ -678,6 +678,8 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    per second.",
         "SEGMENTS",
         "    Prints segment info for the current database.",
+        "TABLE_GC threshold",
+        "    Attempts to shrink the dash table of each shard "
         "HELP",
         "    Prints this help.",
     };
@@ -761,6 +763,9 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   }
   if (subcmd == "SEGMENTS") {
     return Segments(args.subspan(1), cmd_cntx);
+  }
+  if (subcmd == "TABLE_GC") {
+    return TableGC(args.subspan(1), cmd_cntx);
   }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cmd_cntx->SendError(reply, kSyntaxErrType);
@@ -1594,6 +1599,26 @@ void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
   absl::StrAppend(&result, "Segment Size Histogram: \n");
   absl::StrAppend(&result, hist.ToString(), "\n");
   rb->SendVerbatimString(result);
+}
+
+void DebugCmd::TableGC(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  double threshold = 0.25;
+  if (args.size() > 0) {
+    if (!absl::SimpleAtod(facade::ToSV(args[0]), &threshold)) {
+      return rb->SendError("Invalid threshold value");
+    }
+    if (threshold <= 0.0 || threshold > 1.0) {
+      return rb->SendError("Threshold must be between 0 and 1");
+    }
+  }
+
+  std::vector<size_t> results(shard_set->size());
+  shard_set->RunBlockingInParallel(
+      [&](EngineShard* shard) { results[shard->shard_id()] = shard->TableGC(threshold); });
+
+  rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
 }
 
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {

@@ -4,6 +4,7 @@
 
 #include "server/engine_shard.h"
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -1081,6 +1082,53 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   }
 
   return info;
+}
+
+size_t EngineShard::TableGC(double threshold) {
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  auto& prime = db_slice.GetDBTable(0)->prime;
+  // When two buddy segments merge, their dictionary entries will point to the same object (see
+  // Split). We need this map to skip those as we iterate below. We can bound this table memory
+  // usage with a bitfield instead. A dictionary of 2^global_depth segments with global=32 would
+  // take 4gb. With a bitfield, this can reduce down to 512mb.
+  absl::flat_hash_set<PrimeTable::Segment_t*> visited;
+  size_t total_seg_merged = 0;
+
+  // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
+  for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
+    // Fetch segment pointer fresh each iteration
+    auto* seg = prime.GetSegment(seg_id);
+
+    if (visited.contains(seg))
+      continue;
+
+    visited.insert(seg);
+
+    unsigned buddy_id = prime.FindBuddyId(seg_id);
+    if (buddy_id == seg_id)
+      continue;
+
+    auto* buddy = prime.GetSegment(buddy_id);
+
+    // Skip if buddy already processed
+    if (visited.contains(buddy))
+      continue;
+
+    const size_t combined = seg->SlowSize() + buddy->SlowSize();
+    const size_t max_size = threshold * seg->capacity();
+
+    if (combined > max_size)
+      continue;
+
+    prime.Merge(seg_id, buddy_id);
+    visited.insert(buddy);
+    ++total_seg_merged;
+
+    // Yield after merge (don't hold pointers across yield)
+    util::ThisFiber::Yield();
+  }
+
+  return total_seg_merged;
 }
 
 }  // namespace dfly
