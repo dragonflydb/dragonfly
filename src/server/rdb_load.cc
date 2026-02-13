@@ -381,8 +381,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 
     bool values_expired = false;
 
+    string element;  // we keep string as ToSV internal buffer is be reused multiple times.
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      string_view element = ToSV(ltrace->arr[i].rdb_var);
+      element = ToSV(ltrace->arr[i].rdb_var);
 
       uint32_t ttl_sec = UINT32_MAX;
       if (increment == 2) {
@@ -404,7 +405,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         }
       }
       if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected";
+        LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element) << " with TTL "
+                   << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed() << " "
+                   << config_.append;
+        for (auto it = set->begin(); it != set->end(); ++it) {
+          LOG(ERROR) << "Existing member " << absl::CHexEscape(*it) << " with TTL "
+                     << it.ExpiryTime();
+        }
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
@@ -714,7 +721,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   });
 
   for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
-    string_view nodekey = ToSV(ltrace->arr[i].rdb_var);
+    // use string as we override sv buffer in the next call to ToSV.
+    string nodekey{ToSV(ltrace->arr[i].rdb_var)};
     string_view data = ToSV(ltrace->arr[i + 1].rdb_var);
 
     uint8_t* lp = (uint8_t*)data.data();
@@ -1003,7 +1011,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
 string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
   if (holds_alternative<long long>(obj)) {
-    tset_blob_.resize(32);
+    tset_blob_.resize(absl::numbers_internal::kFastToBufferSize);
     auto val = get<long long>(obj);
     char* next = absl::numbers_internal::FastIntToBuffer(val, tset_blob_.data());
     return string_view{tset_blob_.data(), size_t(next - tset_blob_.data())};
@@ -2608,6 +2616,8 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   if (item->load_config.streamed && item->load_config.append) {
     std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
+      LOG(INFO) << "Appending to streamed key '" << absl::CHexEscape(item->key) << "' in DB "
+                << db_ind;
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2639,16 +2649,20 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       }
       return;
     }
-    LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
+    LOG(ERROR) << "Could not load value for key '" << absl::CHexEscape(item->key) << "' in DB "
+               << db_ind << " " << item->load_config.streamed << " " << item->load_config.append
+               << " " << item->val.rdb_type;
     stop_early_ = true;
     return;
   }
 
   if (item->load_config.streamed) {
     std::unique_lock lk{now_streamed_mu_};
-    if (now_streamed_.find(item->key) == now_streamed_.end())
+    if (now_streamed_.find(item->key) == now_streamed_.end()) {
+      LOG(INFO) << "Inserting " << absl::CHexEscape(item->key) << " to now_streamed_ in DB "
+                << db_ind;
       now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
-
+    }
     if (!item->load_config.finalize)
       return;
 
