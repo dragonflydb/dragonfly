@@ -738,8 +738,7 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s >= 0) {
-    // Set timeout for command processing (2 seconds for complex commands)
-    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};  // 2s
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -748,10 +747,9 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
     a.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
     if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
-      send(s, data, len, 0);
-      // Just read once - don't wait for full response
+      send(s, data, len, MSG_NOSIGNAL);
       char r[4096];
-      recv(s, r, sizeof(r), 0);  // Single read, timeout after 100ms
+      recv(s, r, sizeof(r), 0);
     }
     close(s);
   }
