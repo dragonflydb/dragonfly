@@ -10,9 +10,10 @@
 #include "base/pod_array.h"
 #include "core/search/base.h"
 #include "io/file.h"
-#include "server/common.h"
 #include "server/db_slice.h"
+#include "server/execution_state.h"
 #include "server/rdb_save.h"
+#include "server/synchronization.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
 

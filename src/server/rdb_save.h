@@ -78,6 +78,8 @@ enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MUL
 
 CompressionMode GetDefaultCompressionMode();
 
+using StringVec = std::vector<std::string>;
+
 class RdbSaver {
  public:
   // Global data which doesn't belong to shards and is serialized in header

@@ -6,7 +6,7 @@
 
 #include <functional>
 
-#include "server/common.h"
+#include "server/execution_state.h"
 #include "server/tx_base.h"
 
 namespace dfly {
