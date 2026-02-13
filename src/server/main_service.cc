@@ -2204,8 +2204,6 @@ static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            bool read_only, CommandContext* cmd_cntx) {
-  DCHECK(!eval_args.sha.empty());
-
   // Sanitizing the input to avoid code injection.
   if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
     return cmd_cntx->SendError(facade::kScriptNotFound);

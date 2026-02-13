@@ -278,6 +278,9 @@ TEST_F(DflyEngineTest, EvalSha) {
   resp = Run({"evalsha", "foobar", "0"});
   EXPECT_THAT(resp, ErrArg("No matching"));
 
+  resp = Run({"evalsha", "", "0"});
+  EXPECT_THAT(resp, ErrArg("No matching"));
+
   resp = Run({"script", "load", "\n return 5"});
 
   // Important to keep spaces in order to be compatible with Redis.
