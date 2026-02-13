@@ -18,8 +18,8 @@ extern "C" {
 #include "core/search/hnsw_index.h"
 #include "io/io.h"
 #include "io/io_buf.h"
-#include "server/common.h"
 #include "server/detail/decompress.h"
+#include "server/execution_state.h"
 #include "server/journal/serializer.h"
 
 struct streamID;

@@ -19,12 +19,14 @@
 #include "core/search/hnsw_index.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
-#include "server/common.h"
 #include "server/search/aggregator.h"
 #include "server/search/index_join.h"
+#include "server/stats.h"
 #include "server/table.h"
 
 namespace dfly {
+
+using StringVec = std::vector<std::string>;
 
 namespace search {
 struct IndexBuilder;

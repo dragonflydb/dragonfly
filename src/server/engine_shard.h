@@ -9,7 +9,7 @@
 #include "core/page_usage/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
-#include "server/common.h"
+#include "server/common_types.h"
 #include "server/sharding.h"
 #include "server/tx_base.h"
 #include "util/sliding_counter.h"

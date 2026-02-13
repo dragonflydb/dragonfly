@@ -92,20 +92,20 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
   }
 
-  const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
-  std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
-  if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
-    flush_fun = [this, flush_threshold](size_t bytes_serialized,
-                                        RdbSerializer::FlushState flush_state) {
-      if (bytes_serialized > flush_threshold) {
-        size_t serialized = FlushSerialized(flush_state);
-        VLOG(2) << "FlushSerialized " << serialized << " bytes";
-        auto& stats = ServerState::tlocal()->stats;
-        ++stats.big_value_preemptions;
-      }
-    };
+  size_t flush_threshold = 0;
+  RdbSerializer::ConsumeFun consume_fun;
+  if (allow_flush == SnapshotFlush::kAllow) {
+    flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
+    if (flush_threshold != 0) {
+      // The callback receives data directly from the serializer, no need to call back into it.
+      consume_fun = [this](std::string data) {
+        HandleFlushData(std::move(data));
+        VLOG(2) << "HandleFlushData via callback";
+        ++ServerState::tlocal()->stats.big_value_preemptions;
+      };
+    }
   }
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -396,15 +396,11 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
-  io::StringFile sfile;
-  error_code ec = serializer_->FlushToSink(&sfile, flush_state);
-  CHECK(!ec);  // always succeeds
+void SliceSnapshot::HandleFlushData(std::string data) {
+  if (data.empty())
+    return;
 
-  size_t serialized = sfile.val.size();
-  if (serialized == 0)
-    return 0;
-
+  size_t serialized = data.size();
   uint64_t id = rec_id_++;
 
   if (use_background_mode_) {
@@ -427,21 +423,28 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  consumer_->ConsumeData(std::move(sfile.val), cntx_);
+  consumer_->ConsumeData(std::move(data), cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;
   seq_cond_.notify_all();
 
   if (!use_background_mode_) {
-    // FlushToSink can be quite slow for large values or due compression, therefore
-    // we counter-balance CPU over-usage by forcing sleep.
+    // serializer_->Flush can be quite slow for large values or due to compression, therefore
+    // we counter-balance CPU over-usage by sleeping.
     // We measure running_cycles before the preemption points, because they reset the counter.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
     ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
   }
 
   VLOG(2) << "Pushed with Serialize() " << serialized;
+}
+
+size_t SliceSnapshot::FlushSerialized() {
+  std::string blob = serializer_->Flush(SerializerBase::FlushState::kFlushEndEntry);
+
+  size_t serialized = blob.size();
+  HandleFlushData(std::move(blob));
   return serialized;
 }
 
@@ -450,7 +453,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushSerialized(FlushState::kFlushEndEntry);
+  size_t serialized = FlushSerialized();
 
   if (!delayed_entries_.empty()) {
     // Async bucket serialization might have accumulated some delayed values.
@@ -479,7 +482,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     } while (!delayed_entries_.empty());
 
     // blocking point.
-    serialized += FlushSerialized(FlushState::kFlushEndEntry);
+    serialized += FlushSerialized();
   }
   return serialized > 0;
 }
@@ -545,9 +548,8 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 }
 
 // For any key any journal entry must arrive at the replica strictly after its first original rdb
-// value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
-// no database switch can be performed between those two calls, because they are part of one
-// transaction.
+// value. This is guaranteed because journal change callbacks run after OnDbChange, and no
+// database switch can be performed between those two calls, as they are part of one transaction.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
   // barrier here for atomic serialization.

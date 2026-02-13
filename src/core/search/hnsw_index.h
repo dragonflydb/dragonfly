@@ -59,12 +59,24 @@ class HnswVectorIndex {
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
 
+  // Set metadata (used during restoration)
+  void SetMetadata(const HnswIndexMetadata& metadata);
+
   // Get total number of nodes in the index
   size_t GetNodeCount() const;
 
   // Get nodes in the specified range [start, end)
   // Returns vector of node data for serialization
   std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const;
+
+  // Restore graph structure from serialized nodes with metadata
+  // This restores the HNSW graph links but NOT the vector data
+  // Vector data must be populated separately via UpdateVectorData
+  void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata);
+
+  // Update vector data for an existing node (used after RestoreFromNodes)
+  // This populates the vector data for a node that already has graph links
+  bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field);
 
  private:
   bool copy_vector_;

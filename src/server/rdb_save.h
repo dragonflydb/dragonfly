@@ -15,8 +15,8 @@ extern "C" {
 #include "base/pod_array.h"
 #include "io/io.h"
 #include "io/io_buf.h"
-#include "server/common.h"
 #include "server/detail/compressor.h"
+#include "server/execution_state.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
@@ -77,6 +77,8 @@ enum class SaveMode {
 enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
 
 CompressionMode GetDefaultCompressionMode();
+
+using StringVec = std::vector<std::string>;
 
 class RdbSaver {
  public:
@@ -169,15 +171,15 @@ class SerializerBase {
   virtual ~SerializerBase() = default;
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
-  static void DumpValue(const PrimeValue& obj, io::StringSink* out, bool ignore_crc = false);
-  static void DumpValue(RdbSerializer* serializer, const PrimeValue& obj, io::StringSink* out,
-                        bool ignore_crc = false);
+  static std::string DumpValue(const PrimeValue& obj, bool ignore_crc = false);
+  static std::string DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
+                               bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
 
-  // Flush internal buffer to sink.
-  virtual std::error_code FlushToSink(io::Sink* s, FlushState flush_state);
+  // Flush internal buffer and return serialized blob.
+  virtual std::string Flush(FlushState flush_state);
 
   size_t GetBufferCapacity() const;
   virtual size_t GetTempBufferSize() const;
@@ -240,12 +242,16 @@ class SerializerBase {
 
 class RdbSerializer : public SerializerBase {
  public:
-  explicit RdbSerializer(CompressionMode compression_mode,
-                         std::function<void(size_t, FlushState)> flush_fun = {});
+  // ConsumeFun is called when internal buffer exceeds flush_threshold.
+  // The callback receives the extracted data.
+  using ConsumeFun = std::function<void(std::string)>;
+
+  explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
+                         size_t flush_threshold = 0);
 
   ~RdbSerializer();
 
-  std::error_code FlushToSink(io::Sink* s, FlushState flush_state) override;
+  std::string Flush(FlushState flush_state) override;
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
@@ -287,11 +293,12 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamConsumers(bool save_active, streamCG* cg);
 
   // Might preempt
-  void FlushIfNeeded(FlushState flush_state);
+  void PushToConsumerIfNeeded(FlushState flush_state);
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
-  std::function<void(size_t, FlushState)> flush_fun_;
+  ConsumeFun consume_fun_;
+  size_t flush_threshold_ = 0;
 };
 
 }  // namespace dfly
