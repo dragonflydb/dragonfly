@@ -227,4 +227,59 @@ TEST_F(HllFamilyTest, MergeWithInvalidHllFormat) {
               ErrArg("INVALIDOBJ Corrupted HLL object detected."));
 }
 
+TEST_F(HllFamilyTest, PFDebugEncoding) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a", "b", "c"}), 1);
+  auto resp = Run({"pfdebug", "encoding", "key"});
+  // Initially sparse
+  EXPECT_EQ(resp, "sparse");
+}
+
+TEST_F(HllFamilyTest, PFDebugGetReg) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a", "b", "c"}), 1);
+  auto resp = Run({"pfdebug", "getreg", "key"});
+  EXPECT_THAT(resp, ArrLen(16384));
+}
+
+TEST_F(HllFamilyTest, PFDebugToDense) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a"}), 1);
+  // Initially sparse, so todense converts and returns 1
+  auto resp = Run({"pfdebug", "todense", "key"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // Second call, already dense, returns 0
+  resp = Run({"pfdebug", "todense", "key"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Verify encoding is now dense
+  resp = Run({"pfdebug", "encoding", "key"});
+  EXPECT_EQ(resp, "dense");
+}
+
+TEST_F(HllFamilyTest, PFDebugDecode) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a", "b", "c"}), 1);
+
+  // Should be sparse initially
+  auto resp = Run({"pfdebug", "decode", "key"});
+  EXPECT_FALSE(resp.empty());                   // Check it returns something non-empty
+  EXPECT_THAT(resp, testing::HasSubstr("v:"));  // Should contain value run
+
+  // Convert to dense
+  Run({"pfdebug", "todense", "key"});
+
+  // Decode on dense should fail
+  resp = Run({"pfdebug", "decode", "key"});
+  EXPECT_THAT(resp, ErrArg("HLL encoding is not sparse"));
+}
+
+TEST_F(HllFamilyTest, PFDebugUnknown) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key", "a"}), 1);
+  auto resp = Run({"pfdebug", "badcmd", "key"});
+  EXPECT_THAT(resp, ErrArg("Unknown PFDEBUG subcommand 'badcmd'"));
+}
+
+TEST_F(HllFamilyTest, PFDebugNonExistent) {
+  auto resp = Run({"pfdebug", "encoding", "nonexistent"});
+  EXPECT_THAT(resp, ErrArg("The specified key does not exist"));
+}
+
 }  // namespace dfly

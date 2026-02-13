@@ -6,6 +6,9 @@ extern "C" {
 #include "redis/hyperloglog.h"
 }
 
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
+
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
@@ -324,6 +327,169 @@ void PFMerge(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void PFDebug(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  string_view subcmd = ArgS(args, 0);
+  string_view key = ArgS(args, 1);
+
+  if (absl::EqualsIgnoreCase(subcmd, "GETREG")) {
+    auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<vector<int>> {
+      auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
+      auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+      if (!it.ok()) {
+        return it.status();
+      }
+      string hll;
+      it.value()->second.GetString(&hll);
+      if (!ConvertToDenseIfNeeded(&hll)) {
+        return OpStatus::CORRUPTED_HLL;
+      }
+      vector<int> regs(HLL_REGISTERS);
+      if (pfDebugGetReg(StringToHllPtr(hll), regs.data()) != 0) {
+        return OpStatus::INVALID_VALUE;
+      }
+      return regs;
+    };
+
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    if (result.ok()) {
+      const auto& regs = result.value();
+      rb->StartArray(regs.size());
+      for (int val : regs) {
+        rb->SendLong(val);
+      }
+    } else {
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
+    }
+  } else if (absl::EqualsIgnoreCase(subcmd, "DECODE")) {
+    auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
+      auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
+      auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+      if (!it.ok()) {
+        return it.status();
+      }
+      string hll;
+      it.value()->second.GetString(&hll);
+      int enc = pfDebugGetEncoding(StringToHllPtr(hll));
+      if (enc != 1) {
+        return OpStatus::INVALID_VALUE;  // Not sparse
+      }
+      vector<char> buf(64 * 1024);
+      int res = pfDebugDecode(StringToHllPtr(hll), buf.data(), buf.size());
+      if (res != 0) {
+        return OpStatus::INVALID_VALUE;
+      }
+      return string(buf.data());
+    };
+
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    if (result.ok()) {
+      rb->SendBulkString(result.value());
+    } else {
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        case OpStatus::INVALID_VALUE:
+          rb->SendError("HLL encoding is not sparse");
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
+    }
+  } else if (absl::EqualsIgnoreCase(subcmd, "ENCODING")) {
+    auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+      auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
+      auto it = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+      if (!it.ok()) {
+        return it.status();
+      }
+      string hll;
+      // Use GetString to ensure we have a contiguous string for StringToHllPtr
+      it.value()->second.GetString(&hll);
+      return pfDebugGetEncoding(StringToHllPtr(hll));
+    };
+
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    if (result.ok()) {
+      const char* encoding_names[] = {"dense", "sparse"};
+      int enc = result.value();
+      if (enc >= 0 && enc <= 1) {
+        rb->SendSimpleString(encoding_names[enc]);
+      } else {
+        rb->SendError(kInvalidHllError);
+      }
+    } else {
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
+    }
+  } else if (absl::EqualsIgnoreCase(subcmd, "TODENSE")) {
+    auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+      auto& db_slice = t->GetOpArgs(shard).GetDbSlice();
+      auto res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_STRING);
+      if (!res) {
+        return res.status();
+      }
+      string hll;
+      res->it->second.GetString(&hll);
+      int validity = isValidHLL(StringToHllPtr(hll));
+      if (validity == HLL_VALID_DENSE) {
+        return 0;
+      }
+      if (validity == HLL_VALID_SPARSE) {
+        if (!ConvertToDenseIfNeeded(&hll)) {
+          return OpStatus::CORRUPTED_HLL;
+        }
+        res->it->second.SetString(hll);
+        return 1;
+      }
+      return OpStatus::INVALID_VALUE;
+    };
+
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    if (result.ok()) {
+      rb->SendLong(result.value());
+    } else {
+      switch (result.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          rb->SendError("The specified key does not exist");
+          break;
+        case OpStatus::WRONG_TYPE:
+          rb->SendError(kWrongTypeErr);
+          break;
+        default:
+          rb->SendError(kInvalidHllError);
+          break;
+      }
+    }
+  } else {
+    rb->SendError(absl::StrCat("Unknown PFDEBUG subcommand '", subcmd, "'"));
+  }
+}
+
 }  // namespace
 
 void RegisterHllFamily(CommandRegistry* registry) {
@@ -331,7 +497,8 @@ void RegisterHllFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::HYPERLOGLOG);
   *registry << CI{"PFADD", CO::FAST | CO::JOURNALED, -3, 1, 1}.SetHandler(PFAdd)
             << CI{"PFCOUNT", CO::READONLY, -2, 1, -1}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1}.SetHandler(PFMerge);
+            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1}.SetHandler(PFMerge)
+            << CI{"PFDEBUG", CO::ADMIN | CO::LOADING, -3, 2, 2}.SetHandler(PFDebug);
 }
 
 }  // namespace dfly
