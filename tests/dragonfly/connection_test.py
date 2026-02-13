@@ -182,6 +182,29 @@ async def test_monitor_command_lua(async_pool):
     assert expected == collected[1:]
 
 
+@dfly_args({"proactor_threads": 1})
+async def test_monitor_multi_exec_close(df_server: DflyInstance):
+    async def monitor_multi_exec_close():
+        client = aioredis.Redis(port=df_server.port, single_connection_client=True)
+        try:
+            await client.execute_command("MULTI")
+            await client.execute_command("MONITOR")
+            await client.execute_command("MONITOR")
+            await client.execute_command("SET", "a", "1")
+            await client.execute_command("EXEC")
+        except Exception:
+            pass
+        finally:
+            await client.close()
+
+    for _ in range(200):
+        await asyncio.gather(*[monitor_multi_exec_close() for _ in range(10)])
+
+    # If we get here, the server did not crash.
+    client = df_server.client()
+    assert await client.ping()
+
+
 """
 Run test in pipeline mode.
 This is mostly how this is done with python - its more like a transaction that

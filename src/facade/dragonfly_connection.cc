@@ -1879,10 +1879,6 @@ void Connection::SendPubMessageAsync(PubMessage msg) {
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
-  // DispatchMonitor uses async DispatchBrief, so by the time this callback
-  // runs the connection may already be closing.
-  if (!cc_ || !listener())
-    return;
   SendAsync({MonitorMessage{std::move(msg)}});
 }
 

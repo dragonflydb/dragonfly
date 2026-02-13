@@ -69,6 +69,10 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
+  // Ensure idempotency: MONITOR may be queued multiple times inside MULTI/EXEC.
+  if (start == monitor)
+    return;
+
   // This will either remove or register a new connection
   // at the "top level" thread --> ServerState context
   // note that we are registering/removing this connection to the thread at which at run
