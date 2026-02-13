@@ -729,27 +729,30 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
   return len;
 }
 
-// Sends fuzzing input to the Dragonfly server over TCP and reads the response.
+// Sends fuzzing input to the Dragonfly server and reads the response.
+// This executes one fuzzing iteration by:
+// 1. Creating a TCP socket connection to the server
+// 2. Sending the fuzzed data
+// 3. Reading a response (with timeout to prevent hangs)
+// The function uses short timeouts to keep fuzzing fast and prevent AFL++ from stalling.
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
-  if (s < 0)
-    return;
+  if (s >= 0) {
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-  struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
-  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-  struct sockaddr_in a = {};
-  a.sin_family = AF_INET;
-  a.sin_port = htons(port);
-  inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-
-  if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
-    send(s, data, len, MSG_NOSIGNAL);
-    char r[4096];
-    recv(s, r, sizeof(r), 0);
+    struct sockaddr_in a = {};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
+      send(s, data, len, MSG_NOSIGNAL);
+      char r[4096];
+      recv(s, r, sizeof(r), 0);
+    }
+    close(s);
   }
-  close(s);
 }
 
 // Initializes AFL++ fuzzing by starting the server in a separate thread,

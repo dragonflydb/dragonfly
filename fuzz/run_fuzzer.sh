@@ -166,6 +166,11 @@ run_fuzzer() {
     # stages to finish. Useful for protocol fuzzing where random mutations find new paths.
     export AFL_EXPAND_HAVOC_NOW=1
 
+    # Custom RESP protocol mutator — mutates at command/argument level
+    # instead of random bytes, keeping RESP framing valid.
+    export PYTHONPATH="$FUZZ_DIR"
+    export AFL_PYTHON_MODULE=resp_mutator
+
     exec "${AFL_CMD[@]}"
 }
 
