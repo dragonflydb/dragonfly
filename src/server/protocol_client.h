@@ -12,7 +12,7 @@
 #include "facade/redis_parser.h"
 #include "facade/resp_parser.h"
 #include "io/io_buf.h"
-#include "server/common.h"
+#include "server/execution_state.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 

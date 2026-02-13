@@ -1140,6 +1140,21 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert list[0]["lib-ver"] == "1.2.3.4"
 
 
+async def test_client_info(async_client: aioredis.Redis):
+    """Test CLIENT INFO returns info about the current connection only."""
+    await async_client.client_setname("test_client_info")
+
+    info = await async_client.execute_command("CLIENT INFO")
+    assert isinstance(info, dict)
+    assert info["name"] == "test_client_info"
+
+    # Verify CLIENT INFO returns same format as CLIENT LIST but for single connection
+    client_list = await async_client.client_list()
+    assert len(client_list) == 1
+    # CLIENT INFO should contain the same client id as CLIENT LIST
+    assert str(info["id"]) == str(client_list[0]["id"])
+
+
 async def test_hiredis(df_factory):
     server = df_factory.create(proactor_threads=1)
     server.start()
@@ -1592,3 +1607,24 @@ async def test_quit_in_pipeline(df_server: DflyInstance):
 
     assert res[:NUM_KEYS] == [1] * NUM_KEYS, f"Expected {NUM_KEYS} DEL replies, got: {res}"
     assert res[NUM_KEYS] in (b"OK", True), f"Expected QUIT OK reply, got: {res[NUM_KEYS]}"
+
+
+async def test_tls_partial_header_read(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
+):
+    server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
+
+    # Connect with raw socket and send only 1 byte (less than the 2-byte TLS header check)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect(("localhost", server.port))
+        # Send 1 byte (less than the 2-byte TLS header that dragonfly expects)
+        sock.send(b"\x16")
+
+    # If the server crashes due to UB, it will fail. Otherwise this test passes.
+    # The server should handle this gracefully without crashing.
+    await asyncio.sleep(0.5)  # Give server time to handle the connection
+
+    # Verify server is still alive by making a valid connection
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    assert await client.ping()

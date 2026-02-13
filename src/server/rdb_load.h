@@ -15,10 +15,11 @@ extern "C" {
 #include "base/pod_array.h"
 #include "base/spinlock.h"
 #include "core/search/base.h"
+#include "core/search/hnsw_index.h"
 #include "io/io.h"
 #include "io/io_buf.h"
-#include "server/common.h"
 #include "server/detail/decompress.h"
+#include "server/execution_state.h"
 #include "server/journal/serializer.h"
 
 struct streamID;
@@ -334,6 +335,9 @@ class RdbLoader : protected RdbLoaderBase {
   // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
+  // Load HNSW index metadata from JSON, sets metadata on the GlobalHnswIndexRegistry
+  void LoadHnswIndexMetadataFromAux(std::string&& value);
+
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
@@ -352,6 +356,14 @@ class RdbLoader : protected RdbLoaderBase {
     std::vector<std::pair<std::string, search::DocId>> mappings;
   };
   std::vector<PendingIndexMapping> pending_index_mappings_;
+
+  // HNSW metadata loaded from "hnsw-index-metadata" AUX fields, keyed by index_name:field_name
+  struct PendingHnswMetadata {
+    std::string index_name;
+    std::string field_name;
+    search::HnswIndexMetadata metadata;
+  };
+  std::vector<PendingHnswMetadata> pending_hnsw_metadata_;
 
   std::string snapshot_id_;
   bool override_existing_keys_ = false;

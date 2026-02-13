@@ -13,7 +13,6 @@
 #include <utility>
 #include <variant>
 
-#include "common/backed_args.h"
 #include "facade/connection_ref.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"

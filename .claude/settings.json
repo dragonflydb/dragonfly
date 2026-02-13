@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit($CLAUDE_PROJECT_DIR/**)",
+      "Write($CLAUDE_PROJECT_DIR/**)",
+      "Bash(./*_test:*)",
+      "Bash(ninja:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(gh issue view:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "WebSearch",
+      "Bash(grep:*)",
+      "Bash(pre-commit run:*)",
+      "Bash(clang-format:*)",
+      "Bash(git checkout:*)",
+      "Bash(tee:*)",
+      "Bash(sort:*)",
+      "Bash(git patch-id:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/format-after-edit.sh",
+            "timeout": 30,
+            "statusMessage": "Formatting code..."
+          }
+        ]
+      }
+    ]
+  }
+}

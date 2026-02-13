@@ -15,6 +15,7 @@
 #include "base/function2.hpp"
 #include "base/logging.h"
 #include "server/journal/serializer.h"
+#include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, shard_repl_backlog_len, 8192,
           "The length of the circular replication log per shard");

@@ -45,6 +45,7 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -2593,6 +2594,8 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "hnsw-index-metadata") {
+    LoadHnswIndexMetadataFromAux(std::move(auxval));
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
@@ -2988,41 +2991,13 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  string index_name;
-  string full_cmd;
-
-  // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
-  if (!def.empty() && def[0] == '{') {
-    // New JSON format with HNSW metadata (from summary file)
-    try {
-      auto json_opt = JsonFromString(def);
-      if (!json_opt) {
-        LOG(ERROR) << "Invalid search index JSON: " << def;
-        return;
-      }
-      const auto& json = *json_opt;
-      index_name = json["name"].as<string>();
-      string cmd = json["cmd"].as<string>();
-
-      // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
-      // Currently we just restore the index definition, HNSW graph will be rebuilt
-
-      full_cmd = absl::StrCat(index_name, " ", cmd);
-    } catch (const std::exception& e) {
-      LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
-      return;
-    }
-  } else {
-    // Simple format: "index_name cmd" - from per-shard DFS files or old format
-    // Extract index name (first token before space)
-    size_t space_pos = def.find(' ');
-    if (space_pos == string::npos) {
-      LOG(ERROR) << "Invalid search index definition: " << def;
-      return;
-    }
-    index_name = def.substr(0, space_pos);
-    full_cmd = std::move(def);
+  // Simple format: "index_name cmd"
+  size_t space_pos = def.find(' ');
+  if (space_pos == string::npos) {
+    LOG(ERROR) << "Invalid search index definition: " << def;
+    return;
   }
+  string index_name = def.substr(0, space_pos);
 
   // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
   // We track which indices we've already attempted to create to avoid race conditions where
@@ -3036,11 +3011,36 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     }
   }
 
-  LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+}
+
+void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
+  try {
+    auto json_opt = JsonFromString(def);
+    if (!json_opt) {
+      LOG(ERROR) << "Invalid HNSW index metadata JSON: " << def;
+      return;
+    }
+    const auto& json = *json_opt;
+
+    PendingHnswMetadata phm;
+    phm.index_name = json["index_name"].as<string>();
+    phm.field_name = json["field_name"].as<string>();
+    phm.metadata.max_elements = json["max_elements"].as<size_t>();
+    phm.metadata.cur_element_count = json["cur_element_count"].as<size_t>();
+    phm.metadata.maxlevel = json["maxlevel"].as<int>();
+    phm.metadata.enterpoint_node = json["enterpoint_node"].as<size_t>();
+
+    LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
+              << " elements=" << phm.metadata.cur_element_count;
+
+    pending_hnsw_metadata_.emplace_back(std::move(phm));
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
+  }
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
-  // FT.SYNUPDATE command - defer execution until after RebuildAllIndices
   // Add to shared static vector (may be called from multiple RdbLoader instances)
   pending_synonym_cmds_.push_back(std::move(def));
 }
@@ -3060,14 +3060,15 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (is_error)
     return;
 
-  // Rebuild all search indices as only their definitions are extracted from the snapshot
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+  // Start index building for all indices
+  // TODO: don't build all indices concurrently or limit cumulative budget
+  shard_set->RunBriefInParallel([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args, true);
+    es->search_indices()->RebuildAllIndices(op_args);
   });
 
-  // Now execute all pending synonym commands after indices are rebuilt
+  // Issue FT.SYNUPDATE while the index is building
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

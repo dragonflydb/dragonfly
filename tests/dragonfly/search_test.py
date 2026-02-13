@@ -488,6 +488,11 @@ async def test_index_persistence(df_server):
     i1 = client.ft("i1")
     i2 = client.ft("i2")
 
+    while (await i1.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
+    while (await i2.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
+
     info_1_new = await i1.info()
     info_2_new = await i2.info()
 
@@ -632,7 +637,10 @@ async def test_synonym_persistence(df_server):
     df_server.start()
     client = aioredis.Redis(port=df_server.port)
     await wait_available_async(client)
+
     idx = client.ft("idx")
+    while (await idx.info())["indexing"] == 1:
+        await asyncio.sleep(0.05)
 
     # Verify synonyms still work after restart
     assert (await idx.search(Query("car"))).total == 2
@@ -811,14 +819,18 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
     await wait_available_async(c_replica)
 
-    # Wait for replication to complete and index to be rebuilt
-    await asyncio.sleep(2)
-
     # Verify index exists on replica
     indices = await c_replica.execute_command("FT._LIST")
     assert b"all_types_idx" in indices or "all_types_idx" in indices
 
     replica_idx = c_replica.ft("all_types_idx")
+
+    # Wait for replication and async indexing (especially HNSW vectors) to complete
+    timeout = time.time() + 30  # 30 second timeout
+    while (await replica_idx.info())["indexing"] == 1:
+        if time.time() > timeout:
+            raise TimeoutError("Indexing did not complete within 30 seconds")
+        await asyncio.sleep(0.05)
 
     # Verify all search types work on replica
 
