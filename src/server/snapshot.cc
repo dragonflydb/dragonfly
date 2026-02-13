@@ -548,9 +548,8 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 }
 
 // For any key any journal entry must arrive at the replica strictly after its first original rdb
-// value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
-// no database switch can be performed between those two calls, because they are part of one
-// transaction.
+// value. This is guaranteed because journal change callbacks run after OnDbChange, and no
+// database switch can be performed between those two calls, as they are part of one transaction.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
   // barrier here for atomic serialization.

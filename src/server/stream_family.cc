@@ -1289,8 +1289,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 struct FindGroupResult {
   stream* s = nullptr;
   streamCG* cg = nullptr;
-  DbSlice::AutoUpdater post_updater;
-  DbSlice::Iterator it;
+  DbSlice::ItAndUpdater it;
 };
 
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname,
@@ -1305,7 +1304,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
   if (skip_group && !cg)
     return OpStatus::SKIPPED;
 
-  return FindGroupResult{s, cg, std::move(res_it->post_updater), res_it->it};
+  return FindGroupResult{s, cg, std::move(*res_it)};
 }
 
 // Try to get the consumer. If not found, create a new one.
@@ -1468,7 +1467,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       // TODO: propagate this change with streamPropagateXCLAIM
     }
   }
-  tracker.UpdateStreamSize(cgr_res->it->second);
+  tracker.UpdateStreamSize(cgr_res->it.it->second);
   return result;
 }
 
@@ -1481,7 +1480,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
   streamFreeCG(cgr_res->cg);
 
-  mem_tracker.UpdateStreamSize(cgr_res->it->second);
+  mem_tracker.UpdateStreamSize(cgr_res->it.it->second);
 
   // Awake readers blocked on this group
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
@@ -1513,7 +1512,7 @@ OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, stri
   streamConsumer* consumer = StreamCreateConsumer(
       cgroup_res->cg, consumer_name, op_args.db_cntx.time_now_ms, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
 
-  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
+  mem_tracker.UpdateStreamSize(cgroup_res->it.it->second);
   return consumer ? OpStatus::OK : OpStatus::KEY_EXISTS;
 }
 
@@ -1531,7 +1530,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
     streamDelConsumer(cgroup_res->cg, consumer);
   }
 
-  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
+  mem_tracker.UpdateStreamSize(cgroup_res->it.it->second);
   return pending;
 }
 
@@ -1686,7 +1685,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
       acknowledged++;
     }
   }
-  mem_tracker.UpdateStreamSize(res->it->second);
+  mem_tracker.UpdateStreamSize(res->it.it->second);
   return acknowledged;
 }
 
@@ -1783,7 +1782,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   raxStop(&ri);
   result.end_id = end_id;
 
-  mem_tracker.UpdateStreamSize(cgr_res->it->second);
+  mem_tracker.UpdateStreamSize(cgr_res->it.it->second);
 
   return result;
 }
