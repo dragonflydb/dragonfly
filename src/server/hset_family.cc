@@ -426,6 +426,7 @@ OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, CmdArgList fields) {
 
 struct OpSetParams {
   bool skip_if_exists = false;
+  bool skip_if_not_exists = false;  // FXX flag in Redis
   uint32_t ttl = UINT32_MAX;
   bool keepttl = false;
 };
@@ -458,7 +459,8 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   if (pv.Encoding() == kEncodingListPack) {
     lp = (uint8_t*)pv.RObjPtr();
 
-    if (op_sp.ttl != UINT32_MAX || !IsGoodForListpack(values, lp)) {
+    // Convert to StringMap if TTL is set, FXX is set, or listpack would be too large
+    if (op_sp.ttl != UINT32_MAX || op_sp.skip_if_not_exists || !IsGoodForListpack(values, lp)) {
       StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       lp = nullptr;
@@ -468,6 +470,9 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   unsigned created = 0;
 
   if (lp) {
+    // FXX cannot be used with listpack (should have been converted above)
+    DCHECK(!op_sp.skip_if_not_exists);
+    
     size_t malloc_reserved = zmalloc_size(lp);
     size_t min_sz = EstimateListpackMinBytes(values);
     if (min_sz > malloc_reserved) {
@@ -487,10 +492,21 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     for (size_t i = 0; i < values.size(); i += 2) {
       string_view field = values[i];
       string_view value = values[i + 1];
-      if (op_sp.skip_if_exists)
+      
+      if (op_sp.skip_if_not_exists) {
+        // FXX: only update if field already exists
+        auto it = sm->Find(field);
+        if (it == sm->end()) {
+          added = false;  // Field doesn't exist, don't add
+        } else {
+          added = false;  // Field exists, update it
+          sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
+        }
+      } else if (op_sp.skip_if_exists) {
         added = sm->AddOrSkip(field, value, op_sp.ttl);
-      else
+      } else {
         added = sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
+      }
 
       created += unsigned(added);
     }
@@ -555,7 +571,9 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   return res;
 }
 
-// HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
+// HSETEX supports two formats:
+// 1. Dragonfly format: HSETEX key [NX] [KEEPTTL] ttl_sec field value [field value ...]
+// 2. Redis format: HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT timestamp | PXAT timestamp | KEEPTTL] FIELDS numfields field value [field value ...]
 void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
@@ -566,48 +584,151 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   };
 
-  while (true) {
-    if (parser.Check("NX")) {
-      if (op_sp.skip_if_exists) {
-        return option_already_set();
-      }
-      op_sp.skip_if_exists = true;
-    } else if (parser.Check("KEEPTTL")) {
-      if (op_sp.keepttl) {
-        return option_already_set();
-      }
-      op_sp.keepttl = true;
-    } else {
+  // Detect format by checking if FIELDS keyword exists (Redis format)
+  bool is_redis_format = false;
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (ArgS(args, i) == "FIELDS") {
+      is_redis_format = true;
       break;
     }
   }
 
-  op_sp.ttl = parser.Next<uint32_t>();
-  auto* rb = cmd_cntx->rb();
-  if (parser.HasError()) {
-    return cmd_cntx->SendError(parser.TakeError().MakeReply());
-  }
+  if (is_redis_format) {
+    // Redis format: HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT timestamp | PXAT timestamp | KEEPTTL] FIELDS numfields field value [field value ...]
+    
+    // Parse FNX/FXX flags
+    if (parser.Check("FNX")) {
+      op_sp.skip_if_exists = true;
+    } else if (parser.Check("FXX")) {
+      op_sp.skip_if_not_exists = true;
+    }
 
-  constexpr uint32_t kMaxTtl = (1UL << 26);
-  if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
-    return cmd_cntx->SendError(kInvalidIntErr);
-  }
+    // Parse expiration options
+    bool has_expiration = false;
+    if (parser.Check("EX")) {
+      has_expiration = true;
+      uint64_t ttl = parser.Next<uint64_t>();
+      if (parser.HasError()) {
+        return cmd_cntx->SendError(parser.TakeError().MakeReply());
+      }
+      op_sp.ttl = static_cast<uint32_t>(ttl);
+    } else if (parser.Check("PX")) {
+      has_expiration = true;
+      uint64_t ttl_ms = parser.Next<uint64_t>();
+      if (parser.HasError()) {
+        return cmd_cntx->SendError(parser.TakeError().MakeReply());
+      }
+      // Convert milliseconds to seconds
+      op_sp.ttl = static_cast<uint32_t>((ttl_ms + 999) / 1000);  // Round up
+    } else if (parser.Check("EXAT")) {
+      has_expiration = true;
+      uint64_t timestamp = parser.Next<uint64_t>();
+      if (parser.HasError()) {
+        return cmd_cntx->SendError(parser.TakeError().MakeReply());
+      }
+      // Convert Unix timestamp to relative TTL
+      uint64_t now = cmd_cntx->tx()->GetDbContext().time_now_ms / 1000;
+      if (timestamp > now) {
+        op_sp.ttl = static_cast<uint32_t>(timestamp - now);
+      } else {
+        op_sp.ttl = 0;
+      }
+    } else if (parser.Check("PXAT")) {
+      has_expiration = true;
+      uint64_t timestamp_ms = parser.Next<uint64_t>();
+      if (parser.HasError()) {
+        return cmd_cntx->SendError(parser.TakeError().MakeReply());
+      }
+      // Convert Unix timestamp in milliseconds to relative TTL in seconds
+      uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+      if (timestamp_ms > now_ms) {
+        op_sp.ttl = static_cast<uint32_t>((timestamp_ms - now_ms + 999) / 1000);  // Round up
+      } else {
+        op_sp.ttl = 0;
+      }
+    } else if (parser.Check("KEEPTTL")) {
+      op_sp.keepttl = true;
+    }
 
-  CmdArgList fields = parser.Tail();
+    // Parse FIELDS keyword
+    if (!parser.Check("FIELDS")) {
+      return cmd_cntx->SendError("ERR syntax error", kSyntaxErrType);
+    }
 
-  if (fields.size() % 2 != 0) {
-    return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
-  }
+    uint32_t numfields = parser.Next<uint32_t>();
+    if (parser.HasError()) {
+      return cmd_cntx->SendError(parser.TakeError().MakeReply());
+    }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
-  };
+    CmdArgList fields = parser.Tail();
+    
+    // Validate numfields matches actual field count
+    if (fields.size() != numfields * 2) {
+      return cmd_cntx->SendError("ERR wrong number of arguments for 'hsetex' command", kSyntaxErrType);
+    }
 
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    rb->SendLong(*result);
+    constexpr uint32_t kMaxTtl = (1UL << 26);
+    if (!op_sp.keepttl && has_expiration && (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl)) {
+      return cmd_cntx->SendError(kInvalidIntErr);
+    }
+
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
+    };
+
+    OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    auto* rb = cmd_cntx->rb();
+    if (result) {
+      rb->SendLong(*result);
+    } else {
+      cmd_cntx->SendError(result.status());
+    }
   } else {
-    cmd_cntx->SendError(result.status());
+    // Dragonfly format: HSETEX key [NX] [KEEPTTL] ttl_sec field value [field value ...]
+    
+    while (true) {
+      if (parser.Check("NX")) {
+        if (op_sp.skip_if_exists) {
+          return option_already_set();
+        }
+        op_sp.skip_if_exists = true;
+      } else if (parser.Check("KEEPTTL")) {
+        if (op_sp.keepttl) {
+          return option_already_set();
+        }
+        op_sp.keepttl = true;
+      } else {
+        break;
+      }
+    }
+
+    op_sp.ttl = parser.Next<uint32_t>();
+    auto* rb = cmd_cntx->rb();
+    if (parser.HasError()) {
+      return cmd_cntx->SendError(parser.TakeError().MakeReply());
+    }
+
+    constexpr uint32_t kMaxTtl = (1UL << 26);
+    if (op_sp.ttl == 0 || op_sp.ttl > kMaxTtl) {
+      return cmd_cntx->SendError(kInvalidIntErr);
+    }
+
+    CmdArgList fields = parser.Tail();
+
+    if (fields.size() % 2 != 0) {
+      return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
+    }
+
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
+    };
+
+    OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    if (result) {
+      rb->SendLong(*result);
+    } else {
+      cmd_cntx->SendError(result.status());
+    }
   }
 }
 
