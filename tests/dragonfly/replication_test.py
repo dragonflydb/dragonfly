@@ -154,39 +154,6 @@ async def test_replication_all(
         assert preemptions <= (key_capacity * 0.03)
 
 
-async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
-    role = await c_replica.role()
-    if role[0] != "slave" or role[3] != "online":
-        return False
-    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-
-    logging.debug(f"  offset {syncid} {r_offset} {m_offset}")
-    return r_offset == m_offset
-
-
-async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
-    logging.debug("Waiting for replicas to finish")
-
-    waiting_for = list(c_replicas)
-    start = time.time()
-    while (time.time() - start) < timeout:
-        if not waiting_for:
-            logging.debug("All replicas finished after %s seconds", time.time() - start)
-            return
-        await asyncio.sleep(0.2)
-        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
-        finished_list = await asyncio.gather(
-            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
-        )
-
-        # Remove clients that finished from waiting list
-        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
-
-    first_r: aioredis.Redis = waiting_for[0]
-    logging.error("Replica not finished, role %s", await first_r.role())
-    raise RuntimeError("Not all replicas finished in time!")
-
-
 """
 Test disconnecting replicas during different phases while constantly streaming changes to master.
 
