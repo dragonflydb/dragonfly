@@ -166,7 +166,7 @@ bool JournalStreamer::Cancel() {
     res = true;
   }
   StopStalledDataWriterFiber();
-  WaitForInflightToComplete();
+  WaitForInflightToComplete(false);
   return res;
 }
 
@@ -388,8 +388,15 @@ void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
     LOG_IF(WARNING, status == std::cv_status::timeout)
         << "Waiting for inflight bytes " << in_flight_bytes_;
 
-    if (with_timeout && next >= max_timeout)
-      cntx_->ReportError("JournalStreamer write operation timeout");
+    if (next >= max_timeout) {
+      if (with_timeout) {
+        cntx_->ReportError("JournalStreamer write operation timeout");
+        break;
+      } else {
+        LOG(WARNING) << "WaitForInflightToComplete timed out with " << in_flight_bytes_
+                     << " inflight bytes remaining";
+      }
+    }
   }
 }
 
