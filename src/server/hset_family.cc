@@ -845,15 +845,15 @@ void CmdHGetEx(CmdArgList args, CommandContext* cmd_cntx) {
     ttl_sec = parser.Next<uint32_t>();
   } else if (parser.Check("PX"sv)) {
     uint32_t ttl_ms = parser.Next<uint32_t>();
-    // Round up: (ms + 999) / 1000 ensures ceiling division
+    // Round up duration: (ms + 999) / 1000 ensures ceiling division
     ttl_sec = (ttl_ms + kMsRoundUp) / 1000;
   } else if (parser.Check("EXAT"sv)) {
     int64_t expire_at = parser.Next<int64_t>();
     ttl_sec = (expire_at > now_sec) ? static_cast<uint32_t>(expire_at - now_sec) : 0;
   } else if (parser.Check("PXAT"sv)) {
     int64_t expire_at_ms = parser.Next<int64_t>();
-    // Convert millisecond timestamp to seconds, then compute TTL
-    int64_t expire_at_sec = (expire_at_ms + kMsRoundUp) / 1000;
+    // Convert absolute timestamp (no rounding needed for timestamps)
+    int64_t expire_at_sec = expire_at_ms / 1000;
     ttl_sec = (expire_at_sec > now_sec) ? static_cast<uint32_t>(expire_at_sec - now_sec) : 0;
   }
   
