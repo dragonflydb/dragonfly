@@ -836,20 +836,25 @@ void CmdHGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   // Parse expiration options (all are mutually exclusive)
   optional<uint32_t> ttl_sec;
   int64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
-  int64_t at_ms = now_ms / 1000;  // Current time in seconds
+  int64_t now_sec = now_ms / 1000;  // Current time in seconds
+  
+  // Helper constant for rounding up milliseconds to seconds (ceiling division)
+  constexpr int64_t kMsRoundUp = 999;
   
   if (parser.Check("EX"sv)) {
     ttl_sec = parser.Next<uint32_t>();
   } else if (parser.Check("PX"sv)) {
     uint32_t ttl_ms = parser.Next<uint32_t>();
-    ttl_sec = (ttl_ms + 999) / 1000;  // Convert ms to sec (round up)
+    // Round up: (ms + 999) / 1000 ensures ceiling division
+    ttl_sec = (ttl_ms + kMsRoundUp) / 1000;
   } else if (parser.Check("EXAT"sv)) {
     int64_t expire_at = parser.Next<int64_t>();
-    ttl_sec = (expire_at > at_ms) ? static_cast<uint32_t>(expire_at - at_ms) : 0;
+    ttl_sec = (expire_at > now_sec) ? static_cast<uint32_t>(expire_at - now_sec) : 0;
   } else if (parser.Check("PXAT"sv)) {
     int64_t expire_at_ms = parser.Next<int64_t>();
-    int64_t expire_at_sec = (expire_at_ms + 999) / 1000;
-    ttl_sec = (expire_at_sec > at_ms) ? static_cast<uint32_t>(expire_at_sec - at_ms) : 0;
+    // Convert millisecond timestamp to seconds, then compute TTL
+    int64_t expire_at_sec = (expire_at_ms + kMsRoundUp) / 1000;
+    ttl_sec = (expire_at_sec > now_sec) ? static_cast<uint32_t>(expire_at_sec - now_sec) : 0;
   }
   
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
