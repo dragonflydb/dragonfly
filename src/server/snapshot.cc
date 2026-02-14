@@ -7,6 +7,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <mutex>
+
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -460,13 +462,21 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
   // Atomic bucket serialization might have accumulated some delayed values.
   // Because we can finally block in this function, we'll await and serialize them.
+
+  thread_local fb2::Mutex delayed_experimental_mu_;
+
   while (!delayed_entries_.empty()) {
+    std::lock_guard lk{delayed_experimental_mu_};
+
+    if (delayed_entries_.empty())
+      break;
+
     RdbSerializer delayed_serializer{compression_mode_};
     do {
       // We may call PushSerialized from multiple fibers concurrently, so we need to
       // ensure that we are not serializing the same entry concurrently.
-      DelayedEntry entry = std::move(delayed_entries_.back());
-      delayed_entries_.pop_back();
+      DelayedEntry entry = std::move(delayed_entries_.front());
+      delayed_entries_.pop_front();
 
       // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
       // there are a few problems with how we serialize external values.

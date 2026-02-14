@@ -4,8 +4,7 @@
 
 #pragma once
 
-#include <atomic>
-#include <bitset>
+#include <deque>
 
 #include "base/pod_array.h"
 #include "core/search/base.h"
@@ -166,7 +165,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::deque<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
