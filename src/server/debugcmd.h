@@ -62,6 +62,7 @@ class DebugCmd {
   void Compression(CmdArgList args, CommandContext* cmd_cntx);
   void IOStats(CmdArgList args, CommandContext* cmd_cntx);
   void Segments(CmdArgList args, CommandContext* cmd_cntx);
+  void TableGC(CmdArgList args, CommandContext* cmd_cntx);
   struct PopulateBatch {
     DbIndex dbid;
     uint64_t index[32];

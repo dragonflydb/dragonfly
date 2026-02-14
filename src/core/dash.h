@@ -182,6 +182,59 @@ class DashTable : public detail::DashTableBase {
     return segment_[segment_id];
   }
 
+  unsigned FindBuddyId(unsigned segment_id) {
+    auto* seg = GetSegment(segment_id);
+    uint8_t depth = seg->local_depth();
+
+    assert(depth != 0);
+
+    const size_t bit_pos = global_depth_ - depth;
+    const size_t buddy_idx = segment_id ^ (1 << bit_pos);
+    assert(buddy_idx < segment_.size());
+
+    auto* buddy = GetSegment(buddy_idx);
+    // For that case, buddy is as if it were the segment did not split at depth - 1
+    if (buddy->local_depth() != depth) {
+      return segment_id;
+    }
+
+    return buddy_idx;
+  }
+
+  // Merges two segments
+  void Merge(unsigned keep_id, unsigned buddy_id) {
+    auto* keep = GetSegment(keep_id);
+    auto* buddy = GetSegment(buddy_id);
+    assert((keep->local_depth() == buddy->local_depth()));
+
+    // Move all items from buddy to keep
+    buddy->TraverseAll([&](const auto& it) {
+      uint64_t hash = DoHash(buddy->Key(it.index, it.slot));
+      auto& src_bucket = buddy->GetBucket(it.index);
+      keep->InsertUniq(std::move(src_bucket.key[it.slot]), std::move(src_bucket.value[it.slot]),
+                       hash, false, [](auto&&...) {});
+    });
+
+    // Decrease depth (merge back to parent)
+    keep->set_local_depth(keep->local_depth() - 1);
+
+    // Same as Split()
+    uint32_t buddy_chunk_size = 1u << (global_depth_ - buddy->local_depth());
+    uint32_t buddy_start = buddy_id & ~(buddy_chunk_size - 1);
+    for (size_t i = buddy_start; i < buddy_start + buddy_chunk_size; ++i) {
+      segment_[i] = keep;
+    }
+
+    // Free buddy segment
+    PMR_NS::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
+    using alloc_traits = std::allocator_traits<decltype(pa)>;
+    alloc_traits::destroy(pa, buddy);
+    alloc_traits::deallocate(pa, buddy, 1);
+
+    // Decrement unique segment counter
+    --unique_segments_;
+  }
+
   size_t GetSegmentCount() const {
     return segment_.size();
   }
