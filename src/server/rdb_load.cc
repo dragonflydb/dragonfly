@@ -218,6 +218,8 @@ class RdbLoaderBase::OpaqueObjLoader {
   }
 
  private:
+  using ScratchBuf = base::PODArray<char>;
+
   void CreateSet(const LoadTrace* ltrace);
   void CreateHMap(const LoadTrace* ltrace);
   void CreateList(const LoadTrace* ltrace);
@@ -226,7 +228,7 @@ class RdbLoaderBase::OpaqueObjLoader {
 
   void HandleBlob(string_view blob);
 
-  string_view ToSV(const RdbVariant& obj);
+  string_view ToSV(const RdbVariant& obj, ScratchBuf* buf);
 
   // Returns whether pv_ has the given object type and encoding. If not ec_
   // is set to the error.
@@ -242,7 +244,7 @@ class RdbLoaderBase::OpaqueObjLoader {
 
   std::error_code ec_;
   int rdb_type_;
-  base::PODArray<char> tset_blob_;
+  ScratchBuf buf1_, buf2_, buf3_;
   PrimeValue* pv_;
   LoadConfig config_;
 };
@@ -382,12 +384,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     bool values_expired = false;
 
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      string_view element = ToSV(ltrace->arr[i].rdb_var);
+      string_view element = ToSV(ltrace->arr[i].rdb_var, &buf1_);
 
       uint32_t ttl_sec = UINT32_MAX;
       if (increment == 2) {
         int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var);
+        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
         if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
           LOG(ERROR) << "Can't parse set TTL " << ttl_str;
           ec_ = RdbError(errc::rdb_file_corrupted);
@@ -404,7 +406,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         }
       }
       if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected";
+        LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element) << " with TTL "
+                   << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed() << " "
+                   << config_.append;
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
@@ -453,10 +457,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     CHECK(ltrace->arr.size() % 2 == 0);
     for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
       /* Add pair to listpack */
-      string_view sv = ToSV(ltrace->arr[i].rdb_var);
+      string_view sv = ToSV(ltrace->arr[i].rdb_var, &buf1_);
       lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
 
-      sv = ToSV(ltrace->arr[i + 1].rdb_var);
+      sv = ToSV(ltrace->arr[i + 1].rdb_var, &buf1_);
       lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
     }
 
@@ -489,14 +493,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         CompactObj::DeleteMR<StringMap>(string_map);
       }
     });
-    std::string key;
-    std::string val;
     bool values_expired = false;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      // ToSV may reference an internal buffer, therefore we can use only before the
-      // next call to ToSV. To workaround, copy the key locally.
-      key = ToSV(ltrace->arr[i].rdb_var);
-      val = ToSV(ltrace->arr[i + 1].rdb_var);
+      string_view key = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+      string_view val = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
 
       if (ec_)
         return;
@@ -504,7 +504,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       uint32_t ttl_sec = UINT32_MAX;
       if (increment == 3) {
         int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 2].rdb_var);
+        string_view ttl_str = ToSV(ltrace->arr[i + 2].rdb_var, &buf3_);
         if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
           LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", ttl='" << ttl_str
                      << "', val=" << val;
@@ -561,7 +561,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
     unsigned container = blob.encoding;
-    string_view sv = ToSV(blob.rdb_var);
+    string_view sv = ToSV(blob.rdb_var, &buf1_);
 
     if (ec_)
       return false;
@@ -658,7 +658,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t maxelelen = 0, totelelen = 0;
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
-    string_view sv = ToSV(blob.rdb_var);
+    string_view sv = ToSV(blob.rdb_var, &buf1_);
 
     double score = blob.score;
 
@@ -714,8 +714,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   });
 
   for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
-    string_view nodekey = ToSV(ltrace->arr[i].rdb_var);
-    string_view data = ToSV(ltrace->arr[i + 1].rdb_var);
+    string_view nodekey = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+    string_view data = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
 
     uint8_t* lp = (uint8_t*)data.data();
 
@@ -771,23 +771,25 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   for (const auto& cg : ltrace->stream_trace->cgroup) {
-    string_view cgname = ToSV(cg.name);
-    streamID cg_id;
-    cg_id.ms = cg.ms;
-    cg_id.seq = cg.seq;
+    streamCG* cgroup = nullptr;
+    {
+      string_view cgname = ToSV(cg.name, &buf1_);
+      streamID cg_id;
+      cg_id.ms = cg.ms;
+      cg_id.seq = cg.seq;
 
-    uint64_t entries_read = cg.entries_read;
-    if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
-      entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg_id);
+      uint64_t entries_read = cg.entries_read;
+      if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
+        entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg_id);
+      }
+
+      cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
+      if (cgroup == NULL) {
+        LOG(ERROR) << "Duplicated consumer group name " << cgname;
+        ec_ = RdbError(errc::duplicate_key);
+        return;
+      }
     }
-
-    streamCG* cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
-    if (cgroup == NULL) {
-      LOG(ERROR) << "Duplicated consumer group name " << cgname;
-      ec_ = RdbError(errc::duplicate_key);
-      return;
-    }
-
     for (const auto& pel : cg.pel_arr) {
       streamNACK* nack = reinterpret_cast<streamNACK*>(zmalloc(sizeof(*nack)));
       nack->delivery_time = pel.delivery_time;
@@ -804,8 +806,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& cons : cg.cons_arr) {
-      streamConsumer* consumer = StreamCreateConsumer(cgroup, ToSV(cons.name), cons.seen_time,
-                                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+      streamConsumer* consumer = StreamCreateConsumer(
+          cgroup, ToSV(cons.name, &buf1_), cons.seen_time, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       if (!consumer) {
         LOG(ERROR) << "Duplicate stream consumer detected.";
         ec_ = RdbError(errc::duplicate_key);
@@ -1001,12 +1003,12 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   }
 }
 
-string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
+string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj, ScratchBuf* buf) {
   if (holds_alternative<long long>(obj)) {
-    tset_blob_.resize(32);
+    buf->resize(absl::numbers_internal::kFastToBufferSize);
     auto val = get<long long>(obj);
-    char* next = absl::numbers_internal::FastIntToBuffer(val, tset_blob_.data());
-    return string_view{tset_blob_.data(), size_t(next - tset_blob_.data())};
+    char* next = absl::numbers_internal::FastIntToBuffer(val, buf->data());
+    return string_view{buf->data(), size_t(next - buf->data())};
   }
 
   const base::PODArray<char>* ch_arr = get_if<base::PODArray<char>>(&obj);
@@ -1017,18 +1019,18 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
 
   const LzfString* lzf = get_if<LzfString>(&obj);
   if (lzf) {
-    tset_blob_.resize(lzf->uncompressed_len);
-    if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(), tset_blob_.data(),
+    buf->resize(lzf->uncompressed_len);
+    if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(), buf->data(),
                        lzf->uncompressed_len) == 0) {
       LOG(ERROR) << "Invalid LZF compressed string";
       ec_ = RdbError(errc::rdb_file_corrupted);
-      return string_view{tset_blob_.data(), 0};
+      return {buf->data(), 0};  // important to return non-null pointer to avoid UB with lp API.
     }
-    return string_view{tset_blob_.data(), tset_blob_.size()};
+    return {buf->data(), buf->size()};
   }
 
   LOG(FATAL) << "Unexpected variant";
-  return string_view{};
+  return {};
 }
 
 bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsigned encoding) {
@@ -2608,6 +2610,8 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   if (item->load_config.streamed && item->load_config.append) {
     std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
+      LOG(INFO) << "Appending to streamed key '" << absl::CHexEscape(item->key) << "' in DB "
+                << db_ind;
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2639,7 +2643,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       }
       return;
     }
-    LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
+    LOG(ERROR) << "Could not load value for key '" << absl::CHexEscape(item->key) << "' in DB "
+               << db_ind << " " << item->load_config.streamed << " " << item->load_config.append
+               << " " << item->val.rdb_type;
     stop_early_ = true;
     return;
   }
