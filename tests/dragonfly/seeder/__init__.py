@@ -105,13 +105,14 @@ class DebugPopulateSeeder(SeederBase):
     async def run(self, client: aioredis.Redis):
         """Run with specified options until key_target is met"""
         samples = [
-            (dtype, f"k-s{self.uid}u{i}-") for i, dtype in enumerate(self.types * self.samples)
+            (dtype, f"k-s{self.uid}u{i/2}-") for i, dtype in enumerate(self.types * self.samples)
         ]
 
         # Handle samples in chuncks of 24 to not overload client pool and instance
-        for i in range(0, len(samples), 24):
+        chunk_size = 24
+        for i in range(0, len(samples), chunk_size):
             await asyncio.gather(
-                *(self._run_unit(client, dtype, prefix) for dtype, prefix in samples[i : i + 32])
+                *(self._run_unit(client, dtype, prefix) for dtype, prefix in samples[i : i + 24])
             )
 
     async def _run_unit(self, client: aioredis.Redis, dtype: str, prefix: str):
@@ -126,7 +127,6 @@ class DebugPopulateSeeder(SeederBase):
 
         args = ["DEBUG", "POPULATE", key_target, prefix, math.ceil(dsize)]
         args += ["RAND", "TYPE", dtype, "ELEMENTS", csize]
-        logging.debug(args)
         return await client.execute_command(*args)
 
 

@@ -440,8 +440,12 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
-size_t SliceSnapshot::FlushSerialized() {
-  std::string blob = serializer_->Flush(SerializerBase::FlushState::kFlushEndEntry);
+size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
+  if (serializer == nullptr) {
+    CHECK(delayed_entries_.empty());
+    serializer = serializer_.get();
+  }
+  std::string blob = serializer->Flush(SerializerBase::FlushState::kFlushEndEntry);
 
   size_t serialized = blob.size();
   HandleFlushData(std::move(blob));
@@ -452,16 +456,12 @@ bool SliceSnapshot::PushSerialized(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
     return false;
 
-  // Locked while delayed values are being serialized and pushed to the consumer
-  static thread_local LocalLatch delayed_latch{};
-
   size_t serialized = 0;
-  if (!delayed_entries_.empty()) {
-    std::lock_guard lk{delayed_latch};
-    RdbSerializer delayed_serializer{compression_mode_};
 
-    // Async bucket serialization might have accumulated some delayed values.
-    // Because we can finally block in this function, we'll await and serialize them.
+  // Atomic bucket serialization might have accumulated some delayed values.
+  // Because we can finally block in this function, we'll await and serialize them.
+  while (!delayed_entries_.empty()) {
+    RdbSerializer delayed_serializer{compression_mode_};
     do {
       // We may call PushSerialized from multiple fibers concurrently, so we need to
       // ensure that we are not serializing the same entry concurrently.
@@ -485,13 +485,8 @@ bool SliceSnapshot::PushSerialized(bool force) {
       delayed_serializer.SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
     } while (!delayed_entries_.empty());
 
-    std::string blob = delayed_serializer.Flush(SerializerBase::FlushState::kFlushEndEntry);
-    serialized += blob.size();
-    HandleFlushData(std::move(blob));
+    FlushSerialized(&delayed_serializer);
   }
-
-  // We must wait for all tiered values to be serialized before proceeding with any other writes
-  delayed_latch.Wait();
 
   // Flush any of the leftovers to avoid interleavings
   serialized += FlushSerialized();

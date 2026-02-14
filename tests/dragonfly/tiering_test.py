@@ -101,6 +101,7 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
         "tiered_storage_write_depth": 1500,
+        #  "tiered_experimental_cooling": "false",
     }
 )
 async def test_replication(
@@ -109,6 +110,11 @@ async def test_replication(
     """
     Test replication with tiered storage for strings
     """
+
+    # Fill master with values
+    # seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
+    seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
+    await seeder.run(async_client)
 
     # Start replica
     replica = df_factory.create(
@@ -121,10 +127,6 @@ async def test_replication(
     )
     replica.start()
     replica_client = replica.client()
-
-    # Fill master with values
-    seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
-    await seeder.run(async_client)
 
     # Get some keys and start tasks that append to values
     keys = await async_client.keys()
@@ -158,13 +160,15 @@ async def test_replication(
     await asyncio.gather(*fill_tasks)
     await check_all_replicas_finished([replica_client], async_client, timeout=500)
 
-    # for key in keys:
-    #    key_master = await async_client.get(key)
-    #    key_replica = await replica_client.get(key)
-    #    assert key_master == key_replica
-
+    #
     # Check that everything is in sync
     hashes = await asyncio.gather(
         *(SeederV2.capture(c, types=["STRING"]) for c in [async_client, replica_client])
     )
-    assert len(set(hashes)) == 1
+
+    if len(set(hashes)) != 1:
+        for key in keys:
+            key_master = await async_client.get(key)
+            key_replica = await replica_client.get(key)
+            assert key_master == key_replica
+        assert False, "Iconsistency detected, but key not determined"

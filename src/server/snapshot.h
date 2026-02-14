@@ -147,11 +147,9 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // plumbing and making it safe to move.
   void HandleFlushData(std::string data);
 
-  // Calls serializer_->Flush() to extract the remaining data from the serializer
-  // and process it via HandleFlushData().
-  // Used for explicit flushes at safe points (e.g. between entries).
-  // Can block.
-  size_t FlushSerialized();
+  // Flush data from built in (or custom) serializer and pass it to HandleFlushData.
+  // Used for explicit flushes at safe points (e.g. between entries). Can block.
+  size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
 
   // An entry whose value must be awaited
   struct DelayedEntry {
