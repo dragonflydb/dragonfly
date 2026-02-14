@@ -469,6 +469,34 @@ TEST_F(RdbTest, SetExpiry) {
   EXPECT_THAT(Run({"smembers", "key"}), RespArray(UnorderedElementsAre("key1", "key2")));
 }
 
+// Tests that integer elements in sets with expiry are not corrupted during RDB load.
+// This test covers the bug where ToSV() internal buffer was being reused,
+// causing string corruption when loading integer elements.
+TEST_F(RdbTest, SetExpiryInteger) {
+  // Add integer elements with expiry - integers trigger ToSV() buffer reuse
+  Run({"saddex", "s1", "10", "1", "2", "3", "12345", "67890"});
+
+  // Verify elements are added correctly
+  EXPECT_EQ(5, CheckedInt({"scard", "s1"}));
+  EXPECT_THAT(Run({"smembers", "s1"}),
+              RespArray(UnorderedElementsAre("1", "2", "3", "12345", "67890")));
+
+  // Reload from RDB - this would trigger the corruption bug
+  Run({"debug", "reload"});
+
+  // Verify integers were loaded correctly without corruption
+  EXPECT_EQ(5, CheckedInt({"scard", "s1"}));
+  EXPECT_THAT(Run({"smembers", "s1"}),
+              RespArray(UnorderedElementsAre("1", "2", "3", "12345", "67890")));
+
+  // Verify all elements are actually in the set (no duplicates from corruption)
+  EXPECT_THAT(Run({"sismember", "s1", "1"}), IntArg(1));
+  EXPECT_THAT(Run({"sismember", "s1", "2"}), IntArg(1));
+  EXPECT_THAT(Run({"sismember", "s1", "3"}), IntArg(1));
+  EXPECT_THAT(Run({"sismember", "s1", "12345"}), IntArg(1));
+  EXPECT_THAT(Run({"sismember", "s1", "67890"}), IntArg(1));
+}
+
 TEST_F(RdbTest, SaveFlush) {
   Run({"debug", "populate", "500000"});
 
