@@ -679,6 +679,225 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   };
 }
 
+// Returns the absolute Unix timestamp in milliseconds when hash fields will expire.
+// Returns an array with one result per field:
+// -2 if the key does not exist
+// -1 if the field exists but has no expiration
+// -3 if the field does not exist (Dragonfly specific)
+// Unix timestamp in milliseconds for fields with expiration
+OpResult<vector<long>> OpHExpireTime(Transaction* t, EngineShard* shard, string_view key,
+                                     CmdArgList fields) {
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  const DbContext& db_cntx = t->GetDbContext();
+  auto [it, expire_it] = db_slice.FindReadOnly(db_cntx, key);
+  
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+  
+  if (it->second.ObjType() != OBJ_HASH)
+    return OpStatus::WRONG_TYPE;
+  
+  vector<long> results;
+  results.reserve(fields.size());
+  
+  const PrimeValue& pv = it->second;
+  
+  if (pv.Encoding() == kEncodingListPack) {
+    // Listpack doesn't support field expiration, all fields have no TTL
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    for (string_view field : fields) {
+      results.push_back(lw.Find(field) == lw.end() ? -3 : -1);
+    }
+  } else {
+    // StringMap supports field expiration
+    StringMap* string_map = (StringMap*)pv.RObjPtr();
+    string_map->set_time(MemberTimeSeconds(db_cntx.time_now_ms));
+    
+    for (string_view field : fields) {
+      auto it = string_map->Find(field);
+      if (it == string_map->end()) {
+        results.push_back(-3);
+      } else if (!it.HasExpiry()) {
+        results.push_back(-1);
+      } else {
+        // ExpiryTime() returns seconds since kMemberExpiryBase
+        // Convert to absolute Unix timestamp in milliseconds
+        int64_t expire_time_sec = static_cast<int64_t>(it.ExpiryTime()) + kMemberExpiryBase;
+        int64_t expire_time_ms = expire_time_sec * 1000;
+        results.push_back(expire_time_ms);
+      }
+    }
+  }
+  
+  return results;
+}
+
+void CmdHPExpireTime(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser{args};
+  auto key = parser.Next<string_view>();
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+  if (!parser.Check("FIELDS"sv)) {
+    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                               kSyntaxErrType);
+  }
+
+  uint32_t numFields = parser.Next<uint32_t>();
+
+  CmdArgList fields = parser.Tail();
+  if (fields.size() != numFields) {
+    return rb->SendError("The `numfields` parameter must match the number of arguments",
+                         kSyntaxErrType);
+  }
+
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHExpireTime(t, shard, key, fields);
+  };
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  switch (result.status()) {
+    case OpStatus::OK:
+      return rb->SendLongArr(absl::MakeConstSpan(result.value()));
+    case OpStatus::KEY_NOTFOUND:
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+    default:
+      return cmd_cntx->SendError(result.status());
+  };
+}
+
+// HGETEX key [EX seconds | PX milliseconds | EXAT unix-time-seconds | PXAT unix-time-milliseconds]
+//        FIELDS numfields field [field ...]
+// Gets the values of hash fields and optionally sets their expiration.
+OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, 
+                                   optional<uint32_t> ttl_sec, CmdArgList fields) {
+  auto& db_slice = op_args.GetDbSlice();
+  
+  if (!ttl_sec.has_value()) {
+    // No expiration change, just get values (read-only operation)
+    auto op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+    if (!op_res)
+      return op_res.status();
+    
+    HMapWrap hw(op_res.value()->second, op_args.db_cntx);
+    return OpHMGet(hw, fields);
+  }
+  
+  // Need to modify expiration, use mutable find
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
+  if (!op_res)
+    return op_res.status();
+  
+  PrimeValue* pv = &((*op_res).it->second);
+  
+  // First get the values BEFORE any conversion
+  HMapWrap hw(*pv, op_args.db_cntx);
+  OpResult<vector<OptStr>> values_result = OpHMGet(hw, fields);
+  if (!values_result)
+    return values_result.status();
+  
+  vector<OptStr> values = std::move(values_result.value());
+  
+  // Then update expiration for existing fields only
+  // Convert to StringMap if needed (listpack doesn't support field TTL)
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv);
+  
+  if (pv->Encoding() == kEncodingListPack) {
+    uint8_t* lp = (uint8_t*)pv->RObjPtr();
+    StringMap* sm = HSetFamily::ConvertToStrMap(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  }
+  
+  StringMap* sm = static_cast<StringMap*>(pv->RObjPtr());
+  sm->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+  
+  for (size_t i = 0; i < fields.size(); i++) {
+    if (values[i].has_value()) {
+      auto it = sm->Find(fields[i]);
+      if (it != sm->end()) {
+        it.SetExpiryTime(ttl_sec.value());
+      }
+    }
+  }
+  
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  
+  return values;
+}
+
+void CmdHGetEx(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser{args};
+  auto key = parser.Next<string_view>();
+  
+  // Parse expiration options (all are mutually exclusive)
+  optional<uint32_t> ttl_sec;
+  int64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  int64_t now_sec = now_ms / 1000;  // Current time in seconds
+  
+  // Helper constant for rounding up milliseconds to seconds (ceiling division)
+  constexpr int64_t kMsRoundUp = 999;
+  
+  if (parser.Check("EX"sv)) {
+    ttl_sec = parser.Next<uint32_t>();
+  } else if (parser.Check("PX"sv)) {
+    uint32_t ttl_ms = parser.Next<uint32_t>();
+    // Round up duration: (ms + 999) / 1000 ensures ceiling division
+    ttl_sec = (ttl_ms + kMsRoundUp) / 1000;
+  } else if (parser.Check("EXAT"sv)) {
+    int64_t expire_at = parser.Next<int64_t>();
+    ttl_sec = (expire_at > now_sec) ? static_cast<uint32_t>(expire_at - now_sec) : 0;
+  } else if (parser.Check("PXAT"sv)) {
+    int64_t expire_at_ms = parser.Next<int64_t>();
+    // Convert absolute timestamp (no rounding needed for timestamps)
+    int64_t expire_at_sec = expire_at_ms / 1000;
+    ttl_sec = (expire_at_sec > now_sec) ? static_cast<uint32_t>(expire_at_sec - now_sec) : 0;
+  }
+  
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+  if (!parser.Check("FIELDS"sv)) {
+    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                               kSyntaxErrType);
+  }
+
+  uint32_t numFields = parser.Next<uint32_t>();
+
+  CmdArgList fields = parser.Tail();
+  if (fields.size() != numFields) {
+    return rb->SendError("The `numfields` parameter must match the number of arguments",
+                         kSyntaxErrType);
+  }
+
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHGetEx(t->GetOpArgs(shard), key, ttl_sec, fields);
+  };
+  
+  OpResult<vector<OptStr>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  
+  switch (result.status()) {
+    case OpStatus::OK:
+    case OpStatus::KEY_NOTFOUND: {
+      RedisReplyBuilder::ArrayScope scope{rb, fields.size()};
+      for (size_t i = 0; i < fields.size(); i++) {
+        if (result.ok() && (*result)[i].has_value())
+          rb->SendBulkString(*(*result)[i]);
+        else
+          rb->SendNull();
+      }
+    } break;
+    default:
+      cmd_cntx->SendError(result.status());
+  };
+}
+
 void CmdHGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [field = args[1]](const HMapWrap& hw) -> OpResult<string> {
     if (auto it = hw.Find(field); it)
@@ -1046,6 +1265,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HExists)
             << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HGet)
             << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
+            << CI{"HGETEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HGetEx)
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
             << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
             << CI{"HINCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
@@ -1053,6 +1273,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
                    HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
+            << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
             << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
