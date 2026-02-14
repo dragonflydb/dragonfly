@@ -881,10 +881,11 @@ TEST_F(HSetFamilyTest, HGetEx) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   // Test that HGETEX preserves values during expiration update
-  EXPECT_EQ(CheckedInt({"HSET", "key7", "f1", "value1"}), 1);
-  resp = Run({"HGETEX", "key7", "EX", "5", "FIELDS", "1", "f1"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("value1")));
+  EXPECT_EQ(CheckedInt({"HSET", "key7", "f1", "value1", "f2", "value2"}), 2);
+  resp = Run({"HGETEX", "key7", "EX", "5", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("value1", "value2")));
   EXPECT_EQ(Run({"HGET", "key7", "f1"}), "value1");  // Value should still be there
+  EXPECT_EQ(Run({"HGET", "key7", "f2"}), "value2");  // Value should still be there
 
   // Test wrong number of fields
   resp = Run({"HGETEX", "key", "FIELDS", "2", "f1"});
