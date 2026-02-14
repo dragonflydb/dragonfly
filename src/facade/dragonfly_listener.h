@@ -6,9 +6,11 @@
 
 #include <absl/base/internal/spinlock.h>
 #include <absl/time/time.h>
+#include <time.h>
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <system_error>
 #include <vector>
 
@@ -24,6 +26,12 @@ namespace facade {
 
 class ServiceInterface;
 class Connection;
+
+struct TLSCertificateInfo {
+  std::string commonName;
+  time_t expirationDate;
+  time_t issueDate;
+};
 
 class Listener : public util::ListenerInterface {
  public:
@@ -54,6 +62,13 @@ class Listener : public util::ListenerInterface {
     return protocol_;
   }
 
+  const TLSCertificateInfo& GetCertInfo() const {
+    return cert_info_;
+  }
+  bool HasTLS() const {
+    return ctx_ != nullptr;
+  }
+
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
   ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;
@@ -78,6 +93,7 @@ class Listener : public util::ListenerInterface {
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
+  TLSCertificateInfo cert_info_;
 };
 
 // Dispatch tracker allows tracking the dispatch state of connections and blocking until all
