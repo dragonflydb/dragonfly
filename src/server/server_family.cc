@@ -2883,17 +2883,17 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
       if (result.tx_queue_len < shard->txq()->size())
         result.tx_queue_len = shard->txq()->size();
+
+      if (shard->journal()) {
+        result.lsn_buffer_size += shard->journal()->LsnBufferSize();
+        result.lsn_buffer_bytes += shard->journal()->LsnBufferBytes();
+      }
     }  // if (shard)
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     result.lua_stats += InterpreterManager::tl_stats();
-
-    if (ss->journal()) {
-      result.lsn_buffer_size += ss->journal()->LsnBufferSize();
-      result.lsn_buffer_bytes += ss->journal()->LsnBufferBytes();
-    }
 
     auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
     for (auto& [k, v] : connections_lib_name_ver_map) {
@@ -3796,11 +3796,12 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     auto repl_ptr = replica_;
     if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
       // Start journal and keep offsets.
-      shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
-        auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+      shard_set->RunBlockingInParallel([repl_ptr](EngineShard* shard) {
+        ShardId sid = shard->shard_id();
+        auto flow_map = repl_ptr->GetFlowMapAtIndex(sid);
         size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-        LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-        journal()->StartInThreadAtLsn(rec_executed);
+        LOG(INFO) << "Shard " << sid << " starts journal at: " << rec_executed;
+        shard->journal()->StartInThreadAtLsn(rec_executed);
       });
     }
     // flip flag before clearing replica_
@@ -3921,11 +3922,12 @@ void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   CHECK(repl_ptr);
 
   // Start journal to allow partial sync from same source master
-  shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
-    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+  shard_set->RunBlockingInParallel([repl_ptr](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    auto flow_map = repl_ptr->GetFlowMapAtIndex(sid);
     size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-    journal()->StartInThreadAtLsn(rec_executed);
+    LOG(INFO) << "Shard " << sid << " starts journal at: " << rec_executed;
+    shard->journal()->StartInThreadAtLsn(rec_executed);
   });
 
   auto info = replica_->GetSummary();

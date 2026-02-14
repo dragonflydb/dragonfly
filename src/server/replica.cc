@@ -1020,7 +1020,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-      auto* journal = ServerState::tlocal()->journal();
+      auto* journal = EngineShard::tlocal()->journal();
       if (journal) {
         // We must register this entry to the journal to allow partial sync
         // if journal is active.

@@ -1,11 +1,10 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 #include "server/journal/types.h"
 #include "util/fibers/detail/fiber_interface.h"
-#include "util/proactor_pool.h"
 
 namespace dfly {
 
@@ -47,7 +46,6 @@ class Journal {
   size_t LsnBufferBytes() const;
 
  private:
-  mutable util::fb2::Mutex state_mu_;
 };
 
 class JournalFlushGuard {

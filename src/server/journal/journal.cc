@@ -32,9 +32,7 @@ void Journal::StartInThread() {
 
   ServerState::tlocal()->set_journal(this);
   EngineShard* shard = EngineShard::tlocal();
-  if (shard) {
-    shard->set_journal(this);
-  }
+  shard->set_journal(this);
 }
 
 void Journal::StartInThreadAtLsn(LSN lsn) {
@@ -46,19 +44,16 @@ void Journal::StartInThreadAtLsn(LSN lsn) {
 error_code Journal::Close() {
   VLOG(1) << "Journal::Close";
 
-  lock_guard lk(state_mu_);
-
-  journal_slice.ResetRingBuffer();
-  auto close_cb = [&](auto*) {
-    journal_slice.ResetRingBuffer();
+  auto close_cb = [&](unsigned, auto*) {
     ServerState::tlocal()->set_journal(nullptr);
     EngineShard* shard = EngineShard::tlocal();
     if (shard) {
       shard->set_journal(nullptr);
+      journal_slice.ResetRingBuffer();
     }
   };
 
-  shard_set->pool()->AwaitFiberOnAll(close_cb);
+  shard_set->pool()->AwaitBrief(close_cb);
 
   return {};
 }

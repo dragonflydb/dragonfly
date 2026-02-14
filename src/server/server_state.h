@@ -220,10 +220,6 @@ class ServerState {  // public struct - to allow initialization.
     return data_heap_;
   }
 
-  journal::Journal* journal() {
-    return journal_;
-  }
-
   void set_journal(journal::Journal* j) {
     journal_ = j;
   }
@@ -297,7 +293,7 @@ class ServerState {  // public struct - to allow initialization.
   // Decommits 3 possible heaps according to the flags.
   // For decommit_glibcmalloc the heap is global for the process, for others it's specific only
   // for this thread.
-  enum {
+  enum : uint8_t {
     kDataHeap = 1,
     kBackingHeap = 2,
     kGlibcmalloc = 4,
