@@ -83,7 +83,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     use_snapshot_version_ = absl::GetFlag(FLAGS_point_in_time_snapshot);
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    journal_cb_id_ = journal->RegisterOnChange(this);
+    journal_cb_id_ = journal::RegisterConsumer(this);
     if (!use_snapshot_version_) {
       auto moved_cb = [this](DbIndex db_index, const DbSlice::MovedItemsVec& items) {
         OnMoved(db_index, items);
@@ -142,13 +142,11 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   // Wait for serialization to finish in any case.
   snapshot_fb_.JoinIfNeeded();
 
-  auto* journal = db_slice_->shard_owner()->journal();
-
-  journal->UnregisterOnChange(cb_id);
+  journal::UnregisterConsumer(cb_id);
   if (!cancel) {
     // always succeeds because serializer_ flushes to string.
-    VLOG(1) << "FinalizeJournalStream lsn: " << journal->GetLsn();
-    std::ignore = serializer_->SendJournalOffset(journal->GetLsn());
+    VLOG(1) << "FinalizeJournalStream lsn: " << journal::GetLsn();
+    std::ignore = serializer_->SendJournalOffset(journal::GetLsn());
     PushSerialized(true);
   }
 }

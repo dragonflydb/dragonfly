@@ -297,7 +297,7 @@ class ServerState {  // public struct - to allow initialization.
   // Decommits 3 possible heaps according to the flags.
   // For decommit_glibcmalloc the heap is global for the process, for others it's specific only
   // for this thread.
-  enum {
+  enum : uint8_t {
     kDataHeap = 1,
     kBackingHeap = 2,
     kGlibcmalloc = 4,

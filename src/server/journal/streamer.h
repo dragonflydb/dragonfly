@@ -11,6 +11,7 @@
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
 #include "server/synchronization.h"
+#include "util/fiber_socket_base.h"
 
 namespace dfly {
 

@@ -782,7 +782,7 @@ void EngineShard::Heartbeat() {
 
 void EngineShard::RetireExpiredAndEvict() {
   // Disable flush journal changes to prevent preemtion
-  journal::JournalFlushGuard journal_flush_guard(journal_);
+  journal::DisableFlushGuard journal_flush_guard(journal_);
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
