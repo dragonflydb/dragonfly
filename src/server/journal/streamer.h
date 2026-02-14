@@ -61,7 +61,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return cntx_->IsRunning();
   }
 
-  void WaitForInflightToComplete();
+  void WaitForInflightToComplete(bool with_timeout);
 
   size_t inflight_bytes() const {
     return in_flight_bytes_;
