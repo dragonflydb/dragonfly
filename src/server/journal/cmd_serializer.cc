@@ -5,8 +5,11 @@
 #include "server/journal/cmd_serializer.h"
 
 #include "server/container_utils.h"
+#include "server/db_slice.h"
+#include "server/engine_shard.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
+#include "server/tiered_storage.h"
 
 namespace dfly {
 
@@ -66,8 +69,11 @@ class CommandAggregator {
 
 }  // namespace
 
-CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
-    : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
+CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
+                             size_t max_serialization_buffer_size)
+    : db_slice_(db_slice),
+      cb_(std::move(cb)),
+      max_serialization_buffer_size_(max_serialization_buffer_size) {
   serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
@@ -116,6 +122,30 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
     SerializeExpireIfNeeded(key, expire_ms);
   }
   return commands;
+}
+
+size_t CmdSerializer::SerializeDelayedEntries(bool force) {
+  if (!force && delayed_entries_.size() < 32)
+    return 0;
+
+  size_t serialized = 0;
+  if (!delayed_entries_.empty()) {
+    do {
+      TieredDelayedEntry entry = std::move(delayed_entries_.back());
+      delayed_entries_.pop_back();
+
+      auto res = entry.value.Get();  // Blocking point
+      if (!res.has_value()) {
+        LOG(ERROR) << "Failed to read " << entry.key.ToString();
+        continue;
+      }
+
+      PrimeValue pv{*res};
+      serialized += SerializeEntry(entry.key.ToString(), entry.key, pv, entry.expire);
+    } while (!delayed_entries_.empty());
+  }
+
+  return serialized;
 }
 
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
@@ -213,8 +243,10 @@ size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uin
   if (pv.IsExternal()) {
     if (pv.IsCool()) {
       pv.GetCool().record->value.GetString(&str);
+    } else {
+      SerializeExternal(PrimeKey{std::string(key)}, pv, expire_ms);
+      return 0;
     }
-    LOG(FATAL) << "External string not supported yet";
   } else {
     pv.GetString(&str);
   }
@@ -251,6 +283,15 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   }
 
   SerializeCommand("RESTORE", args);
+}
+
+void CmdSerializer::SerializeExternal(PrimeKey key, const PrimeValue& pv, time_t expire_time) {
+  auto future = ReadTieredString(0 /*db_id always 0 for cluster*/, key.ToString(), pv,
+                                 EngineShard::tlocal()->tiered_storage());
+  uint32_t mc_flags =
+      pv.HasFlag() ? db_slice_->GetMCFlag(0 /*db_id always 0 for cluster*/, key) : 0;
+  delayed_entries_.push_back(
+      {0 /*db_id always 0 for cluster*/, std::move(key), std::move(future), expire_time, mc_flags});
 }
 
 }  // namespace dfly

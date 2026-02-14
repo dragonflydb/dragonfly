@@ -15,6 +15,7 @@
 #include "server/rdb_save.h"
 #include "server/synchronization.h"
 #include "server/table.h"
+#include "server/tiered_storage.h"
 #include "util/fibers/future.h"
 
 namespace dfly {
@@ -153,13 +154,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   size_t FlushSerialized();
 
   // An entry whose value must be awaited
-  struct DelayedEntry {
-    DbIndex dbid;
-    PrimeKey key;
-    util::fb2::Future<io::Result<string>> value;
-    time_t expire;
-    uint32_t mc_flags;
-  };
 
   DbSlice* db_slice_;
   const DbTableArray db_array_;
@@ -167,7 +161,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::vector<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
