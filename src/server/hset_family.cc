@@ -472,7 +472,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   if (lp) {
     // FXX cannot be used with listpack (should have been converted above)
     DCHECK(!op_sp.skip_if_not_exists);
-    
+
     size_t malloc_reserved = zmalloc_size(lp);
     size_t min_sz = EstimateListpackMinBytes(values);
     if (min_sz > malloc_reserved) {
@@ -492,7 +492,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     for (size_t i = 0; i < values.size(); i += 2) {
       string_view field = values[i];
       string_view value = values[i + 1];
-      
+
       if (op_sp.skip_if_not_exists) {
         // FXX: only update if field already exists
         auto it = sm->Find(field);
@@ -573,7 +573,8 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
 
 // HSETEX supports two formats:
 // 1. Dragonfly format: HSETEX key [NX] [KEEPTTL] ttl_sec field value [field value ...]
-// 2. Redis format: HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT timestamp | PXAT timestamp | KEEPTTL] FIELDS numfields field value [field value ...]
+// 2. Redis format: HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT timestamp | PXAT timestamp |
+// KEEPTTL] FIELDS numfields field value [field value ...]
 void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
 
@@ -594,8 +595,9 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (is_redis_format) {
-    // Redis format: HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT timestamp | PXAT timestamp | KEEPTTL] FIELDS numfields field value [field value ...]
-    
+    // Redis format: HSETEX key [FNX | FXX] [EX sec | PX ms | EXAT timestamp | PXAT timestamp |
+    // KEEPTTL] FIELDS numfields field value [field value ...]
+
     // Parse FNX/FXX flags
     if (parser.Check("FNX")) {
       op_sp.skip_if_exists = true;
@@ -661,10 +663,11 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     }
 
     CmdArgList fields = parser.Tail();
-    
+
     // Validate numfields matches actual field count
     if (fields.size() != numfields * 2) {
-      return cmd_cntx->SendError("ERR wrong number of arguments for 'hsetex' command", kSyntaxErrType);
+      return cmd_cntx->SendError("ERR wrong number of arguments for 'hsetex' command",
+                                 kSyntaxErrType);
     }
 
     constexpr uint32_t kMaxTtl = (1UL << 26);
@@ -685,7 +688,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     }
   } else {
     // Dragonfly format: HSETEX key [NX] [KEEPTTL] ttl_sec field value [field value ...]
-    
+
     while (true) {
       if (parser.Check("NX")) {
         if (op_sp.skip_if_exists) {
@@ -716,7 +719,8 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     CmdArgList fields = parser.Tail();
 
     if (fields.size() % 2 != 0) {
-      return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
+      return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()),
+                                 kSyntaxErrType);
     }
 
     auto cb = [&](Transaction* t, EngineShard* shard) {

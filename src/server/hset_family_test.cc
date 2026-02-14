@@ -815,7 +815,8 @@ TEST_F(HSetFamilyTest, HSetExRedisFormatEXAT) {
   uint64_t current_time_sec = TEST_current_time_ms / 1000;
 
   // Set expiration at current time + 15 seconds
-  auto resp = Run({"HSETEX", "k", "EXAT", absl::StrCat(current_time_sec + 15), "FIELDS", "1", "f", "v"});
+  auto resp =
+      Run({"HSETEX", "k", "EXAT", absl::StrCat(current_time_sec + 15), "FIELDS", "1", "f", "v"});
   EXPECT_THAT(resp, IntArg(1));
 
   EXPECT_EQ(Run({"HGET", "k", "f"}), "v");
@@ -827,7 +828,8 @@ TEST_F(HSetFamilyTest, HSetExRedisFormatPXAT) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;
 
   // Set expiration at current time + 5500 milliseconds
-  auto resp = Run({"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms + 5500), "FIELDS", "1", "f", "v"});
+  auto resp = Run(
+      {"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms + 5500), "FIELDS", "1", "f", "v"});
   EXPECT_THAT(resp, IntArg(1));
 
   EXPECT_EQ(Run({"HGET", "k", "f"}), "v");
@@ -899,7 +901,7 @@ TEST_F(HSetFamilyTest, HSetExDragonflyFormatBackwardCompat) {
 
   // Test with NX flag
   resp = Run({"HSETEX", "k", "NX", "20", "f1", "newval", "f3", "v3"});
-  EXPECT_THAT(resp, IntArg(1));  // Only f3 was added
+  EXPECT_THAT(resp, IntArg(1));               // Only f3 was added
   EXPECT_EQ(Run({"HGET", "k", "f1"}), "v1");  // f1 unchanged
   EXPECT_EQ(Run({"HGET", "k", "f3"}), "v3");
 
@@ -913,11 +915,11 @@ TEST_F(HSetFamilyTest, HSetExDragonflyFormatBackwardCompat) {
 // Test error cases for Redis format
 TEST_F(HSetFamilyTest, HSetExRedisFormatErrors) {
   // Missing FIELDS keyword - will try to parse "f" as integer and fail
-  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "f", "v"}), 
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "f", "v"}),
               AnyOf(ErrArg("syntax error"), ErrArg("value is not an integer")));
 
   // Wrong numfields count
-  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "FIELDS", "2", "f", "v"}), 
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "FIELDS", "2", "f", "v"}),
               ErrArg("wrong number of arguments"));
 
   // Invalid expiration value
