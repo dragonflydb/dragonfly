@@ -541,7 +541,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
 
     // Send journal entry
     // TODO: Break slot migration upon FLUSHSLOTS
-    journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
+    journal::RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
                          /* shard_cnt= */ shard_set->size(), nullopt,
                          Payload("DFLYCLUSTER", args_view));
   };
