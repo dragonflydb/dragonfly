@@ -446,7 +446,8 @@ void HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
 bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,
                                        std::string_view field) {
   auto vector_ptr = doc.GetVector(field, dim_);
-  if (!vector_ptr) {
+  if (!vector_ptr ||
+      *vector_ptr == search::DocumentAccessor::VectorInfo(search::BorrowedFtVector(nullptr))) {
     // Document doesn't have the vector field - mark node as deleted to prevent
     // "ghost" nodes with invalid vector data from participating in searches
     LOG(WARNING) << "UpdateVectorData: document " << id

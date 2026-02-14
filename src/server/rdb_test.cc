@@ -755,7 +755,12 @@ TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
   EXPECT_THAT(v.front(), IntArg(1));
 }
 
-TEST_F(RdbTest, RestoreVectorSearchIndexHnsw) {
+// Parametrized test for RestoreVectorSearchIndexHnsw with varying document counts
+class HnswRestoreTest : public RdbTest, public testing::WithParamInterface<int> {};
+
+TEST_P(HnswRestoreTest, RestoreVectorSearchIndexHnsw) {
+  int num_docs = GetParam();
+
   EXPECT_EQ(
       Run({"FT.CREATE", "only_vec_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "embedding",
            "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"}),
@@ -766,17 +771,39 @@ TEST_F(RdbTest, RestoreVectorSearchIndexHnsw) {
                  "TYPE",      "FLOAT32", "DIM",  "2",         "DISTANCE_METRIC", "L2"}),
             "OK");
 
-  Run({"HSET", "doc:1", "name", "first", "embedding",
-       StrCat(FloatToBytes(1.0f), FloatToBytes(2.0f))});
-  Run({"HSET", "doc:2", "name", "second", "embedding",
-       StrCat(FloatToBytes(3.0f), FloatToBytes(4.0f))});
-  Run({"HSET", "doc:3", "name", "third", "embedding",
-       StrCat(FloatToBytes(5.0f), FloatToBytes(6.0f))});
+  // Insert documents with incrementing vectors
+  for (int i = 1; i <= num_docs; ++i) {
+    float x = static_cast<float>(i * 2 - 1);
+    float y = static_cast<float>(i * 2);
+    Run({"HSET", StrCat("doc:", i), "name", StrCat("doc", i), "embedding",
+         StrCat(FloatToBytes(x), FloatToBytes(y))});
+  }
 
-  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  LOG(INFO) << "Created " << num_docs << " documents with vector embeddings";
+
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  auto save_info = service_->server_family().GetLastSaveInfo();
+
+  // Reload from the saved file - this should restore the HNSW index, not rebuild it
+  // Look for "Restored HNSW index" in logs to verify restoration vs rebuild
+  LOG(INFO) << "Reloading from " << save_info.file_name << " - expecting HNSW index restoration";
+  EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
+
+  // Wait for async index building to complete on both indices
+  auto is_indexing_done = [this](string_view idx_name) {
+    auto resp = Run({"FT.INFO", idx_name});
+    auto arr = resp.GetVec();
+    auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+    return it != arr.end() && (++it)->GetInt() == 0;
+  };
+
+  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("vec_idx"); },
+                                 std::chrono::milliseconds(10000)));
+  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("only_vec_idx"); },
+                                 std::chrono::milliseconds(10000)));
 
   // Verify text search still works on the restored index
-  auto search = Run({"FT.SEARCH", "vec_idx", "first"});
+  auto search = Run({"FT.SEARCH", "vec_idx", "doc1"});
   ASSERT_THAT(search, ArgType(RespExpr::ARRAY));
   const auto& v = search.GetVec();
   ASSERT_FALSE(v.empty());
@@ -795,7 +822,17 @@ TEST_F(RdbTest, RestoreVectorSearchIndexHnsw) {
                     query_vec, "RETURN", "1", "name"});
   ASSERT_THAT(knn_search, ArgType(RespExpr::ARRAY));
   EXPECT_GE(knn_search.GetVec().front().GetInt(), 1);
+
+  // Verify total document count matches
+  EXPECT_EQ(CheckedInt({"dbsize"}), num_docs);
+
+  LOG(INFO) << "Successfully verified HNSW index restoration with " << num_docs << " documents";
 }
+
+INSTANTIATE_TEST_SUITE_P(HnswRestoreTest, HnswRestoreTest, Values(5, 50, 500, 1000),
+                         [](const testing::TestParamInfo<int>& info) {
+                           return StrCat("Docs", info.param);
+                         });
 
 TEST_F(RdbTest, DflyLoadAppend) {
   // Create an RDB with (k1,1) value in it saved as `filename`
