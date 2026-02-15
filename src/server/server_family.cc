@@ -751,6 +751,7 @@ uint64_t GetDelayMs(uint64_t ts) {
 }
 
 bool ReadProcStats(io::StatusData* sdata) {
+#ifdef __linux__
   io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
   if (!sdata_res) {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
@@ -765,6 +766,9 @@ bool ReadProcStats(io::StatusData* sdata) {
 
   *sdata = *sdata_res;
   return true;
+#else
+  return false;
+#endif
 }
 
 // Rewrite the configuration file with runtime modified settings
