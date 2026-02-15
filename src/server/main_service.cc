@@ -1195,7 +1195,15 @@ void Service::Shutdown() {
 
   Transaction::Shutdown();
 
-  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+#if defined(DFLY_USE_SSL)
+    // Explicitly release OpenSSL thread-local state here.
+    // This prevents a potential crash during thread exit where the allocator (e.g. mimalloc)
+    // might tear down the thread's heap before OpenSSL tries to free its internal state.
+    OPENSSL_thread_stop();
+#endif
+    ServerState::tlocal()->Destroy();
+  });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
