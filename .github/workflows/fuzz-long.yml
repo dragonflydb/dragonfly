@@ -1,23 +1,15 @@
 name: AFL++ Long Fuzzing Campaign
 
 on:
-  # TODO: Uncomment after testing manual runs
-  # schedule:
-  #   # Run nightly at 2 AM UTC
-  #   - cron: '0 2 * * *'
-  #   # Run weekly deep fuzzing on Sunday at 3 AM UTC
-  #   - cron: '0 3 * * 0'
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       duration_minutes:
         description: 'Fuzzing duration in minutes'
         required: false
         default: '30'
-        type: string
-      parallel_instances:
-        description: 'Number of parallel AFL++ instances'
-        required: false
-        default: '1'
         type: string
 
 concurrency:
@@ -28,12 +20,6 @@ jobs:
   fuzz-long:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
-    strategy:
-      fail-fast: false
-      matrix:
-        # Run multiple parallel instances for better coverage
-        instance: [0]  # Can be expanded to [0, 1, 2, 3] for parallel fuzzing
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24-afl
@@ -53,5 +39,16 @@ jobs:
         with:
           mode: long
           duration-minutes: ${{ github.event.inputs.duration_minutes || '30' }}
-          instance: ${{ matrix.instance }}
           run-number: ${{ github.run_number }}
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="AFL++ fuzzing found crashes.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
