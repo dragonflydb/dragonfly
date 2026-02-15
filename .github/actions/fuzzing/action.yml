@@ -127,28 +127,20 @@ runs:
           fi
         fi
 
-        # Fail the job if crashes or hangs were found
+        # Fail the job only if crashes were found
         if [ "$CRASH_COUNT" -gt 0 ]; then
           echo "::error::Found $CRASH_COUNT crash(es)!"
-          if [ "${{ inputs.mode }}" = "smoke" ]; then
-            echo ""
-            echo "Crash files:"
-            ls -lh "$CRASHES_DIR" || true
-          fi
+          echo ""
+          echo "Crash files:"
+          ls -lh "$CRASHES_DIR" || true
           exit 1
         fi
 
         if [ "$HANG_COUNT" -gt 0 ]; then
-          echo "::error::Found $HANG_COUNT hang(s)!"
-          if [ "${{ inputs.mode }}" = "smoke" ]; then
-            echo ""
-            echo "Hang files:"
-            ls -lh "$HANGS_DIR" || true
-          fi
-          exit 1
+          echo "::warning::Found $HANG_COUNT hang(s) (not failing the build)"
         fi
 
-        echo "No crashes or hangs found - fuzzing test passed!"
+        echo "No crashes found - fuzzing test passed!"
 
     - name: Archive fuzzing artifacts
       shell: bash

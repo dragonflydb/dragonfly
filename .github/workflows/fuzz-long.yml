@@ -40,3 +40,15 @@ jobs:
           mode: long
           duration-minutes: ${{ github.event.inputs.duration_minutes || '30' }}
           run-number: ${{ github.run_number }}
+
+      - name: Send notification on failure
+        if: failure()
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="AFL++ fuzzing found crashes.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
