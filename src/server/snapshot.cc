@@ -462,11 +462,9 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
   // Atomic bucket serialization might have accumulated some delayed values.
   // Because we can finally block in this function, we'll await and serialize them.
-
-  thread_local fb2::Mutex delayed_experimental_mu_;
-
   while (!delayed_entries_.empty()) {
-    std::lock_guard lk{delayed_experimental_mu_};
+    thread_local fb2::Mutex delayed_linear_mu;  // guarantee linear order
+    std::unique_lock lk{delayed_linear_mu};
 
     if (delayed_entries_.empty())
       break;
@@ -495,6 +493,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
       delayed_serializer.SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
     } while (!delayed_entries_.empty());
 
+    lk.unlock();
     FlushSerialized(&delayed_serializer);
   }
 
