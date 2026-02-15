@@ -79,7 +79,7 @@ runs:
         AFL_AUTORESUME: 1
         AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: 1
         AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '50' || '500' }}
-        AFL_SKIP_CPUFREQ: ${{ inputs.mode == 'long' && '1' || '' }}
+        AFL_SKIP_CPUFREQ: 1
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_PERSISTENT_RECORD: 1000
         AFL_CUSTOM_MUTATOR_ONLY: 1
@@ -140,7 +140,11 @@ runs:
           echo "::warning::Found $HANG_COUNT hang(s) (not failing the build)"
         fi
 
-        echo "No crashes found - fuzzing test passed!"
+        if [ "$CORPUS_SIZE" -gt 0 ]; then
+          echo "No crashes found - fuzzing test passed!"
+        else
+          echo "No fuzzing artifacts found (fuzzer may not have started)"
+        fi
 
     - name: Archive fuzzing artifacts
       shell: bash
