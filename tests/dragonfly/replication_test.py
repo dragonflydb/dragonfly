@@ -3918,3 +3918,96 @@ async def test_xreadgroup_replication(df_factory):
 
     await check_all_replicas_finished([c_replica], c_master)
     await compare_group_info("mystream", 1, 1)
+
+
+"""
+Test replication with mismatched dbnum between master and replica.
+"""
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replication_replica_smaller_dbnum_shared_dbs_only(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Replica dbnum < Master dbnum, but master only uses DBs within
+    the replica's range. Replication should succeed.
+    """
+    master = df_factory.create(dbnum=8)
+    replica = df_factory.create(dbnum=4)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+
+    # Populate data only in DBs 0-3 (within replica's dbnum range)
+    for db in range(4):
+        c = master.client(db=db)
+        for i in range(50):
+            await c.set(f"key:{db}:{i}", f"val:{db}:{i}")
+        await c.close()
+
+    # Start replication
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify all data is present in the replica across shared DBs
+    for db in range(4):
+        c_m = master.client(db=db)
+        c_r = replica.client(db=db)
+        for i in range(50):
+            assert await c_r.get(f"key:{db}:{i}") == await c_m.get(f"key:{db}:{i}")
+        await c_m.close()
+        await c_r.close()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replication_replica_larger_dbnum(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Replica dbnum > Master dbnum. Replication should succeed;
+    the replica's extra DBs remain empty.
+    """
+    master = df_factory.create(dbnum=4)
+    replica = df_factory.create(dbnum=8)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+
+    # Populate all DBs on the master (0-3)
+    for db in range(4):
+        c = master.client(db=db)
+        for i in range(50):
+            await c.set(f"key:{db}:{i}", f"val:{db}:{i}")
+        await c.close()
+
+    # Start replication
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify master's data is present in the replica
+    for db in range(4):
+        c_m = master.client(db=db)
+        c_r = replica.client(db=db)
+        for i in range(50):
+            assert await c_r.get(f"key:{db}:{i}") == await c_m.get(f"key:{db}:{i}")
+        await c_m.close()
+        await c_r.close()
+
+    # Verify the replica's extra DBs (4-7) are empty
+    for db in range(4, 8):
+        c_r = replica.client(db=db)
+        assert await c_r.dbsize() == 0
+        await c_r.close()
