@@ -55,6 +55,7 @@ jobs:
         run: |
           ${GITHUB_WORKSPACE}/build/dragonfly \
             --alsologtostderr \
+            --default_lua_flags=allow-undeclared-keys \
             --cluster_mode=emulated \
             --lock_on_hashtags \
             --dbfilename= \
@@ -69,11 +70,22 @@ jobs:
           yarn install
           yarn build
 
+      # - name: Run BullMQ tests
+      #   run: |
+      #     cd ${GITHUB_WORKSPACE}/bullmq
+      #     BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors" --invert
+
       - name: Run BullMQ tests
         run: |
           cd ${GITHUB_WORKSPACE}/bullmq
-          BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors" --invert
-
+          for i in {1..20}; do
+            echo "BullMQ test run #$i"
+            if ! BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors" --invert; then
+              echo "Test failed on run #$i"
+              exit 1
+            fi
+          done
+          echo "All 20 BullMQ test runs passed"
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v6
