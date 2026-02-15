@@ -82,6 +82,7 @@ runs:
         AFL_SKIP_CPUFREQ: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_PERSISTENT_RECORD: 1000
+        AFL_CUSTOM_MUTATOR_ONLY: 1
 
     - name: Analyze fuzzing results
       shell: bash

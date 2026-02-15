@@ -1,12 +1,9 @@
 name: AFL++ Long Fuzzing Campaign
 
 on:
-  # TODO: Uncomment after testing manual runs
-  # schedule:
-  #   # Run nightly at 2 AM UTC
-  #   - cron: '0 2 * * *'
-  #   # Run weekly deep fuzzing on Sunday at 3 AM UTC
-  #   - cron: '0 3 * * 0'
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       duration_minutes:
