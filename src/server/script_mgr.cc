@@ -325,14 +325,18 @@ nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
   if (add_result == Interpreter::COMPILE_ERR)
     return nonstd::make_unexpected(GenericError{std::move(result)});
 
-  lock_guard lk{mu_};
-  auto [it, _] = db_.emplace(sha, InternalScriptData{params, nullptr});
+  ScriptParams script_params;
+  {
+    lock_guard lk{mu_};
+    auto [it, _] = db_.emplace(sha, InternalScriptData{params, nullptr});
 
-  if (!it->second.body) {
-    it->second.body = CharBufFromSV(body);
+    if (!it->second.body) {
+      it->second.body = CharBufFromSV(body);
+    }
+    script_params = static_cast<ScriptParams>(it->second);
   }
 
-  UpdateScriptCaches(sha, it->second);
+  UpdateScriptCaches(sha, script_params);
 
   return string{sha};
 }
