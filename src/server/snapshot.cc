@@ -18,6 +18,7 @@
 #include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
@@ -265,6 +266,9 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
+
+  while (true)
+    ThisFiber::SleepFor(5ms);
 
   for (DbIndex snapshot_db_index_ = 0; snapshot_db_index_ < db_array_.size();
        ++snapshot_db_index_) {
@@ -551,6 +555,11 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 // value. This is guaranteed because journal change callbacks run after OnDbChange, and no
 // database switch can be performed between those two calls, as they are part of one transaction.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
+  if (item.max_version && *item.max_version < snapshot_version_) {
+    VLOG(0) << "Entry can be skipped";
+    return;
+  }
+
   // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
   // barrier here for atomic serialization.
   std::lock_guard barrier(big_value_mu_);

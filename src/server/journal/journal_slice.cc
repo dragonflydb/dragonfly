@@ -87,6 +87,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     // only used by RestoreStreamer
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
+    item.max_version = entry.max_version;
 
     io::BufSink buf_sink{&ring_serialize_buf_};
     JournalWriter writer{&buf_sink};

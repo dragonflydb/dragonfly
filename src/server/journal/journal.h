@@ -3,6 +3,8 @@
 //
 
 #pragma once
+#include <optional>
+
 #include "server/journal/types.h"
 #include "util/fibers/detail/fiber_interface.h"
 #include "util/proactor_pool.h"
@@ -39,7 +41,8 @@ class Journal {
   LSN GetLsn() const;
 
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                   std::optional<SlotId> slot, Entry::Payload payload);
+                   std::optional<SlotId> slot, Entry::Payload payload,
+                   std::optional<uint64_t> max_version = std::nullopt);
 
   void SetFlushMode(bool allow_flush);
 

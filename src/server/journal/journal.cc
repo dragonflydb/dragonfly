@@ -88,8 +88,11 @@ LSN Journal::GetLsn() const {
 }
 
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                          std::optional<SlotId> slot, Entry::Payload payload) {
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)});
+                          std::optional<SlotId> slot, Entry::Payload payload,
+                          std::optional<uint64_t> max_version) {
+  Entry e{txid, opcode, dbid, shard_cnt, slot, std::move(payload)};
+  e.max_version = max_version;
+  journal_slice.AddLogRecord(e);
 }
 
 void Journal::SetFlushMode(bool allow_flush) {

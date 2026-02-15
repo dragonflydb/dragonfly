@@ -530,12 +530,13 @@ DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key)
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
-                                                     unsigned req_obj_type) {
-  return FindMutableInternal(cntx, key, req_obj_type);
+                                                     unsigned req_obj_type, bool allow_omit) {
+  return FindMutableInternal(cntx, key, req_obj_type, allow_omit);
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
-                                                             std::optional<unsigned> req_obj_type) {
+                                                             std::optional<unsigned> req_obj_type,
+                                                             bool allow_omit) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
   if (!res.ok()) {
     return res.status();
@@ -543,7 +544,10 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = Iterator(res->it, StringOrView::FromView(key));
   auto exp_it = ExpIterator(res->exp_it, StringOrView::FromView(key));
-  PreUpdateBlocking(cntx.db_index, it);
+
+  if (allow_omit)
+    IncrementBucketVersion(cntx.db_index, it);
+
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
@@ -560,7 +564,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
           << util::fb2::GetStacktrace();
     }
 
-    return {{it, exp_it, AutoUpdater{cntx.db_index, key, it, this}}};
+    return {{it, exp_it, AutoUpdater{cntx.db_index, key, it, this}, false, res->it.GetVersion()}};
   } else {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -681,7 +685,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
     ExpIterator exp_it(res->exp_it, StringOrView::FromView(key));
-    PreUpdateBlocking(cntx.db_index, it);
+    IncrementBucketVersion(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
@@ -1237,7 +1241,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
+void DbSlice::IncrementBucketVersion(DbIndex db_ind, const Iterator& it) {
   CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});  // blocking point.
   auto inner_it = it.GetInnerIt();                          // must call again to launder.
   inner_it.SetVersion(NextVersion());

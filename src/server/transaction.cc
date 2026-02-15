@@ -1579,8 +1579,11 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     uint32_t shard_cnt) const {
   auto journal = shard->journal();
   CHECK(journal);
+
+  const auto& sd = shard_data_[SidToId(shard->shard_id())];
   journal->RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
-                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload));
+                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload),
+                       sd.max_bucket_version);
 }
 
 void Transaction::ReviveAutoJournal() {

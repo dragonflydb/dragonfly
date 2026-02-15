@@ -271,11 +271,12 @@ class DbSlice {
     ExpIterator exp_it;
     AutoUpdater post_updater;
     bool is_new = false;
+    uint64_t version = 0;
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
-                                     unsigned req_obj_type);
+                                     unsigned req_obj_type, bool allow_omit = false);
 
   struct ItAndExpConst {
     ConstIterator it;
@@ -560,7 +561,8 @@ class DbSlice {
   std::unique_ptr<base::Histogram> StopSampleValues(DbIndex db_ind);
 
  private:
-  void PreUpdateBlocking(DbIndex db_ind, const Iterator& it);
+  // Increment bucket version and call change callbacks before it
+  void IncrementBucketVersion(DbIndex db_ind, const Iterator& it);
   void PostUpdate(DbIndex db_ind, std::string_view key);
 
   OpResult<ItAndUpdater> AddOrUpdateInternal(const Context& cntx, std::string_view key,
@@ -609,7 +611,8 @@ class DbSlice {
                                        std::optional<unsigned> req_obj_type,
                                        UpdateStatsMode stats_mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
-                                             std::optional<unsigned> req_obj_type);
+                                             std::optional<unsigned> req_obj_type,
+                                             bool allow_omit = false);
 
   uint64_t NextVersion() {
     return version_++;
