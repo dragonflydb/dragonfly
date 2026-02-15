@@ -1,0 +1,84 @@
+commit e0cda4eb4a54cfcd33afcd5fbd7ecd86510ac4f9
+Author: Roman Gershman <romange@gmail.com>
+Date:   Wed Sep 3 23:30:34 2025 +0300
+
+    chore: track comitted size of full pages in a heap
+    
+    Signed-off-by: Roman Gershman <romange@gmail.com>
+
+diff --git a/include/mimalloc/types.h b/include/mimalloc/types.h
+index a15d9cba..34d99a94 100644
+--- a/include/mimalloc/types.h
++++ b/include/mimalloc/types.h
+@@ -559,9 +559,10 @@ struct mi_heap_s {
+   uintptr_t             cookie;                              // random cookie to verify pointers (see `_mi_ptr_cookie`)
+   uintptr_t             keys[2];                             // two random keys used to encode the `thread_delayed_free` list
+   mi_random_ctx_t       random;                              // random number context used for secure allocation
+-  size_t                page_count;                          // total number of pages in the `pages` queues.
+-  size_t                page_retired_min;                    // smallest retired index (retired pages are fully free, but still in the page queues)
+-  size_t                page_retired_max;                    // largest retired index into the `pages` array.
++  uint32_t              page_count;                          // total number of pages in the `pages` queues.
++  uint16_t              page_retired_min;                    // smallest retired index (retired pages are fully free, but still in the page queues)
++  uint16_t              page_retired_max;                    // largest retired index into the `pages` array.
++  size_t                full_page_size;                      // total size of pages residing in MI_BIN_FULL bin.
+   long                  generic_count;                       // how often is `_mi_malloc_generic` called?
+   long                  generic_collect_count;               // how often is `_mi_malloc_generic` called without collecting?
+   mi_heap_t*            next;                                // list of heaps per thread
+diff --git a/src/init.c b/src/init.c
+index 3fc8b033..61ee4c76 100644
+--- a/src/init.c
++++ b/src/init.c
+@@ -118,6 +118,7 @@ mi_decl_cache_align const mi_heap_t _mi_heap_empty = {
+   { {0}, {0}, 0, true }, // random
+   0,                // page count
+   MI_BIN_FULL, 0,   // page retired min/max
++  0,                // full page size
+   0, 0,             // generic count
+   NULL,             // next
+   false,            // can reclaim
+@@ -167,6 +168,7 @@ mi_decl_cache_align mi_heap_t _mi_heap_main = {
+   { {0x846ca68b}, {0}, 0, true },  // random
+   0,                // page count
+   MI_BIN_FULL, 0,   // page retired min/max
++  0,                // full page size
+   0, 0,             // generic count
+   NULL,             // next heap
+   false,            // can reclaim
+diff --git a/src/page-queue.c b/src/page-queue.c
+index c719b626..524b09d8 100644
+--- a/src/page-queue.c
++++ b/src/page-queue.c
+@@ -232,6 +232,10 @@ static void mi_page_queue_remove(mi_page_queue_t* queue, mi_page_t* page) {
+   page->next = NULL;
+   page->prev = NULL;
+   // mi_atomic_store_ptr_release(mi_atomic_cast(void*, &page->heap), NULL);
++  if (mi_page_queue_is_full(queue)) {
++    mi_assert_internal(heap->full_page_size >= mi_page_block_size(page) * page->capacity);
++    heap->full_page_size -= mi_page_block_size(page) * page->capacity;
++  }
+   mi_page_set_in_full(page,false);
+ }
+ 
+@@ -246,6 +250,9 @@ static void mi_page_queue_push(mi_heap_t* heap, mi_page_queue_t* queue, mi_page_
+                       (mi_page_is_large_or_huge(page) && mi_page_queue_is_huge(queue)) ||
+                         (mi_page_is_in_full(page) && mi_page_queue_is_full(queue)));
+ 
++  if (mi_page_queue_is_full(queue)) {
++    heap->full_page_size += mi_page_block_size(page) * page->capacity;
++  }
+   mi_page_set_in_full(page, mi_page_queue_is_full(queue));
+   // mi_atomic_store_ptr_release(mi_atomic_cast(void*, &page->heap), heap);
+   page->next = queue->first;
+@@ -339,6 +346,12 @@ static void mi_page_queue_enqueue_from_ex(mi_page_queue_t* to, mi_page_queue_t*
+     }
+   }
+ 
++  if (mi_page_queue_is_full(to)) {
++    heap->full_page_size += mi_page_block_size(page) * page->capacity;
++  } else if (mi_page_queue_is_full(from)) {
++    mi_assert_internal(heap->full_page_size >= mi_page_block_size(page) * page->capacity);
++    heap->full_page_size -= mi_page_block_size(page) * page->capacity;
++  }
+   mi_page_set_in_full(page, mi_page_queue_is_full(to));
+ }
+ 

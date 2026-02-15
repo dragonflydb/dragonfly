@@ -123,8 +123,12 @@ Note that if a block is not used, it would not counted as wasted
 int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* commited,
                                         size_t* wasted);
 struct fragmentation_info {
+  size_t committed;
+
+  // a temporary metric to compare against "committed" in production.
+  // TODO: delete it once we are confident committed is computed correctly.
+  size_t committed_golden;
   size_t wasted;
-  uint32_t page_count;
   unsigned bin;
 };
 

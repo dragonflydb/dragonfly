@@ -231,12 +231,11 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  thread_local fragmentation_info finfo{.wasted = 0, .page_count = 0, .bin = 0};
+  thread_local fragmentation_info finfo{
+      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
 
-  size_t curr_memory = rss_mem_current.load(memory_order_relaxed);
-  const std::size_t global_threshold =
-      double(max_memory_limit) * GetFlag(FLAGS_mem_defrag_threshold);
-  if (global_threshold > curr_memory) {
+  const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
+  if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     finfo.bin = 0;  // reset.
     return false;
   }
@@ -251,25 +250,23 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     }
 
     // start checking.
+    finfo.committed = finfo.committed_golden = 0;
     finfo.wasted = 0;
-    finfo.page_count = 0;
     page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
 
   uint64_t start = absl::GetCurrentTimeNanos();
   int res = zmalloc_get_allocator_fragmentation_step(page_utilization_threshold, &finfo);
   uint64_t duration = absl::GetCurrentTimeNanos() - start;
-  VLOG(1) << "Reading memory usage took " << duration << " ns for bin " << finfo.bin - 1 << " with "
-          << finfo.page_count << " pages, wasted " << finfo.wasted << " bytes";
+  VLOG(1) << "Reading memory usage took " << duration << " ns on bin " << finfo.bin - 1;
+
   if (res == 0) {
     // finished checking.
     last_check_time = time(nullptr);
 
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-    const size_t current_mem_per_shard = curr_memory / shard_set->size();
-    if (finfo.wasted > size_t(current_mem_per_shard * waste_threshold)) {
-      VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " "
-              << current_mem_per_shard;
+    if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
+      VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
       return true;
     }
   }
