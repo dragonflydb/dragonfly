@@ -6,7 +6,6 @@
 
 #include <xxhash.h>
 
-#include "base/iterator.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
 #include "server/cluster/cluster_defs.h"
@@ -36,16 +35,6 @@ KeyIndex& KeyIndex::operator++() {
 
 bool KeyIndex::operator!=(const KeyIndex& ki) const {
   return std::tie(start, end, step, bonus) != std::tie(ki.start, ki.end, ki.step, ki.bonus);
-}
-
-base::it::Range<KeyIndex> KeyIndex::Range() const {
-  return base::it::Range(*this, KeyIndex{end, end, step, std::nullopt});
-}
-
-auto KeyIndex::Range(const cmn::ArgSlice& args) const -> base::it::Range<
-    base::it::CompoundIterator<std::function<std::string_view(unsigned)>, KeyIndex>> {
-  std::function<std::string_view(unsigned)> f = [args](unsigned idx) { return args[idx]; };
-  return base::it::Transform(f, Range());
 }
 
 DbSlice& DbContext::GetDbSlice(ShardId shard_id) const {

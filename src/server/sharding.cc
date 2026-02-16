@@ -11,7 +11,6 @@
 #include "base/logging.h"
 #include "server/cluster_support.h"
 #include "server/common.h"
-#include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
 using namespace std;

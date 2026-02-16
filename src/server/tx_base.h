@@ -7,16 +7,11 @@
 #include <absl/types/span.h>
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 
+#include "base/iterator.h"
 #include "common/arg_range.h"
-
-// Forward declarations for base::it types
-namespace base::it {
-template <typename T> struct Range;
-template <typename F, typename... Its> struct CompoundIterator;
-}  // namespace base::it
+#include "server/common_types.h"
 
 namespace dfly {
 
@@ -25,15 +20,7 @@ class Transaction;
 class Namespace;
 class DbSlice;
 
-using DbIndex = uint16_t;
-using ShardId = uint16_t;
-using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
-
 using cmn::ArgSlice;
-
-constexpr DbIndex kInvalidDbId = DbIndex(-1);
-constexpr ShardId kInvalidSid = ShardId(-1);
-constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.
 
 struct KeyLockArgs {
   DbIndex db_index = 0;
@@ -61,13 +48,13 @@ struct KeyIndex {
     return (end - start) + unsigned(bonus.has_value());
   }
 
-  // Define Range() methods in tx_base.cc to avoid including base/iterator.h in header
-  base::it::Range<KeyIndex> Range() const;
+  auto Range() const {
+    return base::it::Range(*this, KeyIndex{end, end, step, std::nullopt});
+  }
 
-  // For the complex return type, we use a helper type alias defined in tx_base.cc
-  // The actual type is CompoundIterator with a lambda that captures ArgSlice
-  auto Range(const cmn::ArgSlice& args) const -> base::it::Range<
-      base::it::CompoundIterator<std::function<std::string_view(unsigned)>, KeyIndex>>;
+  auto Range(const cmn::ArgSlice& args) const {
+    return base::it::Transform([args](unsigned idx) { return args[idx]; }, Range());
+  }
 
  public:
   unsigned start, end, step;      // [start, end) with step

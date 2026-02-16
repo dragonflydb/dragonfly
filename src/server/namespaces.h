@@ -12,6 +12,7 @@
 
 #include "server/blocking_controller.h"
 #include "server/db_slice.h"
+#include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {

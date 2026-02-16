@@ -6,12 +6,9 @@
 
 #include <absl/container/flat_hash_map.h>
 
-#include <cstdint>
 #include <string>
 
-namespace dfly {
-using DbIndex = uint16_t;  // Forward declare typedef from tx_base.h
-}
+#include "server/common_types.h"
 
 namespace dfly::tiering {
 
