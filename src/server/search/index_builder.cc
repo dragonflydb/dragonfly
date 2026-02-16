@@ -64,7 +64,11 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
       // (text/tag/numeric); vector indices are handled separately by VectorLoop.
       if (auto doc_id = index_->key_index().Find(key); doc_id) {
         auto accessor = GetAccessor(db_cntx, pv);
-        index_->indices_->Add(*doc_id, *accessor);
+        if (!index_->indices_->Add(*doc_id, *accessor)) {
+          LOG(WARNING) << "Failed to restore index entry for key: " << key
+                       << ", removing from key index";
+          index_->key_index_.Remove(*doc_id);
+        }
       }
     } else {
       index_->AddDoc(key, db_cntx, pv);

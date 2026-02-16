@@ -2235,7 +2235,7 @@ error_code RdbLoader::Load(io::Source* src) {
                                   shard_set != nullptr && shard_count_ == shard_set->size();
 
       if (should_restore) {
-        size_t colon_pos = index_key.find(':');
+        size_t colon_pos = index_key.rfind(':');
         string_view index_name{index_key.data(),
                                colon_pos != string::npos ? colon_pos : index_key.size()};
         string_view field_name = colon_pos != string::npos
