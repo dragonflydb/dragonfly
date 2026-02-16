@@ -178,6 +178,12 @@ TEST_F(MCParserTest, Gat) {
   res = Parse("gats 1000 foo bar baz\r\n");
   EXPECT_EQ(MemcacheParser::OK, res);
   EXPECT_EQ(cmd_.expire_ts, 3000);
+
+  res = Parse("gats 100\r\n");
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, res);
+
+  res = Parse("gat 100\r\n");
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, res);
 }
 
 TEST_F(MCParserTest, ValueState) {

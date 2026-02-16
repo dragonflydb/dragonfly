@@ -134,6 +134,9 @@ MP::Result ParseValueless(ArgSlice tokens, int64_t now, MP::Command* res) {
     return MP::PARSE_ERROR;
   }
 
+  if (key_pos >= num_tokens)
+    return MP::PARSE_ERROR;
+
   res->cmd_flags.return_cas = (res->type == MP::GETS || res->type == MP::GATS);
   res->cmd_flags.return_value = true;
   res->cmd_flags.return_flags = true;
