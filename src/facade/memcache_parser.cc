@@ -69,7 +69,7 @@ MP::CmdType From(string_view token) {
   return MP::INVALID;
 }
 
-MP::Result ParseStore(ArgSlice tokens, int64_t now, MP::Command* res) {
+MP::Result ParseStore(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t max_value_len) {
   DCHECK_EQ(res->size(), 0u);
 
   const size_t num_tokens = tokens.size();
@@ -87,6 +87,12 @@ MP::Result ParseStore(ArgSlice tokens, int64_t now, MP::Command* res) {
   if (!absl::SimpleAtoi(tokens[1], &flags) || !absl::SimpleAtoi(tokens[2], &expire_ts) ||
       !absl::SimpleAtoi(tokens[3], &bytes_len))
     return MP::BAD_INT;
+
+  if (bytes_len > max_value_len) {
+    LOG_EVERY_T(WARNING, 1) << "Memcache value size " << bytes_len << " exceeds max_bulk_len "
+                            << max_value_len;
+    return MP::PARSE_ERROR;
+  }
 
   res->expire_ts = ToAbsolute(expire_ts, now);
 
@@ -210,7 +216,7 @@ bool ParseMetaMode(char m, MP::Command* res) {
 }
 
 // See https://raw.githubusercontent.com/memcached/memcached/refs/heads/master/doc/protocol.txt
-MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res) {
+MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t max_value_len) {
   DCHECK(!tokens.empty());
 
   if (res->type == MP::META_DEBUG) {
@@ -245,6 +251,11 @@ MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res) {
         return MP::PARSE_ERROR;
       if (!absl::SimpleAtoi(tokens[0], &bytes_len))
         return MP::BAD_INT;
+      if (bytes_len > max_value_len) {
+        LOG_EVERY_T(WARNING, 1) << "Memcache value size " << bytes_len << " exceeds max_bulk_len "
+                                << max_value_len;
+        return MP::PARSE_ERROR;
+      }
 
       res->type = MP::SET;
       tokens.remove_prefix(1);
@@ -391,7 +402,7 @@ auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
       return MP::PARSE_ERROR;
     }
 
-    auto res = ParseStore(tokens_view, last_unix_time_, cmd);
+    auto res = ParseStore(tokens_view, last_unix_time_, cmd, max_value_len_);
     if (res != MP::OK)
       return res;
     val_len_to_read_ = cmd->value().size() + 2;
@@ -402,7 +413,7 @@ auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
     if (tokens_view.empty())
       return MP::PARSE_ERROR;
 
-    auto res = ParseMeta(tokens_view, last_unix_time_, cmd);
+    auto res = ParseMeta(tokens_view, last_unix_time_, cmd, max_value_len_);
     if (res != MP::OK)
       return res;
 
