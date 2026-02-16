@@ -1,9 +1,17 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
+#include <absl/flags/flag.h>
+#include <absl/flags/reflection.h>
+
 #include <random>
 #include <string>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
+#include "journal_slice.h"
 #include "server/common.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
@@ -14,6 +22,9 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_max_bytes);
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 
 namespace dfly {
 namespace journal {
@@ -219,6 +230,60 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+void RunLimitTest(size_t bytes, size_t count, std::function<void(JournalSlice&)> f) {
+  absl::FlagSaver fs;
+
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, bytes);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, count);
+
+  JournalSlice slice;
+  slice.Init();
+  f(slice);
+}
+
+TEST(JournalSlice, ByteLimit) {
+  RunLimitTest(300, 10240, [](JournalSlice& slice) {
+    std::string cmd(100, 'x');
+
+    for (auto lsn : std::views::iota(1, 20)) {
+      const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
+      slice.AddLogRecord(entry);
+      EXPECT_LE(slice.GetRingBufferSize(), 3);
+      EXPECT_LE(slice.GetRingBufferBytes(), 300);
+      EXPECT_TRUE(slice.IsLSNInBuffer(lsn)) << lsn << " not in buffer";
+      EXPECT_FALSE(slice.IsLSNInBuffer(std::max(0, lsn - 3)));
+    }
+  });
+}
+
+TEST(JournalSlice, ItemTooLarge) {
+  RunLimitTest(300, 10240, [](JournalSlice& slice) {
+    for (auto _ : std::views::iota(0, 10)) {
+      const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"xxxxxx", ShardArgs{}}};
+      slice.AddLogRecord(entry);
+    }
+
+    std::string cmd(1024, 'x');
+    const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
+    slice.AddLogRecord(entry);
+
+    EXPECT_EQ(slice.GetRingBufferSize(), 1);
+    EXPECT_GE(slice.GetRingBufferBytes(), 1024);
+  });
+}
+
+TEST(JournalSlice, BothBytesAndCountLimited) {
+  RunLimitTest(300, 3, [](JournalSlice& slice) {
+    const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"x", ShardArgs{}}};
+
+    for (auto _ : std::views::iota(0, 10)) {
+      slice.AddLogRecord(entry);
+      EXPECT_LE(slice.GetRingBufferSize(), 3);
+      EXPECT_LE(slice.GetRingBufferBytes(), 300);
+    }
+  });
 }
 
 }  // namespace journal
