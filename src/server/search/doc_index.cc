@@ -21,6 +21,7 @@
 #include "server/search/global_hnsw_index.h"
 #include "server/search/index_builder.h"
 #include "server/server_state.h"
+#include "util/fibers/fibers.h"
 
 namespace dfly {
 
@@ -796,6 +797,18 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
   for (auto& [index_name, ptr] : indices_)
     ptr->Rebuild(op_args, &local_mr_);
+}
+
+void ShardDocIndices::BlockUntilConstructionEnd() {
+  bool indexing = false;
+  do {
+    indexing = false;
+    for (const auto& [_, ptr] : indices_)
+      indexing |= ptr->GetInfo().indexing;
+
+    if (indexing)
+      util::ThisFiber::SleepFor(1ms);
+  } while (indexing);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {

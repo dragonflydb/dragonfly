@@ -3053,12 +3053,14 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
 
 void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+  if (cmd == nullptr)  // In case search module is disabled
     return;
 
   // Clear the created indices tracking set for next load
+  bool had_indices = false;
   {
     std::lock_guard lk(search_index_mu_);
+    had_indices = !created_search_indices_.empty();
     created_search_indices_.clear();
   }
 
@@ -3068,15 +3070,23 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
 
   // Start index building for all indices
   // TODO: don't build all indices concurrently or limit cumulative budget
-  shard_set->RunBriefInParallel([](EngineShard* es) {
-    OpArgs op_args{es, nullptr,
-                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args);
-  });
+  if (had_indices) {
+    shard_set->RunBriefInParallel([](EngineShard* es) {
+      OpArgs op_args{es, nullptr,
+                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+      es->search_indices()->RebuildAllIndices(op_args);
+    });
+  }
 
   // Issue FT.SYNUPDATE while the index is building
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
+  }
+
+  // Wait until index building ends
+  if (had_indices) {
+    shard_set->RunBlockingInParallel(
+        [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
   }
 }
 
