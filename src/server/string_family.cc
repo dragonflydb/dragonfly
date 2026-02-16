@@ -243,11 +243,15 @@ size_t ExtendExisting(const DbSlice::Iterator& it, string_view key, string_view 
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
+
+  // allow omit
+  VLOG(0) << "Finding with allow omit";
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING, true);
   if (!it_res) {
     return false;
   }
 
+  op_args.tx->RecordMaxBucketVersion(op_args.shard->shard_id(), it_res->version);
   return ExtendExisting(it_res->it, key, val, prepend);
 }
 

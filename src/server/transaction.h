@@ -350,6 +350,11 @@ class Transaction {
   // Return debug information about a transaction, include shard local info if passed
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
+  void RecordMaxBucketVersion(ShardId sid, uint64_t version) const {
+    auto& mbv = shard_data_[SidToId(sid)].max_bucket_version;
+    mbv = std::max(mbv.value_or(0), version);
+  }
+
   // Write a journal entry to a shard journal with the given payload.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
                          uint32_t shard_cnt) const;
@@ -427,8 +432,7 @@ class Transaction {
       unsigned total_runs = 0;  // total number of runs
     } stats;
 
-    // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[64 - 7 * sizeof(uint32_t) - sizeof(Stats)];
+    mutable std::optional<uint64_t> max_bucket_version = 0;
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline

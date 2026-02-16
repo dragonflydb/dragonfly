@@ -24,6 +24,8 @@ struct EntryBase {
                        // and deserialize it to maintain backward compatibility.
   std::optional<SlotId> slot;
   LSN lsn{0};
+
+  std::optional<uint64_t> max_version;
 };
 
 // This struct represents a single journal entry.
@@ -90,6 +92,7 @@ struct JournalChangeItem {
 
   std::string_view cmd;
   std::optional<SlotId> slot;
+  std::optional<uint64_t> max_version;
 };
 
 struct JournalConsumerInterface {
