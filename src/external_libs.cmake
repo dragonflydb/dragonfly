@@ -61,7 +61,7 @@ add_third_party(
 set(MIMALLOC_ROOT_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2)
 set(MIMALLOC_INCLUDE_DIR ${MIMALLOC_ROOT_DIR}/include)
 set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4)
-set(MIMALLOC_C_FLAGS "-O3 -g -DMI_STAT=1 -DNDEBUG")
+set(MIMALLOC_C_FLAGS "-O3 -g -DNDEBUG")
 file(MAKE_DIRECTORY ${MIMALLOC_INCLUDE_DIR})
 
 ExternalProject_Add(mimalloc2_project
