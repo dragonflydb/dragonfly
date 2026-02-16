@@ -124,27 +124,49 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
   return commands;
 }
 
-size_t CmdSerializer::SerializeDelayedEntries(bool force) {
-  if (!force && delayed_entries_.size() < 32)
+size_t CmdSerializer::SerializeDelayedEntries(bool force,
+                                              absl::flat_hash_set<std::string>* tiered_keys) {
+  // If there are no delayed entries, or we're not forced to serialize them, or we have only a few
+  // of them, we can skip serialization for now and wait for more entries to accumulate or for force
+  // to be true.
+  // Check next comment that this can be removed once we have better support for skipping unresolved
+  // entries.
+  if (delayed_entries_.empty() || !force || delayed_entries_.size() < 32) {
     return 0;
-
-  size_t serialized = 0;
-  if (!delayed_entries_.empty()) {
-    do {
-      TieredDelayedEntry entry = std::move(delayed_entries_.back());
-      delayed_entries_.pop_back();
-
-      auto res = entry.value.Get();  // Blocking point
-      if (!res.has_value()) {
-        LOG(ERROR) << "Failed to read " << entry.key.ToString();
-        continue;
-      }
-
-      PrimeValue pv{*res};
-      serialized += SerializeEntry(entry.key.ToString(), entry.key, pv, entry.expire);
-    } while (!delayed_entries_.empty());
   }
 
+  size_t serialized = 0;
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    auto& entry = it->second;
+
+    // TODO: Once https://github.com/romange/helio/pull/541 is merged we can skip entries that are
+    // not resolved yet.
+    // Skip unresolved entries unless force is true if (!force &&
+    // !entry->value.IsResolved()) {
+    //   ++it;
+    //   continue;
+    // }
+
+    // If tiered_keys filter is provided, only serialize matching keys
+    // Compare the string key from the map with the keys in tiered_keys set
+    if (tiered_keys && !tiered_keys->contains(it->first)) {
+      ++it;
+      continue;
+    }
+
+    // Get the value from the future (blocks if not resolved and force=true)
+    auto res = entry->value.Get();
+    if (!res.has_value()) {
+      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
+      it++;
+      continue;
+    }
+
+    // Serialize the entry and remove it from delayed_entries_
+    PrimeValue pv{*res};
+    serialized += SerializeEntry(entry->key.ToString(), entry->key, pv, entry->expire);
+    delayed_entries_.erase(it++);
+  }
   return serialized;
 }
 
@@ -244,7 +266,7 @@ size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uin
     if (pv.IsCool()) {
       pv.GetCool().record->value.GetString(&str);
     } else {
-      SerializeExternal(PrimeKey{std::string(key)}, pv, expire_ms);
+      SerializeExternal(key, pv, expire_ms);
       return 0;
     }
   } else {
@@ -285,13 +307,16 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   SerializeCommand("RESTORE", args);
 }
 
-void CmdSerializer::SerializeExternal(PrimeKey key, const PrimeValue& pv, time_t expire_time) {
-  auto future = ReadTieredString(0 /*db_id always 0 for cluster*/, key.ToString(), pv,
-                                 EngineShard::tlocal()->tiered_storage());
-  uint32_t mc_flags =
-      pv.HasFlag() ? db_slice_->GetMCFlag(0 /*db_id always 0 for cluster*/, key) : 0;
-  delayed_entries_.push_back(
-      {0 /*db_id always 0 for cluster*/, std::move(key), std::move(future), expire_time, mc_flags});
+void CmdSerializer::SerializeExternal(std::string_view key, const PrimeValue& pv,
+                                      time_t expire_time) {
+  // In cluster mode, db_id is always 0
+  constexpr DbIndex kClusterDbId = 0;
+  auto future = ReadTieredString(kClusterDbId, key, pv, EngineShard::tlocal()->tiered_storage());
+  PrimeKey prime_key{key};
+  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(kClusterDbId, prime_key) : 0;
+  auto entry = std::make_unique<TieredDelayedEntry>(kClusterDbId, std::move(prime_key),
+                                                    std::move(future), expire_time, mc_flags);
+  delayed_entries_.emplace(key, std::move(entry));
 }
 
 }  // namespace dfly

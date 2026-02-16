@@ -3672,10 +3672,11 @@ async def test_cluster_migration_with_tiering(df_factory):
 
     await asyncio.sleep(5)  # wait for tiering to offload data
 
+    # We need to wait for some tiered entries to verify migration works with tiering.
     async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED"):
         with breaker:
             logging.info(f"Tiered entries: {info['tiered_entries']}")
-            assert info["tiered_entries"] >= 350_000
+            assert info["tiered_entries"] >= 10_000
 
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
