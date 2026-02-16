@@ -462,7 +462,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
   // Atomic bucket serialization might have accumulated some delayed values.
   // Because we can finally block in this function, we'll await and serialize them
-
   thread_local LocalLatch delayed_flush_latch_;
   while (!delayed_entries_.empty()) {
     // After pop_front there is no indication of the operation ongoing, so we need a latch
@@ -470,8 +469,8 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
     RdbSerializer delayed_serializer{compression_mode_};
     do {
-      // We may call PushSerialized from multiple fibers concurrently, so we need to
-      // ensure that we are not serializing the same entry concurrently.
+      // This code can run concurrently, so pop the entries one by one.
+      // Because the keys never repeat (bucket visited once) order is not important.
       DelayedEntry entry = std::move(delayed_entries_.front());
       delayed_entries_.pop_front();
 
