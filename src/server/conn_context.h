@@ -131,6 +131,13 @@ struct ConnectionState {
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
+
+    struct Stats {
+      std::string sha;            // TODO: avoid copy via char[40]?
+      unsigned num_commands = 0;  // total number of command executed
+      // TODO: Latency measurement only possible with squashing info (or use atomic for everything?)
+      // uint64_t command_time_us = 0;
+    } stats;
   };
 
   // PUB-SUB messaging related data.
@@ -408,9 +415,6 @@ class CommandContext : public facade::ParsedCommand {
   }
 
   uint64_t start_time_ns = 0;
-
-  // number of commands in the last exec body.
-  unsigned exec_body_len = 0;
 
   // Stores backing array for tail args slice
   CmdArgVec arg_slice_backing;

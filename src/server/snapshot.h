@@ -4,8 +4,7 @@
 
 #pragma once
 
-#include <atomic>
-#include <bitset>
+#include <deque>
 
 #include "base/pod_array.h"
 #include "core/search/base.h"
@@ -146,11 +145,9 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // plumbing and making it safe to move.
   void HandleFlushData(std::string data);
 
-  // Calls serializer_->Flush() to extract the remaining data from the serializer
-  // and process it via HandleFlushData().
-  // Used for explicit flushes at safe points (e.g. between entries).
-  // Can block.
-  size_t FlushSerialized();
+  // Flush data from built in (or custom) serializer and pass it to HandleFlushData.
+  // Used for explicit flushes at safe points (e.g. between entries). Can block.
+  size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
 
   // An entry whose value must be awaited
   struct DelayedEntry {
@@ -167,7 +164,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::deque<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
