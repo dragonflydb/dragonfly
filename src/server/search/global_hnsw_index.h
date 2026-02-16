@@ -17,7 +17,6 @@
 #include "core/search/hnsw_index.h"
 #include "core/search/search.h"
 #include "server/search/doc_index.h"
-#include "server/tx_base.h"
 
 namespace dfly {
 class GlobalHnswIndexRegistry {
