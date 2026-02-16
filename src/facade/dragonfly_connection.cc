@@ -584,7 +584,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
           new RespSrvParser(GetFlag(FLAGS_max_multi_bulk_len), GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
-      memcache_parser_ = make_unique<MemcacheParser>(GetFlag(FLAGS_max_bulk_len));
+      memcache_parser_ =
+          make_unique<MemcacheParser>(std::min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX));
       break;
   }
 
