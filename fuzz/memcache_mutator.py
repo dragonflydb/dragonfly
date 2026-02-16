@@ -254,14 +254,25 @@ def _mutate_commands(commands):
         line, value = result[idx]
         parts = line.split(b" ")
         if len(parts) >= 2:
-            parts[1] = _random_key()
+            cmd = parts[0].lower()
+            # Mutate the correct key index depending on command
+            if cmd in (b"gat", b"gats") and len(parts) >= 3:
+                key_idx = random.randint(2, len(parts) - 1)
+                parts[key_idx] = _random_key()
+            else:
+                parts[1] = _random_key()
             if value is not None:
                 new_value = _random_value()
                 # Update byte count in the header
-                if len(parts) >= 5:
+                length_idx = None
+                if cmd == b"ms" and len(parts) >= 3:
+                    length_idx = 2
+                elif len(parts) >= 5:
+                    length_idx = 4
+                if length_idx is not None:
                     try:
-                        int(parts[4])
-                        parts[4] = str(len(new_value)).encode()
+                        int(parts[length_idx])
+                        parts[length_idx] = str(len(new_value)).encode()
                     except ValueError:
                         pass
                 value = new_value

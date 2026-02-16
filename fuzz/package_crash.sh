@@ -74,8 +74,10 @@ rm -rf "$TMPDIR"
 SIZE=$(du -h "$OUTPUT" | cut -f1)
 print_info "Archive created: ${OUTPUT} (${SIZE})"
 echo ""
+# Detect target from directory structure: artifacts/<target>/default/crashes
+TARGET_NAME=$(basename "$(dirname "$(dirname "$CRASHES_DIR")")")
 IS_MEMCACHE=false
-if [[ "$CRASHES_DIR" == *"memcache"* ]]; then
+if [[ "$TARGET_NAME" == "memcache" ]]; then
     IS_MEMCACHE=true
 fi
 
