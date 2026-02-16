@@ -116,21 +116,29 @@ namespace dfly {
 
 namespace {
 
+#if ABSL_HAVE_ADDRESS_SANITIZER
+// Increase stack size for all debug builds; tools like ASAN can require more than 50 KB.
+constexpr size_t kAsanFactor = 2;
+#else
+constexpr size_t kAsanFactor = 1;
+#endif
+
+#ifdef NDEBUG
+constexpr size_t kFiberStackBase = 32_KB;
+#else
+constexpr size_t kFiberStackBase = 48_KB;
+#endif
+
 // Default stack size for fibers. We decrease it by 16 bytes because some allocators
 // need additional 8-16 bytes for their internal structures, thus over reserving additional
 // memory pages if using round sizes.
-#ifdef NDEBUG
-constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
-#else
-// Increase stack size for debug builds, because some compilers can create exec, that consumes much
-// mores stack.
-constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
-#endif
+constexpr size_t kFiberDefaultStackSize = kFiberStackBase * kAsanFactor - 16;
 
-enum class TermColor { kDefault, kRed, kGreen, kYellow };
+enum class TermColor : uint8_t { kDefault, kRed, kGreen, kYellow };
+
 // Returns the ANSI color code for the given color. TermColor::kDefault is
 // an invalid input.
-static const char* GetAnsiColorCode(TermColor color) {
+const char* GetAnsiColorCode(TermColor color) {
   switch (color) {
     case TermColor::kRed:
       return "1";
