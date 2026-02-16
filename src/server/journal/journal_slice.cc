@@ -4,13 +4,9 @@
 
 #include "server/journal/journal_slice.h"
 
-#include <absl/container/inlined_vector.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/escaping.h>
-#include <absl/strings/str_cat.h>
 #include <fcntl.h>
-
-#include <filesystem>
 
 #include "base/function2.hpp"
 #include "base/logging.h"
