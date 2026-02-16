@@ -81,6 +81,7 @@ class JournalSlice {
   bool enable_journal_flush_ = true;
 
   size_t ring_buffer_bytes = 0;
+  size_t ring_buffer_max_bytes_ = 0;
 };
 
 }  // namespace journal

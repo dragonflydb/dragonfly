@@ -19,6 +19,8 @@
 
 ABSL_FLAG(uint32_t, shard_repl_backlog_len, 8192,
           "The length of the circular replication log per shard");
+ABSL_FLAG(uint32_t, shard_repl_backlog_max_bytes, 0,
+          "The maximum bytes the circular replication log can hold (0 is unlimited)");
 
 namespace dfly {
 namespace journal {
@@ -37,6 +39,7 @@ void JournalSlice::Init() {
     return;
 
   ring_buffer_.set_capacity(absl::GetFlag(FLAGS_shard_repl_backlog_len));
+  ring_buffer_max_bytes_ = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes);
 }
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
@@ -110,6 +113,19 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
     k_v.second->ConsumeJournalChange(*change_item);
   }
   auto& item = change_item->journal_item;
+
+  // Drain the buffer until it is smaller than max bytes, only if the limit is set and the buffer is
+  // not empty. If the item is large enough that it will not fit into the buffer, still accommodate
+  // it as the sole element after draining the entire buffer.
+  const auto new_item_size = sizeof(item) + item.data.size();
+  while (ring_buffer_max_bytes_ && !ring_buffer_.empty() &&
+         ring_buffer_bytes + new_item_size > ring_buffer_max_bytes_) {
+    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
+    DCHECK_GE(ring_buffer_bytes, bytes_removed);
+    ring_buffer_bytes -= bytes_removed;
+    ring_buffer_.pop_front();
+  }
+
   // We preserve order here. After ConsumeJournalChange there can reordering
   if (ring_buffer_.size() == ring_buffer_.capacity()) {
     const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
