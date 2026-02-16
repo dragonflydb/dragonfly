@@ -1978,6 +1978,7 @@ RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
     : service_{service},
       snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
+      deserialize_hnsw_index_{GetFlag(FLAGS_deserialize_hnsw_index)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
 }
@@ -2218,7 +2219,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      // Read HNSW vector index graph data and restore directly
+      // HNSW vector index graph data.
       // Binary format: [index_key, elements_number,
       //   then for each node (little-endian):
       //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
@@ -2229,94 +2230,20 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      // Only restore if flag enabled and shard count matches (GlobalDocId encodes shard_id)
-      bool should_restore = GetFlag(FLAGS_deserialize_hnsw_index) && shard_count_ > 0 &&
-                            shard_set != nullptr && shard_count_ == shard_set->size();
+      // Only restore if the flag is enabled and shard count matches (GlobalDocId encodes shard_id)
+      const bool should_restore = deserialize_hnsw_index_ && shard_count_ > 0 &&
+                                  shard_set != nullptr && shard_count_ == shard_set->size();
 
-      // Extract index_name and field_name from index_key
-      size_t colon_pos = index_key.find(':');
-      string index_name = (colon_pos != string::npos) ? index_key.substr(0, colon_pos) : index_key;
-      string field_name = (colon_pos != string::npos) ? index_key.substr(colon_pos + 1) : "";
-
-      // Check if we can get the HNSW index (it should exist from FT.CREATE in aux).
-      // If another shard's FT.CREATE hasn't completed yet, wait briefly for the
-      // registry to be populated (bounded by FT.CREATE completion time).
-      auto hnsw_index = should_restore
-                            ? GlobalHnswIndexRegistry::Instance().Get(index_name, field_name)
-                            : nullptr;
-
-      if (should_restore && !hnsw_index) {
-        LOG(ERROR) << "HNSW index not found for restoration: " << index_key;
-        should_restore = false;
-      }
-
-      std::vector<search::HnswNodeData> nodes;
       if (should_restore) {
-        nodes.reserve(elements_number);
-      }
-
-      for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        uint32_t internal_id;
-        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
-        uint64_t global_id;
-        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
-        uint32_t level;
-        SET_OR_RETURN(FetchInt<uint32_t>(), level);
-
-        search::HnswNodeData node;
-        if (should_restore) {
-          node.internal_id = internal_id;
-          node.global_id = global_id;
-          node.level = level;
-          node.levels_links.resize(level + 1);
-        }
-
-        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
-          uint32_t links_num;
-          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
-
-          if (should_restore) {
-            node.levels_links[lvl].reserve(links_num);
-          }
-
-          for (uint32_t i = 0; i < links_num; ++i) {
-            uint32_t link;
-            SET_OR_RETURN(FetchInt<uint32_t>(), link);
-            if (should_restore) {
-              node.levels_links[lvl].push_back(link);
-            }
-          }
-        }
-
-        if (should_restore) {
-          nodes.push_back(std::move(node));
-        }
-      }
-
-      if (should_restore && !nodes.empty()) {
-        // Look up metadata from pending_hnsw_metadata_ (loaded from AUX field)
-        std::optional<search::HnswIndexMetadata> metadata;
-        {
-          std::lock_guard lk(search_index_mu_);
-          for (const auto& phm : pending_hnsw_metadata_) {
-            if (phm.index_name == index_name && phm.field_name == field_name) {
-              metadata = phm.metadata;
-              break;
-            }
-          }
-        }
-
-        CHECK(metadata);
-
-        // Restore the HNSW graph structure (links between nodes)
-        hnsw_index->RestoreFromNodes(nodes, *metadata);
-
-        LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
-      } else if (elements_number > 0) {
-        LOG(INFO) << "Skipping HNSW vector index restore: " << index_key
-                  << " elements_number=" << elements_number << " shard_count_=" << shard_count_
-                  << " current_shards=" << (shard_set ? shard_set->size() : 0)
-                  << ". Index will be rebuilt from data.";
+        size_t colon_pos = index_key.find(':');
+        string_view index_name{index_key.data(),
+                               colon_pos != string::npos ? colon_pos : index_key.size()};
+        string_view field_name = colon_pos != string::npos
+                                     ? string_view{index_key.data() + colon_pos + 1}
+                                     : string_view{};
+        RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
+      } else {
+        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
       }
       continue;
     }
@@ -2344,7 +2271,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
       // Only store mappings if deserialization is enabled AND shard count matches.
       // With different shard counts, keys are distributed differently so the mappings are invalid.
-      if (!GetFlag(FLAGS_deserialize_hnsw_index) || shard_count_ == 0 || shard_set == nullptr ||
+      if (!deserialize_hnsw_index_ || shard_count_ == 0 || shard_set == nullptr ||
           shard_count_ != shard_set->size()) {
         continue;
       }
@@ -3082,9 +3009,9 @@ std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
 absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
 RdbLoader::TakePendingIndexMappings() {
   // we don't need to lock here as this is called after all RdbLoader instances are done
-  absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> result;
-  result.swap(pending_index_mappings_);
-  return std::move(pending_index_mappings_);
+  decltype(pending_index_mappings_) result;
+  std::swap(result, pending_index_mappings_);
+  return result;
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
@@ -3118,6 +3045,85 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
   } catch (const std::exception& e) {
     LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
   }
+}
+
+error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
+                                         string_view field_name, uint64_t elements_number) {
+  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
+  if (!hnsw_index) {
+    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
+               << ". Skipping serialized graph data.";
+    return SkipVectorIndex(index_key, elements_number);
+  }
+
+  std::vector<search::HnswNodeData> nodes;
+  nodes.reserve(elements_number);
+
+  for (uint64_t elem = 0; elem < elements_number; ++elem) {
+    search::HnswNodeData node;
+    SET_OR_RETURN(FetchInt<uint32_t>(), node.internal_id);
+    SET_OR_RETURN(FetchInt<uint64_t>(), node.global_id);
+    uint32_t raw_level;
+    SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    node.level = static_cast<int>(raw_level);
+
+    node.levels_links.resize(node.level + 1);
+    for (int lvl = 0; lvl <= node.level; ++lvl) {
+      uint32_t links_num;
+      SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      node.levels_links[lvl].resize(links_num);
+      for (uint32_t i = 0; i < links_num; ++i) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), node.levels_links[lvl][i]);
+      }
+    }
+    nodes.push_back(std::move(node));
+  }
+
+  if (!nodes.empty()) {
+    // Look up metadata from pending_hnsw_metadata_ (loaded from AUX field)
+    std::optional<search::HnswIndexMetadata> metadata;
+    {
+      std::lock_guard lk(search_index_mu_);
+      for (const auto& phm : pending_hnsw_metadata_) {
+        if (phm.index_name == index_name && phm.field_name == field_name) {
+          metadata = phm.metadata;
+          break;
+        }
+      }
+    }
+
+    CHECK(metadata);
+    hnsw_index->RestoreFromNodes(nodes, *metadata);
+    LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
+  }
+  return {};
+}
+
+error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_number) {
+  for (uint64_t elem = 0; elem < elements_number; ++elem) {
+    SET_OR_RETURN(FetchInt<uint32_t>(), std::ignore);  // internal_id
+    SET_OR_RETURN(FetchInt<uint64_t>(), std::ignore);  // global_id
+    uint32_t raw_level;
+    SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    int level = static_cast<int>(raw_level);
+
+    for (int lvl = 0; lvl <= level; ++lvl) {
+      uint32_t links_num;
+      SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      for (uint32_t i = 0; i < links_num; ++i) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), std::ignore);
+      }
+    }
+  }
+
+  if (elements_number > 0) {
+    LOG(INFO) << "Skipping HNSW vector index restore: " << index_key
+              << " elements_number=" << elements_number << " shard_count_=" << shard_count_
+              << " current_shards=" << (shard_set ? shard_set->size() : 0)
+              << ". Index will be rebuilt from data.";
+  }
+  return {};
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {

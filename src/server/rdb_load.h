@@ -342,6 +342,13 @@ class RdbLoader : protected RdbLoaderBase {
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
+  // Restore HNSW vector index graph from serialized node data.
+  std::error_code RestoreVectorIndex(std::string_view index_key, std::string_view index_name,
+                                     std::string_view field_name, uint64_t elements_number);
+
+  // Skip over serialized HNSW vector index node data without restoring.
+  std::error_code SkipVectorIndex(std::string_view index_key, uint64_t elements_number);
+
   // Get pending synonym commands collected from all RdbLoader instances
   static std::vector<std::string> TakePendingSynonymCommands();
 
@@ -372,6 +379,7 @@ class RdbLoader : protected RdbLoaderBase {
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
   bool rdb_ignore_expiry_;
+  const bool deserialize_hnsw_index_;
   uint32_t shard_id_ = UINT32_MAX;
   uint32_t shard_count_ = 0;
   size_t table_used_memory_ = 0;

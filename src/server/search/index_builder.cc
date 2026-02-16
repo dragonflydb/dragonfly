@@ -89,7 +89,7 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
   // If any HNSW index was restored from RDB, use UpdateVectorData instead of Add.
   if (is_restored_) {
     OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
-    index_->RebuildGlobalVectorIndices(index_->base_->name, op_args, /*from_restored=*/true);
+    index_->RestoreGlobalVectorIndices(index_->base_->name, op_args);
     return;
   }
 

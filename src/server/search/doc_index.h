@@ -328,10 +328,9 @@ class ShardDocIndex {
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       const PrimeValue& pv);
 
-  // Rebuild global vector indices, choosing strategy based on whether they were restored from RDB.
-  // When `from_restored` is true, uses the efficient ByIndexKeys path (UpdateVectorData).
-  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args,
-                                  bool from_restored = false);
+  // Rebuild global vector indices from restored key index, updating vector data
+  // for nodes whose graph structure was already restored from RDB.
+  void RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
 
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
@@ -361,12 +360,6 @@ class ShardDocIndex {
 
   // Cancel builder if in progress
   void CancelBuilder();
-
-  // Helper methods for RebuildGlobalVectorIndices
-  // Iterates by index keys - more efficient for restored indices
-  void RebuildGlobalVectorIndicesByIndexKeys(std::string_view index_name, const OpArgs& op_args);
-  // Iterates by database - needed when building new index
-  void RebuildGlobalVectorIndicesByDatabase(std::string_view index_name, const OpArgs& op_args);
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;

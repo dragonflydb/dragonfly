@@ -462,27 +462,14 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
   }
 }
 
-void ShardDocIndex::RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args,
-                                               bool from_restored) {
+void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
   // Don't run loop if no vector fields are present
   if (std::ranges::empty(GetIndexedHnswFields(base_->schema)))
     return;
 
-  if (from_restored) {
-    // Iterate by index keys - more efficient for restored indices
-    LOG(INFO) << "Restoring vector index '" << index_name << "' from serialized graph on shard "
-              << EngineShard::tlocal()->shard_id();
-    RebuildGlobalVectorIndicesByIndexKeys(index_name, op_args);
-  } else {
-    // Iterate by database - needed when building new index
-    LOG(INFO) << "Rebuilding vector index '" << index_name << "' from database on shard "
-              << EngineShard::tlocal()->shard_id() << " (no serialized graph available)";
-    RebuildGlobalVectorIndicesByDatabase(index_name, op_args);
-  }
-}
+  LOG(INFO) << "Restoring vector index '" << index_name << "' from serialized graph on shard "
+            << EngineShard::tlocal()->shard_id();
 
-void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index_name,
-                                                          const OpArgs& op_args) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
@@ -533,16 +520,6 @@ void ShardDocIndex::RebuildGlobalVectorIndicesByIndexKeys(std::string_view index
     VLOG(1) << "Restored vectors for index " << index_name << ": " << successful_updates << "/"
             << total_docs << " documents";
   }
-}
-
-void ShardDocIndex::RebuildGlobalVectorIndicesByDatabase(std::string_view index_name,
-                                                         const OpArgs& op_args) {
-  auto cb = [this](string_view key, const DbContext& db_cntx, PrimeValue& pv) {
-    if (auto local_id = key_index_.Find(key); local_id)
-      AddDocToGlobalVectorIndex(*local_id, db_cntx, &pv);
-  };
-
-  TraverseAllMatching(*base_, op_args, cb);
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
