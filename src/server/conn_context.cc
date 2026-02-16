@@ -321,7 +321,8 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
     auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
     switch (*mck) {
       case CO::MultiControlKind::EXEC:
-        aux_params = FormatExecSlowlog(cntx->conn_state);
+        if (cid_->name() == "EXEC")
+          aux_params = FormatExecSlowlog(cntx->conn_state);
         break;
       case CO::MultiControlKind::EVAL:
         aux_params = FormatEvalSlowlog(cntx->conn_state);
@@ -329,7 +330,8 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
     };
     aux_slice = {aux_params.begin(), aux_params.end()};
     if (tail_args.size() > 0) {
-      tail_args.remove_prefix(1);  // remove script/sha from eval/evalsha
+      if (!aux_params.empty())
+        tail_args.remove_prefix(1);  // remove script/sha from eval/evalsha
       aux_slice.insert(aux_slice.end(), tail_args.begin(), tail_args.end());
     }
     tail_args = aux_slice;
