@@ -115,24 +115,24 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
   // it as the sole element after draining the entire buffer.
   const auto new_item_size = sizeof(item) + item.data.size();
   while (ring_buffer_max_bytes_ && !ring_buffer_.empty() &&
-         ring_buffer_bytes + new_item_size > ring_buffer_max_bytes_) {
+         ring_buffer_bytes_ + new_item_size > ring_buffer_max_bytes_) {
     const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
-    DCHECK_GE(ring_buffer_bytes, bytes_removed);
-    ring_buffer_bytes -= bytes_removed;
+    DCHECK_GE(ring_buffer_bytes_, bytes_removed);
+    ring_buffer_bytes_ -= bytes_removed;
     ring_buffer_.pop_front();
   }
 
   // We preserve order here. After ConsumeJournalChange there can reordering
   if (ring_buffer_.size() == ring_buffer_.capacity()) {
     const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
-    DCHECK_GE(ring_buffer_bytes, bytes_removed);
-    ring_buffer_bytes -= bytes_removed;
+    DCHECK_GE(ring_buffer_bytes_, bytes_removed);
+    ring_buffer_bytes_ -= bytes_removed;
   }
   if (!ring_buffer_.empty()) {
     DCHECK(item.lsn == ring_buffer_.back().lsn + 1);
   }
   ring_buffer_.push_back(std::move(item));
-  ring_buffer_bytes += sizeof(item) + ring_buffer_.back().data.size();
+  ring_buffer_bytes_ += sizeof(item) + ring_buffer_.back().data.size();
 
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
@@ -162,7 +162,7 @@ size_t JournalSlice::GetRingBufferSize() const {
 }
 
 size_t JournalSlice::GetRingBufferBytes() const {
-  return ring_buffer_bytes;
+  return ring_buffer_bytes_;
 }
 
 void JournalSlice::ResetRingBuffer() {
