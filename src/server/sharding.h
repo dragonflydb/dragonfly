@@ -4,11 +4,12 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
-#include "tx_base.h"
-
 namespace dfly {
+
+using ShardId = uint16_t;  // Forward declare typedef from tx_base.h
 
 ShardId Shard(std::string_view v, ShardId shard_num);
 

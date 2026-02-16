@@ -4,12 +4,16 @@
 
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "base/logging.h"
 #include "core/linear_search_map.h"
 #include "core/search/base.h"
-#include "server/tx_base.h"
+
+namespace dfly {
+using ShardId = uint16_t;  // Forward declare typedef from tx_base.h
+}
 
 namespace dfly::join {
 

@@ -6,7 +6,6 @@
 
 #include "base/flags.h"
 #include "facade/facade_types.h"
-#include "server/tx_base.h"
 
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
@@ -17,6 +16,10 @@ using facade::OpResult;
 
 class CommandRegistry;
 class CommandContext;
+
+// Forward declarations from tx_base.h
+struct OpArgs;
+class ShardArgs;
 
 class GenericFamily {
  public:

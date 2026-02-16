@@ -7,11 +7,16 @@
 #include <functional>
 
 #include "server/execution_state.h"
-#include "server/tx_base.h"
 
 namespace dfly {
+
 struct DbTable;
 class ShardDocIndex;
+
+// Forward declarations from tx_base.h
+struct OpArgs;
+struct DbContext;
+
 }  // namespace dfly
 
 namespace dfly::search {

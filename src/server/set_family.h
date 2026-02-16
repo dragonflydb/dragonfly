@@ -6,7 +6,6 @@
 
 #include "facade/facade_types.h"
 #include "server/table.h"
-#include "server/tx_base.h"
 
 typedef struct intset intset;
 
@@ -16,6 +15,10 @@ using facade::OpResult;
 
 class CommandRegistry;
 class StringSet;
+
+// Forward declarations from tx_base.h
+struct OpArgs;
+struct DbContext;
 
 class SetFamily {
  public:
