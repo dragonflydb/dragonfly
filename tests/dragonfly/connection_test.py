@@ -182,6 +182,29 @@ async def test_monitor_command_lua(async_pool):
     assert expected == collected[1:]
 
 
+@dfly_args({"proactor_threads": 1})
+async def test_monitor_multi_exec_close(df_server: DflyInstance):
+    async def monitor_multi_exec_close():
+        client = aioredis.Redis(port=df_server.port, single_connection_client=True)
+        try:
+            await client.execute_command("MULTI")
+            await client.execute_command("MONITOR")
+            await client.execute_command("MONITOR")
+            await client.execute_command("SET", "a", "1")
+            await client.execute_command("EXEC")
+        except Exception:
+            pass
+        finally:
+            await client.close()
+
+    for _ in range(200):
+        await asyncio.gather(*[monitor_multi_exec_close() for _ in range(10)])
+
+    # If we get here, the server did not crash.
+    client = df_server.client()
+    assert await client.ping()
+
+
 """
 Run test in pipeline mode.
 This is mostly how this is done with python - its more like a transaction that
@@ -1140,6 +1163,21 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert list[0]["lib-ver"] == "1.2.3.4"
 
 
+async def test_client_info(async_client: aioredis.Redis):
+    """Test CLIENT INFO returns info about the current connection only."""
+    await async_client.client_setname("test_client_info")
+
+    info = await async_client.execute_command("CLIENT INFO")
+    assert isinstance(info, dict)
+    assert info["name"] == "test_client_info"
+
+    # Verify CLIENT INFO returns same format as CLIENT LIST but for single connection
+    client_list = await async_client.client_list()
+    assert len(client_list) == 1
+    # CLIENT INFO should contain the same client id as CLIENT LIST
+    assert str(info["id"]) == str(client_list[0]["id"])
+
+
 async def test_hiredis(df_factory):
     server = df_factory.create(proactor_threads=1)
     server.start()
@@ -1420,6 +1458,48 @@ async def test_client_migrate(df_server: DflyInstance):
     assert resp == 1  # migrated successfully
 
 
+async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
+    admin = df_server.client()
+    resp = await admin.execute_command("DFLY THREAD")
+    num_threads = resp[1]
+
+    # Create multiple clients and migrate them all to the same thread.
+    # If DecreaseConnStats is called twice per migration (double-decrement bug),
+    # the source threads' uint32 counters are invalid.
+    num_clients = 20
+    clients = []
+    client_ids = []
+    dest_tid = 0
+    for _ in range(num_clients):
+        c = df_server.client()
+        clients.append(c)
+        client_ids.append(await c.client_id())
+
+    info = await admin.info("clients")
+    baseline = info["connected_clients"]
+
+    for c, cid in zip(clients, client_ids):
+        r = await c.execute_command("DFLY THREAD")
+        if r[0] != dest_tid:
+            await admin.execute_command("CLIENT", "MIGRATE", cid, dest_tid)
+
+    # Wait for all migrations to complete by polling each client's thread
+    for c in clients:
+        async for r, breaker in tick_timer(lambda c=c: c.execute_command("DFLY THREAD")):
+            with breaker:
+                assert r[0] == dest_tid
+
+    # After all migrations complete, connected_clients must stay the same
+    info = await admin.info("clients")
+    assert (
+        info["connected_clients"] == baseline
+    ), f"connected_clients changed from {baseline} to {info['connected_clients']} after migrations"
+
+    for c in clients:
+        await c.aclose()
+    await admin.aclose()
+
+
 async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
     """
     Regression test for #5931
@@ -1523,3 +1603,51 @@ async def test_issue_6165_squash_invalid_syntax(async_client):
     res = await pip.execute(raise_on_error=False)
     assert res[0] == True  # SET key1
     assert isinstance(res[1], aioredis.ResponseError)  # INVALID SYNTAX
+
+
+@dfly_args({"proactor_threads": "2", "pipeline_squash": 1})
+async def test_quit_in_pipeline(df_server: DflyInstance):
+    """
+    Regression test: when QUIT is pipelined together with other commands
+    (e.g. DEL DEL ... DEL QUIT), the server must flush all preceding replies
+    before closing the connection.
+
+    Reproduces the BullMQ removeAllQueueData() pattern.
+    """
+    NUM_KEYS = 9
+    client = df_server.client()
+
+    # Setup: create NUM_KEYS keys
+    for i in range(NUM_KEYS):
+        await client.set(f"{{b}}:pqt:k{i}", "v")
+
+    # Send DEL for all keys + QUIT in one pipeline
+    pipe = client.pipeline(transaction=False)
+    for i in range(NUM_KEYS):
+        pipe.delete(f"{{b}}:pqt:k{i}")
+    pipe.execute_command("QUIT")
+    res = await pipe.execute()
+
+    assert res[:NUM_KEYS] == [1] * NUM_KEYS, f"Expected {NUM_KEYS} DEL replies, got: {res}"
+    assert res[NUM_KEYS] in (b"OK", True), f"Expected QUIT OK reply, got: {res[NUM_KEYS]}"
+
+
+async def test_tls_partial_header_read(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
+):
+    server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
+
+    # Connect with raw socket and send only 1 byte (less than the 2-byte TLS header check)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect(("localhost", server.port))
+        # Send 1 byte (less than the 2-byte TLS header that dragonfly expects)
+        sock.send(b"\x16")
+
+    # If the server crashes due to UB, it will fail. Otherwise this test passes.
+    # The server should handle this gracefully without crashing.
+    await asyncio.sleep(0.5)  # Give server time to handle the connection
+
+    # Verify server is still alive by making a valid connection
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    assert await client.ping()

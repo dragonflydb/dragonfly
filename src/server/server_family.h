@@ -9,20 +9,22 @@
 #include <optional>
 #include <string>
 
+#include "core/qlist.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_stats.h"
 #include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/replica.h"
 #include "server/server_state.h"
+#include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/future.h"
 
 namespace util {
 
 class AcceptServer;
-class ListenerInterface;
 class HttpListenerBase;
 
 }  // namespace util
@@ -86,6 +88,7 @@ struct Metrics {
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
+  QList::Stats qlist_stats;
 
   size_t qps = 0;
 

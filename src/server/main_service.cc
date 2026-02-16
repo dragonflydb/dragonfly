@@ -93,7 +93,7 @@ ABSL_FLAG(bool, admin_nopass, false,
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
+ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database, until data starts to be evicted "
           "(according to eviction policy). With tiering, this value defines only the size in RAM, "
           "and not the whole dataset (RAM + SSD). "
@@ -120,10 +120,6 @@ ABSL_FLAG(string, huffman_table, "",
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
-
-ABSL_RETIRED_FLAG(uint32_t, uring_wake_mode, 1, "DEPRECATED");
-
-ABSL_RETIRED_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "DEPRECATED");
 
 ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
 ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
@@ -211,7 +207,8 @@ constexpr size_t kMaxThreadSize = 1024;
 void UnwatchAllKeys(Namespace* ns, ConnectionState::ExecInfo* exec_info) {
   if (!exec_info->watched_keys.empty()) {
     auto cb = [&](EngineShard* shard) {
-      ns->GetDbSlice(shard->shard_id()).UnregisterConnectionWatches(exec_info);
+      ns->GetDbSlice(shard->shard_id())
+          .UnregisterConnectionWatches(exec_info->watched_keys, &exec_info->watched_dirty);
     };
     shard_set->RunBriefInParallel(std::move(cb));
   }
@@ -682,7 +679,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
       // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
         CmdArgVec arg_vec{};
-        auto args = scmd.ArgList(&arg_vec);
+        auto args = scmd.Slice(&arg_vec);
         auto keys = DetermineKeys(scmd.Cid(), args);
         transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
@@ -840,7 +837,6 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case BLOCKING:
       return "blocking";
     case HIDDEN:
-    case INTERLEAVED_KEYS:
     case GLOBAL_TRANS:
     case STORE_LAST_KEY:
     case VARIADIC_KEYS:
@@ -873,6 +869,11 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 void TrackIfNeeded(CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.tracking_info_;
+
+  if (!info.IsTrackingOn()) {
+    return;
+  }
+
   if (auto* tx = cmd_cntx->tx(); tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
     // we will end up triggerring the callback on the following commands. To avoid this
@@ -953,6 +954,15 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSl
   const size_t old_size = exec_info.GetStoredCmdBytes();
   exec_info.AddStoredCmd(cid, tail_args);  // Deep copy of args.
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
+}
+
+bool ShouldLogError(const CommandId& cid, string_view reason, CmdArgList tail_args) {
+  if (absl::StartsWith(reason, "-BUSYGROUP"))
+    return false;
+
+  if (cid.name() != "CLIENT")
+    return true;
+  return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.front(), "maint_notifications");
 }
 
 }  // namespace
@@ -1059,10 +1069,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                          FLAGS_scheduler_background_warrant),
       []() { UpdateSchedulerFlagsOnThread(); });
 
-  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
-    // TODO: reduce code reliance on constant direct access of max_memory_limit
-    max_memory_limit.store(flag.value, memory_order_relaxed);
-  });
+  config_registry.RegisterSetter<strings::MemoryBytesFlag>(
+      "maxmemory", [](const strings::MemoryBytesFlag& flag) {
+        // TODO: reduce code reliance on constant direct access of max_memory_limit
+        max_memory_limit.store(flag.value, memory_order_relaxed);
+      });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("background_snapshotting");
@@ -1171,7 +1182,6 @@ void Service::Shutdown() {
 
   // to shutdown all the runtime components that depend on EngineShard
   cluster_family_.Shutdown();
-
   server_family_.Shutdown();
 
   shutdown_watchdog.emplace(pp_);
@@ -1183,13 +1193,17 @@ void Service::Shutdown() {
   shard_set->PreShutdown();
   shard_set->Shutdown();
 
-#ifdef WITH_SEARCH
-  SearchFamily::Shutdown();
-#endif
-
   Transaction::Shutdown();
 
-  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+#if defined(DFLY_USE_SSL)
+    // Explicitly release OpenSSL thread-local state here.
+    // This prevents a potential crash during thread exit where the allocator (e.g. mimalloc)
+    // might tear down the thread's heap before OpenSSL tries to free its internal state.
+    OPENSSL_thread_stop();
+#endif
+    ServerState::tlocal()->Destroy();
+  });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
@@ -1328,10 +1342,11 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
+bool ShouldDenyOnOOM(const CommandContext& cmd_cntx) {
+  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
   ServerState& etl = *ServerState::tlocal();
-  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    auto memory_stats = etl.GetMemoryUsage(curr_time_ns);
+  if ((cmd_cntx.cid()->opt_mask() & CO::DENYOOM) && etl.is_master) {
+    auto memory_stats = etl.GetMemoryUsage(cmd_cntx.start_time_ns);
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
     if (memory_stats.used_mem > limit ||
@@ -1343,16 +1358,6 @@ bool ShouldDenyOnOOM(const CommandId* cid, uint64_t curr_time_ns) {
     }
   }
   return false;
-}
-
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandContext& cmd_cntx,
-                                                     CmdArgList tail_args) {
-  DCHECK_NE(cmd_cntx.start_time_ns, 0u);
-  if (ShouldDenyOnOOM(cmd_cntx.cid(), cmd_cntx.start_time_ns)) {
-    return facade::ErrorReply{OpStatus::OUT_OF_MEMORY};
-  }
-
-  return std::nullopt;
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdArgList tail_args,
@@ -1414,7 +1419,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid, CmdA
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
-      return ErrorReply{"-NOAUTH Authentication required."};
+      return ErrorReply{"-NOAUTH Authentication required.", facade::kNoAuthErrType};
     }
   }
 
@@ -1490,20 +1495,27 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     case AsyncPreference::ONLY_SYNC:
       break;
     case AsyncPreference::ONLY_ASYNC:
-      if (!cid->IsAsync())
+      if (!cid->SupportsAsync())
         return DispatchResult::WOULD_BLOCK;
       [[fallthrough]];
     case AsyncPreference::PREFER_ASYNC:
-      if (cid->IsAsync())
-        parsed_cmd->SetDeferredReply();
+      if (!cid->SupportsAsync())
+        break;
+
+      parsed_cmd->SetDeferredReply();
       break;
   };
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
 
-  CmdArgVec tmp_vec;
-  ArgSlice tail_args = args_no_cmd.ToSlice(&tmp_vec);
+  ArgSlice tail_args;
+  if (cmd_cntx->IsDeferredReply()) {
+    args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
+    tail_args = cmd_cntx->arg_slice_backing;
+  } else {
+    tail_args = args_no_cmd.ToSlice(&cmd_cntx->arg_slice_backing);
+  }
 
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
@@ -1531,6 +1543,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
     if (cid->name() == "REPLCONF") {
       DCHECK_GE(args_no_cmd.size(), 1u);
+      // We should not reply to REPLCONF ACKS.
       if (absl::EqualsIgnoreCase(args_no_cmd.Front(), "ACK")) {
         server_family_.GetDflyCmd()->OnClose(
             dfly_cntx->conn_state.replication_info.repl_session_id);
@@ -1569,7 +1582,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
     cmd_cntx->SendError("Internal Error");
-    cmd_cntx->rb()->CloseConnection();
+    dfly_cntx->conn()->MarkForClose();
   }
 
   return res;
@@ -1616,16 +1629,9 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   DCHECK(builder);
   DCHECK(cntx);
 
-  if (auto err = VerifyCommandExecution(*cmd_cntx, tail_args); err) {
-    // We need to skip this because ACK's should not be replied to
-    // Bonus points because this allows to continue replication with ACL users who got
-    // their access revoked and reinstated
-    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
-      return DispatchResult::OK;
-    }
-    cmd_cntx->SendError(*err);
-
-    return err->status == OpStatus::OUT_OF_MEMORY ? DispatchResult::OOM : DispatchResult::OK;
+  if (ShouldDenyOnOOM(*cmd_cntx)) {
+    cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
+    return DispatchResult::OOM;
   }
 
   bool has_monitors = !ServerState::tlocal()->Monitors().Empty();
@@ -1636,6 +1642,15 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   ServerState::tlocal()->RecordCmd(cntx->has_main_or_memcache_listener);
   TrackIfNeeded(cmd_cntx);
   auto* tx = cmd_cntx->tx();
+
+  // For EVAL[] and EXEC/DISCARD, clean up state.
+  // We don't do it directly in commands to allow some introspection after execution (slowlog).
+  absl::Cleanup mck_cleanup = [cntx, cid, mck = cid->MultiControlKind()]() {
+    if (mck && *mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
+      MultiCleanup(cntx);
+    else if (mck && *mck == CO::MultiControlKind::EVAL)
+      cntx->conn_state.script_info.reset();
+  };
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
@@ -1656,18 +1671,20 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
       res = DispatchResult::OOM;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    if (!absl::StartsWith(reason, "-BUSYGROUP")) {
+    if (ShouldLogError(*cid, reason, tail_args)) {
       LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
     }
   }
 
-  if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
-    // Each time we execute a command we need to increase the sequence number in
-    // order to properly track clients when OPTIN is used.
-    // We don't do this for `multi/exec` because it would break the
-    // semantics, i.e, CACHING should stick for all commands following
-    // the CLIENT CACHING ON within a multi/exec block
-    cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+  if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
+    if ((!tx && cid->name() != "MULTI") || (tx && !tx->IsMulti())) {
+      // Each time we execute a command we need to increase the sequence number in
+      // order to properly track clients when OPTIN is used.
+      // We don't do this for `multi/exec` because it would break the
+      // semantics, i.e, CACHING should stick for all commands following
+      // the CLIENT CACHING ON within a multi/exec block
+      cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+    }
   }
 
   cmd_cntx->RecordLatency(tail_args);
@@ -1955,11 +1972,9 @@ void Service::Quit(CmdArgList args, CommandContext* cmd_cntx) {
   if (cmd_cntx->rb()->GetProtocol() == Protocol::REDIS)
     cmd_cntx->rb()->SendOk();
 
-  cmd_cntx->rb()->CloseConnection();
-
   auto* cntx = cmd_cntx->server_conn_cntx();
   DeactivateMonitoring(cntx);
-  cntx->conn()->ShutdownSelfBlocking();
+  cmd_cntx->conn()->MarkForClose();
 }
 
 void Service::Multi(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1986,7 +2001,7 @@ void Service::Watch(CmdArgList args, CommandContext* cmd_cntx) {
     ShardId shard_id = shard->shard_id();
     ShardArgs largs = t->GetShardArgs(shard_id);
     for (auto k : largs) {
-      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info);
+      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info.watched_dirty);
     }
 
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);
@@ -2042,13 +2057,13 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
   auto* tx = cmd_cntx->tx();
   DCHECK(tx);
-  DVLOG(2) << "CallFromScript " << ca.args[0];
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& info = cntx->conn_state.script_info;
+  info->stats.num_commands++;
 
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
-  auto* cntx = cmd_cntx->server_conn_cntx();
   if (ca.async) {
-    auto& info = cntx->conn_state.script_info;
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
@@ -2206,8 +2221,6 @@ static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            bool read_only, CommandContext* cmd_cntx) {
-  DCHECK(!eval_args.sha.empty());
-
   // Sanitizing the input to avoid code injection.
   if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
     return cmd_cntx->SendError(facade::kScriptNotFound);
@@ -2232,6 +2245,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
+  sinfo->stats.sha = eval_args.sha;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2259,9 +2273,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo]() {
+  // Reset cid to EVAL[] as the context is reused during command dispatch
+  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
     interpreter->ResetStack();
-    sinfo.reset();
+    cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
@@ -2360,7 +2375,6 @@ void Service::Discard(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  MultiCleanup(cntx);
   rb->SendOk();
 }
 
@@ -2415,7 +2429,7 @@ template <typename F> void IterateAllKeys(const ConnectionState::ExecInfo* exec_
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    auto args = scmd.ArgList(&arg_vec);
+    auto args = scmd.Slice(&arg_vec);
     auto key_res = DetermineKeys(scmd.Cid(), args);
     if (!key_res.ok())
       continue;
@@ -2439,9 +2453,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
-  // Clean the context no matter the outcome
-  absl::Cleanup exec_clear = [cntx] { MultiCleanup(cntx); };
-
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
@@ -2458,8 +2469,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
     return rb->SendNull();
   }
-
-  cmd_cntx->exec_body_len = exec_info.body.size();
 
   auto keys = CollectAllKeys(&exec_info);
   if (IsClusterEnabled()) {
@@ -2521,7 +2530,7 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
       DCHECK_EQ(cmd_cntx->cid(), exec_cid_);
 
       for (const auto& scmd : exec_info.body) {
-        CmdArgList args = scmd.ArgList(&arg_vec);
+        CmdArgList args = scmd.Slice(&arg_vec);
 
         if (scmd.Cid()->IsTransactional()) {
           cmd_cntx->tx()->MultiSwitchCmd(scmd.Cid());
@@ -2736,7 +2745,7 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
 
     rb->SendLong(cid.first_key_pos());
     rb->SendLong(cid.last_key_pos());
-    rb->SendLong(cid.opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1);
+    rb->SendLong(cid.interleaved_step() ? cid.interleaved_step() : 1);
 
     {
       const auto& table = acl_family_.GetRevTable();

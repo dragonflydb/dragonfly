@@ -17,6 +17,7 @@
 #include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -36,8 +37,6 @@
 #include "util/fibers/synchronization.h"
 using namespace std;
 
-ABSL_RETIRED_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
-                  "Do partial sync in case lsn diff is less than the given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
@@ -476,6 +475,13 @@ std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
     lsn_vec.push_back(value);
   }
 
+  DCHECK(flow_id < lsn_vec.size());
+  if (flow_id >= lsn_vec.size()) {
+    LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsn_vec.size()
+               << ". Disabling partial sync.";
+    return std::nullopt;
+  }
+
   return {lsn_vec[flow_id]};
 }
 
@@ -692,9 +698,11 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   error_code ec;
   RdbSaver* saver = flow->saver.get();
   if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
-    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service()));
+    // Full sync summary - include all global data
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service(), true));
   } else {
-    ec = saver->SaveHeader({});
+    // Per-shard - include only search index restore commands
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service(), false));
   }
   if (ec) {
     exec_st->ReportError(ec);

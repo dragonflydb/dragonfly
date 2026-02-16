@@ -114,6 +114,7 @@ class CompactObjectTest : public ::testing::Test {
 
   static void TearDownTestSuite() {
     CheckEverythingDeallocated();
+    CleanupStatelessAllocMR();
   }
 
   CompactValue cobj_;

@@ -4,10 +4,7 @@
 
 #include "server/hset_family.h"
 
-#include "server/family_utils.h"
-#include "server/tiered_storage.h"
-#include "server/tiering/decoders.h"
-#include "server/tiering/serialized_map.h"
+#include <absl/strings/ascii.h>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -27,7 +24,11 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/search/doc_index.h"
+#include "server/tiered_storage.h"
+#include "server/tiering/decoders.h"
+#include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -198,7 +199,8 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
+                                 std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -239,7 +241,7 @@ template <typename F> auto WrapW(F&& f) {
     if (hw.Length() == 0)
       DeleteHw(hw, op_args, key);
     else
-      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
     return res;
   };
@@ -338,7 +340,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   }
 
   hw.Launder(pv);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   return OpStatus::OK;
 }
@@ -494,10 +496,11 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     }
   }
 
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
-  if (auto* ts = op_args.shard->tiered_storage(); ts)
-    ts->TryStash(op_args.db_cntx.db_index, key, &pv);
+  if (auto* ts = op_args.shard->tiered_storage(); ts) {
+    StashPrimeValue(op_args.db_cntx.db_index, key, false, &pv, ts);
+  }
 
   return created;
 }
@@ -538,7 +541,18 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   RETURN_ON_BAD_STATUS(op_res);
 
   PrimeValue* pv = &((*op_res).it->second);
-  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
+  auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
+
+  // If it is a hash which became empty after expiring fields, we must delete the key safely.
+  // We use DelMutable which consumes the iterator/updater to prevent the crash.
+  if (pv->Encoding() == kEncodingStrMap2) {
+    auto* sm = static_cast<StringMap*>(pv->RObjPtr());
+    if (sm->UpperBoundSize() == 0) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+    }
+  }
+
+  return res;
 }
 
 // HSETEX key [NX] [KEEPTTL] tll_sec field value field value ...
@@ -1149,7 +1163,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
   vector<long> res = UpdateTTL(values, ttl_sec, flags, sm);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }
 

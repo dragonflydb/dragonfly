@@ -9,15 +9,18 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
-#include "base/histogram.h"
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
-#include "server/conn_context.h"
 #include "server/detail/table.h"
+#include "server/tx_base.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
 }
+namespace base {
+class Histogram;
+}
+
 namespace dfly {
 
 using PrimeKey = detail::PrimeKey;
@@ -130,8 +133,8 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   // Contains transaction locks
   LockTable trans_locks;
 
-  // Stores a list of dependant connections for each watched key.
-  absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys;
+  // Stores a list of dependant dirty flags for each watched key.
+  absl::flat_hash_map<std::string, std::vector<std::atomic_bool*>> watched_keys;
 
   // Keyspace notifications: list of expired keys since last batch of messages was published.
   mutable std::vector<std::string> expired_keys_events_;

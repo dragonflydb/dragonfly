@@ -12,7 +12,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -446,6 +446,32 @@ TEST_F(BitOpsFamilyTest, BitOpsNot) {
   EXPECT_EQ(res, NOT_RESULTS);
 }
 
+TEST_F(BitOpsFamilyTest, BitOpOverwritesNonStringKeyAccounting) {
+  string long_value(128, 'a');
+  auto resp = Run({"set", "src", long_value});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"rpush", "dest", "a", "b", "c"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  Metrics before = GetMetrics();
+  ASSERT_FALSE(before.db_stats.empty());
+  const size_t list_before = before.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  const size_t str_before = before.db_stats[0].memory_usage_by_type[OBJ_STRING];
+  ASSERT_GT(list_before, 0u);
+
+  resp = Run({"bitop", "or", "dest", "src"});
+  EXPECT_THAT(resp, IntArg(128));
+  EXPECT_EQ(Run({"type", "dest"}), "string");
+  EXPECT_EQ(Run({"get", "dest"}), long_value);
+
+  Metrics after = GetMetrics();
+  const size_t list_after = after.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  const size_t str_after = after.db_stats[0].memory_usage_by_type[OBJ_STRING];
+  EXPECT_EQ(0, list_after);
+  EXPECT_GT(str_after, str_before);
+}
+
 TEST_F(BitOpsFamilyTest, BitPos) {
   ASSERT_EQ(Run({"set", "a", "\x00\x00\x06\xff\xf0"_b}), "OK");
 
@@ -613,7 +639,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 
   // unsigned 63bit
   int64_t max = std::numeric_limits<int64_t>::max();
-  Run({"bitfield", "foo", "set", "i64", "0", absl::StrCat(max)});
+  Run({"bitfield", "foo", "set", "i64", "0", StrCat(max)});
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "1"}), IntArg(-max - 1));
 
   // signed 1 bit
@@ -624,11 +650,11 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-3"}), IntArg(-1));
 
   int64_t min = std::numeric_limits<int64_t>::min();
-  Run({"bitfield", "foo", "set", "i8", "0", absl::StrCat(min)});
+  Run({"bitfield", "foo", "set", "i8", "0", StrCat(min)});
   ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), IntArg(0));
 
   // signed 64 bit
-  Run({"bitfield", "foo", "set", "i64", "0", absl::StrCat(min)});
+  Run({"bitfield", "foo", "set", "i64", "0", StrCat(min)});
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "-1"}), IntArg(max));
 
   // overflow sat
@@ -640,7 +666,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 
   // unsigned 63 bit
   Run({"bitfield", "foo", "set", "u63", "0", "0"});
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "u63", "0", absl::StrCat(max)}),
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "u63", "0", StrCat(max)}),
               IntArg(0));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u63", "0", "10"}), IntArg(max));
 
@@ -653,12 +679,12 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 
   // signed 64 bit
   Run({"bitfield", "foo", "set", "i64", "0", "0"});
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", absl::StrCat(max)}),
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", StrCat(max)}),
               IntArg(0));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i64", "0", "100"}),
               IntArg(max));
   ASSERT_THAT(Run({"bitfield", "foo", "get", "i64", "0"}), IntArg(max));
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", absl::StrCat(min)}),
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", StrCat(min)}),
               IntArg(max));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i64", "0", "-100"}),
               IntArg(min));

@@ -3,6 +3,8 @@
 //
 #include "server/debugcmd.h"
 
+#include "core/detail/gen_utils.h"
+
 #define HUF_STATIC_LINKING_ONLY
 
 extern "C" {
@@ -178,6 +180,9 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
     if (pv.Encoding() == kEncodingQL2) {
       const QList* ql = static_cast<QList*>(pv.RObjPtr());
       val_len = ql->MallocUsed(true);
+    } else if (pv.Encoding() == kEncodingListPack) {
+      val_len = pv.MallocUsed();
+      hist->listpack.Add(val_len);
     }
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(pv, [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
@@ -466,7 +471,12 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
     case OBJ_STRING:
       return "raw";
     case OBJ_LIST:
-      return "quicklist";
+      switch (encoding) {
+        case kEncodingQL2:
+          return "quicklist";
+        case kEncodingListPack:
+          return "listpack";
+      }
       break;
     case OBJ_SET:
       ABSL_FALLTHROUGH_INTENDED;

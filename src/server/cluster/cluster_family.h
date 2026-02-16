@@ -7,10 +7,10 @@
 #include <string>
 
 #include "facade/conn_context.h"
+#include "facade/facade_types.h"
 #include "server/cluster/cluster_config.h"
 #include "server/cluster/incoming_slot_migration.h"
 #include "server/cluster/outgoing_slot_migration.h"
-#include "server/common.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -20,6 +20,7 @@ namespace dfly {
 class ServerFamily;
 class CommandRegistry;
 class ConnectionContext;
+class CommandContext;
 }  // namespace dfly
 
 namespace dfly::cluster {

@@ -19,7 +19,13 @@ SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/$TARGET}"
 DICT_FILE="${DICT_FILE:-$FUZZ_DIR/dict/$TARGET.dict}"
 TIMEOUT="500"
 FUZZ_TARGET="$BUILD_DIR/dragonfly"
-AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
+AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-1}"
+
+# Persistent record: restart server every N iterations and record the last N inputs.
+# This ensures that on crash, ALL inputs that built the current server state are available
+# for replay. Without this, state from earlier iterations is lost and crashes become
+# non-reproducible. Max recommended by AFL++: 10000.
+AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-10000}"
 
 print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -66,9 +72,11 @@ show_config() {
     echo "  Dictionary:       ${DICT_FILE}"
     echo "  Timeout:          ${TIMEOUT}ms"
     echo "  Proactor threads: ${AFL_PROACTOR_THREADS}"
+    echo "  Loop limit:      ${AFL_LOOP_LIMIT} (= AFL_PERSISTENT_RECORD)"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
-    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 2)"
+    print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 1)"
+    print_note "To change loop limit: export AFL_LOOP_LIMIT=N (default: 10000)"
     echo ""
 }
 
@@ -78,8 +86,7 @@ run_fuzzer() {
     echo ""
 
     AFL_CMD=(
-        afl-fuzz -D
-        -l 2
+        afl-fuzz
         -o "${OUTPUT_DIR}"
         -t "${TIMEOUT}"
         -m 4096
@@ -96,6 +103,7 @@ run_fuzzer() {
         --port=6379
         --logtostderr
         --proactor_threads=${AFL_PROACTOR_THREADS}
+        --afl_loop_limit=${AFL_LOOP_LIMIT}
         --bind=0.0.0.0
         --bind=::
         --dbfilename=""
@@ -104,6 +112,7 @@ run_fuzzer() {
         --rename_command=DEBUG=
         --rename_command=FLUSHALL=
         --rename_command=FLUSHDB=
+        --max_bulk_len=1048576
     )
 
     print_info "Running: ${AFL_CMD[*]}"
@@ -115,6 +124,28 @@ run_fuzzer() {
     # AFL_HANG_TMOUT: Only consider it a hang if no response for 60 seconds
     # This prevents false positives from slow but legitimate operations
     export AFL_HANG_TMOUT=60000
+
+    # Dragonfly has ~350K edges, default AFL++ bitmap is 64KB (massive collisions).
+    # Use 512KB bitmap to reduce hash collisions and improve stability.
+    export AFL_MAP_SIZE=524288
+
+    # Record the last N inputs before a crash for replay.
+    # Synced with afl_loop_limit so the full server state history is always captured.
+    export AFL_PERSISTENT_RECORD=${AFL_LOOP_LIMIT}
+
+    # Even with 1 proactor thread, some coverage instability is expected.
+    # Tell AFL++ to continue despite unstable coverage — don't bail on flaky edges.
+    export AFL_IGNORE_PROBLEMS=1
+
+    # More aggressive havoc mutations from the start — don't wait for deterministic
+    # stages to finish. Useful for protocol fuzzing where random mutations find new paths.
+    export AFL_EXPAND_HAVOC_NOW=1
+
+    # Custom RESP protocol mutator — mutates at command/argument level
+    # instead of random bytes, keeping RESP framing valid.
+    export PYTHONPATH="$FUZZ_DIR"
+    export AFL_PYTHON_MODULE=resp_mutator
+
     exec "${AFL_CMD[@]}"
 }
 

@@ -22,10 +22,11 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
-#include "server/common.h"
+#include "server/conn_context.h"
 #include "server/detail/wrapped_json_path.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
 #include "server/sharding.h"
@@ -98,7 +99,7 @@ class JsonAutoUpdater {
   }
 
   void AddDocToIndexes() {
-    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, GetPrimeValue());
+    op_args_.shard->search_indices()->AddDoc(key_, op_args_.db_cntx, &GetPrimeValue());
   }
 
   ~JsonAutoUpdater() {
@@ -509,7 +510,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       if (type == OBJ_JSON) {
         // We need to add the document to the indexes, because we removed it before
-        op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, updater.GetPrimeValue());
+        op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
       }
       return OpStatus::INVALID_JSON;
     }
@@ -532,7 +533,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   updater.SetJsonSize();
 
   // We need to manually run add document here
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, updater.GetPrimeValue());
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
 
   return OpStatus::OK;
 }
@@ -1519,13 +1520,7 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
 // Returns numeric vector that represents the memory size in bytes of JSON value at each path.
 auto OpMemory(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_path) {
   auto cb = [](const string_view&, const JsonType& val) -> std::optional<std::size_t> {
-    auto mem_cb = [](const void* ptr) -> std::size_t {
-      if (!ptr) {
-        return 0;
-      }
-      return mi_usable_size(const_cast<void*>(ptr));
-    };
-    return val.compute_memory_size(mem_cb);
+    return ComputeMemorySize(val);
   };
   return JsonReadOnlyOperation<std::optional<std::size_t>>(
       op_args, key, json_path, std::move(cb),
@@ -2206,8 +2201,7 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
 // TODO: Add sensible defaults/categories to json commands
 
 void RegisterJsonFamily(CommandRegistry* registry) {
-  constexpr size_t kMsetFlags =
-      CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
+  constexpr size_t kMsetFlags = CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, -2, acl::JSON}.HFUNC(MGet);

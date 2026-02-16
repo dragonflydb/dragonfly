@@ -46,14 +46,25 @@ class ListPack {
   std::vector<uint32_t> Pos(std::string_view element, uint32_t rank, uint32_t count,
                             uint32_t max_len, QList::Where where) const;
 
+  uint8_t* Find(std::string_view elem) const;
+
+  uint8_t* Seek(long index) const {
+    return lpSeek(lp_, index);
+  }
+
   // Inserts an element before or after the specified pivot element.
-  bool Insert(std::string_view pivot, std::string_view elem, QList::InsertOpt insert_opt);
+  void Insert(uint8_t* pivot, std::string_view elem, QList::InsertOpt insert_opt) {
+    int where = (insert_opt == QList::BEFORE) ? LP_BEFORE : LP_AFTER;
+    lp_ = lpInsertString(lp_, (unsigned char*)elem.data(), elem.size(), pivot, where, nullptr);
+  }
 
   // Removes up to count occurrences of elem from the specified direction.
-  unsigned Remove(std::string_view elem, unsigned count, QList::Where where);
+  unsigned Remove(const CollectionEntry& elem, unsigned count, QList::Where where);
 
   // Replaces the element at the specified index with a new value.
-  bool Replace(long index, std::string_view elem);
+  void Replace(uint8_t* pos, std::string_view elem) {
+    lp_ = lpReplace(lp_, &pos, (unsigned char*)elem.data(), elem.size());
+  }
 
   // Removes count elements starting from the specified index.
   void Erase(long start, long count) {
@@ -65,8 +76,12 @@ class ListPack {
     return lp_;
   }
 
+  size_t BytesSize() const {
+    return lpBytes(lp_);
+  }
+
  private:
-  static QList::Entry GetEntry(uint8_t* pos);
+  static CollectionEntry GetEntry(uint8_t* pos);
 
   uint8_t* GetFirst(QList::Where where) const {
     return (where == QList::HEAD) ? lpFirst(lp_) : lpLast(lp_);

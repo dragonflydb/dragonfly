@@ -57,7 +57,10 @@ struct StringDecoder : public Decoder {
   UploadMetrics GetMetrics() const override;
   void Upload(CompactObj* obj) override;
 
-  std::string_view Read() const;
+  std::string_view GetView() const {
+    return value_.view();
+  }
+
   std::string* Write();
 
  private:

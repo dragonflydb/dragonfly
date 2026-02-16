@@ -169,8 +169,7 @@ struct BaseVectorIndex : public BaseIndex {
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
 
-  using VectorPtr = decltype(std::declval<OwnedFtVector>().first);
-  virtual void AddVector(DocId id, const VectorPtr& vector) = 0;
+  virtual void AddVector(DocId id, const void* vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
@@ -189,7 +188,7 @@ struct FlatVectorIndex : public BaseVectorIndex {
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
 
  protected:
-  void AddVector(DocId id, const VectorPtr& vector) override;
+  void AddVector(DocId id, const void* vector) override;
 
  private:
   PMR_NS::vector<float> entries_;

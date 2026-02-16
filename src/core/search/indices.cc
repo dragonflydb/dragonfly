@@ -11,6 +11,7 @@
 #include <absl/strings/str_split.h>
 
 #include <boost/iterator/function_output_iterator.hpp>
+#include <string_view>
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
@@ -106,19 +107,25 @@ double ConvertToRadiusInMeters(size_t radius, std::string_view arg) {
   }
 }
 
-std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_view field) {
-  auto element = doc.GetStrings(field);
+// Verify if geo string is valid and convert to point
+std::optional<GeoIndex::point> GetGeoPoint(const string_view& geo_string) {
+  // Empty geo string
+  if (geo_string.empty())
+    return nullopt;
 
-  if (!element)
-    return std::nullopt;
+  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(geo_string, ",");
 
-  absl::InlinedVector<string_view, 2> coordinates = absl::StrSplit(element.value()[0], ",");
-
+  // Invalid coordinate format
   if (coordinates.size() != 2)
     return std::nullopt;
 
+  // Convert coordinates to double
   double lon, lat;
   if (!absl::SimpleAtod(coordinates[0], &lon) || !absl::SimpleAtod(coordinates[1], &lat))
+    return nullopt;
+
+  // Verify that coordinates are within valid ranges
+  if (lon < -180 || lon > 180 || lat < -90 || lat > 90)
     return nullopt;
 
   return GeoIndex::point{lon, lat};
@@ -129,18 +136,24 @@ std::optional<GeoIndex::point> GetGeoPoint(const DocumentAccessor& doc, string_v
 class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
  public:
   explicit RangeTreeAdapter(size_t max_range_block_size, PMR_NS::memory_resource* mr)
-      : range_tree_(mr, max_range_block_size, false) {
+      : range_tree_{mr, max_range_block_size}, builder_{RangeTree::Builder{}} {
   }
 
   void Add(DocId id, absl::Span<double> values) override {
     for (double value : values) {
-      range_tree_.Add(id, value);
+      if (builder_)
+        builder_->Add(id, value);
+      else
+        range_tree_.Add(id, value);
     }
   }
 
   void Remove(DocId id, absl::Span<double> values) override {
     for (double value : values) {
-      range_tree_.Remove(id, value);
+      if (builder_)
+        builder_->Remove(id, value);
+      else
+        range_tree_.Remove(id, value);
     }
   }
 
@@ -154,11 +167,13 @@ class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
   }
 
   void FinalizeInitialization() override {
-    range_tree_.FinalizeInitialization();
+    builder_->Populate(&range_tree_, {500});
+    builder_.reset();
   }
 
  private:
   RangeTree range_tree_;
+  std::optional<RangeTree::Builder> builder_;
 };
 
 class BtreeSetImpl : public NumericIndex::RangeTreeBase {
@@ -492,16 +507,19 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
 }
 
 bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field);
+  auto vector = doc.GetVector(field, dim_);
+
   if (!vector)
     return false;
 
-  auto& [ptr, size] = vector.value();
-  if (ptr && size != dim_) {
-    return false;
+  if (std::holds_alternative<OwnedFtVector>(*vector)) {
+    const auto& owned_vector = std::get<OwnedFtVector>(*vector);
+    AddVector(id, owned_vector.first.get());
+  } else {
+    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector);
+    AddVector(id, borrowed_vector);
   }
 
-  AddVector(id, ptr);
   return true;
 }
 
@@ -512,14 +530,14 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
   entries_.reserve(params.capacity * params.dim);
 }
 
-void FlatVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
+void FlatVectorIndex::AddVector(DocId id, const void* vector) {
   DCHECK_LE(id * dim_, entries_.size());
   if (id * dim_ == entries_.size())
     entries_.resize((id + 1) * dim_);
 
   // TODO: Let get vector write to buf itself
   if (vector) {
-    memcpy(&entries_[id * dim_], vector.get(), dim_ * sizeof(float));
+    memcpy(&entries_[id * dim_], vector, dim_ * sizeof(float));
   }
 }
 
@@ -568,22 +586,55 @@ GeoIndex::~GeoIndex() {
 }
 
 bool GeoIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto doc_point = GetGeoPoint(doc, field);
-  if (!doc_point) {
+  auto geo_string = doc.GetStrings(field);
+
+  if (!geo_string) {
     return false;
   }
-  rtree_->insert({doc_point.value(), id});
+
+  // If field doesn't exists don't add to index.
+  if (geo_string->empty()) {
+    return true;
+  }
+
+  std::vector<GeoIndex::point> points;
+  for (string_view str : *geo_string) {
+    auto doc_point = GetGeoPoint(str);
+    if (!doc_point) {
+      return false;
+    }
+    points.emplace_back(*doc_point);
+  }
+  for (point p : points) {
+    rtree_->insert({p, id});
+  }
+
   return true;
 }
 
 void GeoIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  auto doc_point = GetGeoPoint(doc, field);
-  rtree_->remove({doc_point.value(), id});
+  auto geo_string = doc.GetStrings(field);
+
+  if (!geo_string || geo_string->empty()) {
+    return;
+  }
+
+  std::vector<GeoIndex::point> points;
+  for (string_view str : *geo_string) {
+    auto doc_point = GetGeoPoint(str);
+    if (!doc_point) {
+      return;
+    }
+    points.emplace_back(*doc_point);
+  }
+  for (point p : points) {
+    rtree_->remove({p, id});
+  }
 }
 
 std::vector<DocId> GeoIndex::RadiusSearch(double lon, double lat, double radius,
                                           std::string_view unit) {
-  std::vector<DocId> results;
+  std::set<DocId> unique_results;
 
   // Get radius in meters
   double converted_radius = ConvertToRadiusInMeters(radius, unit);
@@ -611,23 +662,23 @@ std::vector<DocId> GeoIndex::RadiusSearch(double lon, double lat, double radius,
   boost::geometry::model::box<point> box;
   boost::geometry::envelope(buffer_polygon, box);
 
-  rtree_->query(
-      boost::geometry::index::within(box),
-      boost::make_function_output_iterator([&results, &p, &converted_radius](auto const& val) {
-        if (haversine_.apply(val.first, p) <= converted_radius) {
-          results.push_back(val.second);
-        }
-      }));
+  rtree_->query(boost::geometry::index::within(box),
+                boost::make_function_output_iterator(
+                    [&unique_results, &p, &converted_radius](auto const& val) {
+                      if (haversine_.apply(val.first, p) <= converted_radius) {
+                        unique_results.insert(val.second);
+                      }
+                    }));
 
   // TODO: we should return sorted results by radius distance
-  return results;
+  return {unique_results.begin(), unique_results.end()};
 }
 
 std::vector<DocId> GeoIndex::GetAllDocsWithNonNullValues() const {
-  std::vector<DocId> results;
+  std::set<DocId> unique_results;
   std::for_each(boost::geometry::index::begin(*rtree_), boost::geometry::index::end(*rtree_),
-                [&results](auto const& val) { results.push_back(val.second); });
-  return results;
+                [&unique_results](auto const& val) { unique_results.insert(val.second); });
+  return {unique_results.begin(), unique_results.end()};
 }
 
 }  // namespace dfly::search

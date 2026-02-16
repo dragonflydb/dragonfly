@@ -6,9 +6,11 @@
 
 #include "base/cycle_clock.h"
 #include "server/cluster/slot_set.h"
-#include "server/common.h"
+#include "server/common_types.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
+#include "server/synchronization.h"
 
 namespace dfly {
 
@@ -59,7 +61,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return cntx_->IsRunning();
   }
 
-  void WaitForInflightToComplete();
+  void WaitForInflightToComplete(bool with_timeout);
 
   size_t inflight_bytes() const {
     return in_flight_bytes_;

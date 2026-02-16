@@ -9,8 +9,9 @@
 #include <shared_mutex>
 #include <string_view>
 
-#include "server/common.h"
+#include "base/io_buf.h"
 #include "server/journal/types.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 namespace journal {

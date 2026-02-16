@@ -154,39 +154,6 @@ async def test_replication_all(
         assert preemptions <= (key_capacity * 0.03)
 
 
-async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
-    role = await c_replica.role()
-    if role[0] != "slave" or role[3] != "online":
-        return False
-    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-
-    logging.debug(f"  offset {syncid} {r_offset} {m_offset}")
-    return r_offset == m_offset
-
-
-async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
-    logging.debug("Waiting for replicas to finish")
-
-    waiting_for = list(c_replicas)
-    start = time.time()
-    while (time.time() - start) < timeout:
-        if not waiting_for:
-            logging.debug("All replicas finished after %s seconds", time.time() - start)
-            return
-        await asyncio.sleep(0.2)
-        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
-        finished_list = await asyncio.gather(
-            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
-        )
-
-        # Remove clients that finished from waiting list
-        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
-
-    first_r: aioredis.Redis = waiting_for[0]
-    logging.error("Replica not finished, role %s", await first_r.role())
-    raise RuntimeError("Not all replicas finished in time!")
-
-
 """
 Test disconnecting replicas during different phases while constantly streaming changes to master.
 
@@ -793,6 +760,30 @@ async def test_rewrites(df_factory):
         await c_master.zadd("key", {"a": 1, "b": 2, "c": 3})
         await skip_cmd()
         await check("ZMPOP 3 key3 key2 key MAX", r"ZPOPMAX key 1")
+
+        # Check XREADGROUP turns into XGROUP SETID + XCLAIM (for non-NOACK)
+        await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+        await skip_cmd()
+        await c_master.execute_command("XADD mystream * field1 value1")
+        await skip_cmd()
+        # XREADGROUP without NOACK should journal XCLAIM + XGROUP SETID
+        await c_master.execute_command("XREADGROUP GROUP mygroup consumer1 STREAMS mystream >")
+        # Consumer creation
+        assert await is_match_rsp("XGROUP CREATECONSUMER mystream mygroup consumer1")
+        # Expect XCLAIM for the message + XGROUP SETID with ENTRIESREAD
+        assert await is_match_rsp(
+            r"XCLAIM mystream mygroup consumer1 0 (.*?) TIME \d+ RETRYCOUNT 1 FORCE JUSTID LASTID (.*?)"
+        )
+        assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 1")
+
+        # Check XREADGROUP with NOACK only journals XGROUP SETID
+        await c_master.execute_command("XADD mystream * field2 value2")
+        await skip_cmd()
+        await c_master.execute_command(
+            "XREADGROUP GROUP mygroup consumer1 NOACK STREAMS mystream >"
+        )
+        # With NOACK, only XGROUP SETID should be journaled (no XCLAIM)
+        assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 2")
 
 
 """
@@ -3731,3 +3722,259 @@ async def test_repl_offset(df_factory):
 
     await c_replica1.execute_command(f"REPLTAKEOVER 5")
     await with_timeout_link_down(c_replica3)
+
+
+async def test_partial_sync_with_different_shard_sizes(df_factory):
+    master = df_factory.create(proactor_threads=3)
+    replica1 = df_factory.create(proactor_threads=4)
+    replica2 = df_factory.create(proactor_threads=5)
+    replica3 = df_factory.create(proactor_threads=6)
+
+    df_factory.start_all([replica1, replica2, replica3, master])
+
+    c_replica1 = replica1.client()
+    c_replica2 = replica2.client()
+    c_replica3 = replica3.client()
+
+    c_master = master.client()
+
+    await c_master.execute_command("debug populate 5000")
+
+    await c_replica1.execute_command(f"replicaof localhost {master.port}")
+    await c_replica2.execute_command(f"replicaof localhost {master.port}")
+    await c_replica3.execute_command(f"replicaof localhost {master.port}")
+
+    seeder = SeederV2(key_target=100)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    await check_all_replicas_finished([c_replica1, c_replica2, c_replica3], c_master)
+
+    await c_replica1.execute_command("repltakeover 5")
+    await c_replica2.execute_command(f"replicaof localhost {replica1.port}")
+    await c_replica3.execute_command(f"replicaof localhost {replica1.port}")
+
+    await check_all_replicas_finished([c_replica2, c_replica3], c_replica1)
+
+    for replica in (replica1, replica2, replica3):
+        replica.stop()
+
+    lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
+    assert len(lines) == 0
+    lines = replica3.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
+    assert len(lines) == 0
+
+
+@pytest.mark.slow
+async def test_replica_reconnection_leaks_connections(df_factory: DflyInstanceFactory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    info = await c_master.info("clients")
+    baseline = info["connected_clients"]
+
+    num_cycles = 20
+    for _ in range(num_cycles):
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_for_replicas_state(c_replica)
+        await c_replica.execute_command("REPLICAOF NO ONE")
+
+    # Wait for connected_clients to stabilize (stop changing)
+    prev = None
+    async for info, breaker in info_tick_timer(c_master, "clients", timeout=10):
+        with breaker:
+            curr = info["connected_clients"]
+            assert curr == prev
+        prev = curr
+
+    leaked = prev - baseline
+    assert leaked == 0, f"connected_clients leaked {leaked} after {num_cycles} reconnect cycles"
+
+    await c_master.aclose()
+    await c_replica.aclose()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_xreadgroup_replication(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    master.start()
+    replica.start()
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async def compare_group_info(stream_key, expected_pending, expected_entries_read):
+        master_info = await c_master.execute_command(f"XINFO GROUPS {stream_key}")
+        replica_info = await c_replica.execute_command(f"XINFO GROUPS {stream_key}")
+
+        # Parse group info (format: [name, consumers, pending, last-delivered-id, entries-read, lag])
+        assert len(master_info) == len(replica_info)
+
+        for m_group, r_group in zip(master_info, replica_info):
+            m_dict = dict(zip(m_group[::2], m_group[1::2]))
+            r_dict = dict(zip(r_group[::2], r_group[1::2]))
+
+            assert m_dict["last-delivered-id"] == r_dict["last-delivered-id"]
+            assert m_dict["entries-read"] == r_dict["entries-read"]
+            assert m_dict["entries-read"] == expected_entries_read
+            assert m_dict["pending"] == r_dict["pending"]
+            assert m_dict["pending"] == expected_pending
+            assert m_dict["consumers"] == r_dict["consumers"]
+
+    # Case 1: Non-blocking path, NOACK
+    await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 NOACK STREAMS mystream >")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 0, 1)
+
+    # Case 2: Non-blocking path, with PEL
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 STREAMS mystream >")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 2, 3)
+
+    # Case 3: Blocking path, NOACK
+
+    # Start blocking XREADGROUP in background
+    read_task = asyncio.create_task(
+        c_master.execute_command(
+            "XREADGROUP GROUP mygroup worker1 NOACK BLOCK 0 STREAMS mystream >"
+        )
+    )
+    # Let the blocking command start
+    await asyncio.sleep(0.1)
+    await c_master.execute_command("XADD mystream * tmp tmp")
+
+    await read_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 2, 4)
+
+    # Case 4: Blocking path, with PEL
+
+    # Start blocking XREADGROUP in background
+    read_task = asyncio.create_task(
+        c_master.execute_command("XREADGROUP GROUP mygroup worker1 BLOCK 0 STREAMS mystream >")
+    )
+
+    await asyncio.sleep(0.1)
+    await c_master.execute_command("XADD mystream * tmp tmp")
+    await read_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 3, 5)
+
+    await c_master.execute_command("flushall")
+    # Create consumer
+    await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+    await c_master.execute_command("XADD mystream 2000-0 tmp tmp")
+    # Add to PEL but don't ack
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 STREAMS mystream >")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker2 STREAMS mystream 2000-0")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 1, 1)
+
+
+"""
+Test replication with mismatched dbnum between master and replica.
+"""
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replication_replica_smaller_dbnum_shared_dbs_only(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Replica dbnum < Master dbnum, but master only uses DBs within
+    the replica's range. Replication should succeed.
+    """
+    master = df_factory.create(dbnum=8)
+    replica = df_factory.create(dbnum=4)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+
+    # Populate data only in DBs 0-3 (within replica's dbnum range)
+    for db in range(4):
+        c = master.client(db=db)
+        for i in range(50):
+            await c.set(f"key:{db}:{i}", f"val:{db}:{i}")
+        await c.close()
+
+    # Start replication
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify all data is present in the replica across shared DBs
+    for db in range(4):
+        c_m = master.client(db=db)
+        c_r = replica.client(db=db)
+        for i in range(50):
+            assert await c_r.get(f"key:{db}:{i}") == await c_m.get(f"key:{db}:{i}")
+        await c_m.close()
+        await c_r.close()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replication_replica_larger_dbnum(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Replica dbnum > Master dbnum. Replication should succeed;
+    the replica's extra DBs remain empty.
+    """
+    master = df_factory.create(dbnum=4)
+    replica = df_factory.create(dbnum=8)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+
+    # Populate all DBs on the master (0-3)
+    for db in range(4):
+        c = master.client(db=db)
+        for i in range(50):
+            await c.set(f"key:{db}:{i}", f"val:{db}:{i}")
+        await c.close()
+
+    # Start replication
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify master's data is present in the replica
+    for db in range(4):
+        c_m = master.client(db=db)
+        c_r = replica.client(db=db)
+        for i in range(50):
+            assert await c_r.get(f"key:{db}:{i}") == await c_m.get(f"key:{db}:{i}")
+        await c_m.close()
+        await c_r.close()
+
+    # Verify the replica's extra DBs (4-7) are empty
+    for db in range(4, 8):
+        c_r = replica.client(db=db)
+        assert await c_r.dbsize() == 0
+        await c_r.close()

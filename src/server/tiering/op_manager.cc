@@ -14,31 +14,23 @@
 #include "util/fibers/fibers.h"
 namespace dfly::tiering {
 
-namespace {
+using namespace std;
 
-OpManager::OwnedEntryId ToOwned(OpManager::EntryId id) {
+OpManager::OwnedEntryId OpManager::ToOwned(OpManager::PendingId id) {
   Overloaded convert{[](unsigned i) -> OpManager::OwnedEntryId { return i; },
-                     [](std::pair<DbIndex, std::string_view> p) -> OpManager::OwnedEntryId {
+                     [](std::pair<DbIndex, std::string_view> p) -> OwnedEntryId {
                        return std::make_pair(p.first, std::string{p.second});
                      }};
   return std::visit(convert, id);
 }
 
-OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
-  return std::visit([](const auto& v) -> OpManager::EntryId { return v; }, id);
-}
-
-std::ostream& operator<<(std::ostream& os, const OpManager::EntryId& id) {
+string OpManager::ToString(const OwnedEntryId& id) {
   if (const auto* i = std::get_if<unsigned>(&id); i) {
-    return os << *i;
-  } else {
-    const auto& key = std::get<OpManager::KeyRef>(id);
-    return os << "(" << key.first << ':' << key.second << ")";
+    return absl::StrCat(*i);
   }
-  return os;
+  const auto& key = std::get<DbKeyId>(id);
+  return absl::StrCat("(", key.first, ":", key.second, ")");
 }
-
-}  // namespace
 
 OpManager::OpManager(size_t max_size) : storage_{max_size} {
 }
@@ -58,14 +50,15 @@ void OpManager::Close() {
   DCHECK(pending_reads_.empty());
 }
 
-void OpManager::Enqueue(EntryId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb) {
+void OpManager::Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder,
+                        ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
   PrepareRead(segment.ContainingPages())
       .ForSegment(segment, id, decoder)
       .callbacks.emplace_back(std::move(cb));
 }
 
-void OpManager::Delete(EntryId id) {
+void OpManager::CancelPending(PendingId id) {
   // If the item isn't offloaded, it has io pending, so cancel it
   DCHECK(pending_stash_ver_.count(ToOwned(id)));
   pending_stash_ver_.erase(ToOwned(id));
@@ -79,19 +72,20 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
     pending_read = base_it->second.Find(segment);
 
   if (pending_read) {
-    // Mark that the read operation must finilize with deletion.
+    // Mark that the read operation must finalize with deletion.
     pending_read->deleting = true;
   } else if (NotifyDelete(segment) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }
 }
 
-void OpManager::Stash(EntryId id_ref, tiering::DiskSegment segment, util::fb2::UringBuf buf) {
+void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment, util::fb2::UringBuf buf) {
   auto id = ToOwned(id_ref);
-  unsigned version = pending_stash_ver_[id] = ++pending_stash_counter_;
+  unsigned version = ++pending_stash_counter_;
+  pending_stash_ver_[id] = version;
 
   auto io_cb = [this, version, id = std::move(id), segment](std::error_code ec) {
-    ProcessStashed(Borrowed(id), version,
+    ProcessStashed(id, version,
                    ec ? nonstd::make_unexpected(ec) : io::Result<DiskSegment>(segment));
   };
 
@@ -99,7 +93,7 @@ void OpManager::Stash(EntryId id_ref, tiering::DiskSegment segment, util::fb2::U
   storage_.Stash(segment, buf, std::move(io_cb));
 }
 
-std::error_code OpManager::PrepareAndStash(EntryId id, size_t length,
+std::error_code OpManager::PrepareAndStash(PendingId id, size_t length,
                                            const std::function<size_t(io::MutableBytes)>& writer) {
   auto buf = PrepareStash(length);
   if (!buf.has_value())
@@ -124,15 +118,15 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
   return it->second;
 }
 
-void OpManager::ProcessStashed(EntryId id, unsigned version,
+void OpManager::ProcessStashed(const OwnedEntryId& id, unsigned version,
                                const io::Result<DiskSegment>& segment) {
-  if (auto it = pending_stash_ver_.find(ToOwned(id));
+  if (auto it = pending_stash_ver_.find(id);
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
     NotifyStashed(id, segment);
   } else if (segment) {
     // Throw away the value because it's no longer up-to-date even if no error occured
-    VLOG(1) << "Releasing segment " << *segment << ", id: " << id;
+    VLOG(1) << "Releasing segment " << *segment << ", id: " << ToString(id);
     storage_.MarkAsFree(*segment);
   } else {
     LOG(ERROR) << "Stash failed with error " << segment.error();
@@ -174,7 +168,7 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
     // If the item is not being deleted, report is as fetched to be cached potentially.
     // In case it's cached, we might need to delete it.
     if (page.has_value() && !delete_from_storage)
-      delete_from_storage |= NotifyFetched(Borrowed(ko.id), ko.segment, &*ko.decoder);
+      delete_from_storage |= NotifyFetched(ko.id, ko.segment, &*ko.decoder);
 
     // If the item is being deleted, check if the full page needs to be deleted.
     if (delete_from_storage)
@@ -192,7 +186,7 @@ OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decode
     : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()} {
 }
 
-OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, EntryId id,
+OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, PendingId id,
                                                    const Decoder& decoder) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);

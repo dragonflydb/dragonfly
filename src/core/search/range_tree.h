@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/btree_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <memory>
 #include <queue>
@@ -13,6 +14,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/block_list.h"
+#include "core/search/renewable_quota.h"
 
 namespace dfly::search {
 class RangeResult;
@@ -32,8 +34,20 @@ class RangeResult;
 class RangeTree {
  public:
   friend class RangeResult;
-
   using Entry = std::pair<DocId, double>;
+
+  // More efficient builder for range tree where updates are batched
+  // and then applied in an optimized order inside Populate.
+  struct Builder {
+    void Add(DocId id, double value);
+    void Remove(DocId id, double value);
+
+    // Build tree from batched updates. Accepts new updates during suspensions.
+    void Populate(RangeTree* tree, const RenewableQuota& quota);
+
+   private:
+    absl::flat_hash_set<Entry> updates_, delayed_erased_;
+  };
 
   // Main node of numeric tree
   struct RangeBlock : public BlockList<SortedVector<Entry>> {
@@ -54,14 +68,10 @@ class RangeTree {
     double max_seen = -std::numeric_limits<double>::infinity();
   };
 
-  using Map = absl::btree_map<double, RangeBlock, std::less<>,
-                              PMR_NS::polymorphic_allocator<std::pair<double, RangeBlock>>>;
-
   static constexpr size_t kDefaultMaxRangeBlockSize = 10'000;
 
   explicit RangeTree(PMR_NS::memory_resource* mr,
-                     size_t max_range_block_size = kDefaultMaxRangeBlockSize,
-                     bool enable_splitting = true);
+                     size_t max_range_block_size = kDefaultMaxRangeBlockSize);
 
   // Adds a document with a value to the index.
   void Add(DocId id, double value);
@@ -78,9 +88,6 @@ class RangeTree {
   // Returns all blocks in the tree.
   absl::InlinedVector<const RangeBlock*, 5> GetAllBlocks() const;
 
-  // Build tree ouf of a single block after replication
-  void FinalizeInitialization();
-
   struct Stats {
     size_t splits = 0;
     size_t merges = 0;
@@ -90,6 +97,9 @@ class RangeTree {
   Stats GetStats() const;
 
  private:
+  using Map = absl::btree_map<double, RangeBlock, std::less<>,
+                              PMR_NS::polymorphic_allocator<std::pair<double, RangeBlock>>>;
+
   Map::iterator FindRangeBlock(double value);
   Map::const_iterator FindRangeBlock(double value) const;
 
@@ -108,12 +118,6 @@ class RangeTree {
     size_t splits = 0;
     size_t merges = 0;
   } stats_;
-
-  /* During index initialization, we are using temporary buffer to store all entries.
-     That is needed to avoid unnecessary complexity of splitting blocks.
-     After calling FinishInitialization, the tmp_buffer_ is cleared and
-     further Add/Remove operations are applied directly to the entries_ map. */
-  bool enable_splitting_;
 };
 
 /* This iterator filters out entries that are not in the range [l, r].

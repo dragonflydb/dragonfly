@@ -26,10 +26,10 @@
 #include <unordered_set>
 
 #include "absl/strings/ascii.h"
+#include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "server/common.h"
-#include "slowlog.h"
-#include "util/fibers/synchronization.h"
+#include "server/slowlog.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -63,6 +63,7 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
+#include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
@@ -388,6 +389,19 @@ void ClientGetName(CmdArgList args, CommandContext* cmd_cntx) {
   } else {
     return rb->SendNull();
   }
+}
+
+void ClientInfo(CmdArgList args, CommandContext* cmd_cntx) {
+  if (!args.empty()) {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
+  }
+  auto* conn = cmd_cntx->conn();
+  string info = conn->GetClientInfo();
+
+  // redis-py (5expects these fields. We append dummy values to keep the output parsable.
+  absl::StrAppend(&info, " db=", cmd_cntx->server_conn_cntx()->db_index(), "\r\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  return rb->SendBulkString(info);
 }
 
 void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
@@ -737,6 +751,7 @@ uint64_t GetDelayMs(uint64_t ts) {
 }
 
 bool ReadProcStats(io::StatusData* sdata) {
+#ifdef __linux__
   io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
   if (!sdata_res) {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
@@ -751,6 +766,9 @@ bool ReadProcStats(io::StatusData* sdata) {
 
   *sdata = *sdata_res;
   return true;
+#else
+  return false;
+#endif
 }
 
 // Rewrite the configuration file with runtime modified settings
@@ -1244,6 +1262,9 @@ void ServerFamily::Shutdown() {
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
+#ifdef WITH_SEARCH
+    SearchFamily::Shutdown();
+#endif
   });
 }
 
@@ -1389,6 +1410,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     }
 
     if (aggregated_result->first_error) {
+      RdbLoader::PerformPostLoad(&service_, true);
       LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
     } else {
       RdbLoader::PerformPostLoad(&service_);
@@ -1480,7 +1502,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
   return result;
 }
 
-enum MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
+enum class MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
 const char* MetricTypeName(MetricType type) {
   switch (type) {
@@ -1558,7 +1580,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
+  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.pipeline_queue_entries,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("send_delay_seconds", "",
                             double(GetDelayMs(m.oldest_pending_send_ts)) / 1000.0,
@@ -1770,6 +1792,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                               MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                               MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("pipeline_queue_bytes", "", conn_stats.pipeline_queue_bytes,
+                              MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
                               MetricType::GAUGE, &resp->body());
   }
@@ -1795,6 +1819,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
 
   AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_cmd_cache_bytes, {"class"},
                     {"pipeline_cmd_cache"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", conn_stats.pipeline_queue_bytes, {"class"},
+                    {"pipeline_queue"}, &memory_by_class_bytes);
 
   AppendMetricValue("memory_by_class_bytes", conn_stats.dispatch_queue_bytes, {"class"},
                     {"dispatch_queue"}, &memory_by_class_bytes);
@@ -1826,7 +1853,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     }
 
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
-                       MetricType::HISTOGRAM, &command_metrics);
+                       MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
@@ -1952,16 +1979,22 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
 
-  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
-                            m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_task_invocation_total, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
-                            m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_attempt_total, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
-                            m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
+
+  AppendMetricHeader("list_reads", "List Reads Patterns", MetricType::COUNTER, &resp->body());
+  AppendMetricValue("list_reads", m.qlist_stats.total_node_reads, {"type"}, {"total"},
+                    &resp->body());
+  AppendMetricValue("list_reads", m.qlist_stats.interior_node_reads, {"type"}, {"interior"},
+                    &resp->body());
 
   // Tiered metrics
   {
@@ -1998,12 +2031,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricValue("tiered_hits", m.events.ram_misses, {"type"}, {"disk"}, &resp->body());
 
     // Potential problems due to overloading system
-    AppendMetricHeader("tiered_overload", "Potential problems due to overlaoding",
+    AppendMetricHeader("tiered_overload", "Potential problems due to overloading",
                        MetricType::COUNTER, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_clients_throttled, {"type"},
                       {"client throttling"}, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
                       {"stash overflows"}, &resp->body());
+
+    AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
+                       &resp->body());
+    AppendMetricValue("tiered_list_events", m.qlist_stats.offload_requests, {"type"}, {"offload"},
+                      &resp->body());
+    AppendMetricValue("tiered_list_events", m.qlist_stats.onload_requests, {"type"}, {"onload"},
+                      &resp->body());
   }
 }
 
@@ -2405,7 +2445,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return cmd_cntx->SendError(facade::kAuthRejected);
+    return cmd_cntx->SendError(facade::kAuthRejected, facade::kNoAuthErrType);
   }
 
   if (!cntx->req_auth) {
@@ -2419,7 +2459,7 @@ void ServerFamily::Auth(CmdArgList args, CommandContext* cmd_cntx) {
     cntx->authenticated = true;
     cmd_cntx->rb()->SendOk();
   } else {
-    return cmd_cntx->SendError(facade::kAuthRejected);
+    return cmd_cntx->SendError(facade::kAuthRejected, facade::kNoAuthErrType);
   }
 }
 
@@ -2458,6 +2498,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made to specified local address",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "INFO",
+      "    Return information about the current client connection.",
       "LIST",
       "    Return information about client connections.",
       "UNPAUSE",
@@ -2489,6 +2531,8 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
     return ClientSetName(sub_args, cmd_cntx);
   } else if (sub_cmd == "GETNAME") {
     return ClientGetName(sub_args, cmd_cntx);
+  } else if (sub_cmd == "INFO") {
+    return ClientInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
@@ -2837,6 +2881,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
         result.search_stats += shard->search_indices()->GetStats();
       }
 
+      result.qlist_stats += QList::stats;
+
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
       if (result.tx_queue_len < shard->txq()->size())
@@ -2896,8 +2942,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   // update peak_stats_ from it.
   {
     util::fb2::LockGuard lk{peak_stats_mu_};
+    // Note: PeakStats::conn_dispatch_queue_bytes is a legacy name. It now tracks the combined
+    // server-wide total of dispatch_queue_bytes and pipeline_queue_bytes for ALL connections.
     UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
-              result.facade_stats.conn_stats.dispatch_queue_bytes);
+              result.facade_stats.conn_stats.dispatch_queue_bytes +
+                  result.facade_stats.conn_stats.pipeline_queue_bytes);
     UpdateMax(&peak_stats_.conn_read_buf_capacity,
               result.facade_stats.conn_stats.read_buf_capacity);
     result.peak_stats = peak_stats_;
@@ -2986,8 +3035,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
-    append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
-
+    append("pipeline_queue_length", m.facade_stats.conn_stats.pipeline_queue_entries);
     append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
     append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
   };
@@ -3037,6 +3085,7 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("small_string_bytes", m.small_string_bytes);
     append("pipeline_cache_bytes", m.facade_stats.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.facade_stats.conn_stats.dispatch_queue_bytes);
+    append("pipeline_queue_bytes", m.facade_stats.conn_stats.pipeline_queue_bytes);
     append("dispatch_queue_subscriber_bytes",
            m.facade_stats.conn_stats.dispatch_queue_subscriber_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
@@ -3515,7 +3564,7 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmd_cntx) {
 
   ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   if (has_auth && !DoAuth(cntx, username, password)) {
-    return cmd_cntx->SendError(facade::kAuthRejected);
+    return cmd_cntx->SendError(facade::kAuthRejected, facade::kNoAuthErrType);
   }
 
   if (cntx->req_auth && !cntx->authenticated) {
@@ -3523,7 +3572,8 @@ void ServerFamily::Hello(CmdArgList args, CommandContext* cmd_cntx) {
         "-NOAUTH HELLO must be called with the client already "
         "authenticated, otherwise the HELLO <proto> AUTH <user> <pass> "
         "option can be used to authenticate the client and "
-        "select the RESP protocol version at the same time");
+        "select the RESP protocol version at the same time",
+        facade::kNoAuthErrType);
     return;
   }
 

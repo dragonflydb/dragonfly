@@ -8,13 +8,11 @@
 #include <absl/types/span.h>
 
 #include <string>
-#include <utility>
 
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
-#include "server/common.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
 
@@ -34,7 +32,8 @@ struct BaseAccessor : public search::DocumentAccessor {
                                   absl::Span<const FieldReference> fields) const;
 
   // Default implementation uses GetStrings
-  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const override;
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field,
+                                              size_t dim) const override;
   virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
   virtual std::optional<StringList> GetTags(std::string_view active_field) const override;
 };
@@ -71,7 +70,7 @@ struct JsonAccessor : public BaseAccessor {
   }
 
   std::optional<StringList> GetStrings(std::string_view field) const override;
-  std::optional<VectorInfo> GetVector(std::string_view field) const override;
+  std::optional<VectorInfo> GetVector(std::string_view field, size_t dim) const override;
   std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
   std::optional<StringList> GetTags(std::string_view active_field) const override;
 

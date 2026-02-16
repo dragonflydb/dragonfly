@@ -27,9 +27,7 @@ class GenericFamily {
   static OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async);
 
  private:
-  static void Del(CmdArgList args, CommandContext* cmd_cntx);
   static void Delex(CmdArgList args, CommandContext* cmd_cntx);
-  static void Unlink(CmdArgList args, CommandContext* cmd_cntx);
   static void Ping(CmdArgList args, CommandContext* cmd_cntx);
   static void Exists(CmdArgList args, CommandContext* cmd_cntx);
   static void Expire(CmdArgList args, CommandContext* cmd_cntx);

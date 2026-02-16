@@ -34,8 +34,7 @@ enum CommandOpt : uint32_t {
   ADMIN = 1U << 7,  // implies NOSCRIPT,
   NOSCRIPT = 1U << 8,
   BLOCKING = 1U << 9,
-  HIDDEN = 1U << 10,            // does not show in COMMAND command output
-  INTERLEAVED_KEYS = 1U << 11,  // keys are interleaved with arguments
+  HIDDEN = 1U << 10,  // does not show in COMMAND command output
   GLOBAL_TRANS = 1U << 12,
   STORE_LAST_KEY = 1U << 13,  // The command my have a store key as the last argument.
 
@@ -147,7 +146,12 @@ class CommandId : public facade::CommandId {
     return can_be_monitored_;
   }
 
-  CommandId&& SetHandler(Handler f) && {
+  int8_t interleaved_step() const {
+    return interleave_step_;
+  }
+
+  CommandId&& SetHandler(Handler f, bool async_support = false) && {
+    support_async_ |= async_support;
     handler_ = std::move(f);
     return std::move(*this);
   }
@@ -191,8 +195,8 @@ class CommandId : public facade::CommandId {
 
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
-  bool IsAsync() const {
-    return name() == "SET";  // Temporary
+  bool SupportsAsync() const {
+    return support_async_;
   }
 
  private:
@@ -203,6 +207,8 @@ class CommandId : public facade::CommandId {
   bool implicit_acl_;
   bool is_alias_{false};
   bool can_be_monitored_{true};
+  bool support_async_{false};
+  int8_t interleave_step_{0};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;

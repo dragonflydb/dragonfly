@@ -16,14 +16,21 @@
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/hnsw_index.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
-#include "server/common.h"
 #include "server/search/aggregator.h"
 #include "server/search/index_join.h"
+#include "server/stats.h"
 #include "server/table.h"
 
 namespace dfly {
+
+using StringVec = std::vector<std::string>;
+
+namespace search {
+struct IndexBuilder;
+}  // namespace search
 
 struct BaseAccessor;
 
@@ -187,7 +194,7 @@ struct AggregateParams {
 
 // Stores basic info about a document index.
 struct DocIndex {
-  enum DataType { HASH, JSON };
+  enum DataType : uint8_t { HASH, JSON };
 
   // Get numeric OBJ_ code
   uint8_t GetObjCode() const;
@@ -195,15 +202,23 @@ struct DocIndex {
   // Return true if the following document (key, obj_code) is tracked by this index.
   bool Matches(std::string_view key, unsigned obj_code) const;
 
+  std::string name;
   search::Schema schema;
-  search::IndicesOptions options{};
-  std::vector<std::string> prefixes{};
+  search::IndicesOptions options;
+  std::vector<std::string> prefixes;
   DataType type{HASH};
 };
 
 struct DocIndexInfo {
   DocIndex base_index;
   size_t num_docs = 0;
+
+  bool indexing = false;
+  float percent_indexed = 1;
+
+  // HNSW metadata for vector index (if present)
+  // TODO: move to schema
+  std::optional<search::HnswIndexMetadata> hnsw_metadata = std::nullopt;
 
   // Build original ft.create command that can be used to re-create this index
   std::string BuildRestoreCommand() const;
@@ -214,6 +229,8 @@ class ShardDocIndices;
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
   friend class ShardDocIndices;
+  friend struct search::IndexBuilder;
+
   using DocId = search::DocId;
   using GlobalDocId = search::GlobalDocId;
 
@@ -234,6 +251,9 @@ class ShardDocIndex {
       return ids_;
     }
 
+    // Serialization: returns pairs of (key, doc_id) for all active mappings
+    std::vector<std::pair<std::string, DocId>> Serialize() const;
+
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -243,7 +263,10 @@ class ShardDocIndex {
 
  public:
   // Index must be rebuilt at least once after intialization
-  ShardDocIndex(std::shared_ptr<const DocIndex> index);
+  explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
+
+  // Possibly blocking to stop indexing job
+  ~ShardDocIndex();
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -292,15 +315,15 @@ class ShardDocIndex {
                        const std::vector<std::string_view>& terms);
 
   // Public access to key index for direct operations (e.g., when dropping index with DD)
+  // TODO: replace with keys() view
   const DocKeyIndex& key_index() const {
     return key_index_;
   }
 
-  void AddDocToGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
-                                 const DbContext& db_cntx, const PrimeValue& pv);
-  void RemoveDocFromGlobalVectorIndex(std::string_view index_name, ShardDocIndex::DocId doc_id,
-                                      const DbContext& db_cntx, const PrimeValue& pv);
-  void RebuildGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
+  void AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+                                 PrimeValue* pv);
+  void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+                                      const PrimeValue& pv);
 
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
@@ -315,9 +338,16 @@ class ShardDocIndex {
     return search::DefragmentResult{false, 0};
   }
 
+  std::vector<std::pair<std::string, DocId>> SerializeKeyIndex() const {
+    return key_index_.Serialize();
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+
+  // Cancel builder if in progress
+  void CancelBuilder();
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
@@ -332,6 +362,8 @@ class ShardDocIndex {
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
+
+  std::unique_ptr<search::IndexBuilder> builder_;
 };
 
 // Stores shard doc indices by name on a specific shard.
@@ -359,7 +391,7 @@ class ShardDocIndices {
   std::vector<std::string> GetIndexNames() const;
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
-  void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+  void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
   size_t GetUsedMemory() const;

@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"
@@ -13,6 +12,7 @@
 #include "facade/parsed_command.h"
 #include "facade/reply_mode.h"
 #include "server/common.h"
+#include "server/common_types.h"
 #include "server/tx_base.h"
 #include "server/version.h"
 
@@ -44,7 +44,7 @@ class StoredCmd {
     return backed_ ? backed_->HeapMemory() + sizeof(*backed_) : 0;
   }
 
-  facade::CmdArgList ArgList(CmdArgVec* scratch) const;
+  facade::ArgSlice Slice(CmdArgVec* scratch) const;
   std::string FirstArg() const;
 
   const CommandId* Cid() const {
@@ -131,6 +131,13 @@ struct ConnectionState {
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
+
+    struct Stats {
+      std::string sha;            // TODO: avoid copy via char[40]?
+      unsigned num_commands = 0;  // total number of command executed
+      // TODO: Latency measurement only possible with squashing info (or use atomic for everything?)
+      // uint64_t command_time_us = 0;
+    } stats;
   };
 
   // PUB-SUB messaging related data.
@@ -251,7 +258,7 @@ struct ConnectionState {
     }
 
     void ResetCachingSequenceNumber() {
-      caching_seq_num_ = 0;
+      caching_seq_num_ = 1;
     }
 
     bool HasOption(Options option) const {
@@ -265,7 +272,7 @@ struct ConnectionState {
     Options option_ = NONE;
     // sequence number
     size_t seq_num_ = 0;
-    size_t caching_seq_num_ = 0;
+    size_t caching_seq_num_ = 1;
   };
 
  public:
@@ -385,11 +392,6 @@ class CommandContext : public facade::ParsedCommand {
     return sizeof(CommandContext);
   }
 
-  uint64_t start_time_ns = 0;
-
-  // number of commands in the last exec body.
-  unsigned exec_body_len = 0;
-
   ConnectionContext* server_conn_cntx() const {
     return static_cast<ConnectionContext*>(conn_cntx_);
   }
@@ -411,6 +413,11 @@ class CommandContext : public facade::ParsedCommand {
   const CommandId* cid() const {
     return cid_;
   }
+
+  uint64_t start_time_ns = 0;
+
+  // Stores backing array for tail args slice
+  CmdArgVec arg_slice_backing;
 
  protected:
   void ReuseInternal() final;

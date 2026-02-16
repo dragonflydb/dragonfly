@@ -1,17 +1,13 @@
 if (NOT WITH_SEARCH)
-  add_library(dfly_search_server doc_index_fallback.cc)
-  target_link_libraries(dfly_search_server dfly_transaction dfly_facade redis_lib jsonpath TRDP::jsoncons)
-  return()
+  SET(DF_SEARCH_SRCS search/doc_index_fallback.cc PARENT_SCOPE)
+else()
+  SET(DF_SEARCH_SRCS
+    search/aggregator.cc
+    search/doc_accessors.cc
+    search/doc_index.cc
+    search/search_family.cc
+    search/index_join.cc
+    search/global_hnsw_index.cc
+    search/index_builder.cc
+    PARENT_SCOPE)
 endif()
-
-add_library(dfly_search_server aggregator.cc doc_accessors.cc doc_index.cc search_family.cc index_join.cc
-             global_hnsw_index.cc)
-target_link_libraries(dfly_search_server dfly_transaction dragonfly_lib dfly_facade redis_lib jsonpath TRDP::jsoncons)
-
-
-helio_cxx_test(search_family_test dfly_test_lib LABELS DFLY)
-helio_cxx_test(aggregator_test dfly_test_lib LABELS DFLY)
-helio_cxx_test(index_join_test dfly_test_lib LABELS DFLY)
-
-
-add_dependencies(check_dfly search_family_test aggregator_test index_join_test)

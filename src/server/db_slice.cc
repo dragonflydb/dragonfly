@@ -962,7 +962,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   LOG_IF(DFATAL, !fetched_items_.empty())
       << "Some operation might bumped up items outside of a transaction";
 
-  auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
+  auto cb = [flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
@@ -1249,9 +1249,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
   if (!watched_keys.empty()) {
     // Check if the key is watched.
     if (auto wit = watched_keys.find(key); wit != watched_keys.end()) {
-      for (auto conn_ptr : wit->second) {
-        conn_ptr->watched_dirty.store(true, memory_order_relaxed);
-      }
+      for (auto* dirty_ptr : wit->second)
+        dirty_ptr->store(true, memory_order_relaxed);
       // No connections need to watch it anymore.
       watched_keys.erase(wit);
     }
@@ -1293,9 +1292,8 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   // TODO: to employ multi-generation update of expire-base and the underlying values.
   int64_t expire_time = ExpireTime(expire_it->second);
 
-  // Never do expiration on replica or if expiration is disabled or global lock was taken.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_ ||
-      !shard_owner()->shard_lock()->Check(IntentLock::Mode::EXCLUSIVE)) {
+  // Never do expiration on replica or if expiration is disabled.
+  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
     return {it, expire_it};
   }
 
@@ -1565,16 +1563,17 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 }
 
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
-                                 ConnectionState::ExecInfo* exec_info) {
+                                 std::atomic_bool* dirty_ptr) {
   // Because we might insert while another fiber is preempted
-  db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
+  db_arr_[db_indx]->watched_keys[key].push_back(dirty_ptr);
 }
 
-void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
-  for (const auto& [db_indx, key] : exec_info->watched_keys) {
+void DbSlice::UnregisterConnectionWatches(absl::Span<const std::pair<DbIndex, std::string>> keys,
+                                          const std::atomic_bool* dirty_ptr) {
+  for (const auto& [db_indx, key] : keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
-      it->second.erase(std::remove(it->second.begin(), it->second.end(), exec_info),
+      it->second.erase(std::remove(it->second.begin(), it->second.end(), dirty_ptr),
                        it->second.end());
       if (it->second.empty())
         watched_keys.erase(it);
@@ -1584,9 +1583,8 @@ void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_
 
 void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
   for (const auto& [key, conn_list] : db_arr_[db_indx]->watched_keys) {
-    for (auto conn_ptr : conn_list) {
-      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
-    }
+    for (auto* dirty_ptr : conn_list)
+      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 
@@ -1596,9 +1594,8 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
     if (!slot_ids.Contains(sid)) {
       continue;
     }
-    for (auto conn_ptr : conn_list) {
-      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
-    }
+    for (auto* dirty_ptr : conn_list)
+      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 

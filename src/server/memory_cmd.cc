@@ -147,7 +147,10 @@ void MemoryCmd::Run(CmdArgList args) {
     return Stats();
   }
 
-  if (parser.Check("USAGE") && args.size() > 1) {
+  if (parser.Check("USAGE")) {
+    if (!parser.HasNext()) {
+      return cmd_cntx_->SendError(kSyntaxErr);
+    }
     string_view key = parser.Next();
     bool account_key_memory_usage = !parser.Check("WITHOUTKEY");
     return Usage(key, account_key_memory_usage);
@@ -238,6 +241,7 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
   shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
     mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_cmd_cache_bytes;
     mems[index].pipelined_bytes += tl_facade_stats->conn_stats.dispatch_queue_bytes;
+    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_queue_bytes;
   });
 
   ConnectionMemoryUsage mem;

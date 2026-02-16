@@ -893,6 +893,10 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
   }
 }
 
+TEST_F(MultiTest, ScriptFlagsInvalidSha) {
+  EXPECT_THAT(Run({"script", "flags", "short", "allow-undeclared-keys"}), ErrArg(""));
+}
+
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
   --!df flags=allow-undeclared-keys
@@ -1191,7 +1195,7 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
       return false;
     }
 
-    if (arr[0].type == RespExpr::STRING) {
+    if (arr[start].type == RespExpr::STRING) {
       string s0 = arr[start].GetString();
       string s1 = arr[start + 1].GetString();
       string s2 = arr[start + 2].GetString();
@@ -1472,6 +1476,26 @@ TEST_F(MultiTest, StoredCmdBytesMetric) {
   ASSERT_THAT(resp, ArrLen(100));
   ASSERT_THAT(resp.GetVec(), Contains(ArgType(RespExpr::NIL)).Times(100));
   ASSERT_EQ(GetMetrics().coordinator_stats.stored_cmd_bytes, 0);
+}
+
+// Verify that lazy expiration works inside EVAL running in global mode.
+// Previously, the shard_lock()->Check(EXCLUSIVE) guard in ExpireIfNeeded
+// prevented lazy expiry while a global transaction held the shard lock,
+// causing expired keys to be returned as if they were still alive.
+TEST_F(MultiTest, EvalGlobalLazyExpire) {
+  // Set key with TTL, advance time past expiry, then read via global EVAL.
+  // The global shard lock blocks heartbeat during EVAL, so active expiry
+  // cannot delete the key — only lazy expiry inside GET can.
+  Run({"set", "key", "val", "px", "10"});
+  AdvanceTime(100);
+
+  constexpr char kScript[] = R"(
+--!df flags=allow-undeclared-keys
+return redis.call('GET', KEYS[1])
+)";
+
+  auto resp = Run({"eval", kScript, "1", "key"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 }  // namespace dfly

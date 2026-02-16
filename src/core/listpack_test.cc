@@ -39,17 +39,19 @@ class ListPackTest : public ::testing::Test {
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
   }
 
+  unsigned Remove(string_view elem, unsigned count, QList::Where where) {
+    return lp_.Remove(CollectionEntry{elem.data(), elem.size()}, count, where);
+  }
+
   ListPack lp_;
   uint8_t* ptr_ = nullptr;
 };
 
-TEST_F(ListPackTest, InsertPivotNotFound) {
+TEST_F(ListPackTest, FindNotFound) {
   lp_.Push("first", QList::TAIL);
   lp_.Push("third", QList::TAIL);
 
-  // Try to insert with non-existent pivot
-  EXPECT_FALSE(lp_.Insert("notfound", "second", QList::BEFORE));
-  EXPECT_EQ(2, lp_.Size());
+  EXPECT_EQ(lp_.Find("second"), nullptr);
 }
 
 TEST_F(ListPackTest, RemoveIntegerFromHead) {
@@ -59,7 +61,7 @@ TEST_F(ListPackTest, RemoveIntegerFromHead) {
   lp_.Push("3", QList::TAIL);
 
   // Remove integer value "1" from head
-  unsigned removed = lp_.Remove("1", 0, QList::HEAD);
+  unsigned removed = Remove("1", 0, QList::HEAD);
   EXPECT_EQ(2, removed);
   EXPECT_EQ(2, lp_.Size());
 
@@ -76,7 +78,7 @@ TEST_F(ListPackTest, RemoveFromTailAll) {
   lp_.Push("a", QList::TAIL);
 
   // Remove all "a" from tail direction
-  unsigned removed = lp_.Remove("a", 0, QList::TAIL);
+  unsigned removed = Remove("a", 0, QList::TAIL);
   EXPECT_EQ(3, removed);
   EXPECT_EQ(2, lp_.Size());
 
@@ -94,7 +96,7 @@ TEST_F(ListPackTest, RemoveFromTailWithCount) {
   lp_.Push("a", QList::TAIL);
 
   // Remove only 2 occurrences of "a" from tail (removes indices 4 and 2)
-  unsigned removed = lp_.Remove("a", 2, QList::TAIL);
+  unsigned removed = Remove("a", 2, QList::TAIL);
   EXPECT_EQ(2, removed);
   EXPECT_EQ(3, lp_.Size());
 
@@ -113,7 +115,7 @@ TEST_F(ListPackTest, RemoveFromTailConsecutive) {
   lp_.Push("target", QList::TAIL);
   lp_.Push("target", QList::TAIL);
 
-  unsigned removed = lp_.Remove("target", 0, QList::TAIL);
+  unsigned removed = Remove("target", 0, QList::TAIL);
   EXPECT_EQ(3, removed);
   EXPECT_EQ(1, lp_.Size());
   EXPECT_EQ("x", lp_.At(0));
@@ -129,7 +131,7 @@ TEST_F(ListPackTest, RemoveFromTailDeletesHead) {
   lp_.Push("b", QList::TAIL);
   lp_.Push("c", QList::TAIL);
 
-  unsigned removed = lp_.Remove("a", 0, QList::TAIL);
+  unsigned removed = Remove("a", 0, QList::TAIL);
   EXPECT_EQ(1, removed);
   EXPECT_EQ(2, lp_.Size());
 
@@ -143,7 +145,9 @@ TEST_F(ListPackTest, ReplaceAtIndex) {
   lp_.Push("third", QList::TAIL);
 
   // Replace element at index 1
-  EXPECT_TRUE(lp_.Replace(1, "replaced"));
+  uint8_t* pos = lp_.Seek(1);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, "replaced");
   EXPECT_EQ(3, lp_.Size());
 
   EXPECT_EQ("first", lp_.At(0));
@@ -157,7 +161,9 @@ TEST_F(ListPackTest, ReplaceAtNegativeIndex) {
   lp_.Push("third", QList::TAIL);
 
   // Replace element at index -1 (last element)
-  EXPECT_TRUE(lp_.Replace(-1, "new_last"));
+  uint8_t* pos = lp_.Seek(-1);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, "new_last");
   EXPECT_EQ(3, lp_.Size());
 
   EXPECT_EQ("first", lp_.At(0));
@@ -170,13 +176,10 @@ TEST_F(ListPackTest, ReplaceOutOfBounds) {
   lp_.Push("second", QList::TAIL);
 
   // Replace at out-of-bounds index should return false
-  EXPECT_FALSE(lp_.Replace(5, "nope"));
-  EXPECT_FALSE(lp_.Replace(-5, "nope"));
-  EXPECT_EQ(2, lp_.Size());
-
-  // Original elements unchanged
-  EXPECT_EQ("first", lp_.At(0));
-  EXPECT_EQ("second", lp_.At(1));
+  uint8_t* pos = lp_.Seek(5);
+  EXPECT_EQ(pos, nullptr);
+  pos = lp_.Seek(-5);
+  EXPECT_EQ(pos, nullptr);
 }
 
 TEST_F(ListPackTest, ReplaceWithLargerString) {
@@ -185,7 +188,9 @@ TEST_F(ListPackTest, ReplaceWithLargerString) {
 
   // Replace with a much larger string
   string large(500, 'x');
-  EXPECT_TRUE(lp_.Replace(0, large));
+  uint8_t* pos = lp_.Seek(0);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, large);
   EXPECT_EQ(2, lp_.Size());
 
   EXPECT_EQ(large, lp_.At(0));
@@ -197,7 +202,9 @@ TEST_F(ListPackTest, ReplaceWithEmptyString) {
   lp_.Push("second", QList::TAIL);
 
   // Replace with empty string
-  EXPECT_TRUE(lp_.Replace(0, ""));
+  uint8_t* pos = lp_.Seek(0);
+  EXPECT_NE(pos, nullptr);
+  lp_.Replace(pos, "");
   EXPECT_EQ(2, lp_.Size());
 
   EXPECT_EQ("", lp_.At(0));

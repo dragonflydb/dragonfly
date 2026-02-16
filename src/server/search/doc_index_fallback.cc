@@ -6,6 +6,7 @@
 #include "core/page_usage/page_usage_stats.h"
 #include "core/search/base.h"
 #include "server/search/doc_index.h"
+#include "server/search/index_builder.h"
 
 namespace dfly {
 
@@ -14,7 +15,7 @@ using namespace std;
 ShardDocIndices::ShardDocIndices() : local_mr_(nullptr) {
 }
 
-void ShardDocIndices::AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv) {
+void ShardDocIndices::AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv) {
 }
 void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt,
                                 const PrimeValue& pv) {
@@ -34,6 +35,9 @@ SearchStats ShardDocIndices::GetStats() const {
 
 search::DefragmentResult ShardDocIndices::Defragment(PageUsage*) {
   return search::DefragmentResult{};
+}
+
+ShardDocIndex::~ShardDocIndex() {
 }
 
 }  // namespace dfly

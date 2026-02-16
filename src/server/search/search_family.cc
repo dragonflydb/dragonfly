@@ -323,8 +323,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 #pragma GCC diagnostic pop
 #endif
 
-ParseResult<DocIndex> CreateDocIndex(CmdArgParser* parser) {
+ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser) {
   DocIndex index{};
+  index.name = name;
 
   while (parser->HasNext()) {
     auto option_parser =
@@ -1227,7 +1228,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 
   bool is_cross_shard = parser.Check("CSS");
 
-  auto parsed_index = CreateDocIndex(&parser);
+  auto parsed_index = CreateDocIndex(idx_name, &parser);
   if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
@@ -1266,8 +1267,8 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
     if (field_info.type == search::SchemaField::VECTOR &&
         !(field_info.flags & search::SchemaField::NOINDEX)) {
       const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-      if (vparams.use_hnsw &&
-          !GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name, vparams)) {
+      if (vparams.use_hnsw && !GlobalHnswIndexRegistry::Instance().Create(
+                                  idx_name, field_info.short_name, vparams, idx_ptr->type)) {
         cmd_cntx->tx()->Conclude();
         return builder->SendError("Index already exists");
       }
@@ -1277,9 +1278,6 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
-        if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
-          index->RebuildGlobalVectorIndices(idx_name, tx->GetOpArgs(es));
-        }
         return OpStatus::OK;
       },
       true);
@@ -1325,7 +1323,8 @@ void CmdFtAlter(CmdArgList args, CommandContext* cmd_cntx) {
 
   // For logging we copy the whole schema
   // TODO: Use a more efficient way for logging
-  LOG(INFO) << "Adding " << DocIndexInfo{.base_index = new_index}.BuildRestoreCommand();
+  LOG(INFO) << "Adding "
+            << DocIndexInfo{.base_index = new_index, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Merge schemas
   search::Schema& schema = index_info->schema;
@@ -1430,14 +1429,19 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
 
+  bool indexing = false;
+  float percent_indexed = 1.0;
   size_t total_num_docs = 0;
-  for (const auto& info : infos)
+  for (const auto& info : infos) {
     total_num_docs += info.num_docs;
+    indexing |= info.indexing;
+    percent_indexed = std::min(percent_indexed, info.percent_indexed);
+  }
 
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(5, CollectionType::MAP);
+  rb->StartCollection(7, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
@@ -1487,6 +1491,12 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("num_docs");
   rb->SendLong(total_num_docs);
+
+  rb->SendSimpleString("indexing");
+  rb->SendLong(indexing ? 1 : 0);
+
+  rb->SendSimpleString("percent_indexed");
+  rb->SendDouble(percent_indexed);
 }
 
 void CmdFtList(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2254,7 +2264,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
 }
 
 void SearchFamily::Shutdown() {
-  GlobalHnswIndexRegistry::Instance().Reset();
+  shard_set->RunBlockingInParallel([](EngineShard* es) { es->search_indices()->DropAllIndices(); });
 }
 
 }  // namespace dfly

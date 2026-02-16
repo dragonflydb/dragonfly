@@ -139,6 +139,7 @@ class BaseFamilyTest::TestConnWrapper {
 
   void ClearSink() {
     sink_.Clear();
+    expr_builder_.Clear();
   }
 
   TestConnection* conn() {
@@ -156,7 +157,7 @@ class BaseFamilyTest::TestConnWrapper {
 
   std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
 
-  std::unique_ptr<RedisParser> parser_;
+  RespExprBuilder expr_builder_;
   std::unique_ptr<SinkReplyBuilder> builder_;
 };
 
@@ -304,9 +305,11 @@ void BaseFamilyTest::ResetService() {
           }
 
           LOG(ERROR) << "Transaction for shard " << es->shard_id();
+          std::unique_lock conn_lck{mu_};
           for (auto& conn : connections_) {
             auto* context = conn.second->cmd_cntx();
-            if (context->transaction && context->transaction->IsActive(es->shard_id())) {
+            if (context->transaction && context->transaction->IsScheduled() &&
+                context->transaction->IsActive(es->shard_id())) {
               LOG(ERROR) << context->transaction->DebugId(es->shard_id());
             }
           }
@@ -621,20 +624,45 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
 RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
-  auto buf = RespExpr::buffer(&s);
 
-  auto s_copy = s;
+  RESPParser parser;
+  auto obj = parser.Feed(s.data(), s.size());
 
-  uint32_t consumed = 0;
-  parser_.reset(new RedisParser{RedisParser::Mode::CLIENT});  // Client mode.
-  RespVec res;
-  RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
+  CHECK(obj.has_value()) << "Failed to parse response: \"" << s << "\" (" << s.size() << " chars)";
 
-  CHECK_EQ(RedisParser::OK, st) << " response: \"" << s_copy << "\" (" << s_copy.size()
-                                << " chars)";
   if (fully_consumed) {
-    DCHECK_EQ(consumed, s.size()) << s;
+    size_t buf_pos = parser.BufferPos();
+    // After parsing, if successful, buf_pos can be 0 when the internal buffer is cleared
+    buf_pos = obj && !buf_pos ? s.size() : buf_pos;
+    DCHECK_EQ(buf_pos, s.size()) << s;
   }
+
+  // Build expressions from the parsed object. We must consume the RESPObj before
+  // freeing it, since BuildExpr copies string data into owned_strings_.
+  auto& parsed = *obj;
+
+  // The old RedisParser unwraps top-level arrays: elements go directly into res.
+  // We match that behavior here for compatibility with existing tests.
+  RespVec res;
+  auto type = parsed.GetType();
+  if (type == RESPObj::Type::ARRAY || type == RESPObj::Type::MAP || type == RESPObj::Type::SET) {
+    auto arr = parsed.As<RESPArray>();
+    if (arr.has_value() && arr->Size() != SIZE_MAX) {
+      for (size_t i = 0; i < arr->Size(); ++i) {
+        res.push_back(expr_builder_.BuildExpr((*arr)[i]));
+      }
+    } else {
+      // Null aggregate (e.g. *-1\r\n) — produce a NIL_ARRAY entry.
+      res.push_back(expr_builder_.BuildExpr(parsed));
+    }
+  } else {
+    res.push_back(expr_builder_.BuildExpr(parsed));
+  }
+
+  // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
+  // reply data on this thread. All needed string data has been copied into
+  // expr_builder_.owned_strings_.
+
   return res;
 }
 

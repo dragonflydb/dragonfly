@@ -181,7 +181,7 @@ TEST_F(QListTest, Basic) {
   EXPECT_LE(ql_.MallocUsed(false), ql_.MallocUsed(true));
 
   auto it = ql_.GetIterator(QList::HEAD);
-  ASSERT_TRUE(it.Next());  // Needed to initialize the iterator.
+  ASSERT_TRUE(it.Valid());  // Iterator is valid immediately.
 
   EXPECT_EQ("abc", it.Get().view());
 
@@ -192,7 +192,7 @@ TEST_F(QListTest, Basic) {
   EXPECT_LE(ql_.MallocUsed(false), ql_.MallocUsed(true));
 
   it = ql_.GetIterator(QList::TAIL);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ("def", it.Get().view());
 
   ASSERT_TRUE(it.Next());
@@ -200,10 +200,10 @@ TEST_F(QListTest, Basic) {
   ASSERT_FALSE(it.Next());
 
   it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ("abc", it.Get().view());
   it = ql_.GetIterator(-1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ("def", it.Get().view());
 
   vector<string> items = ToItems();
@@ -233,26 +233,68 @@ TEST_F(QListTest, InsertDelete) {
   EXPECT_THAT(items, ElementsAre("def", "abc", "123456"));
 
   auto it = ql_.GetIterator(QList::HEAD);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
 
   // Erase the items one by one.
   it = ql_.Erase(it);
   items = ToItems();
   EXPECT_THAT(items, ElementsAre("abc", "123456"));
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("abc", it.Get().view());
 
   it = ql_.Erase(it);
   items = ToItems();
   EXPECT_THAT(items, ElementsAre("123456"));
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ(123456, it.Get().ival());
 
   it = ql_.Erase(it);
   items = ToItems();
   EXPECT_THAT(items, ElementsAre());
-  ASSERT_FALSE(it.Next());
+  ASSERT_FALSE(it.Valid());
   EXPECT_EQ(0, ql_.Size());
+}
+
+TEST_F(QListTest, EraseLastElementInNodeAdvancesToNextNode) {
+  // Regression test for iterator semantics: when erasing the last element
+  // within a multi-entry node and another node follows, the iterator should
+  // correctly advance to the first element of the next node.
+
+  // Create a QList with fill=2 to ensure max 2 elements per node
+  ql_ = QList(2, QUICKLIST_NOCOMPRESS);
+
+  // Push 3 elements: this creates 2 nodes (first with 2 elements, second with 1)
+  ql_.Push("first", QList::HEAD);   // Will be at index 2 after all pushes
+  ql_.Push("second", QList::HEAD);  // Will be at index 1 after all pushes
+  ql_.Push("third", QList::HEAD);   // Will be at index 0 after all pushes
+
+  // Verify we have 2 nodes as expected
+  ASSERT_EQ(2, ql_.node_count());
+  ASSERT_EQ(3, ql_.Size());
+
+  // Node structure should be:
+  // Node 1: ["third", "second"]
+  // Node 2: ["first"]
+
+  auto items = ToItems();
+  EXPECT_THAT(items, ElementsAre("third", "second", "first"));
+
+  // Get iterator to "second" (last element in first node)
+  auto it = ql_.GetIterator(1);
+  ASSERT_TRUE(it.Valid());
+  ASSERT_EQ("second", it.Get().view());
+
+  // Erase "second" - this is the last element in the first node
+  it = ql_.Erase(it);
+
+  // Iterator should now point to "first" (first element of the second node)
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ("first", it.Get().view());
+
+  // Verify the list is correct
+  items = ToItems();
+  EXPECT_THAT(items, ElementsAre("third", "first"));
+  EXPECT_EQ(2, ql_.Size());
 }
 
 TEST_F(QListTest, PushPlain) {
@@ -266,7 +308,7 @@ TEST_F(QListTest, PushPlain) {
 TEST_F(QListTest, GetNum) {
   ql_.Push("1251977", QList::HEAD);
   QList::Iterator it = ql_.GetIterator(QList::HEAD);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ(1251977, it.Get().ival());
 }
 
@@ -285,12 +327,13 @@ TEST_F(QListTest, CompressionPlain) {
 
   QList::Iterator it = ql_.GetIterator(QList::TAIL);
   int i = 0;
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     string_view sv = it.Get().view();
     ASSERT_EQ(sizeof(buf), sv.size());
     ASSERT_TRUE(absl::StartsWith(sv, StrCat("hello", i)));
     i++;
-  }
+  } while (it.Next());
   EXPECT_EQ(500, i);
 }
 
@@ -307,12 +350,12 @@ TEST_F(QListTest, RemoveListpack) {
   ql_.Push("ABC", QList::TAIL);
   ql_.Push("DEF", QList::TAIL);
   auto it = ql_.GetIterator(QList::TAIL);
-  ASSERT_TRUE(it.Next());  // must call Next to initialize the iterator.
+  ASSERT_TRUE(it.Valid());  // Iterator is valid immediately.
   ql_.Erase(it);
   it = ql_.GetIterator(QList::TAIL);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   it = ql_.Erase(it);
-  ASSERT_FALSE(it.Next());
+  ASSERT_FALSE(it.Valid());
 }
 
 TEST_F(QListTest, DefragListpackRaw) {
@@ -356,13 +399,23 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
 
   auto i = 0;
   auto it = ql_.GetIterator(QList::HEAD);
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     auto v = it.Get().view();
     ASSERT_EQ(v.size(), 256);
     ASSERT_TRUE(absl::StartsWith(v, StrCat("test__", i)));
     ++i;
-  }
+  } while (it.Next());
   ASSERT_EQ(i, total_items);
+}
+
+TEST_F(QListTest, Tiering) {
+  QList::stats.offload_requests = 0;
+  ql_.SetTieringParams(QList::TieringParams{.node_depth_threshold = 1});
+  for (int i = 0; i < 8000; i++) {
+    ql_.Push(absl::StrCat("value", i), QList::TAIL);
+  }
+  EXPECT_EQ(QList::stats.offload_requests, 9);
 }
 
 using FillCompress = tuple<int, unsigned, QList::COMPR_METHOD>;
@@ -401,12 +454,12 @@ TEST_P(OptionsTest, Numbers) {
 
   for (unsigned i = 0; i < nums.size(); i++) {
     auto it = ql_.GetIterator(i);
-    ASSERT_TRUE(it.Next());
+    ASSERT_TRUE(it.Valid());
     ASSERT_EQ(nums[i], it.Get().ival()) << i;
   }
 
   auto it = ql_.GetIterator(nums.size());
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ("xxxxxxxxxxxxxxxxxxxx", it.Get().view());
 }
 
@@ -423,10 +476,11 @@ TEST_P(OptionsTest, NumbersIndex) {
 
   unsigned i = 437;
   QList::Iterator it = ql_.GetIterator(i);
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     ASSERT_EQ(nums[i], it.Get().ival());
     i++;
-  }
+  } while (it.Next());
   ASSERT_EQ(760, i);
 }
 
@@ -451,7 +505,7 @@ TEST_P(OptionsTest, DelRangeA) {
     ASSERT_EQ(0, ql_verify(ql_, 1, 1, 1, 1));
   }
   auto it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ(-5157318210846258173, it.Get().ival());
 }
 
@@ -476,21 +530,21 @@ TEST_P(OptionsTest, DelRangeB) {
   }
 
   auto it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ(5, it.Get().ival());
 
   it = ql_.GetIterator(-1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ(16, it.Get().ival());
 
   ql_.Push("bobobob", QList::TAIL);
   it = ql_.GetIterator(-1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   EXPECT_EQ("bobobob", it.Get().view());
 
   for (int i = 0; i < 12; i++) {
     it = ql_.GetIterator(i);
-    ASSERT_TRUE(it.Next());
+    ASSERT_TRUE(it.Valid());
     EXPECT_EQ(i + 5, it.Get().ival());
   }
 }
@@ -516,7 +570,7 @@ TEST_P(OptionsTest, DelRangeC) {
     ASSERT_EQ(0, ql_verify(ql_, 1, 1, 1, 1));
   }
   auto it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ(-5157318210846258173, it.Get().ival());
 }
 
@@ -616,7 +670,7 @@ TEST_P(OptionsTest, DelNeg100From500) {
   ql_.Erase(-100, 100);
 
   QList::Iterator it = ql_.GetIterator(QList::TAIL);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello400", it.Get());
   ASSERT_EQ(0, ql_verify(ql_, 13, 400, 32, 16));
 }
@@ -645,9 +699,13 @@ TEST_P(OptionsTest, DelElems) {
 
   /* lrem 0 bar */
   auto iter = ql_.GetIterator(QList::HEAD);
-  while (iter.Next()) {
+  while (iter.Valid()) {
     if (iter.Get() == "bar") {
       iter = ql_.Erase(iter);
+      // iter now points to next element, don't call Next()
+    } else {
+      if (!iter.Next())
+        break;
     }
   }
   EXPECT_THAT(ToItems(), ElementsAreArray(result));
@@ -657,13 +715,17 @@ TEST_P(OptionsTest, DelElems) {
   /* lrem -2 foo */
   iter = ql_.GetIterator(QList::TAIL);
   int del = 2;
-  while (iter.Next()) {
+  while (iter.Valid()) {
     if (iter.Get() == "foo") {
       iter = ql_.Erase(iter);
       del--;
+      if (del == 0)
+        break;
+      // iter now points to next element, don't call Next()
+    } else {
+      if (!iter.Next())
+        break;
     }
-    if (del == 0)
-      break;
   }
 
   /* check result of lrem -2 foo */
@@ -680,10 +742,11 @@ TEST_P(OptionsTest, IterateReverse) {
     ql_.Push(StrCat("hello", i), QList::HEAD);
   QList::Iterator it = ql_.GetIterator(QList::TAIL);
   int i = 0;
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     ASSERT_EQ(StrCat("hello", i), it.Get());
     i++;
-  }
+  } while (it.Next());
   ASSERT_EQ(500, i);
   ASSERT_EQ(0, ql_verify(ql_, 16, 500, 20, 32));
 }
@@ -696,21 +759,23 @@ TEST_P(OptionsTest, Iterate500) {
 
   QList::Iterator it = ql_.GetIterator(QList::HEAD);
   int i = 499, count = 0;
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     QList::Entry entry = it.Get();
     ASSERT_EQ(StrCat("hello", i), entry);
     i--;
     count++;
-  }
+  } while (it.Next());
   EXPECT_EQ(500, count);
   ASSERT_EQ(0, ql_verify(ql_, 16, 500, 20, 32));
 
   it = ql_.GetIterator(QList::TAIL);
   i = 0;
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     ASSERT_EQ(StrCat("hello", i), it.Get());
     i++;
-  }
+  } while (it.Next());
   EXPECT_EQ(500, i);
 }
 
@@ -720,18 +785,18 @@ TEST_P(OptionsTest, IterateAfterOne) {
   ql_.Push("hello", QList::HEAD);
 
   QList::Iterator it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ql_.Insert(it, "abc", QList::AFTER);
 
   ASSERT_EQ(0, ql_verify(ql_, 1, 2, 2, 2));
 
   /* verify results */
   it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello", it.Get());
 
   it = ql_.GetIterator(1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("abc", it.Get());
 }
 
@@ -746,15 +811,13 @@ TEST_P(OptionsTest, IterateDelete) {
   ql_.Push("oop", QList::TAIL);
 
   QList::Iterator it = ql_.GetIterator(QList::HEAD);
-  int i = 0;
-  while (it.Next()) {
+  while (it.Valid()) {
     if (it.Get() == "hij") {
       it = ql_.Erase(it);
+    } else {
+      it.Next();
     }
-    i++;
   }
-
-  ASSERT_EQ(5, i);
 
   ASSERT_THAT(ToItems(), ElementsAre("abc", "def", "jkl", "oop"));
 }
@@ -765,17 +828,17 @@ TEST_P(OptionsTest, InsertBeforeOne) {
 
   ql_.Push("hello", QList::HEAD);
   QList::Iterator it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ql_.Insert(it, "abc", QList::BEFORE);
   ql_verify(ql_, 1, 2, 2, 2);
 
   /* verify results */
   it = ql_.GetIterator(0);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("abc", it.Get());
 
   it = ql_.GetIterator(1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello", it.Get());
 }
 
@@ -788,7 +851,7 @@ TEST_P(OptionsTest, InsertWithHeadFull) {
 
   ql_.set_fill(-1);
   QList::Iterator it = ql_.GetIterator(-10);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
 
   char buf[4096] = {0};
   ql_.Insert(it, string_view{buf, sizeof(buf)}, QList::BEFORE);
@@ -803,7 +866,7 @@ TEST_P(OptionsTest, InsertWithTailFull) {
 
   ql_.set_fill(-1);
   QList::Iterator it = ql_.GetIterator(-1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
 
   char buf[4096] = {0};
   ql_.Insert(it, string_view{buf, sizeof(buf)}, QList::AFTER);
@@ -825,11 +888,13 @@ TEST_P(OptionsTest, InsertOnceWhileIterating) {
 
   /* insert "bar" before "bob" while iterating over list. */
   QList::Iterator it = ql_.GetIterator(QList::HEAD);
-  while (it.Next()) {
-    if (it.Get() == "bob") {
-      ql_.Insert(it, "bar", QList::BEFORE);
-      break; /* didn't we fix insert-while-iterating? */
-    }
+  if (it.Valid()) {
+    do {
+      if (it.Get() == "bob") {
+        ql_.Insert(it, "bar", QList::BEFORE);
+        break; /* didn't we fix insert-while-iterating? */
+      }
+    } while (it.Next());
   }
   EXPECT_THAT(ToItems(), ElementsAre("abc", "def", "bar", "bob", "foo", "zoo"));
 }
@@ -845,7 +910,7 @@ TEST_P(OptionsTest, InsertBefore250NewInMiddleOf500Elements) {
 
   for (int i = 0; i < 250; i++) {
     QList::Iterator it = ql_.GetIterator(250);
-    ASSERT_TRUE(it.Next());
+    ASSERT_TRUE(it.Valid());
     ql_.Insert(it, StrCat("abc", i), QList::BEFORE);
   }
 
@@ -862,7 +927,7 @@ TEST_P(OptionsTest, InsertAfter250NewInMiddleOf500Elements) {
 
   for (int i = 0; i < 250; i++) {
     QList::Iterator it = ql_.GetIterator(250);
-    ASSERT_TRUE(it.Next());
+    ASSERT_TRUE(it.Valid());
     ql_.Insert(it, StrCat("abc", i), QList::AFTER);
   }
 
@@ -887,10 +952,11 @@ TEST_P(OptionsTest, NextPlain) {
   QList::Iterator it = ql_.GetIterator(QList::TAIL);
   int j = 0;
 
-  while (it.Next()) {
+  ASSERT_TRUE(it.Valid());
+  do {
     ASSERT_EQ(strings[j], it.Get());
     j++;
-  }
+  } while (it.Next());
 }
 
 TEST_P(OptionsTest, IndexFrom500) {
@@ -900,26 +966,26 @@ TEST_P(OptionsTest, IndexFrom500) {
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
 
   QList::Iterator it = ql_.GetIterator(1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello2", it.Get());
   it = ql_.GetIterator(200);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello201", it.Get());
 
   it = ql_.GetIterator(-1);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello500", it.Get());
 
   it = ql_.GetIterator(-2);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello499", it.Get());
 
   it = ql_.GetIterator(-100);
-  ASSERT_TRUE(it.Next());
+  ASSERT_TRUE(it.Valid());
   ASSERT_EQ("hello401", it.Get());
 
   it = ql_.GetIterator(500);
-  ASSERT_FALSE(it.Next());
+  ASSERT_FALSE(it.Valid());
 }
 
 static void BM_QListCompress(benchmark::State& state) {

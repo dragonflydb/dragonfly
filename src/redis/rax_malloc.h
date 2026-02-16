@@ -1,6 +1,6 @@
 /* Rax -- A radix tree implementation.
  *
- * Copyright (c) 2017, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2017, Redis Ltd.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,4 +41,5 @@
 #define rax_malloc zmalloc
 #define rax_realloc zrealloc
 #define rax_free zfree
+#define rax_ptr_alloc_size zmalloc_size
 #endif

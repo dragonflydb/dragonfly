@@ -31,6 +31,7 @@
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
+#include "strings/human_readable.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
@@ -61,10 +62,10 @@ ABSL_FLAG(string, admin_bind, "",
           "If set, the admin consol TCP connection would be bind the given address. "
           "This supports both HTTP and RESP protocols");
 
-ABSL_FLAG(facade::MemoryBytesFlag, request_cache_limit, 64_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, request_cache_limit, 64_MB,
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
           "Amount of memory to use for storing pipeline requests - per IO thread."
           "Please note that clients that send excecissively huge pipelines, "
           "may deadlock themselves. See https://github.com/dragonflydb/dragonfly/discussions/3997"
@@ -77,7 +78,7 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "may require increasing this limit to prevent the risk of deadlocking."
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
-ABSL_FLAG(facade::MemoryBytesFlag, publish_buffer_limit, 128_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
 ABSL_FLAG(uint32_t, pipeline_squash, 1,
@@ -92,7 +93,7 @@ ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
           "Maximum bulk length that is "
           "allowed to be accepted when parsing RESP protocol");
 
-ABSL_FLAG(facade::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
+ABSL_FLAG(strings::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
 ABSL_FLAG(bool, migrate_connections, true,
@@ -319,8 +320,28 @@ struct QueueBackpressure {
   // Block until subscriber memory usage is below limit, can be called from any thread.
   void EnsureBelowLimit();
 
+  // Checks if backpressure should be applied.
+  // 'size' should be the total bytes currently consumed by all connections on this thread.
+  // 'q_len' should be the length of the pipeline queue for the current connection.
+  //
+  // Returns true if EITHER:
+  // 1. Thread-local: memory limit (on all thread's connections) is exceeded (protects server from
+  // OOM).
+  // 2. Per-Connection queue length limit is exceeded (protects against single-client abuse).
   bool IsPipelineBufferOverLimit(size_t size, uint32_t q_len) const {
-    return size >= pipeline_buffer_limit || q_len > pipeline_queue_max_len;
+    return size >= (pipeline_buffer_limit) || (q_len > pipeline_queue_max_len);
+  }
+
+  // Checks if usage has dropped below the limit in at least one criteria.
+  // Used to determine if we should notify waiters.
+  // 'size' should be the total bytes currently consumed by all connections on this thread.
+  // 'q_len' should be the length of the pipeline queue for the current connection.
+  //
+  // Returns true if EITHER:
+  // 1. Thread-Global memory is now under the limit (allows neighbors to wake up).
+  // 2. Per-Connection queue length is now within the limit (allows self to wake up).
+  bool IsPipelineBufferUnderLimit(size_t size, uint32_t q_len) const {
+    return (size < pipeline_buffer_limit) || (q_len <= pipeline_queue_max_len);
   }
 
   // Used by publisher/subscriber actors to make sure we do not publish too many messages
@@ -391,9 +412,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const PubMessagePtr& msg) {
       return sizeof(PubMessage) + (msg->channel.size() + msg->message.size());
     }
-    size_t operator()(const PipelineMessagePtr& msg) {
-      return UsedMemoryInternal(*msg);
-    }
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
     }
@@ -412,8 +430,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
 }
 
 bool Connection::MessageHandle::IsReplying() const {
-  return IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
-         holds_alternative<PipelineMessagePtr>(handle);
+  return IsPubMsg() || holds_alternative<MonitorMessage>(handle);
 }
 
 struct Connection::AsyncOperations {
@@ -604,6 +621,13 @@ bool Connection::IsSending() const {
   return reply_builder_ && reply_builder_->IsSendActive();
 }
 
+void Connection::MarkForClose() {
+  if (reply_builder_) {
+    reply_builder_->CloseConnection();
+  }
+  request_shutdown_ = true;
+}
+
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
@@ -629,6 +653,8 @@ void Connection::OnPreMigrateThread() {
 
   socket_->CancelOnErrorCb();
   DCHECK(!async_fb_.IsJoinable()) << GetClientId();
+
+  DecreaseConnStats();
 }
 
 void Connection::OnPostMigrateThread() {
@@ -651,13 +677,12 @@ void Connection::OnPostMigrateThread() {
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
-  if (!dispatch_q_.empty()) {
+  if (HasPendingMessages()) {
     LaunchAsyncFiberIfNeeded();
   }
 
   stats_ = &tl_facade_stats->conn_stats;
-  IncrNumConns();
-  stats_->read_buf_capacity += io_buf_.Capacity();
+  IncreaseConnStats();
 }
 
 void Connection::OnConnectionStart() {
@@ -689,8 +714,8 @@ void Connection::HandleRequests() {
     uint8_t buf[2];
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
-      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " "
-                           << read_sz.error().message()
+      auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
+      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " " << msg
                            << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       stats_->tls_accept_disconnects++;
       return;
@@ -846,9 +871,9 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   }
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
-  if (dispatch_q_.size()) {
-    absl::StrAppend(&after, " pipeline=", dispatch_q_.size());
-    absl::StrAppend(&after, " pbuf=", pending_pipeline_bytes_);
+  if (parsed_cmd_q_len_ > 0) {
+    absl::StrAppend(&after, " pipeline=", parsed_cmd_q_len_);
+    absl::StrAppend(&after, " pbuf=", parsed_cmd_q_bytes_);
   }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
@@ -998,9 +1023,11 @@ io::Result<bool> Connection::CheckForHttpProto() {
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
 
-  IncrNumConns();
+  // Register the new connection with the thread-local statistics.
+  // At this point (connection birth), local queue stats/luggage are 0,
+  // so only connection counts and buffer capacities are incremented.
+  IncreaseConnStats();
   ++stats_->conn_received_cnt;
-  stats_->read_buf_capacity += io_buf_.Capacity();
 
   ++local_stats_.read_cnt;
   local_stats_.net_bytes_in += io_buf_.InputLen();
@@ -1054,10 +1081,15 @@ void Connection::ConnectionFlow() {
   phase_ = PRECLOSE;
 
   ClearPipelinedMessages();
-  DCHECK(dispatch_q_.empty());
+  DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
-  DecreaseStatsOnClose();
+
+  // We have already cleared the queues above (ClearPipelinedMessages), so local queue stats
+  // (dispatch_q_bytes_, etc.) represent 0 usage. DecreaseConnStats will safely subtract 0 for those
+  // stats, while correctly removing this connection from the global connection counts and buffer
+  // capacity tracking.
+  DecreaseConnStats();
 
   if (ioloop_v2_) {
     socket_->ResetOnRecvHook();
@@ -1105,28 +1137,41 @@ void Connection::ConnectionFlow() {
 }
 
 void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
-                                absl::FunctionRef<MessageHandle()> cmd_msg_cb) {
+                                absl::FunctionRef<void()> enqueue_cmd_cb) {
+  // Unconditional return when closing:
+  // else, non-throttled connections skip the check below and enqueue data even if they are closing.
+  // No one will read that data anyway.
+  if (cc_->conn_closing)
+    return;
+  auto can_dispatch_sync_fn = [this]() {
+    return !cc_->async_dispatch && !HasPendingMessages() && (cc_->subscriptions == 0);
+  };
   bool optimize_for_async = has_more;
+  bool can_dispatch_sync = can_dispatch_sync_fn();
   QueueBackpressure& qbp = GetQueueBackpressure();
-  if (optimize_for_async &&
-      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
+  if ((optimize_for_async || !can_dispatch_sync) &&
+      qbp.IsPipelineBufferOverLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_)) {
     stats_->pipeline_throttle_count++;
-    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit: pipeline_bytes "
-                             << stats_->dispatch_queue_bytes << " queue_size " << dispatch_q_.size()
+    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit."
+                             << ", Thread pipeline_queue_bytes: " << stats_->pipeline_queue_bytes
+                             << ", Thread pipeline_queue_entries: "
+                             << stats_->pipeline_queue_entries
+                             << ", Connection parsed_cmd_q_bytes_: " << parsed_cmd_q_bytes_
+                             << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
     fb2::NoOpLock noop;
-    qbp.pipeline_cnd.wait(noop, [this, &qbp] {
+    qbp.pipeline_cnd.wait(noop, [this, &qbp, &can_dispatch_sync_fn] {
+      // Wait until at least one is true:
+      // 1) Connection is closing.
+      // 2) Can dispatch synchronously.
+      // 3) Not over limits (for an async dispatch).
+      bool can_dispatch_sync = can_dispatch_sync_fn();
+      if (can_dispatch_sync)
+        return true;
       bool over_limits =
-          qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size());
-      return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
+          qbp.IsPipelineBufferOverLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_);
+      return !over_limits || cc_->conn_closing;
     });
-
-    if (cc_->conn_closing) {
-      if (request_shutdown_) {
-        ShutdownSelfBlocking();
-      }
-      return;
-    }
 
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
@@ -1134,11 +1179,12 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
-  bool can_dispatch_sync = !cc_->async_dispatch && dispatch_q_.empty() && cc_->subscriptions == 0;
+  can_dispatch_sync = can_dispatch_sync_fn();
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
-    SendAsync(cmd_msg_cb());
+    LaunchAsyncFiberIfNeeded();
+    enqueue_cmd_cb();
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
@@ -1150,7 +1196,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     last_interaction_ = time(nullptr);
 
     // We might have blocked the dispatch queue from processing, wake it up.
-    if (!dispatch_q_.empty())
+    if (HasPendingMessages())
       cnd_.notify_one();
   }
 }
@@ -1163,16 +1209,13 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
                               facade::AsyncPreference::ONLY_SYNC);
   };
-
-  auto dispatch_async = [this]() -> MessageHandle {
+  auto dispatch_async = [this]() -> void {
     PipelineMessagePtr ptr = GetFromPoolOrCreate();
-
-    // parsed_cmd_ has the parsed arguments. Move it to the message and set it up
-    // with a new empty ParsedCommand for the next parse.
-    auto* res = std::exchange(parsed_cmd_, ptr.release());
-    return {PipelineMessagePtr{res}};
+    // parsed_cmd_ holds the parsed arguments. Move it to 'cmd' to be enqueued and set it with a new
+    // empty ParsedCommand for the next parse.
+    auto* cmd = std::exchange(parsed_cmd_, ptr.release());
+    EnqueueParsedCommand(cmd);
   };
-
   io::Bytes read_buffer = io_buf_.InputBuffer();
   // Keep track of total bytes consumed/parsed. The do/while{} loop below preempts,
   // and InputBuffer() size might change between preemption points. There is a corner case,
@@ -1292,8 +1335,6 @@ void Connection::HandleMigrateRequest() {
     stats_->num_migrations++;
     migration_request_ = nullptr;
 
-    DecreaseStatsOnClose();
-
     // We need to return early as the socket is closing and IoLoop will clean up.
     // The reason that this is true is because of the following DCHECK
     DCHECK(!async_fb_.IsJoinable());
@@ -1409,7 +1450,7 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
     return false;
   }
 
-  if (dispatch_q_.empty()) {
+  if (!HasPendingMessages()) {
     // Migration requests means we should terminate this function (and allow the fiber to
     // join), so that we can re-launch the fiber in the new thread.
     // We intentionally return and not break in order to keep the connection open.
@@ -1430,26 +1471,19 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
 }
 
 void Connection::SquashPipeline() {
-  DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
+  DCHECK_EQ(GetPendingMessageCount(), parsed_cmd_q_len_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
-
-  unsigned pipeline_count = std::min<uint32_t>(dispatch_q_.size(), pipeline_squash_limit_cached);
+  unsigned pipeline_count = std::min<uint32_t>(parsed_cmd_q_len_, pipeline_squash_limit_cached);
 
   uint64_t start = CycleClock::Now();
 
-  // We use indexes as iterators are invalidated when pushing into the queue.
-  // Control messages may be inserted at the front during iteration, so we skip them.
-  auto get_next_fn = [i = size_t{0}, this]() mutable -> ParsedArgs {
-    // Count control messages at front
-    size_t ctrl_offset = 0;
-    while (ctrl_offset < dispatch_q_.size() && dispatch_q_[ctrl_offset].IsCheckPoint()) {
-      ctrl_offset++;
-    }
-    const auto& elem = dispatch_q_[ctrl_offset + i++];
-    CHECK(holds_alternative<PipelineMessagePtr>(elem.handle));
-    const auto& pmsg = get<PipelineMessagePtr>(elem.handle);
-
-    return *pmsg;
+  // Define a "Feeder" Lambda
+  // This lambda advances a temporary pointer exec_cmd_ptr to feed the execution engine.
+  // We do not modify parsed_to_execute_ yet, in case execution throws/fails.
+  auto exec_cmd_ptr{parsed_to_execute_};
+  auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
+    DCHECK(exec_cmd_ptr);
+    return ParsedArgs{*std::exchange(exec_cmd_ptr, exec_cmd_ptr->next)};
   };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
@@ -1459,12 +1493,14 @@ void Connection::SquashPipeline() {
   DispatchManyResult result =
       service_->DispatchManyCommands(get_next_fn, pipeline_count, reply_builder_.get(), cc_.get());
 
-  uint32_t dispatched = result.processed;
-  uint64_t before_flush = CycleClock::Now();
+  local_stats_.cmds += result.processed;
+  last_interaction_ = time(nullptr);
+  uint32_t num_dispatched_cmds = result.processed;
+  uint64_t flush_start_cycle_cnt = CycleClock::Now();
   //
   // TODO: to investigate if always flushing will improve P99 latency because otherwise we
   // wait for the next batch to finish before fully flushing the current response.
-  if (pending_pipeline_cmd_cnt_ == pipeline_count ||
+  if (parsed_cmd_q_len_ == pipeline_count ||
       always_flush_pipeline_cached) {  // Flush if no new commands appeared
     reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
@@ -1476,42 +1512,66 @@ void Connection::SquashPipeline() {
 
   if (result.account_in_stats) {
     stats_->pipeline_dispatch_calls++;
-    stats_->pipeline_dispatch_commands += dispatched;
-    stats_->pipeline_dispatch_flush_usec += CycleClock::ToUsec(CycleClock::Now() - before_flush);
+    stats_->pipeline_dispatch_commands += num_dispatched_cmds;
+    stats_->pipeline_dispatch_flush_usec +=
+        CycleClock::ToUsec(CycleClock::Now() - flush_start_cycle_cnt);
   }
-  auto it = dispatch_q_.begin();
-  while (it->IsCheckPoint())  // Skip newly received checkpoint messages
-    ++it;
 
-  for (auto rit = it; rit != it + dispatched; ++rit) {
+  auto* current{parsed_head_};
+  for (size_t i = 0; (i < num_dispatched_cmds) && current; ++i) {
+    auto* next{current->next};
+
     if (result.account_in_stats) {
-      // measure the time spent in the pipeline  queue waiting for dispatch
-      stats_->pipelined_wait_latency += CycleClock::ToUsec(start - rit->dispatch_cycle);
-    } else {
-      rit->dispatch_cycle = 0;  // Reset dispatch cycle to avoid accounting inside RecycleMessage
+      stats_->pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
     }
-    RecycleMessage(std::move(*rit));
-  }
 
-  dispatch_q_.erase(it, it + dispatched);
+    ReleaseParsedCommand(current, result.account_in_stats /* is_pipelined */);
+    current = next;
+  }
+  parsed_head_ = current;
+  if (!parsed_head_) {
+    parsed_tail_ = nullptr;
+  }
+  parsed_to_execute_ = parsed_head_;
 
   // If interrupted due to pause, fall back to regular dispatch
-  skip_next_squashing_ = dispatched != pipeline_count;
+  skip_next_squashing_ = (num_dispatched_cmds != pipeline_count);
 }
 
 void Connection::ClearPipelinedMessages() {
   AsyncOperations async_op{reply_builder_.get(), this};
 
+  // First, clear dispatch queue
   // Recycle messages even from disconnecting client to keep properly track of memory stats
-  // As well as to avoid pubsub backpressure leakege.
+  // As well as to avoid pubsub backpressure leakage.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
     if (msg.IsCheckPoint())
       visit(async_op, msg.handle);  // to not miss checkpoints
-    RecycleMessage(std::move(msg));
+    UpdateDispatchStats(msg, false /* subtract */);
   }
 
   dispatch_q_.clear();
+
+  // Second, drain the pending pipeline queue: release memory and update stats without executing
+  // commands.
+  while (parsed_head_) {
+    auto* curr{parsed_head_};
+    parsed_head_ = parsed_head_->next;
+
+    // Wait for the in-flight async commands processing by consumer to finish before recycling.
+    if (curr->IsDeferredReply() && !curr->CanReply()) {
+      curr->Blocker()->Wait();
+    }
+
+    ReleaseParsedCommand(curr, false);
+  }
+
+  DCHECK_EQ(parsed_cmd_q_len_, 0u);
+  DCHECK_EQ(parsed_cmd_q_bytes_, 0u);
+  parsed_tail_ = nullptr;
+  parsed_to_execute_ = nullptr;
+
   QueueBackpressure& qbp = GetQueueBackpressure();
   qbp.pipeline_cnd.notify_all();
   qbp.pubsub_ec.notifyAll();
@@ -1529,10 +1589,9 @@ string Connection::DebugInfo() const {
   }
   absl::StrAppend(&info, "df:joinable=", async_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = !dispatch_q_.empty() && dispatch_q_.front().IsCheckPoint();
   absl::StrAppend(&info, "dq:size=", dispatch_q_.size(), ", ");
-  absl::StrAppend(&info, "dq:pipelined=", pending_pipeline_cmd_cnt_, ", ");
-  absl::StrAppend(&info, "dq:intrusive=", intrusive_front, ", ");
+  absl::StrAppend(&info, "pq:parsed_cmd_q_len=", parsed_cmd_q_len_, ", ");
+  absl::StrAppend(&info, "pq:is_empty=", (parsed_head_ == nullptr), ", ");
 
   if (cc_) {
     absl::StrAppend(&info, "state=");
@@ -1547,26 +1606,107 @@ string Connection::DebugInfo() const {
   return info;
 }
 
-// DispatchFiber handles commands coming from the InputLoop.
-// Thus, InputLoop can quickly read data from the input buffer, parse it and push
-// into the dispatch queue and DispatchFiber will run those commands asynchronously with
-// InputLoop. Note: in some cases, InputLoop may decide to dispatch directly and bypass the
-// DispatchFiber.
+bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op) {
+  // Guard: Automatically subtract stats when this scope exits (via return or exception).
+  absl::Cleanup stats_guard = [this, msg] { UpdateDispatchStats(*msg, false /* subtract */); };
+  bool is_replying = msg->IsReplying();
+
+  // Pre-execution Flush
+  // If this is a non-replying control message (e.g. Migration) and it's the last item,
+  // we MUST flush the buffer now. Otherwise, previous pipelined replies might wait
+  // indefinitely or be lost if the fiber terminates.
+  if (!HasPendingMessages() && !is_replying) {
+    reply_builder_->Flush();
+  }
+
+  // Fiber Termination Check
+  if (ShouldEndAsyncFiber(*msg)) {
+    CHECK(!HasPendingMessages()) << DebugInfo();
+    GetQueueBackpressure().pipeline_cnd.notify_all();
+    return true;  // Signal to terminate AsyncFiber
+  }
+
+  // Execution
+  auto replies_recorded_before = reply_builder_->RepliesRecorded();
+  cc_->async_dispatch = true;
+  std::visit(*async_op, msg->handle);
+  cc_->async_dispatch = false;
+
+  // Post-execution Flush
+  // We force a flush If the message is supposed to reply (e.g. PubSub) but didn't write to the
+  // buffer (e.g. subscription filter), and the queues are empty.
+  if (!HasPendingMessages() && is_replying &&
+      (replies_recorded_before == reply_builder_->RepliesRecorded())) {
+    reply_builder_->Flush();
+  }
+  return false;
+}
+
+void Connection::ProcessPipelineCommand() {
+  DCHECK(parsed_head_ && parsed_to_execute_) << DebugInfo();
+
+  auto* cmd = parsed_to_execute_;
+  parsed_to_execute_ = cmd->next;
+  parsed_head_ = parsed_to_execute_;
+  if (!parsed_head_) {
+    parsed_tail_ = nullptr;
+  }
+
+  stats_->pipelined_wait_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
+
+  cc_->async_dispatch = true;
+  local_stats_.cmds++;
+  service_->DispatchCommand(ParsedArgs{*cmd}, cmd, facade::AsyncPreference::ONLY_SYNC);
+  last_interaction_ = time(nullptr);
+  skip_next_squashing_ = false;
+  cc_->async_dispatch = false;
+
+  ReleaseParsedCommand(cmd, true);
+
+  // If we drained the pipeline and no admin messages are waiting, flush.
+  if (!HasPendingMessages()) {
+    reply_builder_->Flush();
+  }
+}
+
+// AsyncFiber acts as the consumer for all asynchronous connection tasks.
+//
+// It operates on a producer-consumer model where the InputLoop parses socket data
+// and routes it into two distinct streams:
+// 1. Data Path: Pipelined commands are queued in a Parsed Commands linked list
+// 2. Control Path: Admin events (Migrations, Checkpoints, PubSub) use a deque (dispatch_q_)
+//
+// AsyncFiber drains these queues according to system prioritization, ensuring
+// high-priority events are handled promptly while preventing priority inversion
+// during thread migrations. For simple requests, the InputLoop may bypass this
+// fiber and dispatch synchronously to minimize latency.
 void Connection::AsyncFiber() {
   ThisFiber::SetName("AsyncFiber");
 
   AsyncOperations async_op{reply_builder_.get(), this};
-
   size_t squashing_threshold = GetFlag(FLAGS_pipeline_squash);
-
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   fb2::NoOpLock noop_lk;
   QueueBackpressure& qbp = GetQueueBackpressure();
   while (!reply_builder_->GetError()) {
     DCHECK_EQ(socket()->proactor(), ProactorBase::me());
     cnd_.wait(noop_lk, [this] {
-      return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch);
+      if (cc_->conn_closing)
+        return true;
+
+      // If we are currently executing a synchronous dispatch (e.g. inside IoLoop),
+      // we must wait until it finishes to avoid race conditions.
+      if (cc_->sync_dispatch)
+        return false;
+
+      // For Memcache, we ONLY wake up for Admin messages (dispatch_q_) as we process
+      // parsed_head_  in the connection fiber. For RESP, we wake up for both queues.
+      if (protocol_ == Protocol::MEMCACHE) {
+        return !dispatch_q_.empty();
+      }
+      return HasPendingMessages();
     });
+
     if (cc_->conn_closing)
       break;
 
@@ -1578,19 +1718,20 @@ void Connection::AsyncFiber() {
     // wants to.
     // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
-    if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
+    if ((GetPendingMessageCount() == 1) && (cur_epoch == prev_epoch)) {
       if (pipeline_wait_batch_usec > 0) {
         ThisFiber::SleepFor(chrono::microseconds(pipeline_wait_batch_usec));
       } else {
         ThisFiber::Yield();
       }
-      DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
+      DVLOG(2) << "After yielding to producer, parsed_cmd_q_len_=" << parsed_cmd_q_len_
+               << " dispatch_q size=" << dispatch_q_.size();
       if (cc_->conn_closing)
         break;
     }
     prev_epoch = cur_epoch;
 
-    reply_builder_->SetBatchMode(dispatch_q_.size() > 1);
+    reply_builder_->SetBatchMode(GetPendingMessageCount() > 1);
 
     bool subscriber_over_limit =
         stats_->dispatch_queue_subscriber_bytes >= qbp.publish_buffer_limit;
@@ -1600,48 +1741,45 @@ void Connection::AsyncFiber() {
     // It is only enabled if the threshold is reached and the whole dispatch queue
     // consists only of commands (no pubsub or monitor messages)
     bool squashing_enabled = squashing_threshold > 0;
-    bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
-    bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
-    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_ &&
+    bool threshold_reached = parsed_cmd_q_len_ > squashing_threshold;
+    if (squashing_enabled && threshold_reached && dispatch_q_.empty() && !skip_next_squashing_ &&
         !IsReplySizeOverLimit()) {
       SquashPipeline();
     } else {
-      MessageHandle msg = std::move(dispatch_q_.front());
-      dispatch_q_.pop_front();
+      MessageHandle msg;
 
-      stats_->pipelined_wait_latency += CycleClock::ToUsec(CycleClock::Now() - msg.dispatch_cycle);
+      // If the front message is a Migration Request, but we still have pipeline data
+      // (parsed_head_), we must block the migration and process the pipeline messages first.
+      bool is_migration_req =
+          !dispatch_q_.empty() &&
+          std::holds_alternative<MigrationRequestMessage>(dispatch_q_.front().handle);
 
-      // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
-      // last command to reply and flush. If it doesn't reply (i.e. is a control message like
-      // migrate), we have to flush manually.
-      bool is_replying = msg.IsReplying();
-      if (dispatch_q_.empty() && !is_replying) {
-        reply_builder_->Flush();
+      // Check if we are blocked:
+      // Blocked = It IS a migration AND we have pipeline work AND we are in Redis mode.
+      bool is_blocked =
+          is_migration_req && (parsed_head_ != nullptr) && (protocol_ == Protocol::REDIS);
+
+      // Process Admin Queue
+      // Run if: Queue is not empty and we are not blocked.
+      if (!dispatch_q_.empty() && !is_blocked) {
+        msg = std::move(dispatch_q_.front());
+        dispatch_q_.pop_front();
+
+        // Execute and check if we need to terminate the fiber
+        if (ProcessAdminMessage(&msg, &async_op)) {
+          return;  // don't set conn closing flag
+        }
+      } else {  // Process Pipeline Queue
+        ProcessPipelineCommand();
       }
-
-      if (ShouldEndAsyncFiber(msg)) {
-        RecycleMessage(std::move(msg));
-        CHECK(dispatch_q_.empty()) << DebugInfo();
-        qbp.pipeline_cnd.notify_all();
-        return;  // don't set conn closing flag
-      }
-
-      auto replies_recorded_before = reply_builder_->RepliesRecorded();
-      cc_->async_dispatch = true;
-      std::visit(async_op, msg.handle);
-      cc_->async_dispatch = false;
-      // If last msg in queue was replying but nothing was replied during dispatch
-      // (i.e. pubsub message was discarded) we have to manually flush now.
-      if (dispatch_q_.empty() && is_replying &&
-          (replies_recorded_before == reply_builder_->RepliesRecorded())) {
-        reply_builder_->Flush();
-      }
-      RecycleMessage(std::move(msg));
     }
 
-    if (!qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size()) ||
-        dispatch_q_.empty()) {
-      qbp.pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
+    // Notify waiters if backpressure constraints are relieved.
+    // 1. Global memory (bytes) is under limit -> Wakes up neighbors on this thread.
+    // 2. Local queue (length) is under limit -> Wakes up this connection's producer.
+    if (qbp.IsPipelineBufferUnderLimit(stats_->pipeline_queue_bytes, parsed_cmd_q_len_) ||
+        !HasPendingMessages()) {
+      qbp.pipeline_cnd.notify_all();
     }
 
     if (subscriber_over_limit && stats_->dispatch_queue_subscriber_bytes < qbp.publish_buffer_limit)
@@ -1649,8 +1787,15 @@ void Connection::AsyncFiber() {
   }
 
   DCHECK(cc_->conn_closing || reply_builder_->GetError());
+
   cc_->conn_closing = true;
   qbp.pipeline_cnd.notify_all();
+
+  // If shutdown was requested, we need to break the receive call in case the i/o fiber
+  // is blocked there. With io loop v2, we can have a different mechanism to break from recv flow.
+  if (request_shutdown_) {
+    ShutdownSelfBlocking();
+  }
 }
 
 void Connection::ShrinkPipelinePool() {
@@ -1764,7 +1909,10 @@ void Connection::LaunchAsyncFiberIfNeeded() {
   }
 }
 
-// Should never block - the callers may run in as a a brief callback.
+// SendAsync is now strictly for the Control Path (Admin/Events).
+// Pipeline commands are handled separately via EnqueueParsedCommand to maintain
+// clean separation between Data and Control paths.
+// Note: Should never block - the callers may run in as a brief callback.
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(listener());
@@ -1780,39 +1928,32 @@ void Connection::SendAsync(MessageHandle msg) {
   if (!cc_->conn_closing) {
     LaunchAsyncFiberIfNeeded();
   }
-
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
-  QueueBackpressure& qbp = GetQueueBackpressure();
-
-  // Close MONITOR connection if we overflow pipeline limits
-  if (msg.IsMonitor() &&
-      qbp.IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes, dispatch_q_.size())) {
-    cc_->conn_closing = true;
-    request_shutdown_ = true;
-    // We don't shutdown here. The reason is that TLS socket is preemptive
-    // and SendAsync is atomic.
-    cnd_.notify_one();
-    return;
+  // Close MONITOR connection if we overflow limits.
+  // We must check the Thread-Global memory usage of BOTH:
+  // 1. The Control Path (dispatch_queue_bytes)
+  // 2. The Data Path (pipeline_queue_bytes)
+  if (msg.IsMonitor()) {
+    if (GetQueueBackpressure().IsPipelineBufferOverLimit(
+            stats_->dispatch_queue_bytes + stats_->pipeline_queue_bytes,
+            GetPendingMessageCount())) {
+      cc_->conn_closing = true;
+      request_shutdown_ = true;
+      // We don't shutdown here. The reason is that TLS socket is preemptive
+      // and SendAsync is atomic.
+      cnd_.notify_one();
+      return;
+    }
   }
 
-  size_t used_mem = msg.UsedMemory();
-  ++local_stats_.dispatch_entries_added;
-  stats_->dispatch_queue_entries++;
-  stats_->dispatch_queue_bytes += used_mem;
-
+  local_stats_.dispatch_entries_added++;
+  UpdateDispatchStats(msg, true /* add */);
   msg.dispatch_cycle = CycleClock::Now();
-  if (msg.IsPubMsg()) {
-    qbp.subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
-    stats_->dispatch_queue_subscriber_bytes += used_mem;
-  }
 
-  // Squashing is only applied to redis commands
-  if (std::holds_alternative<PipelineMessagePtr>(msg.handle)) {
-    pending_pipeline_cmd_cnt_++;
-    pending_pipeline_bytes_ += used_mem;
-  }
-
+  // Admin Queueing Rules:
+  // Checkpoints go to the front (after existing checkpoints), while all others to the back.
+  bool had_pending_messages = HasPendingMessages();  // check the queues before enqueuing
   if (msg.IsCheckPoint()) {
     auto it = dispatch_q_.begin();
     while (it < dispatch_q_.end() && it->IsCheckPoint())
@@ -1822,38 +1963,48 @@ void Connection::SendAsync(MessageHandle msg) {
     dispatch_q_.push_back(std::move(msg));
   }
 
-  // Don't notify if a sync dispatch is in progress, it will wake after finishing.
-  if (dispatch_q_.size() == 1 && !cc_->sync_dispatch) {
+  // Control Path Notification:
+  // We need to wake up the AsyncFiber only if it is currently sleeping.
+  // 1. Memcache: Sleeps if dispatch_q_ is empty. Must notify on 0->1 transition.
+  // 2. Redis: Sleeps if BOTH queues are empty. If pipeline has items, it's already awake.
+  bool should_notify = false;
+  if (protocol_ == Protocol::REDIS) {
+    if (!had_pending_messages) {
+      should_notify = true;
+    }
+  } else {  // MEMCACHE
+    should_notify = (dispatch_q_.size() == 1);
+  }
+
+  if (should_notify && !cc_->sync_dispatch) {
     cnd_.notify_one();
   }
 }
 
-void Connection::RecycleMessage(MessageHandle msg) {
-  size_t used_mem = msg.UsedMemory();
-
-  stats_->dispatch_queue_bytes -= used_mem;
-  stats_->dispatch_queue_entries--;
-
-  QueueBackpressure& qbp = GetQueueBackpressure();
-  if (msg.IsPubMsg()) {
-    qbp.subscriber_bytes.fetch_sub(used_mem, memory_order_relaxed);
-    stats_->dispatch_queue_subscriber_bytes -= used_mem;
-  }
-
-  if (msg.IsPipelineMsg() && msg.dispatch_cycle) {
-    ++stats_->pipelined_cmd_cnt;
-    stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - msg.dispatch_cycle);
-  }
-
-  // Retain pipeline message in pool.
-  if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
-    DCHECK_GE(pending_pipeline_bytes_, used_mem);
-    DCHECK_GE(pending_pipeline_cmd_cnt_, 1u);
-    pending_pipeline_cmd_cnt_--;
-    pending_pipeline_bytes_ -= used_mem;
-    if (stats_->pipeline_cmd_cache_bytes < qbp.pipeline_cache_limit) {
-      stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*(*pipe));
-      pipeline_req_pool_.push_back(std::move(*pipe));
+void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
+  size_t mem = msg.UsedMemory();
+  auto& qbp = GetQueueBackpressure();
+  if (add) {
+    stats_->dispatch_queue_entries++;
+    stats_->dispatch_queue_bytes += mem;
+    dispatch_q_bytes_ += mem;
+    if (msg.IsPubMsg()) {
+      qbp.subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
+      stats_->dispatch_queue_subscriber_bytes += mem;
+      dispatch_q_subscriber_bytes_ += mem;
+    }
+  } else {
+    DCHECK_GT(stats_->dispatch_queue_entries, 0u);
+    DCHECK_GE(stats_->dispatch_queue_bytes, mem);
+    stats_->dispatch_queue_entries--;
+    stats_->dispatch_queue_bytes -= mem;
+    dispatch_q_bytes_ -= mem;
+    if (msg.IsPubMsg()) {
+      DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, mem);
+      DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), mem);
+      qbp.subscriber_bytes.fetch_sub(mem, std::memory_order_relaxed);
+      stats_->dispatch_queue_subscriber_bytes -= mem;
+      dispatch_q_subscriber_bytes_ -= mem;
     }
   }
 }
@@ -1927,7 +2078,10 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
     mem += UsedMemoryInternal(*parsed_cmd_);
   }
 
-  // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
+  // Account for the pipelined commands waiting in the linked list
+  mem += parsed_cmd_q_bytes_;
+
+  // We add a hardcoded 9k value to accommodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
   // according to our checks) is actually part of the RSS.
   mem += 9'000;
@@ -1938,9 +2092,52 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
   };
 }
 
-void Connection::DecreaseStatsOnClose() {
+void Connection::IncreaseConnStats() {
+  DCHECK(stats_);
+  if (IsMainOrMemcache())
+    ++stats_->num_conns_main;
+  else
+    ++stats_->num_conns_other;
+  stats_->read_buf_capacity += io_buf_.Capacity();
+
+  stats_->dispatch_queue_entries += dispatch_q_.size();
+  stats_->dispatch_queue_bytes += dispatch_q_bytes_;
+  stats_->pipeline_queue_entries += parsed_cmd_q_len_;
+  stats_->pipeline_queue_bytes += parsed_cmd_q_bytes_;
+  if (dispatch_q_subscriber_bytes_ > 0) {
+    auto& qbp = GetQueueBackpressure();
+    stats_->dispatch_queue_subscriber_bytes += dispatch_q_subscriber_bytes_;
+    qbp.subscriber_bytes.fetch_add(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+  }
+}
+
+void Connection::DecreaseConnStats() {
+  DCHECK(stats_);
+  if (IsMainOrMemcache()) {
+    DCHECK_GT(stats_->num_conns_main, 0u);
+    --stats_->num_conns_main;
+  } else {
+    DCHECK_GT(stats_->num_conns_other, 0u);
+    --stats_->num_conns_other;
+  }
+  DCHECK_GE(stats_->read_buf_capacity, io_buf_.Capacity());
   stats_->read_buf_capacity -= io_buf_.Capacity();
-  DecrNumConns();
+
+  DCHECK_GE(stats_->dispatch_queue_entries, dispatch_q_.size());
+  stats_->dispatch_queue_entries -= dispatch_q_.size();
+  DCHECK_GE(stats_->dispatch_queue_bytes, dispatch_q_bytes_);
+  stats_->dispatch_queue_bytes -= dispatch_q_bytes_;
+  if (dispatch_q_subscriber_bytes_ > 0) {
+    auto& qbp = GetQueueBackpressure();
+    DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, dispatch_q_subscriber_bytes_);
+    stats_->dispatch_queue_subscriber_bytes -= dispatch_q_subscriber_bytes_;
+    DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), dispatch_q_subscriber_bytes_);
+    qbp.subscriber_bytes.fetch_sub(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+  }
+  DCHECK_GE(stats_->pipeline_queue_entries, parsed_cmd_q_len_);
+  stats_->pipeline_queue_entries -= parsed_cmd_q_len_;
+  DCHECK_GE(stats_->pipeline_queue_bytes, parsed_cmd_q_bytes_);
+  stats_->pipeline_queue_bytes -= parsed_cmd_q_bytes_;
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -1950,20 +2147,6 @@ void Connection::BreakOnce(uint32_t ev_mask) {
     DCHECK(!breaker_cb_);
     fun(ev_mask);
   }
-}
-
-void Connection::IncrNumConns() {
-  if (IsMainOrMemcache())
-    ++stats_->num_conns_main;
-  else
-    ++stats_->num_conns_other;
-}
-
-void Connection::DecrNumConns() {
-  if (IsMainOrMemcache())
-    --stats_->num_conns_main;
-  else
-    --stats_->num_conns_other;
 }
 
 bool Connection::IsReplySizeOverLimit() const {
@@ -2004,7 +2187,8 @@ bool Connection::ParseMCBatch() {
 
     // We push the command to the parsed queue even in case of parse errors,
     // so that we can reply in order.
-    EnqueueParsedCommand();
+    EnqueueParsedCommand(parsed_cmd_);
+    parsed_cmd_ = nullptr;  // ownership transferred.
 
     if (result != MemcacheParser::OK) {
       // We can not just reply directly to parse error, as we may have pipelined commands before.
@@ -2120,37 +2304,51 @@ ParsedCommand* Connection::CreateParsedCommand() {
   return res;
 }
 
-void Connection::EnqueueParsedCommand() {
-  parsed_cmd_->next = nullptr;
-  parsed_cmd_->parsed_cycle = base::CycleClock::Now();
+void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
+  DCHECK(cmd);
+  cmd->next = nullptr;
+
+  cmd->parsed_cycle = base::CycleClock::Now();
+
   if (parsed_head_ == nullptr) {
-    parsed_head_ = parsed_cmd_;
-    parsed_to_execute_ = parsed_cmd_;
+    parsed_head_ = cmd;
+    parsed_to_execute_ = cmd;
   } else {
-    parsed_tail_->next = parsed_cmd_;
+    parsed_tail_->next = cmd;
     if (parsed_to_execute_ == nullptr) {
       // we've executed all the parsed commands so far.
-      parsed_to_execute_ = parsed_cmd_;
+      parsed_to_execute_ = cmd;
     }
-    // We have a pipelined command
-    local_stats_.dispatch_entries_added++;
   }
-  parsed_tail_ = parsed_cmd_;
-  stats_->dispatch_queue_bytes += parsed_cmd_->UsedMemory();
+  parsed_tail_ = cmd;
 
+  size_t used_mem = cmd->UsedMemory();
   parsed_cmd_q_len_++;
+  parsed_cmd_q_bytes_ += used_mem;
+  local_stats_.dispatch_entries_added++;
+  stats_->pipeline_queue_entries++;
+  stats_->pipeline_queue_bytes += used_mem;
 
-  // We do not recreate parsed_cmd_ here, to support non-pipelined usage pattern,
-  // where we will reuse the same parsed_cmd_ object again after we execute it.
-  parsed_cmd_ = nullptr;  // ownership transferred
+  // AsyncFiber for Memcache only wakes up on dispatch_q_, notify only redis as this is the parse
+  // commands queue.
+  if ((!cc_->sync_dispatch) && (protocol_ == Protocol::REDIS)) {
+    cnd_.notify_one();
+  }
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
   size_t used_mem = cmd->UsedMemory();
-  DCHECK_GE(stats_->dispatch_queue_bytes, used_mem);
+
   DCHECK_GT(parsed_cmd_q_len_, 0u);
-  stats_->dispatch_queue_bytes -= used_mem;
-  --parsed_cmd_q_len_;
+  DCHECK_GE(parsed_cmd_q_bytes_, used_mem);
+  DCHECK_GT(stats_->pipeline_queue_entries, 0u);
+  DCHECK_GE(stats_->pipeline_queue_bytes, used_mem);
+  parsed_cmd_q_len_--;
+  parsed_cmd_q_bytes_ -= used_mem;
+
+  stats_->pipeline_queue_entries--;
+  stats_->pipeline_queue_bytes -= used_mem;
+
   if (is_pipelined) {
     stats_->pipelined_cmd_cnt++;
     stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
@@ -2160,21 +2358,33 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
     parsed_cmd_ = cmd;
     parsed_cmd_->ResetForReuse();
   } else {
-    // TODO: limit pipeline_cmd_cache_bytes.
-    stats_->pipeline_cmd_cache_bytes += UsedMemoryInternal(*cmd);
-    pipeline_req_pool_.emplace_back(cmd);
+    // If we are over the limit, destroy the command instead of caching it.
+    size_t cmd_mem = UsedMemoryInternal(*cmd);
+    QueueBackpressure& qbp = GetQueueBackpressure();
+    if (stats_->pipeline_cmd_cache_bytes + cmd_mem <= qbp.pipeline_cache_limit) {
+      stats_->pipeline_cmd_cache_bytes += cmd_mem;
+      pipeline_req_pool_.emplace_back(cmd);
+    } else {
+      delete cmd;
+    }
   }
 }
 
 void Connection::DestroyParsedQueue() {
   while (parsed_head_ != nullptr) {
     auto* cmd = parsed_head_;
-    stats_->dispatch_queue_bytes -= cmd->UsedMemory();
     parsed_head_ = cmd->next;
-    delete cmd;
+
+    // Being able to drop an in-flight transaction would require it keeping no pointers
+    // at all to any context data - too costly for now! (maybe let it own the arguments?)
+    if (cmd->IsDeferredReply() && !cmd->CanReply())
+      cmd->Blocker()->Wait();  // explicitly wait for it to finish
+    ReleaseParsedCommand(cmd, false);
   }
+
   parsed_tail_ = nullptr;
-  parsed_cmd_q_len_ = 0;
+  CHECK_EQ(parsed_cmd_q_len_, 0u);
+  CHECK_EQ(parsed_cmd_q_bytes_, 0u);
   delete parsed_cmd_;
   parsed_cmd_ = nullptr;
 }

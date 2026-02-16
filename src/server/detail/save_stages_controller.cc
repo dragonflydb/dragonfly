@@ -11,6 +11,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -297,7 +298,8 @@ void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& 
   auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
 
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  auto glob_data = shard == nullptr ? RdbSaver::GetGlobalData(service_) : RdbSaver::GlobalData{};
+  bool is_summary = (shard == nullptr);
+  auto glob_data = RdbSaver::GetGlobalData(service_, is_summary);
 
   if (auto err = snapshot->Start(mode, filename, glob_data, snapshot_id); err) {
     shared_err_ = err;
@@ -319,7 +321,9 @@ void SaveStagesController::SaveRdb() {
   if (!snapshot_storage_->IsCloud())
     filename += ".tmp";
 
-  if (auto err = snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_), "");
+  // RDB is a summary file (contains all global data)
+  if (auto err =
+          snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_, true), "");
       err) {
     snapshot.reset();
     return;

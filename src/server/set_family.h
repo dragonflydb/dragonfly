@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "facade/op_status.h"
+#include "facade/facade_types.h"
 #include "server/table.h"
 #include "server/tx_base.h"
 
@@ -32,7 +32,7 @@ class SetFamily {
                                  std::string_view field);
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                               CmdArgList values, PrimeValue* pv);
+                                               facade::CmdArgList values, PrimeValue* pv);
 };
 
 }  // namespace dfly

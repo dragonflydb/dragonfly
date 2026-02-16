@@ -13,8 +13,8 @@
 #include <utility>
 #include <variant>
 
-#include "common/backed_args.h"
 #include "facade/connection_ref.h"
+#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
@@ -110,10 +110,6 @@ class Connection : public util::Connection {
       return std::holds_alternative<CheckpointMessage>(handle);
     }
 
-    bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle);
-    }
-
     bool IsPubMsg() const {
       return std::holds_alternative<PubMessagePtr>(handle);
     }
@@ -122,10 +118,10 @@ class Connection : public util::Connection {
       return std::holds_alternative<MonitorMessage>(handle);
     }
 
-    bool IsReplying() const;  // control messges don't reply, messages carrying data do
+    bool IsReplying() const;  // control messages don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MigrationRequestMessage,
-                 CheckpointMessage, InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, MigrationRequestMessage, CheckpointMessage,
+                 InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -256,6 +252,8 @@ class Connection : public util::Connection {
     io_event_.notify();
   }
 
+  void MarkForClose();
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -289,15 +287,24 @@ class Connection : public util::Connection {
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
   void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
-                      absl::FunctionRef<MessageHandle()> cmd_msg_cb);
+                      absl::FunctionRef<void()> enqueue_cmd_cb);
 
   // Handles events from the dispatch queue.
   void AsyncFiber();
 
+  // Processes a single Admin/Control message from dispatch_q_.
+  // Returns true if the fiber should terminate (e.g. Migration).
+  bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
+
+  // Processes the next Pipeline command from parsed_head_.
+  void ProcessPipelineCommand();
+
   void SendAsync(MessageHandle msg);
 
-  // Updates memory stats and pooling, must be called for all used messages
-  void RecycleMessage(MessageHandle msg);
+  // Updates Control Path statistics and backpressure counters for administrative
+  // events, monitor messages, and PubSub notifications.
+  // If add is true, stats are incremented, otherwise decremented.
+  void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
   ParserStatus ParseRedis(unsigned max_busy_cycles);
   ParserStatus ParseMemcache();
@@ -325,7 +332,8 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
-  void DecreaseStatsOnClose();
+  void IncreaseConnStats();
+  void DecreaseConnStats();
   void BreakOnce(uint32_t ev_mask);
 
   // The read buffer with read data that needs to be parsed and processed.
@@ -340,9 +348,6 @@ class Connection : public util::Connection {
       slice.remove_prefix(len);
     }
   };
-
-  void IncrNumConns();
-  void DecrNumConns();
 
   bool IsReplySizeOverLimit() const;
 
@@ -364,20 +369,30 @@ class Connection : public util::Connection {
   };
 
   ParsedCommand* CreateParsedCommand();
-  void EnqueueParsedCommand();
+  void EnqueueParsedCommand(ParsedCommand* cmd);
+
+  // Releases the command memory back to the pool.
+  // - Set is_pipelined=true if the command was successfully executed and should be counted
+  // in latency/throughput stats.
+  // - Set is_pipelined=false if the command is being dropped/cleaned up without execution or should
+  // not be counted in stats.
   void ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined);
+
   void DestroyParsedQueue();
 
-  std::deque<MessageHandle> dispatch_q_;  // dispatch queue
-  util::fb2::CondVarAny cnd_;             // dispatch queue waker
-  util::fb2::Fiber async_fb_;             // async fiber (if started)
+  // Dispatch Queue - Queue for the Control Path.
+  // Handles asynchronous administrative tasks, events, and high-priority control
+  // messages (e.g., PubSub, Monitor, Migration requests, Checkpoints) processed
+  // by the AsyncFiber.
+  std::deque<MessageHandle> dispatch_q_;    // dispatch queue
+  util::fb2::CondVarAny cnd_;               // dispatch queue waker
+  util::fb2::Fiber async_fb_;               // async fiber (if started)
+  size_t dispatch_q_bytes_ = 0;             // total bytes in dispatch queue
+  size_t dispatch_q_subscriber_bytes_ = 0;  // total bytes from subscribers in dispatch queue
 
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
-
-  uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
-  size_t pending_pipeline_bytes_ = 0;      // how many bytes of the queued Redis async commands
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
@@ -388,7 +403,7 @@ class Connection : public util::Connection {
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
 
-  // Parsed commands queue.
+  // Parsed Commands Queue - Queue for the Data Path.
   //
   // Commands move through the following stages in a single linked list:
   //   1) parsed but not yet dispatched        : [parsed_to_execute_, ..., parsed_tail_]
@@ -409,7 +424,19 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
-  unsigned parsed_cmd_q_len_ = 0;
+  // Total number of commands in parsed command queue
+  size_t parsed_cmd_q_len_ = 0;
+  // Total bytes used by commands in parsed command queue
+  size_t parsed_cmd_q_bytes_ = 0;
+  // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
+  bool HasPendingMessages() const {
+    return parsed_head_ || !dispatch_q_.empty();
+  }
+
+  // Returns total count of commands pending in the parsed command queue and dispatch queue.
+  size_t GetPendingMessageCount() const {
+    return parsed_cmd_q_len_ + dispatch_q_.size();
+  }
 
   uint32_t id_;
   Protocol protocol_;

@@ -3,21 +3,19 @@
 //
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
+
 #include <boost/intrusive/list.hpp>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "server/common.h"
+#include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
+#include "server/stats.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/entry_map.h"
-#include "server/tx_base.h"
 #include "util/fibers/future.h"
-
-#ifdef WITH_TIERING
-
-#include <absl/container/flat_hash_map.h>
 
 namespace dfly {
 
@@ -28,16 +26,27 @@ class SmallBins;
 struct Decoder;
 };  // namespace tiering
 
+struct TieredStorageBase {
+  // Min sizes of values taking up full page on their own
+  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+  struct StashDescriptor {
+    std::variant<std::array<std::string_view, 2>, uint8_t*> blob;
+    CompactObj::ExternalRep rep;
+
+    size_t EstimatedSerializedSize() const;
+    size_t Serialize(io::MutableBytes buffer) const;
+  };
+
+  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
+};
+
+#ifdef WITH_TIERING
+
 // Manages offloaded values
-class TieredStorage {
+class TieredStorage : public TieredStorageBase {
   class ShardOpManager;
 
  public:
-  // Min sizes of values taking up full page on their own
-  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-
-  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
-
   explicit TieredStorage(size_t max_file_size, DbSlice* db_slice);
   ~TieredStorage();  // drop forward declared unique_ptrs
 
@@ -49,33 +58,23 @@ class TieredStorage {
 
   // Enqueue read external value with generic decoder.
   template <typename D, typename F>
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+  void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
+            const D& decoder, F&& f) {
     // TODO(vlad): untangle endless callback wrapping!
     // Templates don't consider implicit conversions, so explicitly convert to std::function
     auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
       f(res.transform([](auto* d) { return static_cast<D*>(d); }));
     };
-    ReadInternal(dbid, key, value, decoder, wrapped_cb);
+    ReadInternal(dbid, key, segment, decoder, wrapped_cb);
   }
 
-  // Read offloaded value. It must be of external string type
-  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
+  // Returns StashDescriptor if a value should be stashed.
+  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const;
 
-  // Read offloaded value. It must be of external string type
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(io::Result<std::string>)> readf);
-
-  // Apply modification to offloaded value, return generic result from callback.
-  // Unlike immutable Reads - the modified value must be uploaded back to memory.
-  // This is handled by OpManager when modf completes.
-  template <typename T>
-  TResult<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
-                    std::function<T(std::string*)> modf);
-
-  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished.
-  // Returns optional future for backpressure if `provide_bp` is set and conditions are met.
-  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
-                                                  PrimeValue* value, bool provide_bp = false);
+  // Stash value, returns optional future for backpressure
+  // if `provide_bp` is set and conditions are met.
+  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
+                                               const StashDescriptor& blobs, bool provide_bp);
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, PrimeValue* value);
@@ -107,12 +106,9 @@ class TieredStorage {
   }
 
  private:
-  void ReadInternal(DbIndex dbid, std::string_view key, const PrimeValue& value,
+  void ReadInternal(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
                     std::function<void(io::Result<tiering::Decoder*>)> cb);
-
-  // Returns if a value should be stashed
-  bool ShouldStash(const PrimeValue& pv) const;
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
@@ -140,7 +136,8 @@ class TieredStorage {
     float upload_threshold;
     bool experimental_hash_offload;
   } config_;
-  struct {
+
+  mutable struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
     uint64_t offloading_steps = 0;
@@ -150,23 +147,46 @@ class TieredStorage {
   } stats_;
 };
 
-}  // namespace dfly
+// Read offloaded value. It must be of external string type
+void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts);
 
+// Read offloaded value and apply transformation cb on the read result. Returns future of the
+// transformed result.
+template <typename T>
+TieredStorage::TResult<T> ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                     std::function<T(std::string_view)> cb, TieredStorage* ts) {
+  TieredStorage::TResult<T> fut;
+  auto read_cb = [fut, cb = std::move(cb)](io::Result<std::string_view> res) mutable {
+    fut.Resolve(res.transform([&](std::string_view sv) { return cb(sv); }));
+  };
+  ReadTiered(dbid, key, value, std::move(read_cb), ts);
+  return fut;
+}
+
+inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::string_view key,
+                                                            const PrimeValue& value,
+                                                            TieredStorage* ts) {
+  return ReadTiered<std::string>(
+      dbid, key, value, [](std::string_view val) { return std::string(val); }, ts);
+}
+
+// Reads offloaded value, and applies modifications on it and return generic result from callback.
+// Unlike with immutable Reads - the modified value will be uploaded back to memory.
+// This is handled by OpManager when modf completes.
+template <typename T>
+TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                       std::function<T(std::string*)> modf, TieredStorage* ts);
+
+std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
+                                                       bool provide_bp, PrimeValue* pv,
+                                                       TieredStorage* ts);
 #else
 
-class DbSlice;
-
-// This is a stub implementation for non-linux platforms.
-namespace dfly {
-class TieredStorage {
+class TieredStorage : public TieredStorageBase {
   class ShardOpManager;
 
  public:
-  // Min sizes of values taking up full page on their own
-  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-
-  template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
-
   explicit TieredStorage(size_t max_size, DbSlice* db_slice) {
   }
 
@@ -180,17 +200,14 @@ class TieredStorage {
   void Close() {
   }
 
-  TResult<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
-    return {};
-  }
-
   // Read offloaded value. It must be of external type
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
-            std::function<void(io::Result<std::string>)> readf) {
+            std::function<void(io::Result<std::string_view>)> readf) {
   }
 
   template <typename D, typename F>
-  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value, const D& decoder, F&& f) {
+  void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& value, const D& decoder,
+            F&& f) {
   }
 
   template <typename T>
@@ -199,8 +216,12 @@ class TieredStorage {
     return {};
   }
 
-  std::optional<util::fb2::Future<bool>> TryStash(DbIndex dbid, std::string_view key,
-                                                  PrimeValue* value, bool provide_bp = false) {
+  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const {
+    return {};
+  }
+
+  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
+                                               const StashDescriptor& blobs, bool provide_bp) {
     return {};
   }
 
@@ -220,10 +241,6 @@ class TieredStorage {
   }
 
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
-  }
-
-  bool ShouldStash(const PrimeValue& pv) const {
-    return false;
   }
 
   TieredStats GetStats() const {
@@ -253,6 +270,34 @@ class TieredStorage {
   }
 };
 
-}  // namespace dfly
+template <typename T>
+TieredStorage::TResult<T> ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                     std::function<T(std::string_view)> cb, TieredStorage* ts) {
+  return {};
+}
+
+inline void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                       std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts) {
+}
+
+inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::string_view key,
+                                                            const PrimeValue& value,
+                                                            TieredStorage* ts) {
+  return {};
+}
+
+template <typename T>
+TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                                       std::function<T(std::string*)> modf, TieredStorage* ts) {
+  return {};
+}
+
+inline std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
+                                                              bool provide_bp, PrimeValue* pv,
+                                                              TieredStorage* ts) {
+  return {};
+}
 
 #endif  // WITH_TIERING
+
+}  // namespace dfly

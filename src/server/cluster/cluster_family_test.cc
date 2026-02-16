@@ -15,6 +15,7 @@
 #include "absl/time/time.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
@@ -505,6 +506,54 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
                                 "total_writes", IntArg(0), "memory_bytes", IntArg(0))),
           RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(1),
                                 "total_writes", IntArg(2), "memory_bytes", IntArg(36))))));
+}
+
+TEST_F(ClusterFamilyTest, ClusterGetSlotInfoRanges) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  // Test basic range syntax: 0-2 should return 3 slots
+  auto result = RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-2"});
+  ASSERT_EQ(result.GetVec().size(), 3u);
+  EXPECT_THAT(result.GetVec()[0], RespArray(ElementsAre(IntArg(0), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[1], RespArray(ElementsAre(IntArg(1), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[2], RespArray(ElementsAre(IntArg(2), _, _, _, _, _, _, _, _)));
+
+  // Test mixed syntax: range + individual slots
+  result = RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-1", "5", "10-11"});
+  ASSERT_EQ(result.GetVec().size(), 5u);
+  EXPECT_THAT(result.GetVec()[0], RespArray(ElementsAre(IntArg(0), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[1], RespArray(ElementsAre(IntArg(1), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[2], RespArray(ElementsAre(IntArg(5), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[3], RespArray(ElementsAre(IntArg(10), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[4], RespArray(ElementsAre(IntArg(11), _, _, _, _, _, _, _, _)));
+
+  // Test reversed range (5-2 should be treated as 2-5)
+  result = RunPrivileged({"dflycluster", "getslotinfo", "slots", "5-2"});
+  ASSERT_EQ(result.GetVec().size(), 4u);
+  EXPECT_THAT(result.GetVec()[0], RespArray(ElementsAre(IntArg(2), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[1], RespArray(ElementsAre(IntArg(3), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[2], RespArray(ElementsAre(IntArg(4), _, _, _, _, _, _, _, _)));
+  EXPECT_THAT(result.GetVec()[3], RespArray(ElementsAre(IntArg(5), _, _, _, _, _, _, _, _)));
+
+  // Test invalid slot id in range
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-20000"}),
+              ErrArg("Invalid slot id"));
+
+  // Test invalid range format
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "abc-def"}),
+              ErrArg("Invalid slot range format"));
+
+  // Edge cases with dashes
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "-1"}),
+              ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1-"}),
+              ErrArg("Invalid slot range format"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1--2"}),
+              ErrArg("Invalid slot range format"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1-2-3"}),
+              ErrArg("Invalid slot range format"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1---2"}),
+              ErrArg("Invalid slot range format"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {

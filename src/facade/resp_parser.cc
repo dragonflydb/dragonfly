@@ -4,9 +4,19 @@
 
 #include "facade/resp_parser.h"
 
+#include <cstring>
+
 #include "base/logging.h"
 
+extern "C" {
+#include "redis/hiredis.h"
+}
+
 namespace facade {
+
+RESPParser::RESPParser() {
+  reader_ = redisReaderCreate();
+}
 
 RESPObj::RESPObj(RESPObj&& other) noexcept
     : reply_(other.reply_), needs_to_free_(other.needs_to_free_) {
@@ -33,7 +43,8 @@ RESPObj::Type RESPObj::GetType() const {
 size_t RESPObj::Size() const {
   if (!reply_)
     return 0;
-  return GetType() == Type::ARRAY ? reply_->elements : 1;
+  Type type = GetType();
+  return (type == Type::ARRAY || type == Type::MAP || type == Type::SET) ? reply_->elements : 1;
 }
 
 std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len) {
@@ -73,6 +84,12 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
       break;
     }
     case RESPObj::Type::ARRAY: {
+      os << *obj.As<RESPArray>();
+      break;
+    }
+    case RESPObj::Type::MAP:
+      [[fallthrough]];
+    case RESPObj::Type::SET: {
       os << *obj.As<RESPArray>();
       break;
     }
