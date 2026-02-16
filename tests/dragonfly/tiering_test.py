@@ -101,7 +101,6 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
         "tiered_storage_write_depth": 1500,
-        #  "tiered_experimental_cooling": "false",
     }
 )
 async def test_replication(
@@ -112,7 +111,7 @@ async def test_replication(
     """
 
     # Fill master with values
-    # seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
+
     seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
     await seeder.run(async_client)
 
@@ -157,7 +156,7 @@ async def test_replication(
     # cancel filler and wait for replica to catch up
     for task in fill_tasks:
         task.cancel()
-    await asyncio.gather(*fill_tasks)
+    await asyncio.gather(*fill_tasks, return_exceptions=True)
     await check_all_replicas_finished([replica_client], async_client, timeout=500)
 
     #
@@ -171,4 +170,4 @@ async def test_replication(
             key_master = await async_client.get(key)
             key_replica = await replica_client.get(key)
             assert key_master == key_replica
-        assert False, "Iconsistency detected, but key not determined"
+        assert False, "Inconsistency detected, but key not determined"
