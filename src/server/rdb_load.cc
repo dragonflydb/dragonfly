@@ -545,6 +545,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   QList* qlv2 = nullptr;
   if (config_.append) {
     if (pv_->ObjType() != OBJ_LIST) {
+      LOG(ERROR) << "List operation on wrong object type. Expected list got: " << pv_->ObjType();
       ec_ = RdbError(errc::invalid_rdb_type);
       return;
     }
@@ -2284,6 +2285,17 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (!rdbIsObjectTypeDF(type)) {
+      LOG(ERROR) << "Unrecognized rdb object type " << type;
+      LOG(ERROR) << "Prior loop state:";
+      LOG(ERROR) << "Last key loaded: " << last_key_loaded_;
+      LOG(ERROR) << "prending_read_.remaining " << pending_read_.remaining
+                 << " pending_read_.reserve " << pending_read_.reserve;
+      // Ok let's check the key:
+      auto bytes = mem_buf_->InputBuffer();
+      size_t cut = std::min(bytes.size(), 256ul);
+      // Obj dump - bytes
+      std::string_view out{reinterpret_cast<const char*>(bytes.data()), cut};
+      LOG(ERROR) << "Trailing bytes: " << absl::CHexEscape(out);
       return RdbError(errc::invalid_rdb_type);
     }
 
@@ -2688,8 +2700,6 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   if (item->load_config.streamed && item->load_config.append) {
     std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
-      LOG(INFO) << "Appending to streamed key '" << absl::CHexEscape(item->key) << "' in DB "
-                << db_ind;
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2814,6 +2824,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   int64_t start = absl::GetCurrentTimeNanos();
 
   SET_OR_RETURN(ReadKey(), key);
+  last_key_loaded_ = key;
 
   bool streamed = false;
   do {

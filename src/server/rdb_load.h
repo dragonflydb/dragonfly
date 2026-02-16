@@ -396,6 +396,8 @@ class RdbLoader : protected RdbLoaderBase {
   // Map of currently streamed big values
   std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
   base::SpinLock now_streamed_mu_;  // guards now_streamed_
+
+  std::string last_key_loaded_;
 };
 
 }  // namespace dfly
