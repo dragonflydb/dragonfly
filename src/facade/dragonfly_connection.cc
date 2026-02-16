@@ -25,6 +25,7 @@
 #include "common/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
@@ -786,8 +787,10 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      // ioloop_v2 not supported for TLS connections yet.
-      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
+      // ioloop_v2 not supported for TLS & redis connections yet.
+      ioloop_v2_ =
+          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
+
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -2511,6 +2514,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+  DCHECK(memcache_parser_) << "Not supported for redis yet";
+
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
@@ -2578,12 +2583,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (io_buf_.InputLen() > 0) {
-      if (redis_parser_) {
-        parse_status = ParseRedis(max_busy_read_cycles_cached);
-      } else {
-        DCHECK(memcache_parser_);
-        parse_status = ParseMemcache();
-      }
+      DCHECK(memcache_parser_);
+      parse_status = ParseMemcache();
     } else {
       parse_status = NEED_MORE;
 
