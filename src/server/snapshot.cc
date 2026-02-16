@@ -7,6 +7,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <mutex>
+
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -440,8 +442,12 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
-size_t SliceSnapshot::FlushSerialized() {
-  std::string blob = serializer_->Flush(SerializerBase::FlushState::kFlushEndEntry);
+size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
+  if (serializer == nullptr) {
+    CHECK(delayed_entries_.empty());
+    serializer = serializer_.get();
+  }
+  std::string blob = serializer->Flush(SerializerBase::FlushState::kFlushEndEntry);
 
   size_t serialized = blob.size();
   HandleFlushData(std::move(blob));
@@ -452,17 +458,21 @@ bool SliceSnapshot::PushSerialized(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
     return false;
 
-  // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushSerialized();
+  size_t serialized = 0;
 
-  if (!delayed_entries_.empty()) {
-    // Async bucket serialization might have accumulated some delayed values.
-    // Because we can finally block in this function, we'll await and serialize them
+  // Atomic bucket serialization might have accumulated some delayed values.
+  // Because we can finally block in this function, we'll await and serialize them
+  thread_local LocalLatch delayed_flush_latch_;
+  while (!delayed_entries_.empty()) {
+    // After pop_front there is no indication of the operation ongoing, so we need a latch
+    std::unique_lock lk{delayed_flush_latch_};
+
+    RdbSerializer delayed_serializer{compression_mode_};
     do {
-      // We may call PushSerialized from multiple fibers concurrently, so we need to
-      // ensure that we are not serializing the same entry concurrently.
-      DelayedEntry entry = std::move(delayed_entries_.back());
-      delayed_entries_.pop_back();
+      // This code can run concurrently, so pop the entries one by one.
+      // Because the keys never repeat (bucket visited once) order is not important.
+      DelayedEntry entry = std::move(delayed_entries_.front());
+      delayed_entries_.pop_front();
 
       // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
       // there are a few problems with how we serialize external values.
@@ -478,12 +488,17 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       PrimeValue pv{*res};
-      serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
+      delayed_serializer.SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
     } while (!delayed_entries_.empty());
 
-    // blocking point.
-    serialized += FlushSerialized();
+    lk.unlock();
+    serialized += FlushSerialized(&delayed_serializer);
   }
+
+  // Flush any of the leftovers to avoid interleavings
+  delayed_flush_latch_.Wait();
+  serialized += FlushSerialized();
+
   return serialized > 0;
 }
 
