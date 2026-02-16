@@ -1643,6 +1643,15 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   TrackIfNeeded(cmd_cntx);
   auto* tx = cmd_cntx->tx();
 
+  // For EVAL[] and EXEC/DISCARD, clean up state.
+  // We don't do it directly in commands to allow some introspection after execution (slowlog).
+  absl::Cleanup mck_cleanup = [cntx, cid, mck = cid->MultiControlKind()]() {
+    if (mck && *mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
+      MultiCleanup(cntx);
+    else if (mck && *mck == CO::MultiControlKind::EVAL)
+      cntx->conn_state.script_info.reset();
+  };
+
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
@@ -2048,13 +2057,13 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
   auto* tx = cmd_cntx->tx();
   DCHECK(tx);
-  DVLOG(2) << "CallFromScript " << ca.args[0];
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& info = cntx->conn_state.script_info;
+  info->stats.num_commands++;
 
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
-  auto* cntx = cmd_cntx->server_conn_cntx();
   if (ca.async) {
-    auto& info = cntx->conn_state.script_info;
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
@@ -2236,6 +2245,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
+  sinfo->stats.sha = eval_args.sha;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2263,9 +2273,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo]() {
+  // Reset cid to EVAL[] as the context is reused during command dispatch
+  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
     interpreter->ResetStack();
-    sinfo.reset();
+    cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
@@ -2364,7 +2375,6 @@ void Service::Discard(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  MultiCleanup(cntx);
   rb->SendOk();
 }
 
@@ -2443,9 +2453,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
-  // Clean the context no matter the outcome
-  absl::Cleanup exec_clear = [cntx] { MultiCleanup(cntx); };
-
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
@@ -2462,8 +2469,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
     return rb->SendNull();
   }
-
-  cmd_cntx->exec_body_len = exec_info.body.size();
 
   auto keys = CollectAllKeys(&exec_info);
   if (IsClusterEnabled()) {
