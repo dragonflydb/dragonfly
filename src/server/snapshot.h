@@ -158,7 +158,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::deque<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::deque<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
