@@ -863,7 +863,7 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   } else {
     absl::StrAppend(&before, " name=", name_);
   }
-#ifdef DF_USE_SSL
+#ifdef DFLY_USE_SSL
   if (is_tls_) {
     tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
     string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
