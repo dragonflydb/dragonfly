@@ -1,0 +1,3 @@
+stats
+version
+quit

@@ -103,6 +103,9 @@ ABSL_FLAG(uint32_t, afl_loop_limit, UINT_MAX,
           "AFL++ persistent mode loop limit. Specifies how many fuzzing iterations "
           "to run before restarting the process. Higher values improve performance but "
           "may accumulate state.");
+ABSL_FLAG(uint32_t, afl_target_port, 0,
+          "Port to send fuzz input to. Defaults to --port (RESP). "
+          "Set to --memcached_port to fuzz the memcache protocol.");
 #endif
 
 using namespace util;
@@ -1043,7 +1046,8 @@ Usage: dragonfly [FLAGS]
 
     std::thread server_thread = dfly::InitAflFuzzing(pool.get(), &acceptor);
 
-    uint16_t port = GetFlag(FLAGS_port);
+    uint32_t target_port = GetFlag(FLAGS_afl_target_port);
+    uint16_t port = target_port ? target_port : GetFlag(FLAGS_port);
     uint32_t afl_loop_limit = GetFlag(FLAGS_afl_loop_limit);
     unsigned int loop_iteration = 0;
 
