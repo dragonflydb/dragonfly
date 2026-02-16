@@ -88,8 +88,11 @@ MP::Result ParseStore(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t m
       !absl::SimpleAtoi(tokens[3], &bytes_len))
     return MP::BAD_INT;
 
-  if (bytes_len > max_value_len)
+  if (bytes_len > max_value_len) {
+    LOG_EVERY_T(WARNING, 1) << "Memcache value size " << bytes_len << " exceeds max_bulk_len "
+                            << max_value_len;
     return MP::PARSE_ERROR;
+  }
 
   res->expire_ts = ToAbsolute(expire_ts, now);
 
@@ -245,8 +248,11 @@ MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t ma
         return MP::PARSE_ERROR;
       if (!absl::SimpleAtoi(tokens[0], &bytes_len))
         return MP::BAD_INT;
-      if (bytes_len > max_value_len)
+      if (bytes_len > max_value_len) {
+        LOG_EVERY_T(WARNING, 1) << "Memcache value size " << bytes_len << " exceeds max_bulk_len "
+                                << max_value_len;
         return MP::PARSE_ERROR;
+      }
 
       res->type = MP::SET;
       tokens.remove_prefix(1);
