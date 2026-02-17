@@ -74,10 +74,25 @@ rm -rf "$TMPDIR"
 SIZE=$(du -h "$OUTPUT" | cut -f1)
 print_info "Archive created: ${OUTPUT} (${SIZE})"
 echo ""
+# Detect target from directory structure: artifacts/<target>/default/crashes
+TARGET_NAME=$(basename "$(dirname "$(dirname "$CRASHES_DIR")")")
+IS_MEMCACHE=false
+if [[ "$TARGET_NAME" == "memcache" ]]; then
+    IS_MEMCACHE=true
+fi
+
 echo "To reproduce:"
 echo "  1. Start dragonfly:"
-echo "     ./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=\"\""
+if [[ "$IS_MEMCACHE" == true ]]; then
+    echo "     ./build/dragonfly --port 6379 --memcached_port=11211 --logtostderr --proactor_threads 1 --dbfilename=\"\""
+else
+    echo "     ./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=\"\""
+fi
 echo "  2. Extract and replay:"
 echo "     tar xzf ${ARCHIVE_NAME}.tar.gz"
 echo "     cd ${ARCHIVE_NAME}"
-echo "     python3 replay_crash.py crashes ${CRASH_ID}"
+if [[ "$IS_MEMCACHE" == true ]]; then
+    echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 11211"
+else
+    echo "     python3 replay_crash.py crashes ${CRASH_ID}"
+fi
