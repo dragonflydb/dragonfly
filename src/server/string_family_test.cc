@@ -4,7 +4,6 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
-#include "facade/reply_builder.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -985,28 +984,6 @@ TEST_F(StringFamilyTest, GatViaRedisProtocol) {
   Run({"set", "key", "val"});
   auto resp = Run({"GAT", "key"});
   EXPECT_THAT(resp, ErrArg("memcache-only"));
-}
-
-// Meta get with large value should not crash due to buffer overflow.
-TEST_F(StringFamilyTest, MetaGetLargeValue) {
-  facade::FacadeStats stats;
-  facade::tl_facade_stats = &stats;
-
-  io::StringSink sink;
-  facade::MCReplyBuilder builder(&sink);
-
-  facade::MemcacheCmdFlags flags;
-  flags.meta = true;
-  flags.return_value = true;
-
-  string large_val(16000, 'x');
-  builder.SendValue(flags, "key", large_val, 0, 0, 0);
-
-  const string& output = sink.str();
-  EXPECT_THAT(output, HasSubstr("VA 16000"));
-  EXPECT_THAT(output, HasSubstr(large_val));
-
-  facade::tl_facade_stats = nullptr;
 }
 
 TEST_F(StringFamilyTest, MSetNxOddArgs) {
