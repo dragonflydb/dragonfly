@@ -1119,6 +1119,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
   executor_ = std::make_unique<JournalExecutor>(service);
   rdb_loader_ = std::make_unique<RdbLoader>(&service_);
   rdb_loader_->SetLoadUnownedSlots(true);
+  rdb_loader_->SetShardCount(master_context.num_flows);
 }
 
 DflyShardReplica::~DflyShardReplica() {

@@ -86,8 +86,9 @@ absl::flat_hash_set<std::string> GlobalHnswIndexRegistry::GetIndexNames() const 
   std::shared_lock<std::shared_mutex> lock(registry_mutex_);
   absl::flat_hash_set<std::string> index_names;
   for (const auto& [key, _] : indices_) {
-    // Keys are in format "index_name:field_name", extract index_name
-    size_t pos = key.find(':');
+    // Keys are in format "index_name:field_name", extract index_name.
+    // Use rfind because index names may legally contain ':' (e.g. ":Order:index").
+    size_t pos = key.rfind(':');
     if (pos != std::string::npos) {
       index_names.insert(key.substr(0, pos));
     }

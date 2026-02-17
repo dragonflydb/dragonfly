@@ -9,13 +9,17 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
+#include "server/search/global_hnsw_index.h"
 
 namespace dfly::search {
 
-void IndexBuilder::Start(const OpArgs& op_args, std::function<void()> on_complete) {
+void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
+                         std::function<void()> on_complete) {
   using namespace util::fb2;
   auto table = op_args.GetDbSlice().CopyDBTablePtr(op_args.db_cntx.db_index);
   DCHECK(table.get());
+
+  is_restored_ = is_restored;
 
   auto cb = [this, table, db_cntx = op_args.db_cntx, on_complete = std::move(on_complete)] {
     CursorLoop(table.get(), db_cntx);
@@ -51,8 +55,25 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     PrimeValue& pv = it->second;
     std::string_view key = it->first.GetSlice(&scratch);
 
-    if (index_->Matches(key, pv.ObjType()))
+    if (!index_->Matches(key, pv.ObjType()))
+      return;
+
+    // TODO: make it a parameter of SharDocIndex::AddDoc()
+    if (is_restored_) {
+      // Use existing DocIds from the restored key_index_ to keep them aligned with
+      // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices
+      // (text/tag/numeric); vector indices are handled separately by VectorLoop.
+      if (auto doc_id = index_->key_index().Find(key); doc_id) {
+        auto accessor = GetAccessor(db_cntx, pv);
+        if (!index_->indices_->Add(*doc_id, *accessor)) {
+          LOG(WARNING) << "Failed to restore index entry for key: " << key
+                       << ", removing from key index";
+          index_->key_index_.Remove(*doc_id);
+        }
+      }
+    } else {
       index_->AddDoc(key, db_cntx, pv);
+    }
   };
 
   PrimeTable::Cursor cursor;
@@ -69,6 +90,14 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
   });
   if (!any_vector || !state_.IsRunning())
     return;
+
+  // If any HNSW index was restored from RDB, use UpdateVectorData instead of Add.
+  if (is_restored_) {
+    // TODO: Add support for concurrent modifications
+    OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
+    index_->RestoreGlobalVectorIndices(index_->base_->name, op_args);
+    return;
+  }
 
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
