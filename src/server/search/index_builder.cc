@@ -58,7 +58,7 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     if (!index_->Matches(key, pv.ObjType()))
       return;
 
-    // TODO: make it a paramater of SharDocIndex::AddDoc()
+    // TODO: make it a parameter of SharDocIndex::AddDoc()
     if (is_restored_) {
       // Use existing DocIds from the restored key_index_ to keep them aligned with
       // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices

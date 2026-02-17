@@ -2231,8 +2231,7 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
       // Only restore if the flag is enabled and shard count matches (GlobalDocId encodes shard_id)
-      const bool should_restore = deserialize_hnsw_index_ && shard_count_ > 0 &&
-                                  shard_set != nullptr && shard_count_ == shard_set->size();
+      const bool should_restore = deserialize_hnsw_index_ && shard_count_ == shard_set->size();
 
       if (should_restore) {
         size_t colon_pos = index_key.rfind(':');
@@ -2271,8 +2270,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
       // Only store mappings if deserialization is enabled AND shard count matches.
       // With different shard counts, keys are distributed differently so the mappings are invalid.
-      if (!deserialize_hnsw_index_ || shard_count_ == 0 || shard_set == nullptr ||
-          shard_count_ != shard_set->size()) {
+      if (!deserialize_hnsw_index_ || shard_count_ != shard_set->size()) {
         continue;
       }
 
@@ -2931,7 +2929,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context, bool ignore_dispatch_errors = false) {
+                              string_view error_context, bool add_NX = false) {
   facade::CapturingReplyBuilder crb;
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
@@ -2974,17 +2972,19 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   cntx_cmd.Init(&crb, &cntx);
 
   cntx_cmd.PushArg(command_name);
-  for (unsigned i = 0; i < resp_vec.size(); i++) {
+  cntx_cmd.PushArg(resp_vec[0].GetView());  // index name
+  if (add_NX) {
+    cntx_cmd.PushArg("NX");
+  }
+  for (unsigned i = 1; i < resp_vec.size(); i++) {
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
   service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
                            facade::AsyncPreference::ONLY_SYNC);
 
-  if (!ignore_dispatch_errors) {
-    auto response = crb.Take();
-    if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-      LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
-    }
+  auto response = crb.Take();
+  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
+    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
   }
 }
 
@@ -3120,8 +3120,7 @@ error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_n
   if (elements_number > 0) {
     LOG(INFO) << "Skipping HNSW vector index restore: " << index_key
               << " elements_number=" << elements_number << " shard_count_=" << shard_count_
-              << " current_shards=" << (shard_set ? shard_set->size() : 0)
-              << ". Index will be rebuilt from data.";
+              << " current_shards=" << shard_set->size() << ". Index will be rebuilt from data.";
   }
   return {};
 }
@@ -3152,7 +3151,7 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (is_error)
     return;
 
-  if (shard_set != nullptr && !index_mappings.empty()) {
+  if (!index_mappings.empty()) {
     // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
     shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
       auto it = index_mappings.find(es->shard_id());
