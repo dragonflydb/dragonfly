@@ -111,7 +111,6 @@ async def test_replication(
     """
 
     # Fill master with values
-
     seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
     await seeder.run(async_client)
 
@@ -131,10 +130,9 @@ async def test_replication(
     keys = await async_client.keys()
 
     async def fill_job():
-        i = 0
-        for key in keys:
+        for i, key in enumerate(keys):
             await async_client.append(key, f":{i}:")
-            i += 1
+            await asyncio.sleep(0.005)  # limit qps
 
     fill_tasks = [asyncio.create_task(fill_job()) for _ in range(3)]
 
