@@ -1196,14 +1196,14 @@ TEST_F(SearchFamilyTest, AggregateGroupBy) {
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
-  Run({"JSON.SET", "product:1", "$", R"({"name": "Product A", "price": 10, "quantity": 2})"});
-  Run({"JSON.SET", "product:2", "$", R"({"name": "Product B", "price": 20, "quantity": 3})"});
-  Run({"JSON.SET", "product:3", "$", R"({"name": "Product C", "price": 30, "quantity": 5})"});
-
   auto resp =
       Run({"FT.CREATE", "json_index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
            "$.price", "AS", "price", "NUMERIC", "$.quantity", "AS", "quantity", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "product:1", "$", R"({"name": "Product A", "price": 10, "quantity": 2})"});
+  Run({"JSON.SET", "product:2", "$", R"({"name": "Product B", "price": 20, "quantity": 3})"});
+  Run({"JSON.SET", "product:3", "$", R"({"name": "Product C", "price": 30, "quantity": 5})"});
 
   resp = Run({"FT.AGGREGATE", "json_index", "*", "GROUPBY", "0", "REDUCE", "SUM", "1", "price",
               "AS", "total_price"});
@@ -1215,14 +1215,14 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "group", "TAG", "value", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
   absl::FlagSaver fs;
   Run({"HSET", "h1", "group", "first", "value", "1"});
   Run({"HSET", "h2", "group", "second", "value", "2"});
   Run({"HSET", "h3", "group", "first", "value", "3"});
-
-  auto resp =
-      Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "group", "TAG", "value", "NUMERIC"});
-  EXPECT_EQ(resp, "OK");
 
   absl::SetFlag(&FLAGS_search_reject_legacy_field, false);
   resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "group", "REDUCE", "COUNT", "0", "AS",
