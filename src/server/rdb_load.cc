@@ -545,7 +545,6 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   QList* qlv2 = nullptr;
   if (config_.append) {
     if (pv_->ObjType() != OBJ_LIST) {
-      LOG(ERROR) << "List operation on wrong object type. Expected list got: " << pv_->ObjType();
       ec_ = RdbError(errc::invalid_rdb_type);
       return;
     }
@@ -2285,17 +2284,12 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (!rdbIsObjectTypeDF(type)) {
-      LOG(ERROR) << "Unrecognized rdb object type " << type;
-      LOG(ERROR) << "Prior loop state:";
-      LOG(ERROR) << "Last key loaded: " << last_key_loaded_;
-      LOG(ERROR) << "prending_read_.remaining " << pending_read_.remaining
-                 << " pending_read_.reserve " << pending_read_.reserve;
-      // Ok let's check the key:
-      auto bytes = mem_buf_->InputBuffer();
-      size_t cut = std::min(bytes.size(), 256ul);
-      // Obj dump - bytes
-      std::string_view out{reinterpret_cast<const char*>(bytes.data()), cut};
-      LOG(ERROR) << "Trailing bytes: " << absl::CHexEscape(out);
+      LOG(ERROR) << "Unrecognized rdb object type: " << type;
+      LOG(ERROR) << "Last iteration: ";
+      LOG(ERROR) << "key loaded: " << last_key_loaded_;
+      LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
+                 << "pending_read_.reserve: " << pending_read_.reserve;
+      // In case we encounter an error, it might worth peeking the InputBuffer()
       return RdbError(errc::invalid_rdb_type);
     }
 
