@@ -58,6 +58,7 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
     if (!index_->Matches(key, pv.ObjType()))
       return;
 
+    // TODO: make it a paramater of SharDocIndex::AddDoc()
     if (is_restored_) {
       // Use existing DocIds from the restored key_index_ to keep them aligned with
       // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices
@@ -92,6 +93,7 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
 
   // If any HNSW index was restored from RDB, use UpdateVectorData instead of Add.
   if (is_restored_) {
+    // TODO: Add support for concurrent modifications
     OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
     index_->RestoreGlobalVectorIndices(index_->base_->name, op_args);
     return;

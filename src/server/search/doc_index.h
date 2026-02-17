@@ -398,7 +398,7 @@ class ShardDocIndices {
   void DropAllIndices();
 
   // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args, bool is_restored = false);
+  void RebuildAllIndices(const OpArgs& op_args, bool is_restored);
 
   std::vector<std::string> GetIndexNames() const;
 

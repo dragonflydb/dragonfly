@@ -23,7 +23,7 @@ void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt,
 
 void ShardDocIndices::DropAllIndices() {
 }
-void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {
 }
 
 size_t ShardDocIndices::GetUsedMemory() const {
