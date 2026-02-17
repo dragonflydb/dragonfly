@@ -2294,7 +2294,7 @@ error_code RdbLoader::Load(io::Source* src) {
       LOG(ERROR) << "Last iteration: ";
       LOG(ERROR) << "key loaded: " << last_key_loaded_;
       LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
-                 << "pending_read_.reserve: " << pending_read_.reserve;
+                 << "\npending_read_.reserve: " << pending_read_.reserve;
       // In case we encounter an error, it might worth peeking the InputBuffer()
       return RdbError(errc::invalid_rdb_type);
     }
