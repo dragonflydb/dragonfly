@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "facade/facade_types.h"
+#include "server/common_types.h"
 
 namespace dfly {
 
@@ -30,10 +31,7 @@ using facade::OpResult;
 using StringVec = std::vector<std::string>;
 
 class CommandId;
-class Transaction;
-class EngineShard;
 struct ConnectionState;
-class Interpreter;
 class Namespaces;
 
 struct LockTagOptions {
@@ -49,24 +47,9 @@ struct LockTagOptions {
   static const LockTagOptions& instance();
 };
 
-enum class GlobalState : uint8_t {
-  ACTIVE,
-  LOADING,
-  SHUTTING_DOWN,
-  TAKEN_OVER,
-};
-
 std::ostream& operator<<(std::ostream& os, const GlobalState& state);
 
-enum class TimeUnit : uint8_t { SEC, MSEC };
-
-enum ExpireFlags {
-  EXPIRE_ALWAYS = 0,
-  EXPIRE_NX = 1 << 0,  // Set expiry only when key has no expiry
-  EXPIRE_XX = 1 << 2,  // Set expiry only when the key has expiry
-  EXPIRE_GT = 1 << 3,  // GT: Set expiry only when the new expiry is greater than current one
-  EXPIRE_LT = 1 << 4,  // LT: Set expiry only when the new expiry is less than current one
-};
+const char* GlobalStateName(GlobalState gs);
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 bool ParseDouble(std::string_view src, double* value);
@@ -84,8 +67,6 @@ inline Namespaces* namespaces = nullptr;
 // version 5.11 maps to 511 etc.
 // set upon server start.
 inline unsigned kernel_version = 0;
-
-const char* GlobalStateName(GlobalState gs);
 
 struct ScanOpts {
   ~ScanOpts();  // because of forward declaration

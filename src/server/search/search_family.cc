@@ -33,6 +33,7 @@
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"

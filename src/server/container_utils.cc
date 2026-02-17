@@ -11,7 +11,7 @@
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
-#include "server/server_state.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "src/facade/op_status.h"
 

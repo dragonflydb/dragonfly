@@ -12,7 +12,6 @@
 namespace dfly {
 
 class StringMap;
-class CommandRegistry;
 
 using facade::OpResult;
 using facade::OpStatus;

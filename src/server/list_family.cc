@@ -23,6 +23,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 /**

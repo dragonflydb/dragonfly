@@ -15,11 +15,6 @@
 
 namespace dfly {
 
-class EngineShard;
-class Transaction;
-class Namespace;
-class DbSlice;
-
 using cmn::ArgSlice;
 
 struct KeyLockArgs {

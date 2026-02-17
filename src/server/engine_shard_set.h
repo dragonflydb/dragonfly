@@ -4,24 +4,10 @@
 
 #pragma once
 
-extern "C" {
-#include "redis/sds.h"
-}
-
-#include <absl/container/btree_map.h>
-#include <absl/container/flat_hash_map.h>
-
-#include "core/mi_memory_resource.h"
-#include "server/db_slice.h"
 #include "server/engine_shard.h"
 #include "util/proactor_pool.h"
-#include "util/sliding_counter.h"
 
 namespace dfly {
-
-namespace journal {
-class Journal;
-}  // namespace journal
 
 class TieredStorage;
 class ShardDocIndices;
