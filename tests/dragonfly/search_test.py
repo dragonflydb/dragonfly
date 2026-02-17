@@ -545,7 +545,7 @@ def test_redis_om(df_server):
         skip_if_not_in_github("redis-om python library not installed")
         raise
 
-    client = redis.Redis(port=df_server.port)
+    client = redis.Redis(port=df_server.port, decode_responses=True)
 
     class TestCar(redis_om.HashModel):
         producer: str = redis_om.Field(index=True)
@@ -577,8 +577,7 @@ def test_redis_om(df_server):
     redis_om.Migrator().run()
 
     # Wait for async indexing of existing documents to complete
-    for index in client.execute_command("FT._LIST"):
-        index_name = index.decode() if isinstance(index, bytes) else index
+    for index_name in client.execute_command("FT._LIST"):
         timeout = time.time() + 10
         while int(client.ft(index_name).info()["indexing"]) == 1:
             if time.time() > timeout:
