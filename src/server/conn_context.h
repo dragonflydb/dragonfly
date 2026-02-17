@@ -12,14 +12,12 @@
 #include "facade/parsed_command.h"
 #include "facade/reply_mode.h"
 #include "server/common.h"
-#include "server/common_types.h"
 #include "server/tx_base.h"
 #include "server/version.h"
 
 namespace dfly {
 
 class EngineShardSet;
-class ConnectionContext;
 class ChannelStore;
 class Interpreter;
 struct FlowInfo;

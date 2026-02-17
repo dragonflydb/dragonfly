@@ -15,6 +15,7 @@
 #include "core/overloaded.h"
 #include "core/search/indices.h"
 #include "core/search/stateless_allocator.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
 #include "server/search/doc_accessors.h"

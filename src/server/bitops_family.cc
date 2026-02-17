@@ -18,7 +18,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/tiered_storage.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"

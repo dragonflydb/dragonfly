@@ -41,4 +41,18 @@ enum ExpireFlags {
   EXPIRE_LT = 1 << 4,  // LT: Set expiry only when the new expiry is less than current one
 };
 
+// Forward declarations for commonly used classes (to reduce header dependencies)
+class EngineShard;
+class Transaction;
+class DbSlice;
+class ConnectionContext;
+class CommandContext;
+class Namespace;
+class CommandRegistry;
+class Interpreter;
+
+namespace journal {
+class Journal;
+}  // namespace journal
+
 }  // namespace dfly

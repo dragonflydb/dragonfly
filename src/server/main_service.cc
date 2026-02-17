@@ -56,6 +56,7 @@ extern "C" {
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/sharding.h"
 #include "server/stream_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"

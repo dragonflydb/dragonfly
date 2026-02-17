@@ -8,6 +8,8 @@
 #include <optional>
 #include <string_view>
 
+#include "server/common_types.h"
+
 namespace dfly {
 
 namespace detail {
@@ -24,7 +26,6 @@ inline bool cluster_shard_by_slot = false;
 
 };  // namespace detail
 
-using SlotId = std::uint16_t;
 constexpr SlotId kMaxSlotNum = 0x3FFF;
 
 // A simple utility class that "aggregates" SlotId-s and can tell whether all inputs were the same.

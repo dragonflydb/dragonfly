@@ -21,6 +21,7 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"

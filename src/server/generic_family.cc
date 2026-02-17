@@ -33,6 +33,7 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"

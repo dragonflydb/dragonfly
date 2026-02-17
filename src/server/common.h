@@ -31,10 +31,7 @@ using facade::OpResult;
 using StringVec = std::vector<std::string>;
 
 class CommandId;
-class Transaction;
-class EngineShard;
 struct ConnectionState;
-class Interpreter;
 class Namespaces;
 
 struct LockTagOptions {

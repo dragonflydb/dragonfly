@@ -23,6 +23,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/execution_state.h"
 #include "server/family_utils.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {

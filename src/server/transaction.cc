@@ -18,6 +18,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,

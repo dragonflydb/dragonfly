@@ -13,9 +13,6 @@
 
 namespace dfly {
 
-class Transaction;
-class Namespace;
-
 // Used for tracking keys of blocking transactions and properly notifying them.
 // First, keys are marked as watched and associated with an owner transaction. A mutating
 // transaction marks them as touched, and once it concludes, the watching transactions are notified.
