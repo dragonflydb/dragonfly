@@ -1892,6 +1892,9 @@ auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
     if (chunking) {
       size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+      if (total_size == 0) {
+        return Unexpected(errc::rdb_file_corrupted);
+      }
 
       filter_data.resize(total_size);
       size_t offset = 0;
