@@ -13,7 +13,7 @@
 #include "server/acl/acl_log.h"
 #include "server/acl/user_registry.h"
 #include "server/channel_store.h"
-#include "server/common.h"
+#include "server/common_types.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
 #include "util/sliding_counter.h"
