@@ -576,6 +576,15 @@ def test_redis_om(df_server):
 
     redis_om.Migrator().run()
 
+    # Wait for async indexing of existing documents to complete
+    for index in client.execute_command("FT._LIST"):
+        index_name = index.decode() if isinstance(index, bytes) else index
+        timeout = time.time() + 10
+        while int(client.ft(index_name).info()["indexing"]) == 1:
+            if time.time() > timeout:
+                raise TimeoutError(f"Indexing {index_name} did not complete within 10 seconds")
+            time.sleep(0.05)
+
     # Get all cars
     assert extract_producers(TestCar.find().all()) == extract_producers(CARS)
 
