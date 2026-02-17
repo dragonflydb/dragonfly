@@ -82,7 +82,7 @@ class OutgoingMigration : private ProtocolClient {
 
   MigrationState GetStateImpl() const;
 
-  // SliceSlotMigration manages state and data transfering for the corresponding shard
+  // SliceSlotMigration manages state and data transferring for the corresponding shard
   class SliceSlotMigration;
 
   using UniqueSliceSlotMigration = std::unique_ptr<SliceSlotMigration>;
