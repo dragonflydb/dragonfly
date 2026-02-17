@@ -3799,9 +3799,6 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
       // We enable it on all threads, even non-shard threads as we mirror the I/O flows.
       //
       // TODO(roman): it seems wrong to me that journal LSN is tracked per io thread.
-      // What happens if the replica has less threads than the master, for example.
-      // What happens when the second replica fails over to the first one and both
-      // have less shards than I/O threads? Seems all sort of trouble to me.
       shard_set->pool()->AwaitBrief([this, repl_ptr](auto index, auto*) {
         auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
         size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
