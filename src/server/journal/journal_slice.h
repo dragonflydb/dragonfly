@@ -68,6 +68,8 @@ class JournalSlice {
 
  private:
   void CallOnChange(JournalChangeItem* item);
+  // Evicts entries to progress towards ring_buffer_max_bytes_
+  void EvictEntries(size_t new_item_size);
   boost::circular_buffer<JournalItem> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 

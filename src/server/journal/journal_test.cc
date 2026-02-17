@@ -23,7 +23,7 @@ using namespace testing;
 using namespace std;
 using namespace util;
 
-ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_max_bytes);
+ABSL_DECLARE_FLAG(uint64_t, shard_repl_backlog_max_bytes_soft);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 
 namespace dfly {
@@ -235,7 +235,7 @@ TEST(Journal, PendingBuf) {
 void RunLimitTest(size_t bytes, size_t count, std::function<void(JournalSlice&)> f) {
   absl::FlagSaver fs;
 
-  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, bytes);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes_soft, bytes);
   absl::SetFlag(&FLAGS_shard_repl_backlog_len, count);
 
   JournalSlice slice;
@@ -244,41 +244,52 @@ void RunLimitTest(size_t bytes, size_t count, std::function<void(JournalSlice&)>
 }
 
 TEST(JournalSlice, ByteLimit) {
-  RunLimitTest(300, 10240, [](JournalSlice& slice) {
-    std::string cmd(100, 'x');
+  RunLimitTest(500, 10240, [](JournalSlice& slice) {
+    std::string cmd(50, 'x');
 
-    for (auto lsn : std::views::iota(1, 20)) {
-      const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
+    for (TxId i : std::views::iota(1, 20)) {
+      const Entry entry{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
       slice.AddLogRecord(entry);
-      EXPECT_LE(slice.GetRingBufferSize(), 3);
-      EXPECT_LE(slice.GetRingBufferBytes(), 300);
-      EXPECT_TRUE(slice.IsLSNInBuffer(lsn)) << lsn << " not in buffer";
-      EXPECT_FALSE(slice.IsLSNInBuffer(std::max(0, lsn - 3)));
     }
+
+    EXPECT_LE(slice.GetRingBufferBytes(), 500);
   });
 }
 
 TEST(JournalSlice, ItemTooLarge) {
-  RunLimitTest(300, 10240, [](JournalSlice& slice) {
-    for (auto _ : std::views::iota(0, 10)) {
-      const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"xxxxxx", ShardArgs{}}};
+  constexpr auto large_entry_size = 1024;
+  constexpr auto max_bytes = 1200;
+  RunLimitTest(max_bytes, 10240, [&](JournalSlice& slice) {
+    for (const TxId i : std::views::iota(0, 10)) {
+      const Entry entry{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"xxxxxx", ShardArgs{}}};
       slice.AddLogRecord(entry);
     }
 
-    std::string cmd(1024, 'x');
+    const std::string cmd(large_entry_size, 'x');
     const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
     slice.AddLogRecord(entry);
 
-    EXPECT_EQ(slice.GetRingBufferSize(), 1);
-    EXPECT_GE(slice.GetRingBufferBytes(), 1024);
+    // Some items evicted from the front
+    EXPECT_LE(slice.GetRingBufferSize(), 10);
+    // The slice grows over the limit temporarily
+    EXPECT_GE(slice.GetRingBufferBytes(), max_bytes);
+
+    // the size converges, eventually evicting the large entry
+    for (const TxId i : std::views::iota(0, 25)) {
+      const Entry e2{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"xxxxxx", ShardArgs{}}};
+      slice.AddLogRecord(e2);
+    }
+
+    // Now the slice can hold everything
+    EXPECT_GE(slice.GetRingBufferSize(), 20);
+    EXPECT_LE(slice.GetRingBufferBytes(), max_bytes);
   });
 }
 
 TEST(JournalSlice, BothBytesAndCountLimited) {
   RunLimitTest(300, 3, [](JournalSlice& slice) {
-    const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"x", ShardArgs{}}};
-
-    for (auto _ : std::views::iota(0, 10)) {
+    for (const TxId i : std::views::iota(0, 10)) {
+      const Entry entry{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"x", ShardArgs{}}};
       slice.AddLogRecord(entry);
       EXPECT_LE(slice.GetRingBufferSize(), 3);
       EXPECT_LE(slice.GetRingBufferBytes(), 300);

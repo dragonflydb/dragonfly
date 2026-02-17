@@ -15,8 +15,8 @@
 
 ABSL_FLAG(uint32_t, shard_repl_backlog_len, 8192,
           "The length of the circular replication log per shard");
-ABSL_FLAG(uint32_t, shard_repl_backlog_max_bytes, 0,
-          "The maximum bytes the circular replication log can hold (0 is unlimited)");
+ABSL_FLAG(uint64_t, shard_repl_backlog_max_bytes_soft, 0,
+          "Soft limit for number of bytes held in replication log (0 is unlimited)");
 
 namespace dfly {
 namespace journal {
@@ -35,7 +35,7 @@ void JournalSlice::Init() {
     return;
 
   ring_buffer_.set_capacity(absl::GetFlag(FLAGS_shard_repl_backlog_len));
-  ring_buffer_max_bytes_ = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes);
+  ring_buffer_max_bytes_ = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes_soft);
 }
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
@@ -110,16 +110,9 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
   }
   auto& item = change_item->journal_item;
 
-  // Drain the buffer until it is smaller than max bytes, only if the limit is set and the buffer is
-  // not empty. If the item is large enough that it will not fit into the buffer, still accommodate
-  // it as the sole element after draining the entire buffer.
-  const auto new_item_size = sizeof(item) + item.data.size();
-  while (ring_buffer_max_bytes_ && !ring_buffer_.empty() &&
-         ring_buffer_bytes_ + new_item_size > ring_buffer_max_bytes_) {
-    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
-    DCHECK_GE(ring_buffer_bytes_, bytes_removed);
-    ring_buffer_bytes_ -= bytes_removed;
-    ring_buffer_.pop_front();
+  if (const auto new_item_size = sizeof(item) + item.data.size();
+      ring_buffer_max_bytes_ && ring_buffer_bytes_ + new_item_size > ring_buffer_max_bytes_) {
+    EvictEntries(new_item_size);
   }
 
   // We preserve order here. After ConsumeJournalChange there can reordering
@@ -139,6 +132,33 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
       k_v.second->ThrottleIfNeeded();
     }
   }
+}
+
+void JournalSlice::EvictEntries(size_t new_item_size) {
+  // Do not evict more than sqrt of current size. Using sqrt instead of a fixed percentage here
+  // makes sure that the eviction target grows with size, but gently, so as not to spend too much
+  // time on eviction. The idea is that repeated adding of records slowly brings the buffer size
+  // closer to the target of ring_buffer_max_bytes_, rather than all at once. The limit can be
+  // breached temporarily. The max(1) part ensures progress if the size of buffer is too small. In
+  // pathological cases (stream of huge entries) there will be one or more evictions per addition,
+  // in this cases the limits should be increased.
+  size_t max_to_evict = static_cast<size_t>(std::max(1.0, sqrt(ring_buffer_.size())));
+  VLOG(2) << "Evicting " << max_to_evict << " items to reach " << ring_buffer_max_bytes_
+          << ", total size " << ring_buffer_.size() << ", total bytes " << ring_buffer_bytes_;
+  size_t items_evicted = 0;
+  size_t bytes_evicted = 0;
+  while (!ring_buffer_.empty() && ring_buffer_bytes_ + new_item_size > ring_buffer_max_bytes_ &&
+         max_to_evict-- > 0) {
+    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(JournalItem);
+    DCHECK_GE(ring_buffer_bytes_, bytes_removed);
+    ring_buffer_bytes_ -= bytes_removed;
+    ring_buffer_.pop_front();
+
+    items_evicted++;
+    bytes_evicted += bytes_removed;
+  }
+
+  VLOG(2) << "Evicted " << items_evicted << " items to free up " << bytes_evicted << " bytes";
 }
 
 uint32_t JournalSlice::RegisterOnChange(JournalConsumerInterface* consumer) {
