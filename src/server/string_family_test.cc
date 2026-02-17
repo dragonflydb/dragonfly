@@ -987,9 +987,11 @@ TEST_F(StringFamilyTest, GatViaRedisProtocol) {
   EXPECT_THAT(resp, ErrArg("memcache-only"));
 }
 
-// Regression test for https://github.com/dragonflydb/dragonfly/issues/6654
 // Meta get with large value should not crash due to buffer overflow.
 TEST_F(StringFamilyTest, MetaGetLargeValue) {
+  facade::FacadeStats stats;
+  facade::tl_facade_stats = &stats;
+
   io::StringSink sink;
   facade::MCReplyBuilder builder(&sink);
 
@@ -1000,9 +1002,11 @@ TEST_F(StringFamilyTest, MetaGetLargeValue) {
   string large_val(16000, 'x');
   builder.SendValue(flags, "key", large_val, 0, 0, 0);
 
-  string output = sink.str();
+  const string& output = sink.str();
   EXPECT_THAT(output, HasSubstr("VA 16000"));
   EXPECT_THAT(output, HasSubstr(large_val));
+
+  facade::tl_facade_stats = nullptr;
 }
 
 TEST_F(StringFamilyTest, MSetNxOddArgs) {
