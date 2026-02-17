@@ -682,7 +682,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   db_slice.GetLatch()->Wait();
 
   // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
+  journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "

@@ -9,6 +9,7 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
 #include "base/mpsc_intrusive_queue.h"
@@ -341,21 +342,30 @@ class RdbLoader : protected RdbLoaderBase {
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
+  // Restore HNSW vector index graph from serialized node data.
+  std::error_code RestoreVectorIndex(std::string_view index_key, std::string_view index_name,
+                                     std::string_view field_name, uint64_t elements_number);
+
+  // Skip over serialized HNSW vector index node data without restoring.
+  std::error_code SkipVectorIndex(std::string_view index_key, uint64_t elements_number);
+
   // Get pending synonym commands collected from all RdbLoader instances
   static std::vector<std::string> TakePendingSynonymCommands();
 
-  Service* service_;
-  static std::vector<std::string> pending_synonym_cmds_;
-  static base::SpinLock search_index_mu_;  // guards created_search_indices_
-  static absl::flat_hash_set<std::string> created_search_indices_;
-
   // Pending index key-to-DocId mappings to apply after indices are created
   struct PendingIndexMapping {
-    uint32_t shard_id;
     std::string index_name;
     std::vector<std::pair<std::string, search::DocId>> mappings;
   };
-  std::vector<PendingIndexMapping> pending_index_mappings_;
+
+  // Get and clear pending index mappings collected from all RdbLoader instances
+  static absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> TakePendingIndexMappings();
+
+  Service* service_;
+  static std::vector<std::string> pending_synonym_cmds_;
+  static base::SpinLock search_index_mu_;  // created_search_indices_, pending_index_mappings_
+  static absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> pending_index_mappings_;
+  static absl::flat_hash_set<std::string> created_search_indices_;
 
   // HNSW metadata loaded from "hnsw-index-metadata" AUX fields, keyed by index_name:field_name
   struct PendingHnswMetadata {
@@ -363,12 +373,13 @@ class RdbLoader : protected RdbLoaderBase {
     std::string field_name;
     search::HnswIndexMetadata metadata;
   };
-  std::vector<PendingHnswMetadata> pending_hnsw_metadata_;
+  static std::vector<PendingHnswMetadata> pending_hnsw_metadata_;
 
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
   bool rdb_ignore_expiry_;
+  const bool deserialize_hnsw_index_;
   uint32_t shard_id_ = UINT32_MAX;
   uint32_t shard_count_ = 0;
   size_t table_used_memory_ = 0;
@@ -396,6 +407,8 @@ class RdbLoader : protected RdbLoaderBase {
   // Map of currently streamed big values
   std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
   base::SpinLock now_streamed_mu_;  // guards now_streamed_
+
+  std::string last_key_loaded_;
 };
 
 }  // namespace dfly

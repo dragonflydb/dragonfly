@@ -6,7 +6,7 @@
 
 #include <string_view>
 
-#include "tx_base.h"
+#include "server/common_types.h"
 
 namespace dfly {
 

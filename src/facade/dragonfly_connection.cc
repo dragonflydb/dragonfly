@@ -25,6 +25,7 @@
 #include "common/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
@@ -584,7 +585,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
           new RespSrvParser(GetFlag(FLAGS_max_multi_bulk_len), GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
-      memcache_parser_ = make_unique<MemcacheParser>();
+      memcache_parser_ =
+          make_unique<MemcacheParser>(std::min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX));
       break;
   }
 
@@ -786,8 +788,10 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      // ioloop_v2 not supported for TLS connections yet.
-      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
+      // ioloop_v2 not supported for TLS & redis connections yet.
+      ioloop_v2_ =
+          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
+
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -863,12 +867,14 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   } else {
     absl::StrAppend(&before, " name=", name_);
   }
+#ifdef DFLY_USE_SSL
   if (is_tls_) {
     tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
     string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
     const SSL_CIPHER* cipher = SSL_get_current_cipher(tls_sock->ssl_handle());
     absl::StrAppend(&before, " tls=", proto_version, "|", SSL_CIPHER_get_name(cipher));
   }
+#endif
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (parsed_cmd_q_len_ > 0) {
@@ -2511,6 +2517,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+  DCHECK(memcache_parser_) << "Not supported for redis yet";
+
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
@@ -2578,12 +2586,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (io_buf_.InputLen() > 0) {
-      if (redis_parser_) {
-        parse_status = ParseRedis(max_busy_read_cycles_cached);
-      } else {
-        DCHECK(memcache_parser_);
-        parse_status = ParseMemcache();
-      }
+      DCHECK(memcache_parser_);
+      parse_status = ParseMemcache();
     } else {
       parse_status = NEED_MORE;
 

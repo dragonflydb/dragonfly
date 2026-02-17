@@ -5,6 +5,7 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
 
 extern "C" {
@@ -1890,14 +1891,20 @@ auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
     if (chunking) {
-      unsigned total_size = 0;
+      size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+      if (total_size == 0) {
+        return Unexpected(errc::rdb_file_corrupted);
+      }
 
       filter_data.resize(total_size);
       size_t offset = 0;
       while (offset < total_size) {
-        unsigned chunk_size = 0;
+        size_t chunk_size = 0;
         SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
+        if (chunk_size == 0 || chunk_size > total_size - offset) {
+          return Unexpected(errc::rdb_file_corrupted);
+        }
         error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
         if (ec) {
           return make_unexpected(ec);
@@ -1977,6 +1984,7 @@ RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
     : service_{service},
       snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
+      deserialize_hnsw_index_{GetFlag(FLAGS_deserialize_hnsw_index)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
 }
@@ -2217,8 +2225,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      // Stub: read and ignore HNSW vector index data
-      // Binary format: [index_name, elements_number,
+      // HNSW vector index graph data.
+      // Binary format: [index_key, elements_number,
       //   then for each node (little-endian):
       //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
       //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
@@ -2228,26 +2236,22 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        [[maybe_unused]] uint32_t internal_id;
-        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
-        [[maybe_unused]] uint64_t global_id;
-        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
-        uint32_t level;
-        SET_OR_RETURN(FetchInt<uint32_t>(), level);
+      // We can keep the same internal ids if shards count is the same and we can reuse the
+      // data-structures as is, otherwise we must rebuild from scratch
+      // TODO add ability to restore index with different shard count by remapping internal ids
+      const bool should_restore = deserialize_hnsw_index_ && shard_count_ == shard_set->size();
 
-        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
-          uint32_t links_num;
-          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
-          for (uint32_t i = 0; i < links_num; ++i) {
-            [[maybe_unused]] uint32_t link;
-            SET_OR_RETURN(FetchInt<uint32_t>(), link);
-          }
-        }
+      if (should_restore) {
+        size_t colon_pos = index_key.rfind(':');
+        string_view index_name{index_key.data(),
+                               colon_pos != string::npos ? colon_pos : index_key.size()};
+        string_view field_name = colon_pos != string::npos
+                                     ? string_view{index_key.data() + colon_pos + 1}
+                                     : string_view{};
+        RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
+      } else {
+        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
       }
-
-      VLOG(2) << "Ignoring HNSW vector index: " << index_key
-              << " elements_number=" << elements_number;
       continue;
     }
 
@@ -2255,7 +2259,8 @@ error_code RdbLoader::Load(io::Source* src) {
       // Load ShardDocIndex key-to-DocId mapping
       // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
       PendingIndexMapping pim;
-      SET_OR_RETURN(LoadLen(nullptr), pim.shard_id);
+      uint32_t shard_id;
+      SET_OR_RETURN(LoadLen(nullptr), shard_id);
 
       SET_OR_RETURN(FetchGenericString(), pim.index_name);
 
@@ -2271,19 +2276,30 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      if (!GetFlag(FLAGS_deserialize_hnsw_index)) {
+      // Only store mappings if deserialization is enabled AND shard count matches.
+      // With different shard counts, keys are distributed differently so the mappings are invalid.
+      if (!deserialize_hnsw_index_ || shard_count_ != shard_set->size()) {
         continue;
       }
 
-      VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
+      VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
               << " entries";
 
-      // Store the mapping to be applied after index creation
-      pending_index_mappings_.emplace_back(std::move(pim));
+      // Store the mapping to be applied after index creation (thread-safe)
+      {
+        std::lock_guard lk(search_index_mu_);
+        pending_index_mappings_[shard_id].emplace_back(std::move(pim));
+      }
       continue;
     }
 
     if (!rdbIsObjectTypeDF(type)) {
+      LOG(ERROR) << "Unrecognized rdb object type: " << type;
+      LOG(ERROR) << "Last iteration: ";
+      LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
+      LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
+                 << "\npending_read_.reserve: " << pending_read_.reserve;
+      // In case we encounter an error, it might worth peeking the InputBuffer()
       return RdbError(errc::invalid_rdb_type);
     }
 
@@ -2688,8 +2704,6 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   if (item->load_config.streamed && item->load_config.append) {
     std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
-      LOG(INFO) << "Appending to streamed key '" << absl::CHexEscape(item->key) << "' in DB "
-                << db_ind;
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2814,6 +2828,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   int64_t start = absl::GetCurrentTimeNanos();
 
   SET_OR_RETURN(ReadKey(), key);
+  last_key_loaded_ = key;
 
   bool streamed = false;
   do {
@@ -2927,7 +2942,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context) {
+                              string_view error_context, bool add_NX = false) {
   facade::CapturingReplyBuilder crb;
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
@@ -2970,7 +2985,11 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   cntx_cmd.Init(&crb, &cntx);
 
   cntx_cmd.PushArg(command_name);
-  for (unsigned i = 0; i < resp_vec.size(); i++) {
+  cntx_cmd.PushArg(resp_vec[0].GetView());  // index name
+  if (add_NX) {
+    cntx_cmd.PushArg("NX");
+  }
+  for (unsigned i = 1; i < resp_vec.size(); i++) {
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
   service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
@@ -2986,38 +3005,30 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-// Static synchronization for thread-safe search index creation
+// Static storage for index key-to-DocId mappings collected from all RdbLoader instances
+absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
+    RdbLoader::pending_index_mappings_;
+// Static storage for HNSW index metadata collected from all RdbLoader instances
+std::vector<RdbLoader::PendingHnswMetadata> RdbLoader::pending_hnsw_metadata_;
+// Static synchronization for thread-safe search index creation and pending mappings
 base::SpinLock RdbLoader::search_index_mu_;
 absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
-
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
   result.swap(pending_synonym_cmds_);
   return result;
 }
 
+absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
+RdbLoader::TakePendingIndexMappings() {
+  // we don't need to lock here as this is called after all RdbLoader instances are done
+  decltype(pending_index_mappings_) result;
+  std::swap(result, pending_index_mappings_);
+  return result;
+}
+
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  // Simple format: "index_name cmd"
-  size_t space_pos = def.find(' ');
-  if (space_pos == string::npos) {
-    LOG(ERROR) << "Invalid search index definition: " << def;
-    return;
-  }
-  string index_name = def.substr(0, space_pos);
-
-  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
-  // We track which indices we've already attempted to create to avoid race conditions where
-  // multiple threads see the index doesn't exist and all try to create it.
-  {
-    std::lock_guard lk(search_index_mu_);
-    auto [it, inserted] = created_search_indices_.insert(index_name);
-    if (!inserted) {
-      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
-      return;
-    }
-  }
-
-  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition");
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
 }
 
 void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
@@ -3040,10 +3051,91 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
     LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
               << " elements=" << phm.metadata.cur_element_count;
 
-    pending_hnsw_metadata_.emplace_back(std::move(phm));
+    {
+      std::lock_guard lk(search_index_mu_);
+      pending_hnsw_metadata_.emplace_back(std::move(phm));
+    }
   } catch (const std::exception& e) {
     LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
   }
+}
+
+error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
+                                         string_view field_name, uint64_t elements_number) {
+  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
+  if (!hnsw_index) {
+    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
+               << ". Skipping serialized graph data.";
+    return SkipVectorIndex(index_key, elements_number);
+  }
+
+  std::vector<search::HnswNodeData> nodes;
+  nodes.reserve(elements_number);
+
+  for (uint64_t elem = 0; elem < elements_number; ++elem) {
+    search::HnswNodeData node;
+    SET_OR_RETURN(FetchInt<uint32_t>(), node.internal_id);
+    SET_OR_RETURN(FetchInt<uint64_t>(), node.global_id);
+    uint32_t raw_level;
+    SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    node.level = static_cast<int>(raw_level);
+
+    node.levels_links.resize(node.level + 1);
+    for (int lvl = 0; lvl <= node.level; ++lvl) {
+      uint32_t links_num;
+      SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      node.levels_links[lvl].resize(links_num);
+      for (uint32_t i = 0; i < links_num; ++i) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), node.levels_links[lvl][i]);
+      }
+    }
+    nodes.push_back(std::move(node));
+  }
+
+  if (!nodes.empty()) {
+    // Look up metadata from pending_hnsw_metadata_ (loaded from AUX field)
+    std::optional<search::HnswIndexMetadata> metadata;
+    {
+      std::lock_guard lk(search_index_mu_);
+      for (const auto& phm : pending_hnsw_metadata_) {
+        if (phm.index_name == index_name && phm.field_name == field_name) {
+          metadata = phm.metadata;
+          break;
+        }
+      }
+    }
+
+    CHECK(metadata);
+    hnsw_index->RestoreFromNodes(nodes, *metadata);
+    LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
+  }
+  return {};
+}
+
+error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_number) {
+  for (uint64_t elem = 0; elem < elements_number; ++elem) {
+    SET_OR_RETURN(FetchInt<uint32_t>(), std::ignore);  // internal_id
+    SET_OR_RETURN(FetchInt<uint64_t>(), std::ignore);  // global_id
+    uint32_t raw_level;
+    SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    int level = static_cast<int>(raw_level);
+
+    for (int lvl = 0; lvl <= level; ++lvl) {
+      uint32_t links_num;
+      SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      for (uint32_t i = 0; i < links_num; ++i) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), std::ignore);
+      }
+    }
+  }
+
+  if (elements_number > 0) {
+    LOG(INFO) << "Skipping HNSW vector index restore: " << index_key
+              << " elements_number=" << elements_number << " shard_count_=" << shard_count_
+              << " current_shards=" << shard_set->size() << ". Index will be rebuilt from data.";
+  }
+  return {};
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
@@ -3056,26 +3148,44 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   if (cmd == nullptr)  // In case search module is disabled
     return;
 
+  // Capture before clearing — indicates HNSW graphs were loaded and need restore path
+  bool has_hnsw_restore;
   // Clear the created indices tracking set for next load
   {
     std::lock_guard lk(search_index_mu_);
+    has_hnsw_restore = !pending_hnsw_metadata_.empty();
     created_search_indices_.clear();
+    pending_hnsw_metadata_.clear();
   }
 
   std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  auto index_mappings = TakePendingIndexMappings();
+
   if (is_error)
     return;
 
-  // Start index building for all indices
-  // TODO: don't build all indices concurrently or limit cumulative budget
-
-  shard_set->RunBriefInParallel([](EngineShard* es) {
+  if (!index_mappings.empty()) {
+    // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
+    shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
+      auto it = index_mappings.find(es->shard_id());
+      if (it == index_mappings.end())
+        return;
+      for (const auto& pim : it->second) {
+        if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
+          index->RestoreKeyIndex(pim.mappings);
+          VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
+                  << pim.index_name << " on shard " << es->shard_id();
+        }
+      }
+    });
+  }
+  shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args);
+    es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
   });
 
-  // Issue FT.SYNUPDATE while the index is building
+  // Now execute all pending synonym commands after indices are rebuilt
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }

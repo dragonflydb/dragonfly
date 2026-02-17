@@ -3791,6 +3791,16 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }
 
+void ServerFamily::StartJournalInShardThreads(Replica* repl_ptr) {
+  shard_set->RunBriefInParallel([this, repl_ptr](auto* shard) {
+    size_t index = shard->shard_id();
+    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal()->StartInThreadAtLsn(rec_executed);
+  });
+}
+
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
@@ -3800,12 +3810,7 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     auto repl_ptr = replica_;
     if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
       // Start journal and keep offsets.
-      shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
-        auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
-        size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-        LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-        journal()->StartInThreadAtLsn(rec_executed);
-      });
+      StartJournalInShardThreads(repl_ptr.get());
     }
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
@@ -3925,12 +3930,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   CHECK(repl_ptr);
 
   // Start journal to allow partial sync from same source master
-  shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
-    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
-    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-    journal()->StartInThreadAtLsn(rec_executed);
-  });
+  StartJournalInShardThreads(repl_ptr.get());
 
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {

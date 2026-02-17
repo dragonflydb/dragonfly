@@ -540,7 +540,7 @@ def test_redis_om(df_server):
         skip_if_not_in_github("redis-om python library not installed")
         raise
 
-    client = redis.Redis(port=df_server.port)
+    client = redis.Redis(port=df_server.port, decode_responses=True)
 
     class TestCar(redis_om.HashModel):
         producer: str = redis_om.Field(index=True)
@@ -570,6 +570,14 @@ def test_redis_om(df_server):
         car.save()
 
     redis_om.Migrator().run()
+
+    # Wait for async indexing of existing documents to complete
+    for index_name in client.execute_command("FT._LIST"):
+        timeout = time.time() + 10
+        while int(client.ft(index_name).info()["indexing"]) == 1:
+            if time.time() > timeout:
+                raise TimeoutError(f"Indexing {index_name} did not complete within 10 seconds")
+            time.sleep(0.05)
 
     # Get all cars
     assert extract_producers(TestCar.find().all()) == extract_producers(CARS)
@@ -608,8 +616,8 @@ def test_redis_om(df_server):
     # What's the fastest car
     assert extract_producers([TestCar.find().sort_by("-speed").first()]) == ["BMW"]
 
-    for index in client.execute_command("FT._LIST"):
-        client.ft(index.decode()).dropindex()
+    for index_name in client.execute_command("FT._LIST"):
+        client.ft(index_name).dropindex()
 
 
 @dfly_args({"proactor_threads": 4, "dbfilename": "synonym-persistence"})

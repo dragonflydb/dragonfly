@@ -1226,6 +1226,9 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
+  // Parse optional NX (Only create if not exists) parameter for internal usage
+  bool is_NX = parser.Check("NX");
+
   bool is_cross_shard = parser.Check("CSS");
 
   auto parsed_index = CreateDocIndex(idx_name, &parser);
@@ -1247,7 +1250,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
     cmd_cntx->tx()->Conclude();
-    return builder->SendError("Index already exists");
+    return is_NX ? builder->SendOk() : builder->SendError("Index already exists");
   }
 
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {

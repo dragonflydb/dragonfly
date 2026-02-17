@@ -980,6 +980,22 @@ TEST_F(RedisReplyBuilderTest, Issue4424) {
   }
 }
 
+TEST_F(RedisReplyBuilderTest, MCMetaGetLargeValue) {
+  io::StringSink mc_sink;
+  MCReplyBuilder mc_builder(&mc_sink);
+
+  MemcacheCmdFlags flags;
+  flags.meta = true;
+  flags.return_value = true;
+
+  string large_val(16000, 'x');
+  mc_builder.SendValue(flags, "key", large_val, 0, 0, 0);
+
+  string_view output = mc_sink.str();
+  EXPECT_THAT(output, HasSubstr("VA 16000"));
+  EXPECT_THAT(output, HasSubstr(large_val));
+}
+
 static void BM_FormatDouble(benchmark::State& state) {
   vector<double> values;
   char buf[64];

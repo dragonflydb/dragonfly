@@ -46,10 +46,7 @@ void Journal::StartInThreadAtLsn(LSN lsn) {
 error_code Journal::Close() {
   VLOG(1) << "Journal::Close";
 
-  lock_guard lk(state_mu_);
-
-  journal_slice.ResetRingBuffer();
-  auto close_cb = [&](auto*) {
+  auto close_cb = [&](unsigned, auto*) {
     journal_slice.ResetRingBuffer();
     ServerState::tlocal()->set_journal(nullptr);
     EngineShard* shard = EngineShard::tlocal();
@@ -58,17 +55,9 @@ error_code Journal::Close() {
     }
   };
 
-  shard_set->pool()->AwaitFiberOnAll(close_cb);
+  shard_set->pool()->AwaitBrief(close_cb);
 
   return {};
-}
-
-uint32_t Journal::RegisterOnChange(JournalConsumerInterface* consumer) {
-  return journal_slice.RegisterOnChange(consumer);
-}
-
-void Journal::UnregisterOnChange(uint32_t id) {
-  journal_slice.UnregisterOnChange(id);
 }
 
 bool Journal::HasRegisteredCallbacks() const {
@@ -83,19 +72,6 @@ std::string_view Journal::GetEntry(LSN lsn) const {
   return journal_slice.GetEntry(lsn);
 }
 
-LSN Journal::GetLsn() const {
-  return journal_slice.cur_lsn();
-}
-
-void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                          std::optional<SlotId> slot, Entry::Payload payload) {
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)});
-}
-
-void Journal::SetFlushMode(bool allow_flush) {
-  journal_slice.SetFlushMode(allow_flush);
-}
-
 size_t Journal::LsnBufferSize() const {
   return journal_slice.GetRingBufferSize();
 }
@@ -104,7 +80,28 @@ size_t Journal::LsnBufferBytes() const {
   return journal_slice.GetRingBufferBytes();
 }
 
-size_t thread_local JournalFlushGuard::counter_ = 0;
+uint32_t RegisterConsumer(JournalConsumerInterface* consumer) {
+  return journal_slice.RegisterOnChange(consumer);
+}
+
+void UnregisterConsumer(uint32_t id) {
+  journal_slice.UnregisterOnChange(id);
+}
+
+LSN GetLsn() {
+  return journal_slice.cur_lsn();
+}
+
+void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, std::optional<SlotId> slot,
+                 Entry::Payload payload) {
+  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)});
+}
+
+void SetFlushMode(bool allow_flush) {
+  journal_slice.SetFlushMode(allow_flush);
+}
+
+size_t thread_local DisableFlushGuard::counter_ = 0;
 
 }  // namespace journal
 }  // namespace dfly
