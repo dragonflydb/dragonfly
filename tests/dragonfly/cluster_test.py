@@ -3749,19 +3749,29 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     # Delete 50k keys during migration to create mutations and verify that they are applied correctly
-    delete_num = 50_000
+    delete_expected_num = 50_000
+    delete_succeded = 0
+
+    # Indicator that migration is done and we can stop deleting keys
+    migration_done = False
 
     async def delete_job():
-        keys_to_delete = [f"key:{i}" for i in range(0, delete_num)]
-        for key in keys_to_delete:
+        nonlocal delete_succeded
+        for i in range(delete_expected_num):
+            if migration_done:
+                break
             try:
-                await nodes[0].client.delete(key)
+                await nodes[0].client.delete(f"key:{i}")
+                delete_succeded += 1
             except Exception as e:
-                logging.info(f"Error deleting key {key}: {e}")
+                pass
 
-    asyncio.create_task(delete_job())
+    delete_task = asyncio.create_task(delete_job())
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
+    migration_done = True
+
+    await delete_task
 
     nodes[0].migrations = []
     nodes[0].slots = []
@@ -3780,4 +3790,4 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
 
     # Verify that mutations are applied on the target node after migration
     info = await nodes[1].client.info("keyspace")
-    assert info["db0"]["keys"] == keys - delete_num
+    assert info["db0"]["keys"] == keys - delete_succeded
