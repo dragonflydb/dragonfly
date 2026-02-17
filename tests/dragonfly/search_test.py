@@ -621,8 +621,8 @@ def test_redis_om(df_server):
     # What's the fastest car
     assert extract_producers([TestCar.find().sort_by("-speed").first()]) == ["BMW"]
 
-    for index in client.execute_command("FT._LIST"):
-        client.ft(index.decode()).dropindex()
+    for index_name in client.execute_command("FT._LIST"):
+        client.ft(index_name).dropindex()
 
 
 @dfly_args({"proactor_threads": 4, "dbfilename": "synonym-persistence"})
