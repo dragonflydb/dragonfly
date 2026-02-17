@@ -2230,7 +2230,9 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      // Only restore if the flag is enabled and shard count matches (GlobalDocId encodes shard_id)
+      // We can keep the same internal ids if shards count is the same and we can reuse the
+      // data-structures as is, otherwise we must rebuild from scratch
+      // TODO add ability to restore index with different shard count by remapping internal ids
       const bool should_restore = deserialize_hnsw_index_ && shard_count_ == shard_set->size();
 
       if (should_restore) {
