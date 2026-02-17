@@ -1890,14 +1890,20 @@ auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
     if (chunking) {
-      unsigned total_size = 0;
+      size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+      if (total_size == 0) {
+        return Unexpected(errc::rdb_file_corrupted);
+      }
 
       filter_data.resize(total_size);
       size_t offset = 0;
       while (offset < total_size) {
-        unsigned chunk_size = 0;
+        size_t chunk_size = 0;
         SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
+        if (chunk_size == 0 || chunk_size > total_size - offset) {
+          return Unexpected(errc::rdb_file_corrupted);
+        }
         error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
         if (ec) {
           return make_unexpected(ec);

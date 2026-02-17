@@ -1572,14 +1572,11 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   }
   // Record to journal autojournal commands, here we allow await which anables writing to sync
   // the journal change.
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_);
+  LogJournalOnShard(std::move(entry_payload), unique_shard_cnt_);
 }
 
-void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt) const {
-  auto journal = shard->journal();
-  CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
+void Transaction::LogJournalOnShard(journal::Entry::Payload&& payload, uint32_t shard_cnt) const {
+  journal::RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
                        unique_slot_checker_.GetUniqueSlotId(), std::move(payload));
 }
 

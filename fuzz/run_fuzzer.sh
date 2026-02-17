@@ -10,7 +10,8 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TARGET="resp"
+# Target: "resp" (default) or "memcache"
+TARGET="${1:-resp}"
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build-dbg}"
 FUZZ_DIR="$SCRIPT_DIR"
 OUTPUT_DIR="${OUTPUT_DIR:-$FUZZ_DIR/artifacts/$TARGET}"
@@ -45,6 +46,11 @@ check_requirements() {
         print_warning "Build with: -DUSE_AFL=ON"
         exit 1
     fi
+
+    if [[ "$TARGET" != "resp" && "$TARGET" != "memcache" ]]; then
+        print_warning "Unknown target: $TARGET (use 'resp' or 'memcache')"
+        exit 1
+    fi
 }
 
 setup_directories() {
@@ -58,7 +64,11 @@ setup_directories() {
             cp "${SEEDS_DIR}"/* "${CORPUS_DIR}/" 2>/dev/null || true
         else
             print_warning "No seeds found, creating minimal seed"
-            echo -e '*1\r\n$4\r\nPING\r\n' > "${CORPUS_DIR}/ping"
+            if [[ "$TARGET" == "memcache" ]]; then
+                printf 'version\r\n' > "${CORPUS_DIR}/version"
+            else
+                echo -e '*1\r\n$4\r\nPING\r\n' > "${CORPUS_DIR}/ping"
+            fi
         fi
     fi
 }
@@ -66,6 +76,7 @@ setup_directories() {
 show_config() {
     echo ""
     print_info "AFL++ Persistent Mode Configuration:"
+    echo "  Target:           ${TARGET}"
     echo "  Binary:           ${FUZZ_TARGET}"
     echo "  Corpus:           ${CORPUS_DIR}"
     echo "  Output:           ${OUTPUT_DIR}"
@@ -75,13 +86,14 @@ show_config() {
     echo "  Loop limit:      ${AFL_LOOP_LIMIT} (= AFL_PERSISTENT_RECORD)"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
+    print_note "Usage: ./run_fuzzer.sh [resp|memcache]"
     print_note "To change proactor threads: export AFL_PROACTOR_THREADS=N (default: 1)"
     print_note "To change loop limit: export AFL_LOOP_LIMIT=N (default: 10000)"
     echo ""
 }
 
 run_fuzzer() {
-    print_info "Starting AFL++ persistent mode fuzzing..."
+    print_info "Starting AFL++ persistent mode fuzzing (target: $TARGET)..."
     print_info "Press Ctrl+C to stop"
     echo ""
 
@@ -115,6 +127,10 @@ run_fuzzer() {
         --max_bulk_len=1048576
     )
 
+    if [[ "$TARGET" == "memcache" ]]; then
+        AFL_CMD+=(--memcached_port=11211 --afl_target_port=11211)
+    fi
+
     print_info "Running: ${AFL_CMD[*]}"
     echo ""
 
@@ -141,10 +157,14 @@ run_fuzzer() {
     # stages to finish. Useful for protocol fuzzing where random mutations find new paths.
     export AFL_EXPAND_HAVOC_NOW=1
 
-    # Custom RESP protocol mutator — mutates at command/argument level
-    # instead of random bytes, keeping RESP framing valid.
+    # Custom protocol mutator — mutates at command/argument level
+    # instead of random bytes, keeping protocol framing valid.
     export PYTHONPATH="$FUZZ_DIR"
-    export AFL_PYTHON_MODULE=resp_mutator
+    if [[ "$TARGET" == "memcache" ]]; then
+        export AFL_PYTHON_MODULE=memcache_mutator
+    else
+        export AFL_PYTHON_MODULE=resp_mutator
+    fi
 
     exec "${AFL_CMD[@]}"
 }

@@ -3978,3 +3978,37 @@ async def test_replication_replica_larger_dbnum(
         c_r = replica.client(db=db)
         assert await c_r.dbsize() == 0
         await c_r.close()
+
+
+# BF.RESERVE with error_rate=0.00001 and capacity=1e9 creates a single bloom filter
+# of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
+# filter size, which silently overflowed to 0 and broke the RDB stream.
+@pytest.mark.skip("Requires ~12GiB RAM for two instances with 4GiB bloom filter")
+@pytest.mark.slow
+async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
+    master = df_factory.create(
+        proactor_threads=1,
+        maxmemory="6G",
+        rdb_sbf_chunked="true",
+    )
+    replica = df_factory.create(
+        proactor_threads=1,
+        maxmemory="6G",
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("BF.RESERVE", "bf", "0.00001", "1000000000")
+    await c_master.execute_command("BF.ADD", "bf", "hello")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1

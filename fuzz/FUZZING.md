@@ -37,7 +37,8 @@ ninja -C build-dbg dragonfly
 
 ```bash
 cd fuzz
-./run_fuzzer.sh
+./run_fuzzer.sh              # RESP protocol (default)
+./run_fuzzer.sh memcache     # Memcache text protocol
 ```
 
 Configuration via environment variables:
@@ -48,19 +49,24 @@ Configuration via environment variables:
 | `AFL_LOOP_LIMIT` | `10000` | Iterations before server restart (= `AFL_PERSISTENT_RECORD`) |
 | `BUILD_DIR` | `build-dbg` | Path to build directory |
 
-## Custom Mutator
+## Custom Mutators
 
-`resp_mutator.py` is a custom AFL++ mutator that operates at the RESP protocol
-level. Instead of flipping random bytes (which mostly breaks RESP framing and
-gets rejected by the parser), it:
+Each target has a custom AFL++ mutator that operates at the protocol level.
+Instead of flipping random bytes (which mostly breaks protocol framing and
+gets rejected by the parser), they:
 
-- Parses input into a list of Redis commands
-- Mutates at the command/argument level (replace command, change argument,
-  insert/remove commands, wrap in MULTI/EXEC, swap order)
-- Serializes back to valid RESP
+- Parse input into a list of commands
+- Mutate at the command/argument level (replace command, change argument,
+  insert/remove commands, swap order)
+- Serialize back to valid protocol format
 
-The mutator is loaded automatically by `run_fuzzer.sh`. AFL++'s built-in
-byte-level mutations also run alongside it (useful for parser edge cases).
+| Target | Mutator | Details |
+|--------|---------|---------|
+| `resp` | `resp_mutator.py` | 150+ Redis commands, wraps in MULTI/EXEC |
+| `memcache` | `memcache_mutator.py` | Store/get/meta commands, noreply toggle |
+
+Mutators are loaded automatically by `run_fuzzer.sh`. AFL++'s built-in
+byte-level mutations also run alongside them (useful for parser edge cases).
 
 To use only the custom mutator: `export AFL_CUSTOM_MUTATOR_ONLY=1`.
 
@@ -81,43 +87,53 @@ crashes/RECORD:000000,cnt:000001      # second input
 crashes/RECORD:000000,cnt:NNNNNN      # input before the crash
 ```
 
-### Replay
+### Replay (RESP)
 
 ```bash
-# Start dragonfly (non-AFL build)
 ./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=""
 
-# Replay crash 000000
 python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
+```
+
+### Replay (memcache)
+
+```bash
+./build/dragonfly --port 6379 --memcached_port=11211 --logtostderr --proactor_threads 1 --dbfilename=""
+
+python3 fuzz/replay_crash.py fuzz/artifacts/memcache/default/crashes 000000 127.0.0.1 11211
 ```
 
 ### Package crash for sharing
 
 ```bash
 cd fuzz
+# RESP
 ./package_crash.sh 000000
+# Memcache
+./package_crash.sh 000000 fuzz/artifacts/memcache/default/crashes
 ```
 
 Creates `crash-000000.tar.gz` containing crash data and `replay_crash.py`.
 The recipient runs:
 
 ```bash
+# RESP
 ./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=""
-
-tar xzf crash-000000.tar.gz
-cd crash-000000
 python3 replay_crash.py crashes 000000
+
+# Memcache
+./build/dragonfly --port 6379 --memcached_port=11211 --logtostderr --proactor_threads 1 --dbfilename=""
+python3 replay_crash.py crashes 000000 127.0.0.1 11211
 ```
 
 ## Seed Corpus
 
-`seeds/resp/` contains 79 seed files covering all major command families:
-string, list, hash, set, sorted set, stream, transactions, pub/sub, geo,
-HyperLogLog, Bloom filter, bitops, JSON, search, scripting, ACL, and
-server introspection.
+| Target | Directory | Seeds | Coverage |
+|--------|-----------|-------|----------|
+| `resp` | `seeds/resp/` | 79 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops |
+| `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands, flush, stats |
 
-To add a new seed, create a file with RESP-encoded commands:
-
+To add a new RESP seed:
 ```
 *3
 $3
@@ -126,4 +142,11 @@ $3
 key
 $5
 value
+```
+
+To add a new memcache seed:
+```
+set mykey 0 0 5
+hello
+get mykey
 ```

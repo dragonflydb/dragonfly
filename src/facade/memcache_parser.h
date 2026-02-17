@@ -19,6 +19,9 @@ namespace facade {
 // then will follow up with reading the blob data directly from source.
 class MemcacheParser {
  public:
+  explicit MemcacheParser(uint32_t max_value_len = UINT32_MAX) : max_value_len_(max_value_len) {
+  }
+
   enum CmdType : uint8_t {
     INVALID = 0,
     SET = 1,
@@ -131,6 +134,7 @@ class MemcacheParser {
   Result ParseInternal(ArgSlice tokens_view, Command* cmd);
 
   uint32_t val_len_to_read_ = 0;
+  uint32_t max_value_len_ = UINT32_MAX;
   std::string tmp_buf_;
   int64_t last_unix_time_ = 0;
 };

@@ -8,7 +8,7 @@
 
 #include <string>
 
-#include "server/tx_base.h"
+#include "server/common_types.h"
 
 namespace dfly::tiering {
 

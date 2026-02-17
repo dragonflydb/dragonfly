@@ -11,6 +11,7 @@
 
 #include "base/iterator.h"
 #include "common/arg_range.h"
+#include "server/common_types.h"
 
 namespace dfly {
 
@@ -19,15 +20,7 @@ class Transaction;
 class Namespace;
 class DbSlice;
 
-using DbIndex = uint16_t;
-using ShardId = uint16_t;
-using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
-
 using cmn::ArgSlice;
-
-constexpr DbIndex kInvalidDbId = DbIndex(-1);
-constexpr ShardId kInvalidSid = ShardId(-1);
-constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.
 
 struct KeyLockArgs {
   DbIndex db_index = 0;
