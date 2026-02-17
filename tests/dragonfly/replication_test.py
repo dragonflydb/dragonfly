@@ -3983,6 +3983,7 @@ async def test_replication_replica_larger_dbnum(
 # BF.RESERVE with error_rate=0.00001 and capacity=1e9 creates a single bloom filter
 # of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
 # filter size, which silently overflowed to 0 and broke the RDB stream.
+@pytest.mark.skip("Requires ~10GiB RAM for 4GiB bloom filter replication")
 @pytest.mark.slow
 async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
     master = df_factory.create(
