@@ -2290,6 +2290,12 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (!rdbIsObjectTypeDF(type)) {
+      LOG(ERROR) << "Unrecognized rdb object type: " << type;
+      LOG(ERROR) << "Last iteration: ";
+      LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
+      LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
+                 << "\npending_read_.reserve: " << pending_read_.reserve;
+      // In case we encounter an error, it might worth peeking the InputBuffer()
       return RdbError(errc::invalid_rdb_type);
     }
 
@@ -2694,8 +2700,6 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   if (item->load_config.streamed && item->load_config.append) {
     std::unique_lock lk{now_streamed_mu_};
     if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
-      LOG(INFO) << "Appending to streamed key '" << absl::CHexEscape(item->key) << "' in DB "
-                << db_ind;
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2820,6 +2824,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   int64_t start = absl::GetCurrentTimeNanos();
 
   SET_OR_RETURN(ReadKey(), key);
+  last_key_loaded_ = key;
 
   bool streamed = false;
   do {
