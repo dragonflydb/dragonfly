@@ -187,6 +187,7 @@ size_t JournalSlice::GetRingBufferBytes() const {
 
 void JournalSlice::ResetRingBuffer() {
   ring_buffer_.clear();
+  ring_buffer_bytes_ = 0;
 }
 
 }  // namespace journal

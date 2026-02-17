@@ -1,9 +1,7 @@
-import os
 import platform
 import shutil
 import signal
 import tarfile
-import time
 import urllib.request
 from itertools import chain, repeat
 
@@ -3376,6 +3374,58 @@ async def test_partial_sync(df_factory, proactors, backlog_len):
     # Second partial sync failed because of stale LSN
     lines = master.find_in_logs("Partial sync requested from stale LSN")
     assert len(lines) == 1
+
+
+async def test_partial_sync_with_byte_limit(df_factory):
+    keys = 10_000
+    proactors = 4
+
+    master = df_factory.create(
+        proactor_threads=proactors,
+        shard_repl_backlog_len=8192,
+        shard_repl_backlog_max_bytes_soft=32 * 1024,
+        lock_on_hashtags=True,
+        vmodule="dragonfly_connection=1,db_slice=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,engine_shard=1,dflycmd=1,snapshot=1,streamer=1,journal_slice=2",
+    )
+    replica = df_factory.create(proactor_threads=proactors)
+
+    df_factory.start_all([replica, master])
+
+    async with replica.client() as c_replica, master.client() as c_master:
+        seeder = SeederV2(key_target=keys)
+        await seeder.run(c_master, target_deviation=0.01)
+
+        proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+            await wait_for_replicas_state(c_replica)
+
+            value = "x" * 500
+            for i in range(100):
+                await c_master.execute_command(f"SET {{prefix}}key{i} val{i}{value}")
+
+            proxy.drop_connection()
+            await asyncio.sleep(1.0)
+
+            await check_all_replicas_finished([c_replica], c_master)
+            hash1, hash2 = await asyncio.gather(
+                *(SeederV2.capture(c) for c in (c_master, c_replica))
+            )
+            assert hash1 == hash2
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+    lines = master.find_in_logs("Partial sync requested from LSN")
+    assert len(lines) >= 1
+    lines = master.find_in_logs("Partial sync requested from stale LSN")
+    assert len(lines) == 0
+    lines = master.find_in_logs(r"Evicting \d+ items to reach")
+    assert len(lines) >= 1
 
 
 async def test_mc_gat_replication(df_factory):
