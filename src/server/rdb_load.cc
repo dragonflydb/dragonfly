@@ -3057,10 +3057,8 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
     return;
 
   // Clear the created indices tracking set for next load
-  bool had_indices = false;
   {
     std::lock_guard lk(search_index_mu_);
-    had_indices = !created_search_indices_.empty();
     created_search_indices_.clear();
   }
 
@@ -3070,13 +3068,12 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
 
   // Start index building for all indices
   // TODO: don't build all indices concurrently or limit cumulative budget
-  if (had_indices) {
-    shard_set->RunBriefInParallel([](EngineShard* es) {
-      OpArgs op_args{es, nullptr,
-                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-      es->search_indices()->RebuildAllIndices(op_args);
-    });
-  }
+
+  shard_set->RunBriefInParallel([](EngineShard* es) {
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    es->search_indices()->RebuildAllIndices(op_args);
+  });
 
   // Issue FT.SYNUPDATE while the index is building
   for (auto& syn_cmd : synonym_cmds) {
@@ -3084,10 +3081,8 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   }
 
   // Wait until index building ends
-  if (had_indices) {
-    shard_set->RunBlockingInParallel(
-        [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
-  }
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
 }
 
 }  // namespace dfly
