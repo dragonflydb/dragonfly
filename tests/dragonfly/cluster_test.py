@@ -3737,13 +3737,10 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     await asyncio.sleep(10)
 
     # Wait for sufficient tiered entries
-    logging.info("Waiting for data to be offloaded to tiered storage")
     async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED"):
         with breaker:
             tiered_entries = info["tiered_entries"]
             assert tiered_entries >= 50_000
-
-    info = await nodes[0].client.info("keyspace")
 
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
@@ -3752,12 +3749,15 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     # Delete 50k keys during migration to create mutations and verify that they are applied correctly
-    delete_num = 10_000
+    delete_num = 50_000
 
     async def delete_job():
         keys_to_delete = [f"key:{i}" for i in range(0, delete_num)]
         for key in keys_to_delete:
-            await nodes[0].client.delete(key)
+            try:
+                await nodes[0].client.delete(key)
+            except Exception as e:
+                logging.info(f"Error deleting key {key}: {e}")
 
     asyncio.create_task(delete_job())
 

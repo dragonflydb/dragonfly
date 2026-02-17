@@ -131,7 +131,7 @@ size_t CmdSerializer::SerializeDelayedEntries(bool force,
   // to be true.
   // Check next comment that this can be removed once we have better support for skipping unresolved
   // entries.
-  if (delayed_entries_.empty() || !force || delayed_entries_.size() < 32) {
+  if (!force && delayed_entries_.size() < 32) {
     return 0;
   }
 
