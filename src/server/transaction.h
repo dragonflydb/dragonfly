@@ -138,7 +138,7 @@ class Transaction {
   using WaitKeys = std::optional<std::string_view>;
 
   // Modes in which a multi transaction can run.
-  enum MultiMode {
+  enum MultiMode : uint8_t {
     // Invalid state.
     NOT_DETERMINED = 0,
     // Global transaction.

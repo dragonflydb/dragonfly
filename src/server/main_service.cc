@@ -2221,8 +2221,11 @@ static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            bool read_only, CommandContext* cmd_cntx) {
+  const static size_t kShaSize = 40;
+  static_assert(sizeof(ConnectionState::ScriptInfo::Stats::sha) == kShaSize);
+
   // Sanitizing the input to avoid code injection.
-  if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
+  if (eval_args.sha.size() != kShaSize || !IsSHA(eval_args.sha)) {
     return cmd_cntx->SendError(facade::kScriptNotFound);
   }
 
@@ -2245,7 +2248,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
-  sinfo->stats.sha = eval_args.sha;
+  memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2280,6 +2283,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
+    sinfo->stats.tx_shards = 1;
     // It might be that there are no declared keys, but there is only a single shard
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
@@ -2329,6 +2333,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       }
     } else {
       scheduled = StartMulti(conn_cntx, script_mode, eval_args.keys);
+      sinfo->stats.tx_shards = tx->GetUniqueShardCnt();
     }
 
     ++ss->stats.eval_io_coordination_cnt;
@@ -2347,6 +2352,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (scheduled)
       tx->UnlockMulti();
   }
+
+  sinfo->stats.tx_mode = script_mode;
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
