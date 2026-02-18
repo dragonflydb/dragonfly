@@ -5,6 +5,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
