@@ -51,7 +51,19 @@ jobs:
           else
             echo "" > /tmp/pr_diff.txt
           fi
-          echo "diff_lines=$(wc -l < /tmp/pr_diff.txt)" >> "$GITHUB_OUTPUT"
+
+          DIFF_LINES=$(wc -l < /tmp/pr_diff.txt)
+          echo "diff_lines=${DIFF_LINES}" >> "$GITHUB_OUTPUT"
+
+          echo "::group::PR diff summary"
+          echo "C++ diff lines: ${DIFF_LINES}"
+          if [ "$DIFF_LINES" -gt 0 ]; then
+            echo "Changed files:"
+            grep '^diff --git' /tmp/pr_diff.txt | sed 's|diff --git a/.* b/|  |' || true
+          else
+            echo "No C++ file changes in this PR — seed generation will be skipped"
+          fi
+          echo "::endgroup::"
 
       - name: Generate targeted seeds
         id: seeds
@@ -72,9 +84,31 @@ jobs:
           echo "focus_commands=${FOCUS}" >> "$GITHUB_OUTPUT"
           echo "seeds_dir=${SEEDS_DIR}" >> "$GITHUB_OUTPUT"
 
-          echo "Generated seeds:"
-          ls -la "$SEEDS_DIR"/*.resp 2>/dev/null || echo "  (none)"
+          SEED_COUNT=$(ls "$SEEDS_DIR"/*.resp 2>/dev/null | wc -l || echo 0)
+
+          echo "::group::Seed generation results"
+          echo "Seeds generated: ${SEED_COUNT}"
           echo "Focus commands: ${FOCUS:-none}"
+          if [ "$SEED_COUNT" -gt 0 ]; then
+            ls -la "$SEEDS_DIR"/*.resp
+          fi
+          echo "::endgroup::"
+
+          # Job summary
+          {
+            echo "### Fuzzing Seed Generation"
+            echo ""
+            if [ "$SEED_COUNT" -gt 0 ]; then
+              echo "- **Seeds generated:** ${SEED_COUNT}"
+              echo "- **Focus commands:** \`${FOCUS}\`"
+            elif [ "$(wc -l < /tmp/pr_diff.txt)" -eq 0 ]; then
+              echo "- No C++ changes in PR — using default seed corpus"
+            elif [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "- No API key — using default seed corpus"
+            else
+              echo "- LLM did not produce usable seeds — using default seed corpus"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
