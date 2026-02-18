@@ -1213,7 +1213,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
   return results;
 }
 
-// Try creating globla hnsw indices for given fields and return true on success
+// Try creating global hnsw indices for given fields and return true on success
 bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
   std::vector<std::string> created_vector_indices;
   for (const auto& [field_ident, field_info] : index.schema.fields) {
@@ -1221,8 +1221,6 @@ bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
       continue;
 
     const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-    if (!vparams.use_hnsw)
-      continue;
 
     bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name,
                                                               vparams, index.type);
