@@ -641,7 +641,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
         "dbfilename": "tiered-entries",
         "tiered_prefix": "tiering-test-backing",
         "tiered_offload_threshold": "0.5",  # ask to keep below 0.5 * 1G
-        "tiered_storage_write_depth": 50,
+        "tiered_storage_write_depth": 1000,
     }
 )
 async def test_tiered_entries_throttle(async_client: aioredis.Redis):
