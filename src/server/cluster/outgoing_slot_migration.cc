@@ -36,8 +36,8 @@ namespace dfly::cluster {
 class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
-                     journal::Journal* journal, OutgoingMigration* om)
-      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
+                     OutgoingMigration* om)
+      : ProtocolClient(server_context), streamer_(slice, std::move(slots), &exec_st_) {
     exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
   }
 
@@ -278,9 +278,9 @@ void OutgoingMigration::SyncFb() {
 
     OnAllShards([this](auto& migration) {
       DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
-      server_family_->journal()->StartInThread();
-      migration = std::make_unique<SliceSlotMigration>(
-          &db_slice, server(), migration_info_.slot_ranges, server_family_->journal(), this);
+      journal::StartInThread();
+      migration = std::make_unique<SliceSlotMigration>(&db_slice, server(),
+                                                       migration_info_.slot_ranges, this);
     });
 
     if (!ChangeState(MigrationState::C_SYNC)) {

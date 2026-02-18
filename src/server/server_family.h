@@ -43,10 +43,6 @@ class SnapshotStorage;
 
 std::string GetPassword();
 
-namespace journal {
-class Journal;
-}  // namespace journal
-
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;
@@ -285,10 +281,6 @@ class ServerFamily {
     return master_replid_;
   }
 
-  journal::Journal* journal() {
-    return journal_.get();
-  }
-
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
@@ -434,7 +426,6 @@ class ServerFamily {
       ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
 
   std::unique_ptr<ScriptMgr> script_mgr_;
-  std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
 
   std::string master_replid_;

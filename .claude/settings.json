@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "Read($CLAUDE_PROJECT_DIR/**)",
       "Edit($CLAUDE_PROJECT_DIR/**)",
       "Write($CLAUDE_PROJECT_DIR/**)",
       "Bash(./*_test:*)",

@@ -213,7 +213,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
 
 // Record expiry in journal with independent transaction.
 // Must be called from shard thread owning key.
-// Might block the calling fiber unless Journal::SetFlushMode(false) is called.
+// Might block the calling fiber unless journal::SetFlushMode(false) is called.
 void RecordExpiryBlocking(DbIndex dbid, std::string_view key);
 
 }  // namespace dfly

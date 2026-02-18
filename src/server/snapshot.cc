@@ -83,8 +83,6 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 
   if (stream_journal) {
     use_snapshot_version_ = absl::GetFlag(FLAGS_point_in_time_snapshot);
-    auto* journal = db_slice_->shard_owner()->journal();
-    DCHECK(journal);
     journal_cb_id_ = journal::RegisterConsumer(this);
     if (!use_snapshot_version_) {
       auto moved_cb = [this](DbIndex db_index, const DbSlice::MovedItemsVec& items) {
