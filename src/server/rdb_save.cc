@@ -1117,7 +1117,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
   Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
-       SaveMode save_mode, io::Sink* sink);
+       SaveMode save_mode, io::Sink* sink, DflyVersion replica_dfly_version);
 
   ~Impl();
 
@@ -1139,10 +1139,6 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   error_code SaveAuxFieldStrStr(string_view key, string_view val);
 
   void CancelInShard(EngineShard* shard);
-
-  void SetDflyVersion(DflyVersion version) {
-    dfly_version_ = version;
-  }
 
   size_t GetTotalBuffersSize() const;
 
@@ -1186,13 +1182,13 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
   SaveMode save_mode_;
-  DflyVersion dfly_version_ = DflyVersion::CURRENT_VER;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
-                     SaveMode sm, io::Sink* sink)
+                     SaveMode sm, io::Sink* sink, DflyVersion replica_dfly_version)
     : sink_(sink),
       shard_snapshots_(producers_len),
       meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
@@ -1206,6 +1202,7 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
     channel_.emplace(kChannelLen, producers_len);
   }
   save_mode_ = sm;
+  replica_dfly_version_ = replica_dfly_version;
 }
 
 void RdbSaver::Impl::CleanShardSnapshots() {
@@ -1298,7 +1295,6 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
   s = CreateSliceSnapshot(shard, &db_slice, cntx);
-  s->SetDflyVersion(dfly_version_);
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
@@ -1308,8 +1304,9 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
 
 SnapshotPtr RdbSaver::Impl::CreateSliceSnapshot(EngineShard* shard, DbSlice* db_slice,
                                                 ExecutionState* cntx) {
-  return SnapshotPtr(new SliceSnapshot(compression_mode_, db_slice, this, cntx),
-                     OwnerThreadDeleter::FromShard(shard));
+  return SnapshotPtr(
+      new SliceSnapshot(compression_mode_, db_slice, this, cntx, replica_dfly_version_),
+      OwnerThreadDeleter::FromShard(shard));
 }
 
 // called on save flow
@@ -1538,8 +1535,9 @@ SnapshotPtr& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
   return shard_snapshots_[sid];
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std::string snapshot_id)
-    : snapshot_id_(std::move(snapshot_id)) {
+RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std::string snapshot_id,
+                   DflyVersion replica_dfly_version)
+    : replica_dfly_version_(replica_dfly_version), snapshot_id_(std::move(snapshot_id)) {
   CHECK_NOTNULL(sink);
   CompressionMode compression_mode = GetDefaultCompressionMode();
   int producer_count = 0;
@@ -1567,7 +1565,8 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std:
       break;
   }
   VLOG(1) << "Rdb save using compression mode:" << uint32_t(compression_mode_);
-  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, save_mode, sink));
+  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, save_mode, sink,
+                       replica_dfly_version_));
   save_mode_ = save_mode;
 }
 
@@ -1576,11 +1575,6 @@ RdbSaver::~RdbSaver() {
   // We create an RdbSaver for each thread, so each one will Decommit for itself.
   auto* tlocal = ServerState::tlocal();
   tlocal->DecommitMemory(ServerState::kAllMemory);
-}
-
-void RdbSaver::SetDflyVersion(DflyVersion version) {
-  dfly_version_ = version;
-  impl_->SetDflyVersion(version);
 }
 
 void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
@@ -1663,14 +1657,14 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     // Search index definitions - for non-summary shards only sent to replicas >= VER6,
     // since older replicas only expect search-index from the summary shard.
     bool send_search_index =
-        (save_mode_ != SaveMode::SINGLE_SHARD) || (dfly_version_ >= DflyVersion::VER6);
+        (save_mode_ != SaveMode::SINGLE_SHARD) || (replica_dfly_version_ >= DflyVersion::VER6);
     if (send_search_index) {
       for (const string& s : glob_state.search_indices)
         RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
     }
 
     // HNSW index metadata (JSON, summary only) - only for replicas >= VER6
-    if (dfly_version_ >= DflyVersion::VER6) {
+    if (replica_dfly_version_ >= DflyVersion::VER6) {
       for (const string& s : glob_state.hnsw_index_metadata)
         RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("hnsw-index-metadata", s));
     }

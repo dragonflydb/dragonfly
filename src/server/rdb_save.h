@@ -98,8 +98,9 @@ class RdbSaver {
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
   // snapshot_id - allows to identify that group of files belongs to the same snapshot
+  // replica_dfly_version - upper bound for conditional serialization of new features.
   explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes,
-                    std::string snapshot_id);
+                    std::string snapshot_id, DflyVersion replica_dfly_version);
 
   ~RdbSaver();
 
@@ -127,14 +128,6 @@ class RdbSaver {
 
   SaveMode Mode() const {
     return save_mode_;
-  }
-
-  // Set the replica version for conditional serialization of new features.
-  // Must be called before SaveHeader() and StartSnapshotInShard().
-  void SetDflyVersion(DflyVersion version);
-
-  DflyVersion GetDflyVersion() const {
-    return dfly_version_;
   }
 
   // Get total size of all rdb serializer buffers and items currently placed in channel
@@ -168,7 +161,7 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
   SaveMode save_mode_;
   CompressionMode compression_mode_;
-  DflyVersion dfly_version_ = DflyVersion::CURRENT_VER;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
   std::string snapshot_id_;
 };
 

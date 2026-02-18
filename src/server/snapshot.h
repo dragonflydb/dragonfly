@@ -64,7 +64,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   };
 
   SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx);
+                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
+                DflyVersion replica_dfly_version);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -73,12 +74,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
   enum class SnapshotFlush : uint8_t { kAllow, kDisallow };
-
-  // Set the replica version for conditional serialization of new features.
-  // Must be called before Start.
-  void SetDflyVersion(DflyVersion version) {
-    dfly_version_ = version;
-  }
 
   void Start(bool stream_journal, SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
@@ -189,7 +184,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
-  DflyVersion dfly_version_ = DflyVersion::CURRENT_VER;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
