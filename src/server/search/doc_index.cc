@@ -904,7 +904,7 @@ void ShardDocIndices::BlockUntilConstructionEnd() {
       indexing |= ptr->GetInfo().indexing;
 
     if (indexing)
-      util::ThisFiber::SleepFor(1ms);
+      util::ThisFiber::SleepFor(5ms);
   } while (indexing);
 }
 
