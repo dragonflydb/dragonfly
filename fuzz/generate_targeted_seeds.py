@@ -177,6 +177,8 @@ def validate_resp(content):
                 continue
             if pos + slen + 2 > len(data):
                 return False
+            if data[pos + slen : pos + slen + 2] != b"\r\n":
+                return False
             pos += slen + 2
 
         found_any = True

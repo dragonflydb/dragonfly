@@ -153,15 +153,21 @@ _FOCUS_WEIGHT = 0.7
 _focus_env = os.environ.get("FUZZ_FOCUS_COMMANDS", "")
 if _focus_env:
     try:
-        _focus_names = set(json.loads(_focus_env))
-        _FOCUS_COMMANDS = [c for c in COMMANDS if c[0].decode() in _focus_names]
+        raw = json.loads(_focus_env)
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, list):
+            _focus_names = {s.strip().upper() for s in raw if isinstance(s, str) and s.strip()}
+        else:
+            _focus_names = set()
+        _FOCUS_COMMANDS = [c for c in COMMANDS if c[0].decode().upper() in _focus_names]
         # Add unknown commands (e.g. newly added in a PR) with default arity
-        _known = {c[0].decode() for c in COMMANDS}
+        _known = {c[0].decode().upper() for c in COMMANDS}
         for name in _focus_names - _known:
             entry = (name.encode(), 1, 3)
             COMMANDS.append(entry)
             _FOCUS_COMMANDS.append(entry)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
 

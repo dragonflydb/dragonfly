@@ -47,7 +47,6 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git config --global --add safe.directory "$GITHUB_WORKSPACE"
-            git fetch origin ${{ github.event.pull_request.base.sha }} --depth=1
             git diff ${{ github.event.pull_request.base.sha }}..HEAD -- '*.cc' '*.h' > /tmp/pr_diff.txt
           else
             echo "" > /tmp/pr_diff.txt
@@ -57,7 +56,7 @@ jobs:
       - name: Generate targeted seeds
         id: seeds
         run: |
-          pip install anthropic 2>/dev/null || pip install --break-system-packages anthropic 2>/dev/null || true
+          pip install 'anthropic>=0.39,<1' 2>/dev/null || pip install --break-system-packages 'anthropic>=0.39,<1' 2>/dev/null || true
 
           SEEDS_DIR="${GITHUB_WORKSPACE}/fuzz/seeds/pr_targeted"
           mkdir -p "$SEEDS_DIR"
@@ -83,7 +82,7 @@ jobs:
         uses: ./.github/actions/fuzzing
         with:
           mode: smoke
-          duration-minutes: ${{ github.event.inputs.duration || '5' }}
+          duration-minutes: ${{ github.event.inputs.duration || '15' }}
           run-number: ${{ github.run_number }}
           extra-seeds-dir: ${{ steps.seeds.outputs.seeds_dir }}
           focus-commands: ${{ steps.seeds.outputs.focus_commands }}
