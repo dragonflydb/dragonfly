@@ -238,6 +238,65 @@ def normalize_resp_content(content):
     return content
 
 
+def fix_resp_content(content):
+    """Re-encode RESP content, fixing both *N array counts and $len bulk string lengths.
+
+    LLMs frequently miscount byte lengths and argument counts. This parses the
+    intent (command names + argument payloads) and re-encodes with correct values.
+    """
+    data = content.encode() if isinstance(content, str) else content
+    commands = []
+    pos = 0
+
+    while pos < len(data):
+        # Skip whitespace between commands
+        while pos < len(data) and data[pos : pos + 1] in (b"\r", b"\n", b" "):
+            pos += 1
+        if pos >= len(data):
+            break
+        if data[pos : pos + 1] != b"*":
+            pos += 1
+            continue
+
+        end = data.find(b"\r\n", pos)
+        if end < 0:
+            break
+        try:
+            nargs = int(data[pos + 1 : end])
+        except ValueError:
+            break
+        pos = end + 2
+
+        args = []
+        for _ in range(nargs):
+            if pos >= len(data) or data[pos : pos + 1] != b"$":
+                break
+            end = data.find(b"\r\n", pos)
+            if end < 0:
+                break
+            pos = end + 2
+            # Find actual payload by looking for next \r\n
+            payload_end = data.find(b"\r\n", pos)
+            if payload_end < 0:
+                args.append(data[pos:])
+                pos = len(data)
+                break
+            args.append(data[pos:payload_end])
+            pos = payload_end + 2
+
+        if args:
+            commands.append(args)
+
+    # Re-encode with correct counts and lengths
+    result = bytearray()
+    for cmd in commands:
+        result.extend(b"*%d\r\n" % len(cmd))
+        for arg in cmd:
+            result.extend(b"$%d\r\n%s\r\n" % (len(arg), arg))
+
+    return bytes(result)
+
+
 def write_output(output_dir, focus_commands, seeds):
     """Write seed files and focus_commands.json to output directory."""
     os.makedirs(output_dir, exist_ok=True)
@@ -253,8 +312,13 @@ def write_output(output_dir, focus_commands, seeds):
         if not name.endswith(".resp"):
             name += ".resp"
         path = os.path.join(output_dir, name)
-        with open(path, "w", newline="") as f:
-            f.write(seed["content"])
+        content = seed["content"]
+        if isinstance(content, bytes):
+            with open(path, "wb") as f:
+                f.write(content)
+        else:
+            with open(path, "w", newline="") as f:
+                f.write(content)
         written += 1
 
     print("Wrote %d seed files to %s" % (written, output_dir), file=sys.stderr)
@@ -324,6 +388,7 @@ def main():
         if not isinstance(s, dict) or "content" not in s:
             continue
         s["content"] = normalize_resp_content(s["content"])
+        s["content"] = fix_resp_content(s["content"])
         if validate_resp(s["content"]):
             valid_seeds.append(s)
         else:
