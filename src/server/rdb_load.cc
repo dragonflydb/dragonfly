@@ -80,7 +80,28 @@ namespace {
 // containing 2 or 3 items.
 constexpr size_t kMaxBlobLen = 4092;
 
+// Type alias for results that propagate InstrumentedError
+template <typename T>
+using InstrumentedResult = nonstd::expected<T, InstrumentedError>;
+
+// Helper to create InstrumentedError with context (without immediate logging)
+template <typename... Args>
+inline InstrumentedError MakeInstrumentedError(errc ev, Args&&... args) {
+  InstrumentedError err{RdbError(ev)};
+  if constexpr (sizeof...(args) > 0) {
+    err.Context(std::forward<Args>(args)...);
+  }
+  return err;
+}
+
+// Helper to log and extract error_code from InstrumentedError
+inline std::error_code LogAndExtractError(InstrumentedError&& err) {
+  LOG(ERROR) << err;
+  return err.Cause().ec_;
+}
+
 // Helper to create InstrumentedError and log it, returning the error_code
+// Used for compatibility with functions returning std::error_code
 template <typename... Args>
 inline std::error_code MakeError(errc ev, Args&&... args) {
   InstrumentedError err{RdbError(ev)};
@@ -100,24 +121,6 @@ inline auto MakeUnexpected(errc ev, Args&&... args) {
   }
   LOG(ERROR) << err;
   return make_unexpected(err.ec_);
-}
-
-// Helper for tracing IO errors
-inline std::error_code TraceError(std::error_code ec) {
-  if (ec) {
-    InstrumentedError err{ec};
-    LOG(ERROR) << err.Trace();
-  }
-  return ec;
-}
-
-// Helper for tracing and returning unexpected
-inline auto TraceUnexpected(std::error_code ec) {
-  if (ec) {
-    InstrumentedError err{ec};
-    LOG(ERROR) << err.Trace();
-  }
-  return make_unexpected(ec);
 }
 
 inline auto Unexpected(errc ev) {
