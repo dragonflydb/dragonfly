@@ -14,6 +14,7 @@
 #include "facade/reply_capture.h"
 #include "facade/service_interface.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 
 using namespace std;
 

@@ -10,7 +10,7 @@
 #include <nonstd/expected.hpp>
 #include <optional>
 
-#include "server/conn_context.h"
+#include "server/common_types.h"
 #include "server/execution_state.h"
 
 namespace facade {
@@ -18,6 +18,8 @@ class SinkReplyBuilder;
 }  // namespace facade
 
 namespace dfly {
+
+using facade::CmdArgList;
 
 class EngineShardSet;
 class Interpreter;

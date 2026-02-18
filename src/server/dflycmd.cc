@@ -29,6 +29,7 @@
 #include "server/journal/journal.h"
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"

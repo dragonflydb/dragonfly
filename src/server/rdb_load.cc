@@ -43,6 +43,7 @@ extern "C" {
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/search/doc_index.h"
