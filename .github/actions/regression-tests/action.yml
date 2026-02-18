@@ -109,12 +109,22 @@ runs:
           export DF_ARG="--df experimental_io_loop_v2=true"
         fi
 
+        export FILTER="${{inputs.filter}}"
+
+        # Exclude large tests unless explicitly requested
+        if [[ "$FILTER" == "large" ]]; then
+          : # keep as-is, run only large tests
+        elif [[ -n "$FILTER" ]]; then
+          FILTER="(not large) and ($FILTER)"
+        else
+          FILTER="not large"
+        fi
+
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
-          export FILTER="${{inputs.filter}} and not exclude_epoll"
+          FILTER="$FILTER and not exclude_epoll"
           # Run only replication tests with epoll
           timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --df force_epoll=true --log-cli-level=INFO || code=$?
         else
-          export FILTER="${{inputs.filter}}"
           # Run only replication tests with iouring
           timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --log-cli-level=INFO || code=$?
         fi
