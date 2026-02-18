@@ -6,6 +6,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -13,6 +14,8 @@ ABSL_DECLARE_FLAG(bool, cache_mode);
 namespace dfly {
 
 using namespace std;
+
+Namespace::~Namespace() = default;
 
 Namespace::Namespace() {
   shard_db_slices_.resize(shard_set->size());

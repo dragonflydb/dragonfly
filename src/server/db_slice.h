@@ -15,6 +15,7 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/common_types.h"
+#include "server/stats.h"
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tx_base.h"
@@ -29,61 +30,6 @@ class SlotSet;
 }  // namespace cluster
 
 using facade::OpResult;
-
-struct DbStats : public DbTableStats {
-  // number of active keys.
-  size_t key_count = 0;
-
-  // number of keys that have expiry deadline.
-  size_t expire_count = 0;
-
-  // total number of slots in prime dictionary (key capacity).
-  size_t prime_capacity = 0;
-
-  // total number of slots in prime dictionary (key capacity).
-  size_t expire_capacity = 0;
-
-  // Memory used by dictionaries.
-  size_t table_mem_usage = 0;
-
-  // We override additional DbStats fields explicitly in DbSlice::GetStats().
-  using DbTableStats::operator=;
-
-  DbStats& operator+=(const DbStats& o);
-};
-
-struct SliceEvents {
-  // Number of eviction events.
-  size_t evicted_keys = 0;
-
-  // evictions that were performed when we have a negative memory budget.
-  size_t hard_evictions = 0;
-  size_t expired_keys = 0;
-  size_t garbage_checked = 0;
-  size_t garbage_collected = 0;
-  size_t stash_unloaded = 0;
-  size_t bumpups = 0;  // how many bump-upds we did.
-
-  // hits/misses on keys
-  size_t hits = 0;
-  size_t misses = 0;
-  size_t mutations = 0;
-
-  // ram hit/miss when tiering is enabled
-  size_t ram_hits = 0;
-  size_t ram_cool_hits = 0;
-  size_t ram_misses = 0;
-
-  // how many insertions were rejected due to OOM.
-  size_t insertion_rejections = 0;
-
-  // how many updates and insertions of keys between snapshot intervals
-  size_t update = 0;
-
-  uint64_t huff_encode_total = 0, huff_encode_success = 0;
-
-  SliceEvents& operator+=(const SliceEvents& o);
-};
 
 class DbSlice {
   DbSlice(const DbSlice&) = delete;

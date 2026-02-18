@@ -11,8 +11,6 @@
 
 #include "core/qlist.h"
 #include "facade/facade_stats.h"
-#include "server/db_slice.h"
-#include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "server/stats.h"
@@ -50,6 +48,7 @@ class Journal;
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;
+class EngineShardSet;
 class Service;
 class ScriptMgr;
 
@@ -83,9 +82,9 @@ struct PeakStats {
 
 // Aggregated metrics over multiple sources on all shards
 struct Metrics {
-  SliceEvents events;              // general keyspace stats
-  std::vector<DbStats> db_stats;   // dbsize stats
-  EngineShard::Stats shard_stats;  // per-shard stats
+  SliceEvents events;             // general keyspace stats
+  std::vector<DbStats> db_stats;  // dbsize stats
+  ShardStats shard_stats;         // per-shard stats
 
   facade::FacadeStats facade_stats;  // client stats and buffer sizes
   TieredStats tiered_stats;
@@ -331,9 +330,7 @@ class ServerFamily {
   void JoinSnapshotSchedule();
   void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
-  uint32_t shard_count() const {
-    return shard_set->size();
-  }
+  uint32_t shard_count() const;
 
   void Auth(CmdArgList args, CommandContext* cmd_cntx);
   void Client(CmdArgList args, CommandContext* cmd_cntx);

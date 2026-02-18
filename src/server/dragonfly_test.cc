@@ -17,6 +17,7 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/db_slice.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
 

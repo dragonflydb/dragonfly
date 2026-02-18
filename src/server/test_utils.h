@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/flags/reflection.h>
 #include <gmock/gmock.h>
 
 #include <chrono>
@@ -14,6 +15,7 @@
 #include "facade/resp_parser.h"
 #include "io/io.h"
 #include "server/conn_context.h"
+#include "server/engine_shard_set.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"

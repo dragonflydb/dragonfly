@@ -19,6 +19,7 @@
 extern "C" {
 #include "redis/zmalloc.h"
 }
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
@@ -221,29 +222,6 @@ string EngineShard::TxQueueInfo::Format() const {
   }
 
   return res;
-}
-
-EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 104);
-
-#define ADD(x) x += o.x
-
-  ADD(defrag_attempt_total);
-  ADD(defrag_realloc_total);
-  ADD(defrag_task_invocation_total);
-  ADD(poll_execution_total);
-  ADD(tx_ooo_total);
-  ADD(tx_optimistic_total);
-  ADD(tx_batch_schedule_calls_total);
-  ADD(tx_batch_scheduled_items_total);
-  ADD(total_heartbeat_expired_keys);
-  ADD(total_heartbeat_expired_bytes);
-  ADD(total_heartbeat_expired_calls);
-  ADD(total_migrated_keys);
-  ADD(huffman_tables_built);
-
-#undef ADD
-  return *this;
 }
 
 void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {

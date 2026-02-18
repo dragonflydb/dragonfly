@@ -36,6 +36,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"

@@ -50,6 +50,7 @@ extern "C" {
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
 #include "server/command_registry.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
 #include "server/detail/save_stages_controller.h"
@@ -2830,6 +2831,10 @@ static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
 
   dest->events += src.events;
   dest->small_string_bytes += src.small_string_bytes;
+}
+
+uint32_t ServerFamily::shard_count() const {
+  return shard_set->size();
 }
 
 void ServerFamily::ResetStat(Namespace* ns) {

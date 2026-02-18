@@ -13,6 +13,8 @@
 #include "base/logging.h"
 #include "facade/reply_capture.h"
 #include "facade/service_interface.h"
+#include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
 

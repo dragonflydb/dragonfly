@@ -10,6 +10,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/db_slice.h"
 #include "server/namespaces.h"
 #include "server/tiered_storage.h"
 #include "strings/human_readable.h"

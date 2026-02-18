@@ -12,51 +12,9 @@
 
 using namespace std;
 namespace dfly {
-#define ADD(x) (x) += o.x
 
 // It should be const, but we override this variable in our tests so that they run faster.
 unsigned kInitSegmentLog = 3;
-
-void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
-  if (type >= memory_usage_by_type.size()) {
-    LOG_FIRST_N(WARNING, 1) << "Encountered unknown type when aggregating per-type memory: "
-                            << type;
-    DCHECK(false) << "Unsupported type " << type;
-    return;
-  }
-  obj_memory_usage += delta;
-  memory_usage_by_type[type] += delta;
-}
-
-DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
-  constexpr size_t kDbSz = sizeof(DbTableStats) - sizeof(memory_usage_by_type);
-  static_assert(kDbSz == 64);
-
-  ADD(inline_keys);
-  ADD(obj_memory_usage);
-  ADD(tiered_entries);
-  ADD(tiered_used_bytes);
-  ADD(events.hits);
-  ADD(events.misses);
-  ADD(events.expired_keys);
-  ADD(events.evicted_keys);
-
-  for (size_t i = 0; i < o.memory_usage_by_type.size(); ++i) {
-    memory_usage_by_type[i] += o.memory_usage_by_type[i];
-  }
-
-  return *this;
-}
-
-SlotStats& SlotStats::operator+=(const SlotStats& o) {
-  static_assert(sizeof(SlotStats) == 32);
-
-  ADD(key_count);
-  ADD(total_reads);
-  ADD(total_writes);
-  ADD(memory_bytes);
-  return *this;
-}
 
 std::optional<const IntentLock> LockTable::Find(LockTag tag) const {
   LockFp fp = tag.Fingerprint();

@@ -6,6 +6,8 @@
 
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "util/fibers/fibers.h"
 
 extern "C" {

@@ -48,6 +48,8 @@
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "server/common.h"
+#include "server/config_registry.h"
+#include "server/engine_shard_set.h"
 #include "server/generic_family.h"
 #include "server/main_service.h"
 #include "server/server_family.h"

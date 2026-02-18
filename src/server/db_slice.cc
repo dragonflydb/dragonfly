@@ -340,48 +340,6 @@ inline bool MayDeleteAsynchronously(const PrimeValue& pv) {
 
 }  // namespace
 
-#define ADD(x) (x) += o.x
-
-DbStats& DbStats::operator+=(const DbStats& o) {
-  constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
-  static_assert(kDbSz == 40);
-
-  DbTableStats::operator+=(o);
-
-  ADD(key_count);
-  ADD(expire_count);
-  ADD(prime_capacity);
-  ADD(expire_capacity);
-  ADD(table_mem_usage);
-
-  return *this;
-}
-
-SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 136, "You should update this function with new fields");
-
-  ADD(evicted_keys);
-  ADD(hard_evictions);
-  ADD(expired_keys);
-  ADD(garbage_collected);
-  ADD(stash_unloaded);
-  ADD(bumpups);
-  ADD(garbage_checked);
-  ADD(hits);
-  ADD(misses);
-  ADD(mutations);
-  ADD(insertion_rejections);
-  ADD(update);
-  ADD(ram_hits);
-  ADD(ram_cool_hits);
-  ADD(ram_misses);
-  ADD(huff_encode_total);
-  ADD(huff_encode_success);
-  return *this;
-}
-
-#undef ADD
-
 class DbSlice::PrimeBumpPolicy {
  public:
   bool CanBump(const CompactObj& obj) const {

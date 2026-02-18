@@ -23,6 +23,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
 #include "server/cluster_support.h"
+#include "server/db_slice.h"
 #include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"

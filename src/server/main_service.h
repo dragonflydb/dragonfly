@@ -7,13 +7,10 @@
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
-#include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
-#include "server/config_registry.h"
-#include "server/engine_shard_set.h"
 #include "server/server_family.h"
 
 namespace util {
@@ -83,9 +80,7 @@ class Service : public facade::ServiceInterface {
 
   Service::ContextInfo GetContextInfo(facade::ConnectionContext* cntx) const final;
 
-  uint32_t shard_count() const {
-    return shard_set->size();
-  }
+  uint32_t shard_count() const;
 
   // Used by tests.
   bool IsLocked(Namespace* ns, DbIndex db_index, std::string_view key) const;

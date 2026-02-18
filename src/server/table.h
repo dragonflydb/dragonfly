@@ -12,11 +12,13 @@
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
 #include "server/detail/table.h"
+#include "server/stats.h"
 #include "server/tx_base.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
 }
+
 namespace base {
 class Histogram;
 }
@@ -53,43 +55,6 @@ inline bool IsValid(PrimeConstIterator it) {
 inline bool IsValid(ExpireConstIterator it) {
   return !it.is_done();
 }
-
-struct SlotStats {
-  uint64_t key_count = 0;
-  uint64_t total_reads = 0;
-  uint64_t total_writes = 0;
-  uint64_t memory_bytes = 0;
-  SlotStats& operator+=(const SlotStats& o);
-};
-
-struct DbTableStats {
-  // Number of inline keys.
-  uint64_t inline_keys = 0;
-
-  // Object memory usage besides hash-table capacity.
-  // Applies for any non-inline objects.
-  size_t obj_memory_usage = 0;
-
-  size_t tiered_entries = 0;
-  size_t tiered_used_bytes = 0;
-
-  struct {
-    // Per-database hits/misses on keys
-    size_t hits = 0;
-    size_t misses = 0;
-
-    // Per-database expired/evicted keys
-    size_t expired_keys = 0;
-    size_t evicted_keys = 0;
-  } events;
-
-  std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
-
-  // Mostly used internally, exposed for tiered storage.
-  void AddTypeMemoryUsage(unsigned type, int64_t delta);
-
-  DbTableStats& operator+=(const DbTableStats& o);
-};
 
 // Table for recording locks. Keys used with the lock table should be normalized with LockTag.
 class LockTable {

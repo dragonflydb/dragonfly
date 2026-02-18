@@ -47,7 +47,10 @@ extern "C" {
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_families.h"
+#include "server/config_registry.h"
+#include "server/db_slice.h"
 #include "server/dflycmd.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/hset_family.h"
@@ -1945,6 +1948,10 @@ facade::ParsedCommand* Service::AllocateParsedCommand() {
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {
   return registry_.Find(registry_.RenamedOrOriginal(cmd));
+}
+
+uint32_t Service::shard_count() const {
+  return shard_set->size();
 }
 
 bool Service::IsLocked(Namespace* ns, DbIndex db_index, std::string_view key) const {

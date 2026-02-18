@@ -10,6 +10,7 @@
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/common_types.h"
+#include "server/stats.h"
 #include "util/sliding_counter.h"
 
 typedef char* sds;
@@ -24,34 +25,7 @@ class EngineShard {
   friend class EngineShardSet;
 
  public:
-  struct Stats {
-    uint64_t defrag_attempt_total = 0;
-    uint64_t defrag_realloc_total = 0;
-    uint64_t defrag_task_invocation_total = 0;
-    uint64_t poll_execution_total = 0;
-
-    // number of optimistic executions - that were run as part of the scheduling.
-    uint64_t tx_optimistic_total = 0;
-    uint64_t tx_ooo_total = 0;
-
-    // Number of ScheduleBatchInShard calls.
-    uint64_t tx_batch_schedule_calls_total = 0;
-
-    // Number of transactions scheduled via ScheduleBatchInShard.
-    uint64_t tx_batch_scheduled_items_total = 0;
-
-    uint64_t total_heartbeat_expired_keys = 0;
-    uint64_t total_heartbeat_expired_bytes = 0;
-    uint64_t total_heartbeat_expired_calls = 0;
-
-    // cluster stats
-    uint64_t total_migrated_keys = 0;
-
-    // how many huffman tables were built successfully in the background
-    uint32_t huffman_tables_built = 0;
-
-    Stats& operator+=(const Stats&);
-  };
+  using Stats = ShardStats;
 
   // Sets up a new EngineShard in the thread.
   // If update_db_time is true, initializes periodic time update for its db_slice.

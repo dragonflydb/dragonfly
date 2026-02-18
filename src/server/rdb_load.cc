@@ -36,6 +36,7 @@ extern "C" {
 #include "core/string_set.h"
 #include "facade/reply_capture.h"
 #include "server/cluster/cluster_config.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
