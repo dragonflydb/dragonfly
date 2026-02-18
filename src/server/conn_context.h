@@ -130,10 +130,12 @@ struct ConnectionState {
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
 
     struct Stats {
-      std::string sha;            // TODO: avoid copy via char[40]?
-      unsigned num_commands = 0;  // total number of command executed
-      // TODO: Latency measurement only possible with squashing info (or use atomic for everything?)
-      // uint64_t command_time_us = 0;
+      char sha[40];                            // sha of script
+      unsigned num_commands = 0;               // total number of command executed
+      std::atomic_uint32_t slow_commands = 0;  // commands that made it into slowlog
+
+      uint8_t tx_mode = 0;     // value of Transaction::MultiMode
+      unsigned tx_shards = 0;  // Number of shards on the transaction
     } stats;
   };
 

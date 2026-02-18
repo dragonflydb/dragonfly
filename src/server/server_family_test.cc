@@ -222,14 +222,15 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
 
 // Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
+  Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
 
   // Run EXEC
   {
     Run({"multi"});
     Run({"set", "first", "ok"});
-    Run({"set", "second", "ok"});
-    Run({"get", "third"});
+    Run({"set", "second2", "ok"});
+    Run({"get", "third3"});
     Run({"exec"});
   }
 
@@ -244,7 +245,7 @@ for i, key in ipairs(KEYS) do
 end
 return 'OK';
     )";
-    auto resp = Run({"EVAL", script, "3", "first", "second", "third", "second"});
+    auto resp = Run({"EVAL", script, "3", "first", "second2", "third3", "second2"});
     EXPECT_EQ(resp, "OK");
   }
 
@@ -257,8 +258,9 @@ return 'OK';
       found++;
     } else if (args[0] == "EVAL") {
       const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
-      EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "is_write: 1", "lock_tags: 3",
-                                          "3", "first", "second", "third", "second"}));
+      EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "slow_cmds: 6", "tx_mode: 2",
+                                          "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3",
+                                          "first", "second2", "third3", "second2"}));
       found++;
     }
   }
