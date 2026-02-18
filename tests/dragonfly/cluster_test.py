@@ -3642,6 +3642,7 @@ async def test_remove_docs_on_cluster_migration(df_factory):
     await verify_keys_match_number_of_index_docs(nodes[0].client, 0)
 
 
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @dfly_args({"cluster_mode": "yes"})
@@ -3705,6 +3706,7 @@ async def test_cluster_migration_with_tiering(df_factory):
     assert info["db0"]["keys"] == 0
 
 
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @dfly_args({"cluster_mode": "yes"})
