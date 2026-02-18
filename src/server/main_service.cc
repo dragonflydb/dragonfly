@@ -2067,7 +2067,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
 
-  bool error_abort = (ca.call_type & CT::PCALL) == 0;
+  bool abort_on_error = (ca.call_type & CT::PCALL) == 0;
   bool async_call = ca.call_type & CT::ACALL;
   bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
 
@@ -2076,10 +2076,10 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
 
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(cmd); cid != nullptr) {
-      auto reply_mode = error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
-    } else if (error_abort) {  // If we don't abort on errors, we can ignore it completely
+    } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ca.args[0]);
     }
   }
@@ -2094,7 +2094,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   if (findcmd_err.has_value()) {
     auto* prev = cmd_cntx->SwapReplier(&replier);
     cmd_cntx->SendError(*findcmd_err);
-    *ca.requested_abort |= error_abort;
+    *ca.requested_abort |= abort_on_error;
     cmd_cntx->SwapReplier(prev);
   }
 
