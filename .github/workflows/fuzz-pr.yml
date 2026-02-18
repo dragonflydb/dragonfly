@@ -1,0 +1,89 @@
+name: AFL++ PR Fuzzing
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**/*.cc'
+      - 'src/**/*.h'
+      - 'helio/**/*.cc'
+      - 'helio/**/*.h'
+      - 'fuzz/**'
+      - '.github/workflows/fuzz-pr.yml'
+      - '.github/actions/fuzzing/**'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration in minutes'
+        required: false
+        default: '15'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24-afl
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Generate PR diff
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            git fetch origin ${{ github.event.pull_request.base.sha }} --depth=1
+            git diff ${{ github.event.pull_request.base.sha }}..HEAD -- '*.cc' '*.h' > /tmp/pr_diff.txt
+          else
+            echo "" > /tmp/pr_diff.txt
+          fi
+          echo "diff_lines=$(wc -l < /tmp/pr_diff.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate targeted seeds
+        id: seeds
+        run: |
+          pip install anthropic 2>/dev/null || pip install --break-system-packages anthropic 2>/dev/null || true
+
+          SEEDS_DIR="${GITHUB_WORKSPACE}/fuzz/seeds/pr_targeted"
+          mkdir -p "$SEEDS_DIR"
+
+          python3 fuzz/generate_targeted_seeds.py \
+            --output-dir "$SEEDS_DIR" \
+            < /tmp/pr_diff.txt
+
+          FOCUS=""
+          if [ -f "$SEEDS_DIR/focus_commands.json" ]; then
+            FOCUS=$(cat "$SEEDS_DIR/focus_commands.json")
+          fi
+          echo "focus_commands=${FOCUS}" >> "$GITHUB_OUTPUT"
+          echo "seeds_dir=${SEEDS_DIR}" >> "$GITHUB_OUTPUT"
+
+          echo "Generated seeds:"
+          ls -la "$SEEDS_DIR"/*.resp 2>/dev/null || echo "  (none)"
+          echo "Focus commands: ${FOCUS:-none}"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Run AFL++ PR fuzzing
+        uses: ./.github/actions/fuzzing
+        with:
+          mode: smoke
+          duration-minutes: ${{ github.event.inputs.duration || '5' }}
+          run-number: ${{ github.run_number }}
+          extra-seeds-dir: ${{ steps.seeds.outputs.seeds_dir }}
+          focus-commands: ${{ steps.seeds.outputs.focus_commands }}

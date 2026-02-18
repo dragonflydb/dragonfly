@@ -10,6 +10,8 @@ Usage:
     afl-fuzz ...
 """
 
+import json
+import os
 import random
 import struct
 
@@ -142,6 +144,33 @@ FUZZ_VALUES = [
     b"inf",
 ]
 
+# Focus commands: when set via FUZZ_FOCUS_COMMANDS env var (JSON list of command names),
+# the mutator will prefer these commands ~70% of the time. Used by PR fuzzing to
+# concentrate mutations on commands affected by the code change.
+_FOCUS_COMMANDS = []
+_FOCUS_WEIGHT = 0.7
+
+_focus_env = os.environ.get("FUZZ_FOCUS_COMMANDS", "")
+if _focus_env:
+    try:
+        _focus_names = set(json.loads(_focus_env))
+        _FOCUS_COMMANDS = [c for c in COMMANDS if c[0].decode() in _focus_names]
+        # Add unknown commands (e.g. newly added in a PR) with default arity
+        _known = {c[0].decode() for c in COMMANDS}
+        for name in _focus_names - _known:
+            entry = (name.encode(), 1, 3)
+            COMMANDS.append(entry)
+            _FOCUS_COMMANDS.append(entry)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+
+def _pick_command():
+    """Pick a command tuple, preferring focus commands when available."""
+    if _FOCUS_COMMANDS and random.random() < _FOCUS_WEIGHT:
+        return random.choice(_FOCUS_COMMANDS)
+    return random.choice(COMMANDS)
+
 
 def init(seed):
     random.seed(seed)
@@ -179,7 +208,7 @@ def _random_arg():
 
 def _random_command():
     """Generate a single random RESP command."""
-    cmd_name, min_args, max_args = random.choice(COMMANDS)
+    cmd_name, min_args, max_args = _pick_command()
     nargs = random.randint(min_args, max_args)
     args = [cmd_name] + [_random_arg() for _ in range(nargs)]
     return _encode_resp(*args)
@@ -247,7 +276,7 @@ def _mutate_commands(commands):
     if mutation < 0.2 and len(result) > 0:
         # Replace a random command entirely
         idx = random.randint(0, len(result) - 1)
-        cmd_name, min_args, max_args = random.choice(COMMANDS)
+        cmd_name, min_args, max_args = _pick_command()
         nargs = random.randint(min_args, max_args)
         result[idx] = [cmd_name] + [_random_arg() for _ in range(nargs)]
 
@@ -263,7 +292,7 @@ def _mutate_commands(commands):
     elif mutation < 0.55:
         # Insert a new random command
         pos = random.randint(0, len(result))
-        cmd_name, min_args, max_args = random.choice(COMMANDS)
+        cmd_name, min_args, max_args = _pick_command()
         nargs = random.randint(min_args, max_args)
         result.insert(pos, [cmd_name] + [_random_arg() for _ in range(nargs)])
 
