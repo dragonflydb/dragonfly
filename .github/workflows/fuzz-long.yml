@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   fuzz-long:
-    runs-on: ubuntu-latest
+    runs-on: CI-LARGE-86
     timeout-minutes: 120
 
     container:

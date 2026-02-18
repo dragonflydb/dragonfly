@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   fuzz-pr:
-    runs-on: ubuntu-latest
+    runs-on: CI-LARGE-86
     timeout-minutes: 60
 
     container:
@@ -59,7 +59,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git config --global --add safe.directory "$GITHUB_WORKSPACE"
-            git diff ${{ github.event.pull_request.base.sha }}..HEAD -- '*.cc' '*.h' > /tmp/pr_diff.txt
+            git diff ${{ github.event.pull_request.base.sha }}..HEAD > /tmp/pr_diff.txt
           else
             echo "" > /tmp/pr_diff.txt
           fi
