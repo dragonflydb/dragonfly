@@ -36,7 +36,6 @@
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
-#include "server/server_state.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
@@ -1214,6 +1213,31 @@ vector<SearchResult> SearchGlobalHnswIndex(
   return results;
 }
 
+// Try creating globla hnsw indices for given fields and return true on success
+bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
+  std::vector<std::string> created_vector_indices;
+  for (const auto& [field_ident, field_info] : index.schema.fields) {
+    if (!field_info.IsIndexableHnswField())
+      continue;
+
+    const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+    if (!vparams.use_hnsw)
+      continue;
+
+    bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name,
+                                                              vparams, index.type);
+    if (!success) {
+      // Clean created indices
+      for (const auto& cfname : created_vector_indices)
+        GlobalHnswIndexRegistry::Instance().Remove(idx_name, cfname);
+      return false;
+    }
+
+    created_vector_indices.emplace_back(field_info.short_name);
+  }
+  return true;
+}
+
 }  // namespace
 
 void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1262,33 +1286,18 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
     CHECK(!req_future.Get());
   }
 
-  auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
-
-  for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
-    if (field_info.type == search::SchemaField::VECTOR &&
-        !(field_info.flags & search::SchemaField::NOINDEX)) {
-      const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-      if (vparams.use_hnsw && !GlobalHnswIndexRegistry::Instance().Create(
-                                  idx_name, field_info.short_name, vparams, idx_ptr->type)) {
-        cmd_cntx->tx()->Conclude();
-        return builder->SendError("Index already exists");
-      }
-    }
+  if (!CreateHnswIndices(idx_name, *parsed_index)) {
+    cmd_cntx->tx()->Conclude();
+    return builder->SendError("Index already exists");
   }
 
+  auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
         return OpStatus::OK;
       },
       true);
-
-  static bool do_once = true;
-  if (!ServerState::tlocal()->is_master) {
-    VLOG(0) << "Causing an error";
-    do_once = false;
-    return builder->SendError("Bad lucj");
-  }
 
   builder->SendOk();
 }
