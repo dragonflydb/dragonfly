@@ -2710,7 +2710,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
       if (!is_set_expiry_type && key_is_not_expired) {
-        InstrumentedError err{ec_};
+        InstrumentedError err{*ec_};  // Dereference AggregateError to get std::error_code
         err.Context("Count not to find append key", item->key, "in DB", db_ind);
         LOG(ERROR) << err;
         return;
@@ -2937,10 +2937,11 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 
   if (script_mgr_) {
     auto res = script_mgr_->Insert(body, interpreter);
-    if (!res)
-      InstrumentedError err{ec_};
+    if (!res) {
+      InstrumentedError err{*ec_};  // Dereference AggregateError to get std::error_code
       err.Context("Error compiling script");
       LOG(ERROR) << err;
+    }
   }
 }
 
