@@ -422,6 +422,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
+      db_slice_,
       [&](std::string s) {
         Write(std::move(s));
         ThrottleIfNeeded();
@@ -450,6 +451,7 @@ void RestoreStreamer::Run() {
   boost::intrusive_ptr<DbTable> table = db_array_.front();
   PrimeTable* pt = &table->prime;
   ExpireTable& expire_table = table->expire;
+
   do {
     if (!cntx_->IsRunning())
       return;
@@ -492,11 +494,16 @@ void RestoreStreamer::Run() {
 
       std::lock_guard guard(big_value_mu_);
 
-      // Locking this never preempts. See snapshot.cc for why we need it.
-      auto* blocking_counter = db_slice_->GetLatch();
-      lock_guard blocking_counter_guard(*blocking_counter);
+      {
+        // Locking this never preempts. See snapshot.cc for why we need it.
+        auto* blocking_counter = db_slice_->GetLatch();
+        lock_guard blocking_counter_guard(*blocking_counter);
 
-      stats_.buckets_loop += WriteBucket(it, expire_table);
+        stats_.buckets_loop += WriteBucket(it, expire_table, false);
+      }
+
+      // We could have delayed entries that are watiting so we want to flush them
+      cmd_serializer_->SerializeDelayedEntries(false, nullptr);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
@@ -508,6 +515,12 @@ void RestoreStreamer::Run() {
       last_yield = 0;
     }
   } while (cursor);
+
+  // Force serialize of all delayed entries.
+  {
+    std::lock_guard guard(big_value_mu_);
+    cmd_serializer_->SerializeDelayedEntries(true, nullptr);
+  }
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
@@ -581,17 +594,23 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table,
+                                  bool on_db_change_cb) {
   auto& shard_stats = EngineShard::tlocal()->stats();
   bool written = false;
+  absl::flat_hash_set<string> tiered_keys;
+  string key_buffer;  // we can reuse it
+
+  // Only track tiered keys when needed and flush delayed entries
+  // 1. When we have tiered storage
+  // 2. We're called from a OnDbChange callback
+  const bool track_tiered_keys =
+      on_db_change_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
 
   if (!it.is_done() && it.GetVersion() < snapshot_version_) {
     base::CpuTimeGuard guard(&cpu_aggregator_);
-
     stats_.buckets_written++;
-
     it.SetVersion(snapshot_version_);
-    string key_buffer;  // we can reuse it
     for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
@@ -604,7 +623,10 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
           CHECK(IsValid(eit)) << " " << expire_table.size();
           expire = db_slice_->ExpireTime(eit->second);
         }
-
+        // Track tiered keys that will need delayed entry flushing
+        if (track_tiered_keys && pv.IsExternal() && !pv.IsCool()) {
+          tiered_keys.emplace(key);
+        }
         WriteEntry(key, it->first, pv, expire);
         written = true;
       } else {
@@ -612,8 +634,28 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
       }
     }
   } else {
+    // Bucket already serialized, but we may still need to track tiered keys
+    // for force-flushing their delayed entries
+    if (track_tiered_keys) {
+      for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+        const auto& pv = it->second;
+        string_view key = it->first.GetSlice(&key_buffer);
+        if (ShouldWrite(key) && pv.IsExternal() && !pv.IsCool()) {
+          tiered_keys.emplace(key);
+        }
+      }
+    }
     stats_.buckets_skipped++;
   }
+
+  // Force serialized entries for keys that are tiered and were updated during migration.
+  // Unfortunately we cannot be selective here and need to flush all delayed entreis that we
+  // collected while traversing bucket.
+  // TODO: change interface so we forcefully flush only single entry.
+  if (tiered_keys.size()) {
+    cmd_serializer_->SerializeDelayedEntries(true, &tiered_keys);
+  }
+
   // we don't need throttle here, because we throttle after every entry written
 
   return written;
@@ -632,14 +674,14 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
       // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
       return;
     }
-    stats_.buckets_on_db_update += WriteBucket(*bit, *expire_table);
+    stats_.buckets_on_db_update += WriteBucket(*bit, *expire_table, true);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator it) {
       if (snapshot_version_ != 0) {  // we need this check because lambda can be called several
                                      // times and we can preempt in WriteBucket
         DCHECK_LT(it.GetVersion(), snapshot_version_);
-        stats_.buckets_on_db_update += WriteBucket(it, *expire_table);
+        stats_.buckets_on_db_update += WriteBucket(it, *expire_table, true);
       }
     });
   }

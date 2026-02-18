@@ -469,7 +469,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     do {
       // This code can run concurrently, so pop the entries one by one.
       // Because the keys never repeat (bucket visited once) order is not important.
-      DelayedEntry entry = std::move(delayed_entries_.front());
+      TieredDelayedEntry entry = std::move(delayed_entries_.front());
       delayed_entries_.pop_front();
 
       // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
