@@ -488,11 +488,6 @@ async def test_index_persistence(df_server):
     i1 = client.ft("i1")
     i2 = client.ft("i2")
 
-    while (await i1.info())["indexing"] == 1:
-        await asyncio.sleep(0.05)
-    while (await i2.info())["indexing"] == 1:
-        await asyncio.sleep(0.05)
-
     info_1_new = await i1.info()
     info_2_new = await i2.info()
 
@@ -647,8 +642,6 @@ async def test_synonym_persistence(df_server):
     await wait_available_async(client)
 
     idx = client.ft("idx")
-    while (await idx.info())["indexing"] == 1:
-        await asyncio.sleep(0.05)
 
     # Verify synonyms still work after restart
     assert (await idx.search(Query("car"))).total == 2
@@ -832,13 +825,6 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     assert b"all_types_idx" in indices or "all_types_idx" in indices
 
     replica_idx = c_replica.ft("all_types_idx")
-
-    # Wait for replication and async indexing (especially HNSW vectors) to complete
-    timeout = time.time() + 30  # 30 second timeout
-    while (await replica_idx.info())["indexing"] == 1:
-        if time.time() > timeout:
-            raise TimeoutError("Indexing did not complete within 30 seconds")
-        await asyncio.sleep(0.05)
 
     # Verify all search types work on replica
 

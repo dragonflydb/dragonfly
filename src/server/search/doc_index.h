@@ -400,6 +400,9 @@ class ShardDocIndices {
   // Rebuild all indices
   void RebuildAllIndices(const OpArgs& op_args, bool is_restored);
 
+  // Block until construction of all indices finishes
+  void BlockUntilConstructionEnd();
+
   std::vector<std::string> GetIndexNames() const;
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */

@@ -3145,7 +3145,7 @@ void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
 
 void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+  if (cmd == nullptr)  // In case search module is disabled
     return;
 
   // Capture before clearing — indicates HNSW graphs were loaded and need restore path
@@ -3189,6 +3189,10 @@ void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }
+
+  // Wait until index building ends
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
 }
 
 }  // namespace dfly

@@ -25,6 +25,8 @@ void ShardDocIndices::DropAllIndices() {
 }
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {
 }
+void ShardDocIndices::BlockUntilConstructionEnd() {
+}
 
 size_t ShardDocIndices::GetUsedMemory() const {
   return 0;
