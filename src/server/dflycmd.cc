@@ -683,6 +683,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, ExecutionState* exec_st,
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false, "");
+  flow->saver->SetDflyVersion(flow->version);
 
   flow->cleanup = [flow, shard]() {
     // socket shutdown is needed before calling saver->Cancel(). Because

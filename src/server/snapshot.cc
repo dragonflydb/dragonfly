@@ -189,7 +189,7 @@ void SliceSnapshot::SerializeIndexMapping(
 
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
-  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+  if (!absl::GetFlag(FLAGS_serialize_hnsw_index) || dfly_version_ < DflyVersion::VER6) {
     return;
   }
 
@@ -219,8 +219,8 @@ void SliceSnapshot::SerializeIndexMappings() {
 void SliceSnapshot::SerializeGlobalHnswIndices() {
 #ifdef WITH_SEARCH
   // Serialize HNSW global indices for shard 0 only
-  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB ||
-      !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+  if (db_slice_->shard_owner()->shard_id() != 0 || !absl::GetFlag(FLAGS_serialize_hnsw_index) ||
+      dfly_version_ < DflyVersion::VER6) {
     return;
   }
 

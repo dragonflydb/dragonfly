@@ -74,6 +74,12 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
   enum class SnapshotFlush : uint8_t { kAllow, kDisallow };
 
+  // Set the replica version for conditional serialization of new features.
+  // Must be called before Start.
+  void SetDflyVersion(DflyVersion version) {
+    dfly_version_ = version;
+  }
+
   void Start(bool stream_journal, SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
   // Finalizes journal streaming writes. Only called for replication.
@@ -183,6 +189,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
+  DflyVersion dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 

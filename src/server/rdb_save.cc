@@ -1140,6 +1140,10 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
 
   void CancelInShard(EngineShard* shard);
 
+  void SetDflyVersion(DflyVersion version) {
+    dfly_version_ = version;
+  }
+
   size_t GetTotalBuffersSize() const;
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
@@ -1182,6 +1186,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
   SaveMode save_mode_;
+  DflyVersion dfly_version_ = DflyVersion::CURRENT_VER;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1293,6 +1298,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
   s = CreateSliceSnapshot(shard, &db_slice, cntx);
+  s->SetDflyVersion(dfly_version_);
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
@@ -1572,6 +1578,11 @@ RdbSaver::~RdbSaver() {
   tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
+void RdbSaver::SetDflyVersion(DflyVersion version) {
+  dfly_version_ = version;
+  impl_->SetDflyVersion(version);
+}
+
 void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
@@ -1649,13 +1660,20 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     if (!glob_state.search_indices.empty())
       LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
   } else {
-    // Search index definitions (simple "index_name cmd" restore commands)
-    for (const string& s : glob_state.search_indices)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+    // Search index definitions - for non-summary shards only sent to replicas >= VER6,
+    // since older replicas only expect search-index from the summary shard.
+    bool send_search_index =
+        (save_mode_ != SaveMode::SINGLE_SHARD) || (dfly_version_ >= DflyVersion::VER6);
+    if (send_search_index) {
+      for (const string& s : glob_state.search_indices)
+        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+    }
 
-    // HNSW index metadata (JSON, summary only)
-    for (const string& s : glob_state.hnsw_index_metadata)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("hnsw-index-metadata", s));
+    // HNSW index metadata (JSON, summary only) - only for replicas >= VER6
+    if (dfly_version_ >= DflyVersion::VER6) {
+      for (const string& s : glob_state.hnsw_index_metadata)
+        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("hnsw-index-metadata", s));
+    }
 
     // Save synonyms only in summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());

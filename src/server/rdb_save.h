@@ -20,6 +20,7 @@ extern "C" {
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "server/version.h"
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
@@ -128,6 +129,14 @@ class RdbSaver {
     return save_mode_;
   }
 
+  // Set the replica version for conditional serialization of new features.
+  // Must be called before StartSnapshotInShard.
+  void SetDflyVersion(DflyVersion version);
+
+  DflyVersion GetDflyVersion() const {
+    return dfly_version_;
+  }
+
   // Get total size of all rdb serializer buffers and items currently placed in channel
   size_t GetTotalBuffersSize() const;
 
@@ -159,6 +168,7 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
   SaveMode save_mode_;
   CompressionMode compression_mode_;
+  DflyVersion dfly_version_ = DflyVersion::CURRENT_VER;
   std::string snapshot_id_;
 };
 
