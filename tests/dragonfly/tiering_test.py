@@ -8,15 +8,26 @@ import redis.asyncio as aioredis
 
 from . import dfly_args
 from .seeder import DebugPopulateSeeder, Seeder as SeederV2
-from .utility import info_tick_timer, wait_for_replicas_state, check_all_replicas_finished
+from .utility import (
+    info_tick_timer,
+    wait_for_replicas_state,
+    check_all_replicas_finished,
+)
 from .instance import DflyInstance, DflyInstanceFactory
 
-BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiered/backing"}
+BASIC_ARGS = {
+    "port": 6379,
+    "proactor_threads": 4,
+    "tiered_prefix": "/tmp/tiered/backing",
+    "tiered_offload_threshold": "1.0",  # offload immediately
+    "tiered_storage_write_depth": 1000,
+    "maxmemory": "1G",
+}
 
 
-@pytest.mark.skip("Requires evaluating runner performance first")
+@pytest.mark.large
 @pytest.mark.opt_only
-@dfly_args(BASIC_ARGS)
+@dfly_args({**BASIC_ARGS, "tiered_experimental_cooling": "false"})
 async def test_basic_memory_usage(async_client: aioredis.Redis):
     """
     Loading 1GB of mixed size strings (256b-16kb) will keep most of them on disk and thus RAM remains almost unused
@@ -28,14 +39,13 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     await seeder.run(async_client)
 
     # Wait for tiering stashes
-    async for info, breaker in info_tick_timer(async_client, section="TIERED"):
+    async for info, breaker in info_tick_timer(async_client, section="TIERED", timeout=60):
         with breaker:
             assert info["tiered_entries"] > 195_000
 
     info = await async_client.info("ALL")
     assert info["num_entries"] == 200_000
 
-    assert info["tiered_entries"] > 195_000  # some remain in unfilled small bins
     assert (
         info["tiered_allocated_bytes"] > 195_000 * 2048 * 0.8
     )  # 0.8 just to be sure because it fluctuates due to variance
@@ -46,14 +56,12 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     )  # the grown table itself takes up lots of space
 
 
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @dfly_args(
     {
         **BASIC_ARGS,
-        "maxmemory": "1G",
-        "tiered_offload_threshold": "1.0",
-        "tiered_storage_write_depth": 1000,
     }
 )
 async def test_mixed_append(async_client: aioredis.Redis):
@@ -90,7 +98,7 @@ async def test_mixed_append(async_client: aioredis.Redis):
     assert res == [10 * k for k in key_range]
 
 
-@pytest.mark.skip("takes too long now")
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @dfly_args(

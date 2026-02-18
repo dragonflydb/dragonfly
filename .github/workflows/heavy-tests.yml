@@ -1,8 +1,8 @@
-name: Regression Tests
+name: Heavy Tests
 
 on:
   schedule:
-    - cron: "0 0/3 * * *"
+    - cron: "0 0/6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -12,8 +12,8 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20-gcc14"]
         proactor: [Uring]
-        build-type: [Debug, Release]
-        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        build-type: [Release]
+        runner: [CI-LARGE-86, CI-LARGE-ARM]
 
     runs-on: ${{ matrix.runner }}
 
@@ -56,24 +56,18 @@ jobs:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Run regression tests action
+      - name: Run heavy tests
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
-          filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          filter: large
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: logs
+          name: logs-${{ matrix.runner }}
           path: /tmp/failed/*
-
-  lint-test-chart:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/lint-test-chart

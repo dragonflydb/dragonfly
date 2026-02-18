@@ -219,3 +219,64 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/lint-test-chart
+
+  large-tests-arm:
+    runs-on: CI-LARGE-ARM
+
+    permissions:
+      id-token: write
+      contents: read
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Print environment info
+        run: |
+          cat /proc/cpuinfo
+          ulimit -a
+          env
+          lsblk -l
+
+      - name: Configure & Build
+        run: |
+          # -no-pie to disable address randomization so we could symbolize stacktraces
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=Release -GNinja \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
+                -DCMAKE_CXX_FLAGS=-no-pie
+
+          cd ${GITHUB_WORKSPACE}/build && ninja dragonfly
+          pwd
+          ls -l ..
+
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Run large tests on ARM
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          build-folder-name: build
+          run-only-on-ubuntu-latest: true
+          filter: large
+          s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: large-tests-arm-logs
+          path: /tmp/failed/*
