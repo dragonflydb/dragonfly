@@ -11,6 +11,7 @@
 #include <absl/functional/function_ref.h>
 
 #include <atomic>
+// #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -21,7 +22,6 @@
 #include "server/cluster_support.h"
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "server/table.h"
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 

@@ -22,6 +22,8 @@
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/future.h"
 
+struct hdr_histogram;
+
 namespace util {
 
 class AcceptServer;

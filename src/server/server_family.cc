@@ -12,6 +12,7 @@
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
 #include <fcntl.h>    // for mkstemp
+#include <hdr/hdr_histogram.h>
 #include <sys/resource.h>
 #include <sys/stat.h>  // for fchmod
 #include <sys/utsname.h>

@@ -4,6 +4,8 @@
 
 #include "server/cmd_support.h"
 
+#include "base/logging.h"
+
 namespace dfly::cmd {
 
 #define RETURN_ON_ERR(result)                                         \
