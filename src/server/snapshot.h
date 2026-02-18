@@ -65,7 +65,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   };
 
   SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx);
+                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
+                DflyVersion replica_dfly_version);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -177,6 +178,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 

@@ -2,6 +2,7 @@ import os
 import platform
 import shutil
 import signal
+import struct
 import tarfile
 import time
 import urllib.request
@@ -2621,6 +2622,108 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_replicas_state(c_replica)
     assert await c_replica.execute_command(f"dbsize") == 0
+
+
+async def test_replicate_search_index_to_old_replica(df_factory: DflyInstanceFactory):
+    """
+    Test that a new master with search indices (including HNSW vector index) can
+    replicate to a v1.35 replica. This verifies backward compatibility of replication
+    when search indices are defined, ensuring the replica receives the data without
+    errors from new RDB AUX fields (search-index, hnsw-index-metadata, HNSW opcodes).
+    """
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.35.1"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+
+    # New master (current version) with search index
+    master = df_factory.create(proactor_threads=2)
+    # Old replica (v1.35)
+    replica = df_factory.create(
+        version=1.35,
+        path=released_dfly_path,
+        proactor_threads=2,
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Create a search index with HNSW vector field on the new master
+    await c_master.execute_command(
+        "FT.CREATE",
+        "test_idx",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "item:",
+        "SCHEMA",
+        "name",
+        "TEXT",
+        "price",
+        "NUMERIC",
+        "SORTABLE",
+        "category",
+        "TAG",
+        "embedding",
+        "VECTOR",
+        "HNSW",
+        "6",
+        "TYPE",
+        "FLOAT32",
+        "DIM",
+        "2",
+        "DISTANCE_METRIC",
+        "L2",
+    )
+
+    # Insert test data with vector embeddings
+    for i in range(100):
+        category = "electronics" if i % 2 == 0 else "clothing"
+        embedding = struct.pack("<2f", float(i), float(i * 2))
+        await c_master.hset(
+            f"item:{i}",
+            mapping={
+                "name": f"Product {i}",
+                "price": str(i * 10),
+                "category": category,
+                "embedding": embedding,
+            },
+        )
+
+    # Verify data and index on master
+    assert await c_master.dbsize() == 100
+    master_idx = c_master.ft("test_idx")
+    text_result = await master_idx.search("Product 50")
+    assert text_result.total >= 1
+
+    # Verify KNN search on master
+    query_vec = struct.pack("<2f", 50.0, 100.0)
+    knn_result = await c_master.execute_command(
+        "FT.SEARCH", "test_idx", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec", query_vec
+    )
+    assert knn_result[0] >= 1
+    assert "item:50" in knn_result
+
+    # Start replication from new master to old replica
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Verify data replicated successfully
+    assert await c_replica.dbsize() == 100
+    assert await c_replica.hget("item:0", "name") == "Product 0"
+    assert await c_replica.hget("item:99", "name") == "Product 99"
+
+    # Verify KNN search works on old replica (index rebuilt from replicated data)
+    knn_result = await c_replica.execute_command(
+        "FT.SEARCH", "test_idx", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec", query_vec
+    )
+    assert knn_result[0] >= 1
+    assert "item:50" in knn_result
 
 
 async def test_replicating_mc_flags(df_factory):

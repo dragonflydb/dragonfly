@@ -45,10 +45,12 @@ constexpr size_t kMinBlobSize = 8_KB;
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                             SnapshotDataConsumerInterface* consumer, ExecutionState* cntx)
+                             SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
+                             DflyVersion replica_dfly_version)
     : db_slice_(slice),
       db_array_(slice->databases()),
       compression_mode_(compression_mode),
+      replica_dfly_version_(replica_dfly_version),
       consumer_(consumer),
       cntx_(cntx) {
   tl_slice_snapshots.insert(this);
@@ -189,7 +191,8 @@ void SliceSnapshot::SerializeIndexMapping(
 
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
-  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index) ||
+      replica_dfly_version_ < DflyVersion::VER6) {
     return;
   }
 
@@ -220,7 +223,7 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
 #ifdef WITH_SEARCH
   // Serialize HNSW global indices for shard 0 only
   if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB ||
-      !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+      !absl::GetFlag(FLAGS_serialize_hnsw_index) || replica_dfly_version_ < DflyVersion::VER6) {
     return;
   }
 
