@@ -165,12 +165,9 @@
 "1"
 "-1"
 
-# Number patterns
-"0"
-"1"
+# Number patterns (0, 1, -1 already above)
 "100"
 "1000"
-"-1"
 "-100"
 
 # Special arguments
@@ -185,12 +182,10 @@
 "COUNT"
 "MATCH"
 
-# Common RESP command patterns
-"*1\x0d\x0a$4\x0d\x0aPING\x0d\x0a"
-"*2\x0d\x0a$3\x0d\x0aGET\x0d\x0a$3\x0d\x0akey\x0d\x0a"
-"*3\x0d\x0a$3\x0d\x0aSET\x0d\x0a$3\x0d\x0akey\x0d\x0a$5\x0d\x0avalue\x0d\x0a"
-"*2\x0d\x0a$3\x0d\x0aDEL\x0d\x0a$3\x0d\x0akey\x0d\x0a"
-"*2\x0d\x0a$6\x0d\x0aEXISTS\x0d\x0a$3\x0d\x0akey\x0d\x0a"
+# Small RESP framing patterns (larger patterns removed — AFL++ warned about >33B tokens)
+"*1\x0d\x0a$"
+"*2\x0d\x0a$"
+"*3\x0d\x0a$"
 
 # Scripting commands
 "EVAL"
@@ -274,3 +269,207 @@
 "\x00"
 "\xff"
 "\x00\x00\x00\x00"
+
+# --- Additional commands for broader coverage ---
+
+# Missing key operations
+"COPY"
+"SORT"
+"SORT_RO"
+"UNLINK"
+"TOUCH"
+"OBJECT"
+"RANDOMKEY"
+"DUMP"
+"RESTORE"
+"WAIT"
+"EXPIREAT"
+"PEXPIRE"
+"PEXPIREAT"
+"PEXPIRETIME"
+"EXPIRETIME"
+"PTTL"
+
+# String commands
+"GETDEL"
+"GETEX"
+"INCRBYFLOAT"
+"DECRBY"
+"INCRBY"
+"MSETNX"
+"PSETEX"
+"SUBSTR"
+
+# List commands
+"LPOS"
+"LMPOP"
+"LMOVE"
+"BLMOVE"
+"BLMPOP"
+"BLPOP"
+"BRPOP"
+"LPUSHX"
+"RPUSHX"
+"RPOPLPUSH"
+
+# Set commands
+"SRANDMEMBER"
+"SMOVE"
+"SMISMEMBER"
+"SINTERCARD"
+"SDIFFSTORE"
+"SINTERSTORE"
+"SUNIONSTORE"
+
+# Sorted set commands
+"ZDIFF"
+"ZDIFFSTORE"
+"ZLEXCOUNT"
+"ZRANGEBYLEX"
+"ZRANGESTORE"
+"ZRANDMEMBER"
+"ZREVRANGE"
+"ZREVRANGEBYLEX"
+"ZREVRANGEBYSCORE"
+"ZREVRANK"
+"ZMSCORE"
+"ZREMRANGEBYLEX"
+"ZREMRANGEBYRANK"
+"ZREMRANGEBYSCORE"
+"BZMPOP"
+"BZPOPMIN"
+"BZPOPMAX"
+
+# Hash commands
+"HRANDFIELD"
+"HSCAN"
+"HSETEX"
+"HSETNX"
+"HSTRLEN"
+"HINCRBYFLOAT"
+"HEXPIRE"
+
+# Server/client commands
+"CLIENT"
+"CONFIG"
+"MEMORY"
+"ACL"
+"HELLO"
+"COMMAND"
+"LATENCY"
+"SLOWLOG"
+"BGSAVE"
+"LASTSAVE"
+"ROLE"
+
+# Subcommands
+"OBJECT ENCODING"
+"OBJECT HELP"
+"OBJECT FREQ"
+"OBJECT IDLETIME"
+"CLIENT SETNAME"
+"CLIENT GETNAME"
+"CLIENT LIST"
+"CLIENT ID"
+"CLIENT INFO"
+"CONFIG GET"
+"CONFIG SET"
+"MEMORY USAGE"
+"MEMORY DOCTOR"
+"ACL LIST"
+"ACL WHOAMI"
+"ACL SETUSER"
+"COMMAND COUNT"
+"COMMAND INFO"
+
+# Scan operations (HSCAN already above)
+"SSCAN"
+"ZSCAN"
+
+# Function/script commands
+"FUNCTION"
+"FUNCTION LOAD"
+"FUNCTION LIST"
+"FUNCTION DELETE"
+
+# More JSON commands
+"JSON.ARRINSERT"
+"JSON.ARRTRIM"
+"JSON.ARRPOP"
+"JSON.ARRINDEX"
+"JSON.OBJKEYS"
+"JSON.OBJLEN"
+"JSON.STRAPPEND"
+"JSON.STRLEN"
+"JSON.TOGGLE"
+"JSON.CLEAR"
+"JSON.MERGE"
+"JSON.MGET"
+"JSON.MSET"
+"JSON.DEBUG"
+"JSON.RESP"
+
+# More Geo commands
+"GEOPOS"
+"GEOHASH"
+"GEOSEARCHSTORE"
+"GEORADIUSBYMEMBER"
+
+# Search commands
+"FT.CREATE"
+"FT.SEARCH"
+"FT.DROPINDEX"
+"FT.INFO"
+"FT.ALTER"
+
+# Additional arguments
+"REPLACE"
+"ABSTTL"
+"IDLETIME"
+"FREQ"
+"LEFT"
+"RIGHT"
+"BEFORE"
+"AFTER"
+"BY"
+"ASC"
+"DESC"
+"ALPHA"
+"STORE"
+"REV"
+"BYSCORE"
+"BYLEX"
+"CH"
+"KEEPTTL"
+"EXAT"
+"PXAT"
+"ENCODING"
+"REFCOUNT"
+
+# Malformed RESP for edge-case testing
+"*-2\x0d\x0a"
+"*999999\x0d\x0a"
+"$-2\x0d\x0a"
+"$999999999\x0d\x0a"
+"*\x0d\x0a"
+"$\x0d\x0a"
+"+\x0d\x0a"
+"-\x0d\x0a"
+":\x0d\x0a"
+
+# Inline commands (no RESP framing)
+"PING\x0d\x0a"
+"PING\x0a"
+"SET key value\x0d\x0a"
+"GET key\x0a"
+"QUIT\x0d\x0a"
+
+# More binary patterns
+"\xfe\xff\x00\x01"
+"\x0d\x0a\x0d\x0a"
+"\x0d\x0d\x0a\x0a"
+"\x00\x01\x02\x03"
+
+# RESP edge cases (small fragments only)
+"$0\x0d\x0a\x0d\x0a"
+"$-1\x0d\x0a"

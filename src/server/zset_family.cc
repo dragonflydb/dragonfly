@@ -4,7 +4,7 @@
 
 #include "server/zset_family.h"
 
-#include "server/acl/acl_commands_def.h"
+#include <absl/strings/ascii.h>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -18,6 +18,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
@@ -26,6 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {

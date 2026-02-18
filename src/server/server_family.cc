@@ -26,10 +26,10 @@
 #include <unordered_set>
 
 #include "absl/strings/ascii.h"
+#include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "server/common.h"
-#include "slowlog.h"
-#include "util/fibers/synchronization.h"
+#include "server/slowlog.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -391,6 +391,19 @@ void ClientGetName(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void ClientInfo(CmdArgList args, CommandContext* cmd_cntx) {
+  if (!args.empty()) {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
+  }
+  auto* conn = cmd_cntx->conn();
+  string info = conn->GetClientInfo();
+
+  // redis-py (5expects these fields. We append dummy values to keep the output parsable.
+  absl::StrAppend(&info, " db=", cmd_cntx->server_conn_cntx()->db_index(), "\r\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  return rb->SendBulkString(info);
+}
+
 void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners,
                 CommandContext* cmd_cntx) {
   if (!args.empty()) {
@@ -738,6 +751,7 @@ uint64_t GetDelayMs(uint64_t ts) {
 }
 
 bool ReadProcStats(io::StatusData* sdata) {
+#ifdef __linux__
   io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
   if (!sdata_res) {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
@@ -752,6 +766,9 @@ bool ReadProcStats(io::StatusData* sdata) {
 
   *sdata = *sdata_res;
   return true;
+#else
+  return false;
+#endif
 }
 
 // Rewrite the configuration file with runtime modified settings
@@ -1485,7 +1502,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
   return result;
 }
 
-enum MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
+enum class MetricType : uint8_t { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
 const char* MetricTypeName(MetricType type) {
   switch (type) {
@@ -1836,7 +1853,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     }
 
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
-                       MetricType::HISTOGRAM, &command_metrics);
+                       MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
@@ -1962,13 +1979,13 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   absl::StrAppend(&resp->body(), db_key_metrics, db_key_expire_metrics, db_capacity_metrics,
                   memory_by_class_bytes);
 
-  AppendMetricHeader("defrag_stats", "Stats for defragmentation task", COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_invocations", "Defrag invocations",
-                            m.shard_stats.defrag_task_invocation_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_task_invocation_total, MetricType::COUNTER,
+                            &resp->body());
   AppendMetricWithoutLabels("defrag_attempts", "Objects examined",
-                            m.shard_stats.defrag_attempt_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_attempt_total, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
-                            m.shard_stats.defrag_realloc_total, COUNTER, &resp->body());
+                            m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
@@ -2481,6 +2498,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made to specified local address",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "INFO",
+      "    Return information about the current client connection.",
       "LIST",
       "    Return information about client connections.",
       "UNPAUSE",
@@ -2512,6 +2531,8 @@ void ServerFamily::Client(CmdArgList args, CommandContext* cmd_cntx) {
     return ClientSetName(sub_args, cmd_cntx);
   } else if (sub_cmd == "GETNAME") {
     return ClientGetName(sub_args, cmd_cntx);
+  } else if (sub_cmd == "INFO") {
+    return ClientInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cmd_cntx);
   } else if (sub_cmd == "PAUSE") {
@@ -3770,6 +3791,16 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }
 
+void ServerFamily::StartJournalInShardThreads(Replica* repl_ptr) {
+  shard_set->RunBriefInParallel([this, repl_ptr](auto* shard) {
+    size_t index = shard->shard_id();
+    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
+    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
+    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
+    journal()->StartInThreadAtLsn(rec_executed);
+  });
+}
+
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
@@ -3779,12 +3810,7 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     auto repl_ptr = replica_;
     if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
       // Start journal and keep offsets.
-      shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
-        auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
-        size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-        LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-        journal()->StartInThreadAtLsn(rec_executed);
-      });
+      StartJournalInShardThreads(repl_ptr.get());
     }
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
@@ -3904,12 +3930,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, CommandContext* cmd_cntx) {
   CHECK(repl_ptr);
 
   // Start journal to allow partial sync from same source master
-  shard_set->pool()->AwaitFiberOnAll([this, repl_ptr](auto index, auto*) {
-    auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
-    size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
-    LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-    journal()->StartInThreadAtLsn(rec_executed);
-  });
+  StartJournalInShardThreads(repl_ptr.get());
 
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {

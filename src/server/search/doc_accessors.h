@@ -8,13 +8,11 @@
 #include <absl/types/span.h>
 
 #include <string>
-#include <utility>
 
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
-#include "server/common.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
 

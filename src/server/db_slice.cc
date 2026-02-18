@@ -176,7 +176,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   }
 
   // Disable flush journal changes to prevent preemtion in GarbageCollect.
-  journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   // bool should_print = (eb.key_hash % 128) == 0;
 
@@ -207,7 +207,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     return 0;
 
   // Disable flush journal changes to prevent preemtion in evict.
-  journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
 
@@ -962,7 +962,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   LOG_IF(DFATAL, !fetched_items_.empty())
       << "Some operation might bumped up items outside of a transaction";
 
-  auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
+  auto cb = [flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
@@ -1328,7 +1328,7 @@ void DbSlice::ExpireAllIfNeeded() {
   // we don't preempt in ExpireIfNeeded
   serialization_latch_.Wait();
   // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(owner_->journal());
+  journal::DisableFlushGuard journal_flush_guard(owner_->journal());
 
   for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
@@ -1464,7 +1464,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
                                                               size_t starting_segment_id,
                                                               size_t increase_goal_bytes) {
   // Disable flush journal changes to prevent preemtion
-  journal::JournalFlushGuard journal_flush_guard(shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard(shard_owner()->journal());
   FiberAtomicGuard guard;
   DCHECK(!owner_->IsReplica());
 

@@ -7,9 +7,11 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <array>
+#include <nonstd/expected.hpp>
 #include <optional>
 
 #include "server/conn_context.h"
+#include "server/execution_state.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -53,7 +55,8 @@ class ScriptMgr {
   void Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
 
   // Insert script and return sha. Get possible error from compilation or parsing script flags.
-  io::Result<std::string, GenericError> Insert(std::string_view body, Interpreter* interpreter);
+  nonstd::expected<std::string, GenericError> Insert(std::string_view body,
+                                                     Interpreter* interpreter);
 
   // Get script body by sha, returns nullptr if not found.
   std::optional<ScriptData> Find(std::string_view sha) const;

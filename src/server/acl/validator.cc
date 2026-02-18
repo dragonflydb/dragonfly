@@ -4,6 +4,8 @@
 
 #include "server/acl/validator.h"
 
+#include <absl/strings/numbers.h>
+
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "facade/dragonfly_connection.h"

@@ -56,6 +56,7 @@ extern "C" {
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/sharding.h"
 #include "server/stream_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -93,7 +94,7 @@ ABSL_FLAG(bool, admin_nopass, false,
 ABSL_FLAG(bool, expose_http_api, false,
           "If set, will expose a POST /api handler for sending redis commands as json array.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, maxmemory, facade::MemoryBytesFlag{},
+ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database, until data starts to be evicted "
           "(according to eviction policy). With tiering, this value defines only the size in RAM, "
           "and not the whole dataset (RAM + SSD). "
@@ -120,10 +121,6 @@ ABSL_FLAG(string, huffman_table, "",
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
-
-ABSL_RETIRED_FLAG(uint32_t, uring_wake_mode, 1, "DEPRECATED");
-
-ABSL_RETIRED_FLAG(uint32_t, uring_submit_threshold, 1u << 31, "DEPRECATED");
 
 ABSL_FLAG(uint32_t, scheduler_background_budget, 50'000, "Background fiber budget in nanoseconds");
 ABSL_FLAG(uint32_t, scheduler_background_sleep_prob, 50,
@@ -841,7 +838,6 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case BLOCKING:
       return "blocking";
     case HIDDEN:
-    case INTERLEAVED_KEYS:
     case GLOBAL_TRANS:
     case STORE_LAST_KEY:
     case VARIADIC_KEYS:
@@ -961,6 +957,15 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid, ArgSl
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 
+bool ShouldLogError(const CommandId& cid, string_view reason, CmdArgList tail_args) {
+  if (absl::StartsWith(reason, "-BUSYGROUP"))
+    return false;
+
+  if (cid.name() != "CLIENT")
+    return true;
+  return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.front(), "maint_notifications");
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1065,10 +1070,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                          FLAGS_scheduler_background_warrant),
       []() { UpdateSchedulerFlagsOnThread(); });
 
-  config_registry.RegisterSetter<MemoryBytesFlag>("maxmemory", [](const MemoryBytesFlag& flag) {
-    // TODO: reduce code reliance on constant direct access of max_memory_limit
-    max_memory_limit.store(flag.value, memory_order_relaxed);
-  });
+  config_registry.RegisterSetter<strings::MemoryBytesFlag>(
+      "maxmemory", [](const strings::MemoryBytesFlag& flag) {
+        // TODO: reduce code reliance on constant direct access of max_memory_limit
+        max_memory_limit.store(flag.value, memory_order_relaxed);
+      });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("background_snapshotting");
@@ -1190,7 +1196,15 @@ void Service::Shutdown() {
 
   Transaction::Shutdown();
 
-  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+#if defined(DFLY_USE_SSL)
+    // Explicitly release OpenSSL thread-local state here.
+    // This prevents a potential crash during thread exit where the allocator (e.g. mimalloc)
+    // might tear down the thread's heap before OpenSSL tries to free its internal state.
+    OPENSSL_thread_stop();
+#endif
+    ServerState::tlocal()->Destroy();
+  });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
@@ -1630,6 +1644,15 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   TrackIfNeeded(cmd_cntx);
   auto* tx = cmd_cntx->tx();
 
+  // For EVAL[] and EXEC/DISCARD, clean up state.
+  // We don't do it directly in commands to allow some introspection after execution (slowlog).
+  absl::Cleanup mck_cleanup = [cntx, cid, mck = cid->MultiControlKind()]() {
+    if (mck && *mck == CO::MultiControlKind::EXEC && cid->name() != "MULTI")
+      MultiCleanup(cntx);
+    else if (mck && *mck == CO::MultiControlKind::EVAL)
+      cntx->conn_state.script_info.reset();
+  };
+
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(*cmd_cntx);
@@ -1649,7 +1672,7 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
       res = DispatchResult::OOM;
     }
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
-    if (!absl::StartsWith(reason, "-BUSYGROUP")) {
+    if (ShouldLogError(*cid, reason, tail_args)) {
       LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
     }
   }
@@ -2037,17 +2060,17 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   auto* tx = cmd_cntx->tx();
 
   DCHECK(tx);
-  DVLOG(2) << "CallFromScript " << ca.args[0];
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& info = cntx->conn_state.script_info;
+  info->stats.num_commands++;
 
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
-  auto* cntx = cmd_cntx->server_conn_cntx();
 
   bool error_abort = (ca.call_type & CT::PCALL) == 0;
   bool async_call = ca.call_type & CT::ACALL;
   bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
 
-  auto& info = cntx->conn_state.script_info;
   if (async_call) {
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
@@ -2230,8 +2253,6 @@ static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            bool read_only, CommandContext* cmd_cntx) {
-  DCHECK(!eval_args.sha.empty());
-
   // Sanitizing the input to avoid code injection.
   if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
     return cmd_cntx->SendError(facade::kScriptNotFound);
@@ -2256,6 +2277,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
+  sinfo->stats.sha = eval_args.sha;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2283,9 +2305,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo]() {
+  // Reset cid to EVAL[] as the context is reused during command dispatch
+  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
     interpreter->ResetStack();
-    sinfo.reset();
+    cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
@@ -2385,7 +2408,6 @@ void Service::Discard(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  MultiCleanup(cntx);
   rb->SendOk();
 }
 
@@ -2464,9 +2486,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
-  // Clean the context no matter the outcome
-  absl::Cleanup exec_clear = [cntx] { MultiCleanup(cntx); };
-
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
@@ -2483,8 +2502,6 @@ void Service::Exec(CmdArgList args, CommandContext* cmd_cntx) {
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
     return rb->SendNull();
   }
-
-  cmd_cntx->exec_body_len = exec_info.body.size();
 
   auto keys = CollectAllKeys(&exec_info);
   if (IsClusterEnabled()) {
@@ -2761,7 +2778,7 @@ void Service::Command(CmdArgList args, CommandContext* cmd_cntx) {
 
     rb->SendLong(cid.first_key_pos());
     rb->SendLong(cid.last_key_pos());
-    rb->SendLong(cid.opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1);
+    rb->SendLong(cid.interleaved_step() ? cid.interleaved_step() : 1);
 
     {
       const auto& table = acl_family_.GetRevTable();

@@ -101,7 +101,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.SendFinalize(attempt);
   }
 
-  const dfly::GenericError GetError() const {
+  dfly::GenericError GetError() const {
     return exec_st_.GetError();
   }
 
@@ -146,13 +146,9 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
   return true;
 }
 
-void OutgoingMigration::OnAllShards(
-    std::function<void(std::unique_ptr<SliceSlotMigration>&)> func) {
-  shard_set->pool()->AwaitFiberOnAll([this, &func](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      func(slot_migrations_[shard->shard_id()]);
-    }
-  });
+void OutgoingMigration::OnAllShards(std::function<void(UniqueSliceSlotMigration&)> func) {
+  shard_set->RunBlockingInParallel(
+      [this, &func](auto* shard) { func(slot_migrations_[shard->shard_id()]); });
 }
 
 void OutgoingMigration::Finish(const GenericError& error) {

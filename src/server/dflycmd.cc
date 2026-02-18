@@ -17,6 +17,7 @@
 #include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
@@ -36,8 +37,6 @@
 #include "util/fibers/synchronization.h"
 using namespace std;
 
-ABSL_RETIRED_FLAG(uint32_t, allow_partial_sync_with_lsn_diff, 0,
-                  "Do partial sync in case lsn diff is less than the given threshold");
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
@@ -89,23 +88,23 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     // PING forces replica to send the most recent last_acked_lsn.
     // ACKS from the replica are send only every X commands or every 3 seconds (flag configurable)
     // or when forced (by the PING above).
-    shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+    journal::RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
   }
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
 
-  while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
+  while (flow->last_acked_lsn < journal::GetLsn()) {
     if (absl::Now() > end_time) {
       LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
                    << ":" << replica->listening_port << ", last acked: " << flow->last_acked_lsn
-                   << ", expecting " << shard->journal()->GetLsn();
+                   << ", expecting " << journal::GetLsn();
       return false;
     }
     if (!replica->exec_st.IsRunning()) {
       return false;
     }
     LOG_EVERY_T(INFO, 1) << "Replica lsn:" << flow->last_acked_lsn
-                         << " master lsn:" << shard->journal()->GetLsn()
+                         << " master lsn:" << journal::GetLsn()
                          << "; Journal streamer state: " << flow->streamer->FormatInternalState();
     ThisFiber::SleepFor(1ms);
   }
@@ -335,7 +334,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
       flow.start_partial_sync_at = *lsn_to_start_partial;
       sync_type = "PARTIAL";
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+              << " and is available. (current_lsn=" << journal::GetLsn() << ")";
     }
   }
 
@@ -443,11 +442,11 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
 bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
   auto* jrnl = sf_->journal();
 
-  const bool exists = jrnl->GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn);
+  const bool exists = journal::GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn);
   if (!exists) {
     LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
               << " that the replication buffer doesn't contain this anymore (current_lsn="
-              << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+              << journal::GetLsn() << "). Will perform a full sync of the data.";
     LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
                  "--shard_repl_backlog_len option";
   }
@@ -636,7 +635,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
   std::vector<LSN> lsns(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     auto* journal = shard->journal();
-    lsns[shard->shard_id()] = journal ? journal->GetLsn() : 0;
+    lsns[shard->shard_id()] = journal ? journal::GetLsn() : 0;
   });
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
@@ -947,7 +946,7 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
     for (const auto& info : ABSL_TS_UNCHECKED_READ(replica_infos_)) {
       const ReplicaInfo* replica = info.second.get();
       if (shard->journal()) {
-        int64_t lag = shard->journal()->GetLsn() - replica->flows[shard->shard_id()].last_acked_lsn;
+        int64_t lag = journal::GetLsn() - replica->flows[shard->shard_id()].last_acked_lsn;
         lags[info.first] = lag;
       }
     }

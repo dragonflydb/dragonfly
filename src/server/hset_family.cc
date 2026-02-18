@@ -4,10 +4,7 @@
 
 #include "server/hset_family.h"
 
-#include "server/family_utils.h"
-#include "server/tiered_storage.h"
-#include "server/tiering/decoders.h"
-#include "server/tiering/serialized_map.h"
+#include <absl/strings/ascii.h>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -25,9 +22,13 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/search/doc_index.h"
+#include "server/family_utils.h"
+#include "server/tiered_storage.h"
+#include "server/tiering/decoders.h"
+#include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
 
 using namespace std;

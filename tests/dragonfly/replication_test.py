@@ -154,39 +154,6 @@ async def test_replication_all(
         assert preemptions <= (key_capacity * 0.03)
 
 
-async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
-    role = await c_replica.role()
-    if role[0] != "slave" or role[3] != "online":
-        return False
-    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-
-    logging.debug(f"  offset {syncid} {r_offset} {m_offset}")
-    return r_offset == m_offset
-
-
-async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
-    logging.debug("Waiting for replicas to finish")
-
-    waiting_for = list(c_replicas)
-    start = time.time()
-    while (time.time() - start) < timeout:
-        if not waiting_for:
-            logging.debug("All replicas finished after %s seconds", time.time() - start)
-            return
-        await asyncio.sleep(0.2)
-        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
-        finished_list = await asyncio.gather(
-            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
-        )
-
-        # Remove clients that finished from waiting list
-        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
-
-    first_r: aioredis.Redis = waiting_for[0]
-    logging.error("Replica not finished, role %s", await first_r.role())
-    raise RuntimeError("Not all replicas finished in time!")
-
-
 """
 Test disconnecting replicas during different phases while constantly streaming changes to master.
 
@@ -801,6 +768,8 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         # XREADGROUP without NOACK should journal XCLAIM + XGROUP SETID
         await c_master.execute_command("XREADGROUP GROUP mygroup consumer1 STREAMS mystream >")
+        # Consumer creation
+        assert await is_match_rsp("XGROUP CREATECONSUMER mystream mygroup consumer1")
         # Expect XCLAIM for the message + XGROUP SETID with ENTRIESREAD
         assert await is_match_rsp(
             r"XCLAIM mystream mygroup consumer1 0 (.*?) TIME \d+ RETRYCOUNT 1 FORCE JUSTID LASTID (.*?)"
@@ -3857,6 +3826,7 @@ async def test_xreadgroup_replication(df_factory):
             assert m_dict["entries-read"] == expected_entries_read
             assert m_dict["pending"] == r_dict["pending"]
             assert m_dict["pending"] == expected_pending
+            assert m_dict["consumers"] == r_dict["consumers"]
 
     # Case 1: Non-blocking path, NOACK
     await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
@@ -3904,3 +3874,141 @@ async def test_xreadgroup_replication(df_factory):
 
     await check_all_replicas_finished([c_replica], c_master)
     await compare_group_info("mystream", 3, 5)
+
+    await c_master.execute_command("flushall")
+    # Create consumer
+    await c_master.execute_command("XGROUP CREATE mystream mygroup $ MKSTREAM")
+    await c_master.execute_command("XADD mystream 2000-0 tmp tmp")
+    # Add to PEL but don't ack
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker1 STREAMS mystream >")
+    await c_master.execute_command("XREADGROUP GROUP mygroup worker2 STREAMS mystream 2000-0")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await compare_group_info("mystream", 1, 1)
+
+
+"""
+Test replication with mismatched dbnum between master and replica.
+"""
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replication_replica_smaller_dbnum_shared_dbs_only(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Replica dbnum < Master dbnum, but master only uses DBs within
+    the replica's range. Replication should succeed.
+    """
+    master = df_factory.create(dbnum=8)
+    replica = df_factory.create(dbnum=4)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+
+    # Populate data only in DBs 0-3 (within replica's dbnum range)
+    for db in range(4):
+        c = master.client(db=db)
+        for i in range(50):
+            await c.set(f"key:{db}:{i}", f"val:{db}:{i}")
+        await c.close()
+
+    # Start replication
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify all data is present in the replica across shared DBs
+    for db in range(4):
+        c_m = master.client(db=db)
+        c_r = replica.client(db=db)
+        for i in range(50):
+            assert await c_r.get(f"key:{db}:{i}") == await c_m.get(f"key:{db}:{i}")
+        await c_m.close()
+        await c_r.close()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replication_replica_larger_dbnum(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Replica dbnum > Master dbnum. Replication should succeed;
+    the replica's extra DBs remain empty.
+    """
+    master = df_factory.create(dbnum=4)
+    replica = df_factory.create(dbnum=8)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+
+    # Populate all DBs on the master (0-3)
+    for db in range(4):
+        c = master.client(db=db)
+        for i in range(50):
+            await c.set(f"key:{db}:{i}", f"val:{db}:{i}")
+        await c.close()
+
+    # Start replication
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify master's data is present in the replica
+    for db in range(4):
+        c_m = master.client(db=db)
+        c_r = replica.client(db=db)
+        for i in range(50):
+            assert await c_r.get(f"key:{db}:{i}") == await c_m.get(f"key:{db}:{i}")
+        await c_m.close()
+        await c_r.close()
+
+    # Verify the replica's extra DBs (4-7) are empty
+    for db in range(4, 8):
+        c_r = replica.client(db=db)
+        assert await c_r.dbsize() == 0
+        await c_r.close()
+
+
+# BF.RESERVE with error_rate=0.00001 and capacity=1e9 creates a single bloom filter
+# of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
+# filter size, which silently overflowed to 0 and broke the RDB stream.
+@pytest.mark.skip("Requires ~12GiB RAM for two instances with 4GiB bloom filter")
+@pytest.mark.slow
+async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
+    master = df_factory.create(
+        proactor_threads=1,
+        maxmemory="6G",
+        rdb_sbf_chunked="true",
+    )
+    replica = df_factory.create(
+        proactor_threads=1,
+        maxmemory="6G",
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("BF.RESERVE", "bf", "0.00001", "1000000000")
+    await c_master.execute_command("BF.ADD", "bf", "hello")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1

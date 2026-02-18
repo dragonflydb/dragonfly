@@ -20,7 +20,7 @@
 #include <utility>
 
 #include "io/io.h"
-#include "server/common.h"
+#include "server/execution_state.h"
 #include "util/cloud/utils.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"

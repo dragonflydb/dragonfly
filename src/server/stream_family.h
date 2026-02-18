@@ -4,20 +4,18 @@
 
 #pragma once
 
-#include "server/common.h"
+#include <cstddef>
 
 namespace dfly {
 
 class CommandRegistry;
-
-class CompactObj;
-using PrimeValue = CompactValue;
+class CompactValue;
 
 class StreamMemTracker {
  public:
   StreamMemTracker();
 
-  void UpdateStreamSize(PrimeValue& pv) const;
+  void UpdateStreamSize(CompactValue& pv) const;
 
  private:
   size_t start_size_{0};

@@ -4,11 +4,13 @@
 
 #include "server/cluster/cluster_family.h"
 
+#include <absl/cleanup/cleanup.h>
+#include <absl/strings/ascii.h>
+
 #include <memory>
 #include <mutex>
 #include <string>
 
-#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
@@ -539,7 +541,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
 
     // Send journal entry
     // TODO: Break slot migration upon FLUSHSLOTS
-    journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
+    journal::RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
                          /* shard_cnt= */ shard_set->size(), nullopt,
                          Payload("DFLYCLUSTER", args_view));
   };

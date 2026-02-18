@@ -1024,7 +1024,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
       if (journal) {
         // We must register this entry to the journal to allow partial sync
         // if journal is active.
-        journal->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+        journal::RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
       }
     } else {
       const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
@@ -1119,6 +1119,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
   executor_ = std::make_unique<JournalExecutor>(service);
   rdb_loader_ = std::make_unique<RdbLoader>(&service_);
   rdb_loader_->SetLoadUnownedSlots(true);
+  rdb_loader_->SetShardCount(master_context.num_flows);
 }
 
 DflyShardReplica::~DflyShardReplica() {

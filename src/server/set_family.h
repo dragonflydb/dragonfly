@@ -5,7 +5,6 @@
 #pragma once
 
 #include "facade/facade_types.h"
-#include "facade/op_status.h"
 #include "server/table.h"
 #include "server/tx_base.h"
 
@@ -15,7 +14,6 @@ namespace dfly {
 
 using facade::OpResult;
 
-class CommandRegistry;
 class StringSet;
 
 class SetFamily {

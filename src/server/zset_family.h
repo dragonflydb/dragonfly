@@ -16,9 +16,6 @@ class SinkReplyBuilder;
 
 namespace dfly {
 
-class CommandRegistry;
-class Transaction;
-class CommandContext;
 struct OpArgs;
 
 class ZSetFamily {

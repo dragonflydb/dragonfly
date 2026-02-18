@@ -4,6 +4,7 @@
 
 #include "server/generic_family.h"
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
 #include <optional>
@@ -18,6 +19,7 @@ extern "C" {
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/glob_matcher.h"
 #include "core/qlist.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
@@ -31,6 +33,7 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -317,7 +320,8 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
 }
 
 OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
-  io::StringSink sink;
+  string str_res;
+
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
     auto res =
@@ -326,12 +330,12 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
       return OpStatus::IO_ERROR;
 
     // TODO: allow saving string directly without proxy object
-    SerializerBase::DumpValue(PrimeValue{*res}, &sink);
+    str_res = SerializerBase::DumpValue(PrimeValue{*res});
   } else {
-    SerializerBase::DumpValue(pv, &sink);
+    str_res = SerializerBase::DumpValue(pv);
   }
 
-  return std::move(sink).str();
+  return {std::move(str_res)};
 }
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
@@ -679,7 +683,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   db_slice.GetLatch()->Wait();
 
   // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
+  journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
@@ -1103,23 +1107,20 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 }
 
 ASYNC_CMD(Del) {
-  bool async_unlink = false;
-  mutable atomic_uint32_t result{0};
-
   PrepareResult Prepare(ArgSlice args, CommandContext * cmd_cntx) override {
     if (cmd_cntx->cid()->name() == "UNLINK")
-      async_unlink = absl::GetFlag(FLAGS_unlink_experimental_async);
+      async_unlink_ = absl::GetFlag(FLAGS_unlink_experimental_async);
     return SingleHop();
   }
 
   OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const {
-    auto res = GenericFamily::OpDel(op_args, args, async_unlink);
-    result.fetch_add(res.value_or(0), memory_order_relaxed);
+    auto res = GenericFamily::OpDel(op_args, args, async_unlink_);
+    result_.fetch_add(res.value_or(0), memory_order_relaxed);
     return OpStatus::OK;
   }
 
   void Reply(SinkReplyBuilder * rb) override {
-    uint32_t del_cnt = result.load(memory_order_relaxed);
+    uint32_t del_cnt = result_.load(memory_order_relaxed);
     if (cmd_cntx->mc_command()) {
       MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
       rb->SendSimpleString(del_cnt ? mc_render.RenderDeleted() : mc_render.RenderNotFound());
@@ -1127,6 +1128,10 @@ ASYNC_CMD(Del) {
       rb->SendLong(del_cnt);
     }
   }
+
+ private:
+  bool async_unlink_ = false;
+  mutable atomic_uint32_t result_{0};
 };
 
 void GenericFamily::Delex(CmdArgList args, CommandContext* cmd_cntx) {

@@ -15,6 +15,7 @@
 #include "absl/time/time.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 

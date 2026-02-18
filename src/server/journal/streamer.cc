@@ -150,7 +150,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
   dest_ = dest;
   // For partial sync we first catch up from journal replication buffer and only then register.
   if (config_.start_partial_sync_at == 0) {
-    journal_cb_id_ = journal_->RegisterOnChange(this);
+    journal_cb_id_ = journal::RegisterConsumer(this);
   }
   StartStalledDataWriterFiber();
 }
@@ -162,11 +162,11 @@ bool JournalStreamer::Cancel() {
   if (journal_cb_id_) {
     auto cb_id = journal_cb_id_;
     journal_cb_id_ = 0;  // Reset to prevent double unregistration in another fiber
-    journal_->UnregisterOnChange(cb_id);
+    journal::UnregisterConsumer(cb_id);
     res = true;
   }
   StopStalledDataWriterFiber();
-  WaitForInflightToComplete();
+  WaitForInflightToComplete(false);
   return res;
 }
 
@@ -207,7 +207,7 @@ bool JournalStreamer::MaybePartialStreamLSNs() {
   // the old LSN"s via a snapshot but rather as journal changes.
   if (config_.start_partial_sync_at > 0) {
     LSN lsn = config_.start_partial_sync_at;
-    DCHECK_LE(lsn, journal_->GetLsn()) << "The replica tried to sync from the future.";
+    DCHECK_LE(lsn, journal::GetLsn()) << "The replica tried to sync from the future.";
 
     LOG(INFO) << "Starting partial sync from lsn: " << lsn;
     // The replica sends the LSN of the next entry is wants to receive.
@@ -223,17 +223,17 @@ bool JournalStreamer::MaybePartialStreamLSNs() {
       return false;
     }
 
-    if (journal_->GetLsn() != lsn) {
+    if (journal::GetLsn() != lsn) {
       // We stopped but we didn't manage to send the whole stream.
       cntx_->ReportError(
           std::make_error_code(errc::state_not_recoverable),
           absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
-                       " was dropped from the buffer. Current lsn=", journal_->GetLsn()));
+                       " was dropped from the buffer. Current lsn=", journal::GetLsn()));
       return false;
     }
 
     // We are done, register back to the journal so we don't miss any changes
-    journal_cb_id_ = journal_->RegisterOnChange(this);
+    journal_cb_id_ = journal::RegisterConsumer(this);
 
     LOG(INFO) << "Last LSN sent in partial sync was " << (lsn - 1);
     // flush pending
@@ -378,13 +378,25 @@ void JournalStreamer::ThrottleIfNeeded() {
   }
 }
 
-void JournalStreamer::WaitForInflightToComplete() {
+void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
+  const auto start = chrono::steady_clock::now();
+  const auto max_timeout = start + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
   while (in_flight_bytes_) {
     auto next = chrono::steady_clock::now() + 1s;
     std::cv_status status =
         waker_.await_until([this] { return this->in_flight_bytes_ == 0; }, next);
     LOG_IF(WARNING, status == std::cv_status::timeout)
         << "Waiting for inflight bytes " << in_flight_bytes_;
+
+    if (next >= max_timeout) {
+      if (with_timeout) {
+        cntx_->ReportError("JournalStreamer write operation timeout");
+        break;
+      } else {
+        LOG(WARNING) << "WaitForInflightToComplete timed out with " << in_flight_bytes_
+                     << " inflight bytes remaining";
+      }
+    }
   }
 }
 
@@ -512,6 +524,10 @@ void RestoreStreamer::SendFinalize(long attempt) {
           << ", throttle on db update: " << stats_.throttle_on_db_update
           << ", throttle usec on db update: " << stats_.throttle_usec_on_db_update
           << ", iter_skips: " << stats_.iter_skips;
+
+  // Drain all pending journal data before sending the finalize marker.
+  // At this point client pause is active, so no new entries can arrive.
+  WaitForInflightToComplete(true);
 
   journal::Entry entry(journal::Op::LSN, attempt);
 

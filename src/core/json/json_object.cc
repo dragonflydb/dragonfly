@@ -177,4 +177,56 @@ bool Defragment(JsonType& j, PageUsage* page_usage) {
   return did_defragment;
 }
 
+size_t ComputeMemorySize(const JsonType& j) {
+  std::stack<const JsonType*> stack;
+  stack.push(&j);
+
+  size_t total = 0;
+  auto add_used_memory = [&total](const auto* data) {
+    if (data)
+      total += mi_usable_size(data);
+  };
+
+  using enum json_storage_kind;
+  while (!stack.empty()) {
+    const auto* current = stack.top();
+    stack.pop();
+
+    const auto storage = current->storage_kind();
+    if (is_trivial_storage(storage))
+      continue;
+
+    switch (storage) {
+      case object: {
+        const auto& object_storage = current->cast<JsonType::object_storage>().value();
+        if (!object_storage.empty())
+          add_used_memory(&*object_storage.begin());
+        for (const auto& member : object_storage) {
+          total += member.key().MemUsed();
+          const auto& value = member.value();
+          if (!is_trivial_storage(value.storage_kind()))
+            stack.push(&value);
+        }
+      } break;
+      case array: {
+        const auto& arr = current->cast<JsonType::array_storage>().value();
+        if (!arr.empty())
+          add_used_memory(&arr[0]);
+        for (const auto& elem : arr)
+          if (!is_trivial_storage(elem.storage_kind()))
+            stack.push(&elem);
+      } break;
+      case long_str:
+        add_used_memory(current->cast<JsonType::long_string_storage>().data());
+        break;
+      case byte_str:
+        add_used_memory(current->cast<JsonType::byte_string_storage>().data());
+        break;
+      default:
+        DCHECK(false) << "unexpected non trivial storage type:" << storage;
+    }
+  }
+  return total;
+}
+
 }  // namespace dfly

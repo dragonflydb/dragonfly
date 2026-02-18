@@ -552,10 +552,14 @@ void EngineShard::DestroyThreadLocal() {
 
   shard_->Shutdown();
 
+  detail::InternedString::ResetPool();
   shard_->~EngineShard();
+  CleanupStatelessAllocMR();
+
   mi_free(shard_);
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
+
   mi_heap_delete(tlh);
   VLOG(1) << "Shard reset " << shard_id;
 }
@@ -778,7 +782,7 @@ void EngineShard::Heartbeat() {
 
 void EngineShard::RetireExpiredAndEvict() {
   // Disable flush journal changes to prevent preemtion
-  journal::JournalFlushGuard journal_flush_guard(journal_);
+  journal::DisableFlushGuard journal_flush_guard(journal_);
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());

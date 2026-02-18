@@ -23,8 +23,9 @@ using namespace std;
 using namespace facade;
 using cmn::HeapSize;
 
-static void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
-                                            unsigned count, RedisReplyBuilder* rb) {
+namespace {
+void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
+                                     unsigned count, RedisReplyBuilder* rb) {
   rb->StartCollection(3, CollectionType::PUSH);
   rb->SendBulkString(action);
   if (topic.has_value())
@@ -33,6 +34,26 @@ static void SendSubscriptionChangedResponse(string_view action, std::optional<st
     rb->SendNull();
   rb->SendLong(count);
 }
+
+vector<string> FormatExecSlowlog(const ConnectionState& state) {
+  const auto& info = state.exec_info;
+  return {absl::StrCat("num_cmds: ", info.body.size()), absl::StrCat("is_write: ", info.is_write)};
+}
+
+vector<string> FormatEvalSlowlog(const ConnectionState& state) {
+  if (!state.script_info)  // EVAL failed to initialize (error)
+    return {};
+
+  const auto& sinfo = *state.script_info;
+  return {
+      sinfo.stats.sha,
+      absl::StrCat("num_cmds: ", sinfo.stats.num_commands),
+      absl::StrCat("is_write: ", !sinfo.read_only),
+      absl::StrCat("lock_tags: ", sinfo.lock_tags.size()),
+  };
+}
+
+}  // namespace
 
 StoredCmd::StoredCmd(const CommandId* cid, facade::ArgSlice args, facade::ReplyMode mode)
     : cid_{cid}, args_{args}, reply_mode_{mode} {
@@ -69,6 +90,10 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
+  // Ensure idempotency: MONITOR may be queued multiple times inside MULTI/EXEC.
+  if (start == monitor)
+    return;
+
   // This will either remove or register a new connection
   // at the "top level" thread --> ServerState context
   // note that we are registering/removing this connection to the thread at which at run
@@ -272,39 +297,53 @@ void CommandContext::ReuseInternal() {
   tx_ = nullptr;
   arg_slice_backing.clear();
   start_time_ns = 0;
-  exec_body_len = 0;
 }
 
 void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
   DCHECK_GT(start_time_ns, 0u);
   int64_t after = absl::GetCurrentTimeNanos();
 
-  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
+  ServerState* ss = ServerState::SafeTLocal();  // Might have migrated thread, read after invocation
   int64_t execution_time_usec = (after - start_time_ns) / 1000;
 
   cid_->RecordLatency(ss->thread_index(), execution_time_usec);
-
   DCHECK(conn_cntx_ != nullptr);
 
-  // TODO: we should probably discard more commands here,
-  // not just the blocking ones
+  // TODO: we should probably discard more than only blocking commands here
   const auto* conn = server_conn_cntx()->conn();
-  if (!(cid_->opt_mask() & CO::BLOCKING) && conn != nullptr &&
-      // Use SafeTLocal() to avoid accessing the wrong thread local instance
-      ServerState::SafeTLocal()->ShouldLogSlowCmd(execution_time_usec)) {
-    vector<string> aux_params;
-    CmdArgVec aux_slices;
+  if (conn == nullptr || (cid_->opt_mask() & CO::BLOCKING))
+    return;
 
-    if (tail_args.empty() && cid_->name() == "EXEC") {
-      // abuse tail_args to pass more information about the slow EXEC.
-      aux_params.emplace_back(absl::StrCat("CMDCOUNT/", exec_body_len));
-      aux_slices.emplace_back(aux_params.back());
-      tail_args = absl::MakeSpan(aux_slices);
+  if (!ss->ShouldLogSlowCmd(execution_time_usec))  // It was not a slow command
+    return;
+
+  vector<string> aux_params;
+  CmdArgVec aux_slice;
+
+  // Rewrite arguments for exec/eval with stats
+  if (auto mck = cid_->MultiControlKind(); mck) {
+    auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
+    switch (*mck) {
+      case CO::MultiControlKind::EXEC:
+        if (cid_->name() == "EXEC")
+          aux_params = FormatExecSlowlog(cntx->conn_state);
+        break;
+      case CO::MultiControlKind::EVAL:
+        aux_params = FormatEvalSlowlog(cntx->conn_state);
+        break;
+    };
+    aux_slice = {aux_params.begin(), aux_params.end()};
+    if (tail_args.size() > 0) {
+      if (!aux_params.empty())
+        tail_args.remove_prefix(1);  // remove script/sha from eval/evalsha
+      aux_slice.insert(aux_slice.end(), tail_args.begin(), tail_args.end());
     }
-    ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
-                                                conn->RemoteEndpointStr(), execution_time_usec,
-                                                absl::GetCurrentTimeNanos() / 1000);
+    tail_args = aux_slice;
   }
+
+  ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), tail_args, conn->GetName(),
+                                              conn->RemoteEndpointStr(), execution_time_usec,
+                                              absl::GetCurrentTimeNanos() / 1000);
 }
 
 }  // namespace dfly

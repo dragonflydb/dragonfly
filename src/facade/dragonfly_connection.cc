@@ -25,12 +25,14 @@
 #include "common/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"
 #include "facade/socket_utils.h"
 #include "io/file.h"
+#include "strings/human_readable.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
@@ -61,10 +63,10 @@ ABSL_FLAG(string, admin_bind, "",
           "If set, the admin consol TCP connection would be bind the given address. "
           "This supports both HTTP and RESP protocols");
 
-ABSL_FLAG(facade::MemoryBytesFlag, request_cache_limit, 64_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, request_cache_limit, 64_MB,
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(facade::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
           "Amount of memory to use for storing pipeline requests - per IO thread."
           "Please note that clients that send excecissively huge pipelines, "
           "may deadlock themselves. See https://github.com/dragonflydb/dragonfly/discussions/3997"
@@ -77,7 +79,7 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "may require increasing this limit to prevent the risk of deadlocking."
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
-ABSL_FLAG(facade::MemoryBytesFlag, publish_buffer_limit, 128_MB,
+ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
 ABSL_FLAG(uint32_t, pipeline_squash, 1,
@@ -92,7 +94,7 @@ ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
           "Maximum bulk length that is "
           "allowed to be accepted when parsing RESP protocol");
 
-ABSL_FLAG(facade::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
+ABSL_FLAG(strings::MemoryBytesFlag, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
 ABSL_FLAG(bool, migrate_connections, true,
@@ -583,7 +585,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
           new RespSrvParser(GetFlag(FLAGS_max_multi_bulk_len), GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
-      memcache_parser_ = make_unique<MemcacheParser>();
+      memcache_parser_ =
+          make_unique<MemcacheParser>(std::min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX));
       break;
   }
 
@@ -713,8 +716,8 @@ void Connection::HandleRequests() {
     uint8_t buf[2];
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
-      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " "
-                           << read_sz.error().message()
+      auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
+      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " " << msg
                            << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
       stats_->tls_accept_disconnects++;
       return;
@@ -785,8 +788,10 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      // ioloop_v2 not supported for TLS connections yet.
-      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
+      // ioloop_v2 not supported for TLS & redis connections yet.
+      ioloop_v2_ =
+          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
+
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -862,12 +867,14 @@ pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   } else {
     absl::StrAppend(&before, " name=", name_);
   }
+#ifdef DFLY_USE_SSL
   if (is_tls_) {
     tls::TlsSocket* tls_sock = static_cast<tls::TlsSocket*>(socket_.get());
     string_view proto_version = SSL_get_version(tls_sock->ssl_handle());
     const SSL_CIPHER* cipher = SSL_get_current_cipher(tls_sock->ssl_handle());
     absl::StrAppend(&before, " tls=", proto_version, "|", SSL_CIPHER_get_name(cipher));
   }
+#endif
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   if (parsed_cmd_q_len_ > 0) {
@@ -1022,6 +1029,9 @@ io::Result<bool> Connection::CheckForHttpProto() {
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
 
+  // Register the new connection with the thread-local statistics.
+  // At this point (connection birth), local queue stats/luggage are 0,
+  // so only connection counts and buffer capacities are incremented.
   IncreaseConnStats();
   ++stats_->conn_received_cnt;
 
@@ -1080,6 +1090,11 @@ void Connection::ConnectionFlow() {
   DCHECK(!HasPendingMessages());
 
   service_->OnConnectionClose(cc_.get());
+
+  // We have already cleared the queues above (ClearPipelinedMessages), so local queue stats
+  // (dispatch_q_bytes_, etc.) represent 0 usage. DecreaseConnStats will safely subtract 0 for those
+  // stats, while correctly removing this connection from the global connection counts and buffer
+  // capacity tracking.
   DecreaseConnStats();
 
   if (ioloop_v2_) {
@@ -1598,6 +1613,8 @@ string Connection::DebugInfo() const {
 }
 
 bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op) {
+  // Guard: Automatically subtract stats when this scope exits (via return or exception).
+  absl::Cleanup stats_guard = [this, msg] { UpdateDispatchStats(*msg, false /* subtract */); };
   bool is_replying = msg->IsReplying();
 
   // Pre-execution Flush
@@ -1610,7 +1627,6 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
 
   // Fiber Termination Check
   if (ShouldEndAsyncFiber(*msg)) {
-    UpdateDispatchStats(*msg, false /* subtract */);
     CHECK(!HasPendingMessages()) << DebugInfo();
     GetQueueBackpressure().pipeline_cnd.notify_all();
     return true;  // Signal to terminate AsyncFiber
@@ -1629,8 +1645,6 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
       (replies_recorded_before == reply_builder_->RepliesRecorded())) {
     reply_builder_->Flush();
   }
-
-  UpdateDispatchStats(*msg, false /* subtract */);
   return false;
 }
 
@@ -1979,20 +1993,24 @@ void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
   if (add) {
     stats_->dispatch_queue_entries++;
     stats_->dispatch_queue_bytes += mem;
+    dispatch_q_bytes_ += mem;
     if (msg.IsPubMsg()) {
       qbp.subscriber_bytes.fetch_add(mem, std::memory_order_relaxed);
       stats_->dispatch_queue_subscriber_bytes += mem;
+      dispatch_q_subscriber_bytes_ += mem;
     }
   } else {
     DCHECK_GT(stats_->dispatch_queue_entries, 0u);
     DCHECK_GE(stats_->dispatch_queue_bytes, mem);
     stats_->dispatch_queue_entries--;
     stats_->dispatch_queue_bytes -= mem;
+    dispatch_q_bytes_ -= mem;
     if (msg.IsPubMsg()) {
       DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, mem);
       DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), mem);
       qbp.subscriber_bytes.fetch_sub(mem, std::memory_order_relaxed);
       stats_->dispatch_queue_subscriber_bytes -= mem;
+      dispatch_q_subscriber_bytes_ -= mem;
     }
   }
 }
@@ -2081,19 +2099,51 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 }
 
 void Connection::IncreaseConnStats() {
+  DCHECK(stats_);
   if (IsMainOrMemcache())
     ++stats_->num_conns_main;
   else
     ++stats_->num_conns_other;
   stats_->read_buf_capacity += io_buf_.Capacity();
+
+  stats_->dispatch_queue_entries += dispatch_q_.size();
+  stats_->dispatch_queue_bytes += dispatch_q_bytes_;
+  stats_->pipeline_queue_entries += parsed_cmd_q_len_;
+  stats_->pipeline_queue_bytes += parsed_cmd_q_bytes_;
+  if (dispatch_q_subscriber_bytes_ > 0) {
+    auto& qbp = GetQueueBackpressure();
+    stats_->dispatch_queue_subscriber_bytes += dispatch_q_subscriber_bytes_;
+    qbp.subscriber_bytes.fetch_add(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+  }
 }
 
 void Connection::DecreaseConnStats() {
-  if (IsMainOrMemcache())
+  DCHECK(stats_);
+  if (IsMainOrMemcache()) {
+    DCHECK_GT(stats_->num_conns_main, 0u);
     --stats_->num_conns_main;
-  else
+  } else {
+    DCHECK_GT(stats_->num_conns_other, 0u);
     --stats_->num_conns_other;
+  }
+  DCHECK_GE(stats_->read_buf_capacity, io_buf_.Capacity());
   stats_->read_buf_capacity -= io_buf_.Capacity();
+
+  DCHECK_GE(stats_->dispatch_queue_entries, dispatch_q_.size());
+  stats_->dispatch_queue_entries -= dispatch_q_.size();
+  DCHECK_GE(stats_->dispatch_queue_bytes, dispatch_q_bytes_);
+  stats_->dispatch_queue_bytes -= dispatch_q_bytes_;
+  if (dispatch_q_subscriber_bytes_ > 0) {
+    auto& qbp = GetQueueBackpressure();
+    DCHECK_GE(stats_->dispatch_queue_subscriber_bytes, dispatch_q_subscriber_bytes_);
+    stats_->dispatch_queue_subscriber_bytes -= dispatch_q_subscriber_bytes_;
+    DCHECK_GE(qbp.subscriber_bytes.load(std::memory_order_relaxed), dispatch_q_subscriber_bytes_);
+    qbp.subscriber_bytes.fetch_sub(dispatch_q_subscriber_bytes_, std::memory_order_relaxed);
+  }
+  DCHECK_GE(stats_->pipeline_queue_entries, parsed_cmd_q_len_);
+  stats_->pipeline_queue_entries -= parsed_cmd_q_len_;
+  DCHECK_GE(stats_->pipeline_queue_bytes, parsed_cmd_q_bytes_);
+  stats_->pipeline_queue_bytes -= parsed_cmd_q_bytes_;
 }
 
 void Connection::BreakOnce(uint32_t ev_mask) {
@@ -2467,6 +2517,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+  DCHECK(memcache_parser_) << "Not supported for redis yet";
+
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
@@ -2534,12 +2586,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (io_buf_.InputLen() > 0) {
-      if (redis_parser_) {
-        parse_status = ParseRedis(max_busy_read_cycles_cached);
-      } else {
-        DCHECK(memcache_parser_);
-        parse_status = ParseMemcache();
-      }
+      DCHECK(memcache_parser_);
+      parse_status = ParseMemcache();
     } else {
       parse_status = NEED_MORE;
 

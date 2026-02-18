@@ -278,6 +278,9 @@ TEST_F(DflyEngineTest, EvalSha) {
   resp = Run({"evalsha", "foobar", "0"});
   EXPECT_THAT(resp, ErrArg("No matching"));
 
+  resp = Run({"evalsha", "", "0"});
+  EXPECT_THAT(resp, ErrArg("No matching"));
+
   resp = Run({"script", "load", "\n return 5"});
 
   // Important to keep spaces in order to be compatible with Redis.
@@ -917,6 +920,13 @@ TEST_F(DflyEngineTest, MemoryUsage) {
 
   resp = Run({"memory", "usage", "l2"});
   EXPECT_GT(*resp.GetInt(), 100000);
+}
+
+// MEMORY USAGE without a key caused a DCHECK crash in CmdArgParser destructor
+// because the parser error was never consumed.
+TEST_F(DflyEngineTest, MemoryUsageNoKey) {
+  auto resp = Run({"memory", "usage"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(DflyEngineTest, DebugObject) {

@@ -5,6 +5,7 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
 
 extern "C" {
@@ -45,6 +46,7 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -55,6 +57,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
+ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
 ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
 
@@ -218,6 +221,8 @@ class RdbLoaderBase::OpaqueObjLoader {
   }
 
  private:
+  using ScratchBuf = base::PODArray<char>;
+
   void CreateSet(const LoadTrace* ltrace);
   void CreateHMap(const LoadTrace* ltrace);
   void CreateList(const LoadTrace* ltrace);
@@ -226,7 +231,7 @@ class RdbLoaderBase::OpaqueObjLoader {
 
   void HandleBlob(string_view blob);
 
-  string_view ToSV(const RdbVariant& obj);
+  string_view ToSV(const RdbVariant& obj, ScratchBuf* buf);
 
   // Returns whether pv_ has the given object type and encoding. If not ec_
   // is set to the error.
@@ -242,7 +247,7 @@ class RdbLoaderBase::OpaqueObjLoader {
 
   std::error_code ec_;
   int rdb_type_;
-  base::PODArray<char> tset_blob_;
+  ScratchBuf buf1_, buf2_, buf3_;
   PrimeValue* pv_;
   LoadConfig config_;
 };
@@ -382,12 +387,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     bool values_expired = false;
 
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      string_view element = ToSV(ltrace->arr[i].rdb_var);
+      string_view element = ToSV(ltrace->arr[i].rdb_var, &buf1_);
 
       uint32_t ttl_sec = UINT32_MAX;
       if (increment == 2) {
         int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var);
+        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
         if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
           LOG(ERROR) << "Can't parse set TTL " << ttl_str;
           ec_ = RdbError(errc::rdb_file_corrupted);
@@ -404,7 +409,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         }
       }
       if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected";
+        LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element) << " with TTL "
+                   << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed() << " "
+                   << config_.append;
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
@@ -453,10 +460,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     CHECK(ltrace->arr.size() % 2 == 0);
     for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
       /* Add pair to listpack */
-      string_view sv = ToSV(ltrace->arr[i].rdb_var);
+      string_view sv = ToSV(ltrace->arr[i].rdb_var, &buf1_);
       lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
 
-      sv = ToSV(ltrace->arr[i + 1].rdb_var);
+      sv = ToSV(ltrace->arr[i + 1].rdb_var, &buf1_);
       lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
     }
 
@@ -489,14 +496,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         CompactObj::DeleteMR<StringMap>(string_map);
       }
     });
-    std::string key;
-    std::string val;
     bool values_expired = false;
     for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
-      // ToSV may reference an internal buffer, therefore we can use only before the
-      // next call to ToSV. To workaround, copy the key locally.
-      key = ToSV(ltrace->arr[i].rdb_var);
-      val = ToSV(ltrace->arr[i + 1].rdb_var);
+      string_view key = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+      string_view val = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
 
       if (ec_)
         return;
@@ -504,7 +507,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       uint32_t ttl_sec = UINT32_MAX;
       if (increment == 3) {
         int64_t ttl_time = -1;
-        string_view ttl_str = ToSV(ltrace->arr[i + 2].rdb_var);
+        string_view ttl_str = ToSV(ltrace->arr[i + 2].rdb_var, &buf3_);
         if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
           LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", ttl='" << ttl_str
                      << "', val=" << val;
@@ -561,7 +564,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
     unsigned container = blob.encoding;
-    string_view sv = ToSV(blob.rdb_var);
+    string_view sv = ToSV(blob.rdb_var, &buf1_);
 
     if (ec_)
       return false;
@@ -664,7 +667,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t maxelelen = 0, totelelen = 0;
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
-    string_view sv = ToSV(blob.rdb_var);
+    string_view sv = ToSV(blob.rdb_var, &buf1_);
 
     double score = blob.score;
 
@@ -720,8 +723,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   });
 
   for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
-    string_view nodekey = ToSV(ltrace->arr[i].rdb_var);
-    string_view data = ToSV(ltrace->arr[i + 1].rdb_var);
+    string_view nodekey = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+    string_view data = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
 
     uint8_t* lp = (uint8_t*)data.data();
 
@@ -777,23 +780,25 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   for (const auto& cg : ltrace->stream_trace->cgroup) {
-    string_view cgname = ToSV(cg.name);
-    streamID cg_id;
-    cg_id.ms = cg.ms;
-    cg_id.seq = cg.seq;
+    streamCG* cgroup = nullptr;
+    {
+      string_view cgname = ToSV(cg.name, &buf1_);
+      streamID cg_id;
+      cg_id.ms = cg.ms;
+      cg_id.seq = cg.seq;
 
-    uint64_t entries_read = cg.entries_read;
-    if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
-      entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg_id);
+      uint64_t entries_read = cg.entries_read;
+      if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
+        entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg_id);
+      }
+
+      cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
+      if (cgroup == NULL) {
+        LOG(ERROR) << "Duplicated consumer group name " << cgname;
+        ec_ = RdbError(errc::duplicate_key);
+        return;
+      }
     }
-
-    streamCG* cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
-    if (cgroup == NULL) {
-      LOG(ERROR) << "Duplicated consumer group name " << cgname;
-      ec_ = RdbError(errc::duplicate_key);
-      return;
-    }
-
     for (const auto& pel : cg.pel_arr) {
       streamNACK* nack = reinterpret_cast<streamNACK*>(zmalloc(sizeof(*nack)));
       nack->delivery_time = pel.delivery_time;
@@ -810,8 +815,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& cons : cg.cons_arr) {
-      streamConsumer* consumer = StreamCreateConsumer(cgroup, ToSV(cons.name), cons.seen_time,
-                                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+      streamConsumer* consumer = StreamCreateConsumer(
+          cgroup, ToSV(cons.name, &buf1_), cons.seen_time, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       if (!consumer) {
         LOG(ERROR) << "Duplicate stream consumer detected.";
         ec_ = RdbError(errc::duplicate_key);
@@ -1008,12 +1013,12 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   }
 }
 
-string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
+string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj, ScratchBuf* buf) {
   if (holds_alternative<long long>(obj)) {
-    tset_blob_.resize(32);
+    buf->resize(absl::numbers_internal::kFastToBufferSize);
     auto val = get<long long>(obj);
-    char* next = absl::numbers_internal::FastIntToBuffer(val, tset_blob_.data());
-    return string_view{tset_blob_.data(), size_t(next - tset_blob_.data())};
+    char* next = absl::numbers_internal::FastIntToBuffer(val, buf->data());
+    return string_view{buf->data(), size_t(next - buf->data())};
   }
 
   const base::PODArray<char>* ch_arr = get_if<base::PODArray<char>>(&obj);
@@ -1024,18 +1029,18 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
 
   const LzfString* lzf = get_if<LzfString>(&obj);
   if (lzf) {
-    tset_blob_.resize(lzf->uncompressed_len);
-    if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(), tset_blob_.data(),
+    buf->resize(lzf->uncompressed_len);
+    if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(), buf->data(),
                        lzf->uncompressed_len) == 0) {
       LOG(ERROR) << "Invalid LZF compressed string";
       ec_ = RdbError(errc::rdb_file_corrupted);
-      return string_view{tset_blob_.data(), 0};
+      return {buf->data(), 0};  // important to return non-null pointer to avoid UB with lp API.
     }
-    return string_view{tset_blob_.data(), tset_blob_.size()};
+    return {buf->data(), buf->size()};
   }
 
   LOG(FATAL) << "Unexpected variant";
-  return string_view{};
+  return {};
 }
 
 bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsigned encoding) {
@@ -1886,14 +1891,20 @@ auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
     if (chunking) {
-      unsigned total_size = 0;
+      size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
+      if (total_size == 0) {
+        return Unexpected(errc::rdb_file_corrupted);
+      }
 
       filter_data.resize(total_size);
       size_t offset = 0;
       while (offset < total_size) {
-        unsigned chunk_size = 0;
+        size_t chunk_size = 0;
         SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
+        if (chunk_size == 0 || chunk_size > total_size - offset) {
+          return Unexpected(errc::rdb_file_corrupted);
+        }
         error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
         if (ec) {
           return make_unexpected(ec);
@@ -1973,6 +1984,7 @@ RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
     : service_{service},
       snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
+      deserialize_hnsw_index_{GetFlag(FLAGS_deserialize_hnsw_index)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
 }
@@ -2213,8 +2225,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      // Stub: read and ignore HNSW vector index data
-      // Binary format: [index_name, elements_number,
+      // HNSW vector index graph data.
+      // Binary format: [index_key, elements_number,
       //   then for each node (little-endian):
       //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
       //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
@@ -2224,26 +2236,22 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      for (uint64_t elem = 0; elem < elements_number; ++elem) {
-        [[maybe_unused]] uint32_t internal_id;
-        SET_OR_RETURN(FetchInt<uint32_t>(), internal_id);
-        [[maybe_unused]] uint64_t global_id;
-        SET_OR_RETURN(FetchInt<uint64_t>(), global_id);
-        uint32_t level;
-        SET_OR_RETURN(FetchInt<uint32_t>(), level);
+      // We can keep the same internal ids if shards count is the same and we can reuse the
+      // data-structures as is, otherwise we must rebuild from scratch
+      // TODO add ability to restore index with different shard count by remapping internal ids
+      const bool should_restore = deserialize_hnsw_index_ && shard_count_ == shard_set->size();
 
-        for (uint32_t lvl = 0; lvl <= level; ++lvl) {
-          uint32_t links_num;
-          SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
-          for (uint32_t i = 0; i < links_num; ++i) {
-            [[maybe_unused]] uint32_t link;
-            SET_OR_RETURN(FetchInt<uint32_t>(), link);
-          }
-        }
+      if (should_restore) {
+        size_t colon_pos = index_key.rfind(':');
+        string_view index_name{index_key.data(),
+                               colon_pos != string::npos ? colon_pos : index_key.size()};
+        string_view field_name = colon_pos != string::npos
+                                     ? string_view{index_key.data() + colon_pos + 1}
+                                     : string_view{};
+        RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
+      } else {
+        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
       }
-
-      VLOG(2) << "Ignoring HNSW vector index: " << index_key
-              << " elements_number=" << elements_number;
       continue;
     }
 
@@ -2251,7 +2259,8 @@ error_code RdbLoader::Load(io::Source* src) {
       // Load ShardDocIndex key-to-DocId mapping
       // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
       PendingIndexMapping pim;
-      SET_OR_RETURN(LoadLen(nullptr), pim.shard_id);
+      uint32_t shard_id;
+      SET_OR_RETURN(LoadLen(nullptr), shard_id);
 
       SET_OR_RETURN(FetchGenericString(), pim.index_name);
 
@@ -2267,15 +2276,30 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      VLOG(2) << "Loaded index mapping for shard " << pim.shard_id << " with " << mapping_count
+      // Only store mappings if deserialization is enabled AND shard count matches.
+      // With different shard counts, keys are distributed differently so the mappings are invalid.
+      if (!deserialize_hnsw_index_ || shard_count_ != shard_set->size()) {
+        continue;
+      }
+
+      VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
               << " entries";
 
-      // Store the mapping to be applied after index creation
-      pending_index_mappings_.emplace_back(std::move(pim));
+      // Store the mapping to be applied after index creation (thread-safe)
+      {
+        std::lock_guard lk(search_index_mu_);
+        pending_index_mappings_[shard_id].emplace_back(std::move(pim));
+      }
       continue;
     }
 
     if (!rdbIsObjectTypeDF(type)) {
+      LOG(ERROR) << "Unrecognized rdb object type: " << type;
+      LOG(ERROR) << "Last iteration: ";
+      LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
+      LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
+                 << "\npending_read_.reserve: " << pending_read_.reserve;
+      // In case we encounter an error, it might worth peeking the InputBuffer()
       return RdbError(errc::invalid_rdb_type);
     }
 
@@ -2588,6 +2612,8 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "hnsw-index-metadata") {
+    LoadHnswIndexMetadataFromAux(std::move(auxval));
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
@@ -2709,7 +2735,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       }
       return;
     }
-    LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
+    LOG(ERROR) << "Could not load value for key '" << absl::CHexEscape(item->key) << "' in DB "
+               << db_ind << " " << item->load_config.streamed << " " << item->load_config.append
+               << " " << item->val.rdb_type;
     stop_early_ = true;
     return;
   }
@@ -2800,6 +2828,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   int64_t start = absl::GetCurrentTimeNanos();
 
   SET_OR_RETURN(ReadKey(), key);
+  last_key_loaded_ = key;
 
   bool streamed = false;
   do {
@@ -2913,7 +2942,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 namespace {
 
 void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context) {
+                              string_view error_context, bool add_NX = false) {
   facade::CapturingReplyBuilder crb;
 
   ConnectionContext cntx{nullptr, acl::UserCredentials{}};
@@ -2956,7 +2985,11 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   cntx_cmd.Init(&crb, &cntx);
 
   cntx_cmd.PushArg(command_name);
-  for (unsigned i = 0; i < resp_vec.size(); i++) {
+  cntx_cmd.PushArg(resp_vec[0].GetView());  // index name
+  if (add_NX) {
+    cntx_cmd.PushArg("NX");
+  }
+  for (unsigned i = 1; i < resp_vec.size(); i++) {
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
   service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
@@ -2972,100 +3005,194 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
 // Static storage for synonym commands collected from all RdbLoader instances
 std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-// Static synchronization for thread-safe search index creation
+// Static storage for index key-to-DocId mappings collected from all RdbLoader instances
+absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
+    RdbLoader::pending_index_mappings_;
+// Static storage for HNSW index metadata collected from all RdbLoader instances
+std::vector<RdbLoader::PendingHnswMetadata> RdbLoader::pending_hnsw_metadata_;
+// Static synchronization for thread-safe search index creation and pending mappings
 base::SpinLock RdbLoader::search_index_mu_;
 absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
-
 std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
   std::vector<std::string> result;
   result.swap(pending_synonym_cmds_);
   return result;
 }
 
+absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
+RdbLoader::TakePendingIndexMappings() {
+  // we don't need to lock here as this is called after all RdbLoader instances are done
+  decltype(pending_index_mappings_) result;
+  std::swap(result, pending_index_mappings_);
+  return result;
+}
+
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  string index_name;
-  string full_cmd;
+  LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
+}
 
-  // Check if this is new JSON format (starts with '{') or old format ("index_name cmd")
-  if (!def.empty() && def[0] == '{') {
-    // New JSON format with HNSW metadata (from summary file)
-    try {
-      auto json_opt = JsonFromString(def);
-      if (!json_opt) {
-        LOG(ERROR) << "Invalid search index JSON: " << def;
-        return;
+void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
+  try {
+    auto json_opt = JsonFromString(def);
+    if (!json_opt) {
+      LOG(ERROR) << "Invalid HNSW index metadata JSON: " << def;
+      return;
+    }
+    const auto& json = *json_opt;
+
+    PendingHnswMetadata phm;
+    phm.index_name = json["index_name"].as<string>();
+    phm.field_name = json["field_name"].as<string>();
+    phm.metadata.max_elements = json["max_elements"].as<size_t>();
+    phm.metadata.cur_element_count = json["cur_element_count"].as<size_t>();
+    phm.metadata.maxlevel = json["maxlevel"].as<int>();
+    phm.metadata.enterpoint_node = json["enterpoint_node"].as<size_t>();
+
+    LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
+              << " elements=" << phm.metadata.cur_element_count;
+
+    {
+      std::lock_guard lk(search_index_mu_);
+      pending_hnsw_metadata_.emplace_back(std::move(phm));
+    }
+  } catch (const std::exception& e) {
+    LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
+  }
+}
+
+error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
+                                         string_view field_name, uint64_t elements_number) {
+  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
+  if (!hnsw_index) {
+    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
+               << ". Skipping serialized graph data.";
+    return SkipVectorIndex(index_key, elements_number);
+  }
+
+  std::vector<search::HnswNodeData> nodes;
+  nodes.reserve(elements_number);
+
+  for (uint64_t elem = 0; elem < elements_number; ++elem) {
+    search::HnswNodeData node;
+    SET_OR_RETURN(FetchInt<uint32_t>(), node.internal_id);
+    SET_OR_RETURN(FetchInt<uint64_t>(), node.global_id);
+    uint32_t raw_level;
+    SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    node.level = static_cast<int>(raw_level);
+
+    node.levels_links.resize(node.level + 1);
+    for (int lvl = 0; lvl <= node.level; ++lvl) {
+      uint32_t links_num;
+      SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      node.levels_links[lvl].resize(links_num);
+      for (uint32_t i = 0; i < links_num; ++i) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), node.levels_links[lvl][i]);
       }
-      const auto& json = *json_opt;
-      index_name = json["name"].as<string>();
-      string cmd = json["cmd"].as<string>();
-
-      // TODO: restore HNSW metadata from json["hnsw_metadata"] if present
-      // Currently we just restore the index definition, HNSW graph will be rebuilt
-
-      full_cmd = absl::StrCat(index_name, " ", cmd);
-    } catch (const std::exception& e) {
-      LOG(ERROR) << "Failed to parse search index JSON: " << e.what() << " def: " << def;
-      return;
     }
-  } else {
-    // Simple format: "index_name cmd" - from per-shard DFS files or old format
-    // Extract index name (first token before space)
-    size_t space_pos = def.find(' ');
-    if (space_pos == string::npos) {
-      LOG(ERROR) << "Invalid search index definition: " << def;
-      return;
-    }
-    index_name = def.substr(0, space_pos);
-    full_cmd = std::move(def);
+    nodes.push_back(std::move(node));
   }
 
-  // Thread-safe check-and-mark to prevent duplicate creation attempts from concurrent shard files.
-  // We track which indices we've already attempted to create to avoid race conditions where
-  // multiple threads see the index doesn't exist and all try to create it.
-  {
-    std::lock_guard lk(search_index_mu_);
-    auto [it, inserted] = created_search_indices_.insert(index_name);
-    if (!inserted) {
-      VLOG(1) << "Index creation already in progress or completed, skipping: " << index_name;
-      return;
+  if (!nodes.empty()) {
+    // Look up metadata from pending_hnsw_metadata_ (loaded from AUX field)
+    std::optional<search::HnswIndexMetadata> metadata;
+    {
+      std::lock_guard lk(search_index_mu_);
+      for (const auto& phm : pending_hnsw_metadata_) {
+        if (phm.index_name == index_name && phm.field_name == field_name) {
+          metadata = phm.metadata;
+          break;
+        }
+      }
+    }
+
+    CHECK(metadata);
+    hnsw_index->RestoreFromNodes(nodes, *metadata);
+    LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
+  }
+  return {};
+}
+
+error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_number) {
+  for (uint64_t elem = 0; elem < elements_number; ++elem) {
+    SET_OR_RETURN(FetchInt<uint32_t>(), std::ignore);  // internal_id
+    SET_OR_RETURN(FetchInt<uint64_t>(), std::ignore);  // global_id
+    uint32_t raw_level;
+    SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    int level = static_cast<int>(raw_level);
+
+    for (int lvl = 0; lvl <= level; ++lvl) {
+      uint32_t links_num;
+      SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      for (uint32_t i = 0; i < links_num; ++i) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), std::ignore);
+      }
     }
   }
 
-  LoadSearchCommandFromAux(service_, std::move(full_cmd), "FT.CREATE", "index definition");
+  if (elements_number > 0) {
+    LOG(INFO) << "Skipping HNSW vector index restore: " << index_key
+              << " elements_number=" << elements_number << " shard_count_=" << shard_count_
+              << " current_shards=" << shard_set->size() << ". Index will be rebuilt from data.";
+  }
+  return {};
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
-  // FT.SYNUPDATE command - defer execution until after RebuildAllIndices
   // Add to shared static vector (may be called from multiple RdbLoader instances)
   pending_synonym_cmds_.push_back(std::move(def));
 }
 
 void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+  if (cmd == nullptr)  // In case search module is disabled
     return;
 
+  // Capture before clearing — indicates HNSW graphs were loaded and need restore path
+  bool has_hnsw_restore;
   // Clear the created indices tracking set for next load
   {
     std::lock_guard lk(search_index_mu_);
+    has_hnsw_restore = !pending_hnsw_metadata_.empty();
     created_search_indices_.clear();
+    pending_hnsw_metadata_.clear();
   }
 
   std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
+  auto index_mappings = TakePendingIndexMappings();
+
   if (is_error)
     return;
 
-  // Rebuild all search indices as only their definitions are extracted from the snapshot
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+  if (!index_mappings.empty()) {
+    // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
+    shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
+      auto it = index_mappings.find(es->shard_id());
+      if (it == index_mappings.end())
+        return;
+      for (const auto& pim : it->second) {
+        if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
+          index->RestoreKeyIndex(pim.mappings);
+          VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
+                  << pim.index_name << " on shard " << es->shard_id();
+        }
+      }
+    });
+  }
+  shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args, true);
+    es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
   });
 
   // Now execute all pending synonym commands after indices are rebuilt
   for (auto& syn_cmd : synonym_cmds) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }
+
+  // Wait until index building ends
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
 }
 
 }  // namespace dfly

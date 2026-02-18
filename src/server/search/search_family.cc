@@ -33,6 +33,7 @@
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
@@ -323,8 +324,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 #pragma GCC diagnostic pop
 #endif
 
-ParseResult<DocIndex> CreateDocIndex(CmdArgParser* parser) {
+ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser) {
   DocIndex index{};
+  index.name = name;
 
   while (parser->HasNext()) {
     auto option_parser =
@@ -1225,9 +1227,12 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
+  // Parse optional NX (Only create if not exists) parameter for internal usage
+  bool is_NX = parser.Check("NX");
+
   bool is_cross_shard = parser.Check("CSS");
 
-  auto parsed_index = CreateDocIndex(&parser);
+  auto parsed_index = CreateDocIndex(idx_name, &parser);
   if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
@@ -1246,7 +1251,7 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
     cmd_cntx->tx()->Conclude();
-    return builder->SendError("Index already exists");
+    return is_NX ? builder->SendOk() : builder->SendError("Index already exists");
   }
 
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
@@ -1277,9 +1282,6 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
-        if (auto* index = es->search_indices()->GetIndex(idx_name); index) {
-          index->RebuildGlobalVectorIndices(idx_name, tx->GetOpArgs(es));
-        }
         return OpStatus::OK;
       },
       true);

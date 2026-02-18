@@ -9,8 +9,8 @@
 #include <optional>
 #include <string_view>
 
+#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
-#include "facade/op_status.h"
 #include "io/io.h"
 
 namespace facade {

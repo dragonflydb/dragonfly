@@ -4,15 +4,15 @@
 
 #pragma once
 
-#include <atomic>
-#include <bitset>
+#include <deque>
 
 #include "base/pod_array.h"
 #include "core/search/base.h"
 #include "io/file.h"
-#include "server/common.h"
 #include "server/db_slice.h"
+#include "server/execution_state.h"
 #include "server/rdb_save.h"
+#include "server/synchronization.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
 
@@ -34,15 +34,16 @@ struct Entry;
 //              |                      Socket is left open in journal streaming mode
 //              ▼
 // ┌──────────────────────────┐          ┌─────────────────────────┐
-// │     SerializeEntry       │ ◄────────┤     OnJournalEntry      │
-// └─────────────┬────────────┘          └─────────────────────────┘
-//               │
-//         PushBytes                  Default buffer gets flushed on iteration,
-//               │                    temporary on destruction
-//               ▼
-// ┌──────────────────────────────┐
-// │     push_cb(buffer)       │
-// └──────────────────────────────┘
+// │     SerializeEntry       │          │  ConsumeJournalChange   │
+// └─────────────┬────────────┘          └────────────┬────────────┘
+//               │                                    │
+//         PushBytes                                  │   into serializer buffer)
+//               │                                    ▼
+//               ▼                        ┌──────────────────────────┐
+//               ▼                        │     WriteJournalEntry    │
+// ┌──────────────────────────────┐       │  (appends journal entry  │
+// │     push_cb(buffer)          │       │   into serializer buffer)│
+// └──────────────────────────────┘       └──────────────────────────┘
 
 // SliceSnapshot is used for iterating over a shard at a specified point-in-time
 // and submitting all values to an output sink.
@@ -131,9 +132,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void OnMoved(DbIndex db_index, const DbSlice::MovedItemsVec& items);
   bool IsPositionSerialized(DbIndex db_index, PrimeTable::Cursor cursor);
 
-  // Journal listener
-  void OnJournalEntry(const journal::JournalItem& item, bool allow_flush);
-
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
@@ -141,10 +139,15 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
                          uint32_t mc_flags);
 
-  // Helper function that flushes the serialized items into the RecordStream.
-  // Can block.
-  using FlushState = SerializerBase::FlushState;
-  size_t FlushSerialized(FlushState flush_state);
+  // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
+  // during big value serialization (e.g. huge sets/lists or large strings).
+  // The data has already been extracted from the serializer and is owned here, ensuring correct
+  // plumbing and making it safe to move.
+  void HandleFlushData(std::string data);
+
+  // Flush data from built in (or custom) serializer and pass it to HandleFlushData.
+  // Used for explicit flushes at safe points (e.g. between entries). Can block.
+  size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
 
   // An entry whose value must be awaited
   struct DelayedEntry {
@@ -161,7 +164,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::deque<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;

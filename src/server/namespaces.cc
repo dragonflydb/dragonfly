@@ -6,7 +6,6 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "server/common.h"
 #include "server/engine_shard_set.h"
 
 ABSL_DECLARE_FLAG(bool, cache_mode);

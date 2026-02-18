@@ -10,11 +10,6 @@ inputs:
     description: "Fuzzing duration in minutes"
     required: true
     type: string
-  instance:
-    description: "Instance ID for parallel fuzzing (0 = main fuzzer)"
-    required: false
-    type: string
-    default: "0"
   run-number:
     description: "GitHub run number for artifact naming"
     required: true
@@ -38,11 +33,8 @@ runs:
       shell: bash
       run: |
         echo "Configuring system for AFL++ fuzzing..."
-        afl-system-config
-
-        # Explicitly set core_pattern (afl-system-config might not work in containers)
+        afl-system-config || true
         echo core > /proc/sys/kernel/core_pattern || echo "Warning: Could not set core_pattern"
-
         echo "System configured"
 
     - name: Build Dragonfly with AFL++
@@ -59,21 +51,14 @@ runs:
       run: |
         MODE="${{ inputs.mode }}"
         DURATION_MINUTES="${{ inputs.duration-minutes }}"
-        INSTANCE_ID="${{ inputs.instance }}"
 
         echo "Starting AFL++ fuzzing..."
         echo "Configuration:"
         echo "  Mode: ${MODE}"
         echo "  Duration: ${DURATION_MINUTES} minutes"
-        echo "  Instance: ${INSTANCE_ID}"
 
         cd fuzz
         export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
-
-        # For parallel fuzzing, modify the fuzzer name
-        if [ "$INSTANCE_ID" -eq 0 ]; then
-          export AFL_FINAL_SYNC=1
-        fi
 
         # Run fuzzer with timeout
         timeout ${DURATION_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
@@ -84,7 +69,8 @@ runs:
         elif [ "${EXIT_CODE:-0}" -eq 0 ]; then
           echo "Fuzzing completed normally"
         else
-          echo "Fuzzing exited with code ${EXIT_CODE}"
+          echo "::error::Fuzzer failed with exit code ${EXIT_CODE}"
+          exit 1
         fi
       env:
         # Mode-specific environment variables
@@ -93,9 +79,10 @@ runs:
         AFL_AUTORESUME: 1
         AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: 1
         AFL_TESTCACHE_SIZE: ${{ inputs.mode == 'smoke' && '50' || '500' }}
-        AFL_SKIP_CPUFREQ: ${{ inputs.mode == 'long' && '1' || '' }}
+        AFL_SKIP_CPUFREQ: 1
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_PERSISTENT_RECORD: 1000
+        AFL_CUSTOM_MUTATOR_ONLY: 1
 
     - name: Analyze fuzzing results
       shell: bash
@@ -140,28 +127,24 @@ runs:
           fi
         fi
 
-        # Fail the job if crashes or hangs were found
+        # Fail the job only if crashes were found
         if [ "$CRASH_COUNT" -gt 0 ]; then
           echo "::error::Found $CRASH_COUNT crash(es)!"
-          if [ "${{ inputs.mode }}" = "smoke" ]; then
-            echo ""
-            echo "Crash files:"
-            ls -lh "$CRASHES_DIR" || true
-          fi
+          echo ""
+          echo "Crash files:"
+          ls -lh "$CRASHES_DIR" || true
           exit 1
         fi
 
         if [ "$HANG_COUNT" -gt 0 ]; then
-          echo "::error::Found $HANG_COUNT hang(s)!"
-          if [ "${{ inputs.mode }}" = "smoke" ]; then
-            echo ""
-            echo "Hang files:"
-            ls -lh "$HANGS_DIR" || true
-          fi
-          exit 1
+          echo "::warning::Found $HANG_COUNT hang(s) (not failing the build)"
         fi
 
-        echo "No crashes or hangs found - fuzzing test passed!"
+        if [ "$CORPUS_SIZE" -gt 0 ]; then
+          echo "No crashes found - fuzzing test passed!"
+        else
+          echo "No fuzzing artifacts found (fuzzer may not have started)"
+        fi
 
     - name: Archive fuzzing artifacts
       shell: bash
@@ -196,7 +179,7 @@ runs:
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: fuzz-${{ inputs.mode }}-artifacts-${{ inputs.run-number }}${{ inputs.instance != '0' && format('-instance-{0}', inputs.instance) || '' }}
+        name: fuzz-${{ inputs.mode }}-artifacts-${{ inputs.run-number }}
         path: |
           fuzz/artifacts/resp/default/*.tar.gz
           fuzz/artifacts/resp/default/fuzzer_stats

@@ -8,7 +8,6 @@
 #include <stack>
 #include <string_view>
 #include <variant>
-#include <vector>
 
 #include "facade/reply_builder.h"
 #include "facade/reply_mode.h"

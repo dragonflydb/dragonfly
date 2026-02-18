@@ -5,6 +5,7 @@
 #include "server/stream_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
 extern "C" {
@@ -20,7 +21,9 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/execution_state.h"
 #include "server/family_utils.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -182,6 +185,7 @@ struct StreamIDsItem {
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
   bool serve_history = false;
+  bool is_consumer_new = false;
 };
 
 struct ReadOpts {
@@ -1286,8 +1290,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 struct FindGroupResult {
   stream* s = nullptr;
   streamCG* cg = nullptr;
-  DbSlice::AutoUpdater post_updater;
-  DbSlice::Iterator it;
+  DbSlice::ItAndUpdater it;
 };
 
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname,
@@ -1302,11 +1305,12 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
   if (skip_group && !cg)
     return OpStatus::SKIPPED;
 
-  return FindGroupResult{s, cg, std::move(res_it->post_updater), res_it->it};
+  return FindGroupResult{s, cg, std::move(*res_it)};
 }
 
 // Try to get the consumer. If not found, create a new one.
-streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_ms) {
+streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_ms,
+                                  bool* is_consumer_new) {
   // Try to get the consumer. If not found, create a new one.
   auto cname = WrapSds(name);
   streamConsumer* consumer = streamLookupConsumer(cg, cname);
@@ -1314,6 +1318,9 @@ streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_m
     consumer->seen_time = now_ms;
   } else {
     // TODO: notify xgroup-createconsumer event once we support stream events.
+    if (is_consumer_new) {
+      *is_consumer_new = true;
+    }
     consumer = StreamCreateConsumer(cg, name, now_ms, SCC_DEFAULT);
   }
 
@@ -1392,7 +1399,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 
   StreamMemTracker tracker;
 
-  streamConsumer* consumer = FindOrAddConsumer(opts.consumer, cgr_res->cg, now_ms);
+  streamConsumer* consumer = FindOrAddConsumer(opts.consumer, cgr_res->cg, now_ms, nullptr);
 
   for (streamID id : ids) {
     std::array<uint8_t, sizeof(streamID)> buf;
@@ -1461,7 +1468,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       // TODO: propagate this change with streamPropagateXCLAIM
     }
   }
-  tracker.UpdateStreamSize(cgr_res->it->second);
+  tracker.UpdateStreamSize(cgr_res->it.it->second);
   return result;
 }
 
@@ -1474,7 +1481,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
   streamFreeCG(cgr_res->cg);
 
-  mem_tracker.UpdateStreamSize(cgr_res->it->second);
+  mem_tracker.UpdateStreamSize(cgr_res->it.it->second);
 
   // Awake readers blocked on this group
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
@@ -1506,7 +1513,7 @@ OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, stri
   streamConsumer* consumer = StreamCreateConsumer(
       cgroup_res->cg, consumer_name, op_args.db_cntx.time_now_ms, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
 
-  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
+  mem_tracker.UpdateStreamSize(cgroup_res->it.it->second);
   return consumer ? OpStatus::OK : OpStatus::KEY_EXISTS;
 }
 
@@ -1524,7 +1531,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
     streamDelConsumer(cgroup_res->cg, consumer);
   }
 
-  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
+  mem_tracker.UpdateStreamSize(cgroup_res->it.it->second);
   return pending;
 }
 
@@ -1679,7 +1686,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
       acknowledged++;
     }
   }
-  mem_tracker.UpdateStreamSize(res->it->second);
+  mem_tracker.UpdateStreamSize(res->it.it->second);
   return acknowledged;
 }
 
@@ -1715,7 +1722,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   uint64_t now_ms = op_args.db_cntx.time_now_ms;
   int count = opts.count;
 
-  streamConsumer* consumer = FindOrAddConsumer(opts.consumer, group, now_ms);
+  streamConsumer* consumer = FindOrAddConsumer(opts.consumer, group, now_ms, nullptr);
 
   while (attempts-- && count && raxNext(&ri)) {
     streamNACK* nack = (streamNACK*)ri.data;
@@ -1776,7 +1783,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   raxStop(&ri);
   result.end_id = end_id;
 
-  mem_tracker.UpdateStreamSize(cgr_res->it->second);
+  mem_tracker.UpdateStreamSize(cgr_res->it.it->second);
 
   return result;
 }
@@ -2417,22 +2424,35 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
   return cmd_cntx->SendError(result.status());
 }
 
+void JournalConsumerCreationIfNeeded(OpArgs op_args, const ReadOpts& opts, std::string_view key) {
+  const bool is_consumer_new = opts.stream_ids.at(key).is_consumer_new;
+
+  if (!op_args.shard->journal() || !is_consumer_new) {
+    return;
+  }
+
+  CmdArgVec args = {"CREATECONSUMER", key, opts.group_name, opts.consumer_name};
+  RecordJournal(op_args, "XGROUP"sv, args);
+}
+
 // Valkey 7.2.11:
 // --------------
 // If the consumer was created but nothing was read the consumer is *not* deleted
-// and XINFO should show it (does not affect replication).
-// Just like redis, it only replicates the side effects of xgroupread:
+// and XINFO should show it. If NOACK is used, consumer creation is replicated
+// but ignored when NOACK is omitted.
+// Journal rewrites for when reading via `>`:
 // * without noack -> xclaim + xgroup setid
-// * with noack -> xgroup setid
+// * with noack -> xgroup createconsumer +  xgroup setid
 //
 // Redis 7.0.15:
 // --------------
-// Redis instead deletes the consumer in case the stream is empty and nothing
-// was read even if the command blocks. On the later case, after unblocking the consumer
-// is created again and its side effects are replicated similar to what described above.
+// Redis deletes the consumer in case the stream is empty and nothing
+// was read even if the command blocks. On the later case, after
+// unblocking, the consumer is created again and its side effects are
+// replicated similar to what described above.
 //
-// Dragonfly follows Valkey behaviour (the consumer is not deleted and this does not affect
-// replication).
+// Dragonfly simply propagates consumer creation but does not roll back consumer
+// creation.
 void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const RecordVec& records,
                                std::string_view key) {
   if (!op_args.shard->journal()) {
@@ -2441,34 +2461,41 @@ void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const Recor
 
   const bool serve_history = opts.stream_ids.at(key).serve_history;
 
-  if (!serve_history) {
-    // Reading NEW messages (ID = ">")
-    auto journal_xgroup = [&opts, op_args](const auto& records, std::string_view key) {
-      if (!records.empty()) {
-        const auto& sitem = opts.stream_ids.at(key);
-        auto id = absl::StrCat(records.back().id.ms, "-", records.back().id.seq);
-        auto entries_read = absl::StrCat(sitem.group->entries_read);
-        CmdArgVec journal_args = {"SETID", key, opts.group_name, id, "ENTRIESREAD", entries_read};
-        RecordJournal(op_args, "XGROUP"sv, journal_args);
-      }
-    };
-    for (auto& record : records) {
-      if (!opts.noack) {
-        auto id = absl::StrCat(record.id.ms, "-", record.id.seq);
-        auto deliv_time = absl::StrCat(record.delivery_time);
-        CmdArgVec journal_args = {key, opts.group_name, opts.consumer_name, "0",
-                                  id,  "TIME",          deliv_time,         "RETRYCOUNT",
-                                  "1", "FORCE",         "JUSTID",           "LASTID",
-                                  id};
+  if (serve_history) {
+    return;
+  }
 
-        RecordJournal(op_args, "XCLAIM"sv, journal_args);
-      }
+  // Reading from >
+  auto journal_xgroup = [&opts, op_args](const auto& records, std::string_view key) {
+    if (!records.empty()) {
+      const auto& sitem = opts.stream_ids.at(key);
+      auto id = absl::StrCat(records.back().id.ms, "-", records.back().id.seq);
+      auto entries_read = absl::StrCat(sitem.group->entries_read);
+      CmdArgVec journal_args = {"SETID", key, opts.group_name, id, "ENTRIESREAD", entries_read};
+      RecordJournal(op_args, "XGROUP"sv, journal_args);
+    }
+  };
+
+  // If NOACK is *not* set we add entries to PEL. Consumer is created as a side
+  // effect of XCLAIM.
+  if (!opts.noack) {
+    for (auto& record : records) {
+      auto id = absl::StrCat(record.id.ms, "-", record.id.seq);
+      auto deliv_time = absl::StrCat(record.delivery_time);
+      CmdArgVec journal_args = {
+          key, opts.group_name, opts.consumer_name, "0",      id, "TIME", deliv_time, "RETRYCOUNT",
+          "1", "FORCE",         "JUSTID",           "LASTID", id};
+
+      RecordJournal(op_args, "XCLAIM"sv, journal_args);
     }
     journal_xgroup(records, key);
+    return;
   }
+
+  journal_xgroup(records, key);
 }
 
-// Set consumer_created to true if the consumer is created. Only relevant for,
+// Set is_consumer_new to true if the consumer is created. Only relevant for,
 // when XReadBlock is called from XREADGROUP command.
 void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                 ConnectionContext* cntx) {
@@ -2548,9 +2575,10 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       // Update consumer, only for XReadGroup path
       std::optional<StreamMemTracker> tracker;
       if (sitem.group) {
-        tracker = {};
-        range_opts.consumer =
-            FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
+        tracker = StreamMemTracker{};
+        sitem.is_consumer_new = false;
+        range_opts.consumer = FindOrAddConsumer(opts->consumer_name, sitem.group,
+                                                GetCurrentTimeMs(), &sitem.is_consumer_new);
         sitem.consumer = range_opts.consumer;
         if (!sitem.consumer) {
           return OpStatus::OUT_OF_MEMORY;
@@ -2580,6 +2608,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
       if (result) {
+        JournalConsumerCreationIfNeeded(t->GetOpArgs(shard), *opts, *wake_key);
         JournalXReadGroupIfNeeded(t->GetOpArgs(shard), *opts, *result, *wake_key);
       }
     }
@@ -2631,12 +2660,18 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
         if (read_group) {
           size_t index = 0;
           for (auto key : tx->GetShardArgs(es->shard_id())) {
-            // We can batch here to improve journal writes -- I leave it unoptimized for now
+            // We can batch here to improve journal writes
+            JournalConsumerCreationIfNeeded(op_args, *opts, key);
             JournalXReadGroupIfNeeded(op_args, *opts, fastread_prefetched[index++], key);
           }
         }
-      } else
+      } else {
+        // We didn't read any entries but we might added new consumers
+        for (auto key : tx->GetShardArgs(es->shard_id())) {
+          JournalConsumerCreationIfNeeded(op_args, *opts, key);
+        }
         return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
+      }
     }
     return OpStatus::OK;
   };
@@ -2662,6 +2697,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, CommandContext* cmd_cntx) {
       if (read_group) {
         size_t index = 0;
         for (auto key : tx->GetShardArgs(sid)) {
+          JournalConsumerCreationIfNeeded(op_args, *opts, key);
           JournalXReadGroupIfNeeded(op_args, *opts, xread_resp[sid][index++], key);
         }
       }
@@ -3219,6 +3255,9 @@ void CmdXInfo(CmdArgList args, CommandContext* cmd_cntx) {
       }
       return cmd_cntx->SendError(sinfo.status());
     } else if (sub_cmd == "CONSUMERS") {
+      if (args.size() < 3) {
+        return cmd_cntx->SendError(kSyntaxErr);
+      }
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
@@ -3393,7 +3432,9 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
     StreamMemTracker tracker;
-    consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
+    requested_sitem.is_consumer_new = false;
+    consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms,
+                                 &requested_sitem.is_consumer_new);
     tracker.UpdateStreamSize(it.it->second);
 
     requested_sitem.group = group;
@@ -3577,7 +3618,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
-  ClaimInfo cresult = result.value();
+  const ClaimInfo& cresult = result.value();
 
   rb->StartArray(3);
   rb->SendBulkString(StreamIdRepr(cresult.end_id));

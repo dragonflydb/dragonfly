@@ -48,6 +48,10 @@ using namespace std::chrono_literals;
 
 __thread ServerState* ServerState::state_ = nullptr;
 
+facade::ConnectionStats* ServerState::tl_connection_stats() {
+  return &facade::tl_facade_stats->conn_stats;
+}
+
 ServerState::Stats::Stats(unsigned num_shards)
     : tx_width_freq_arr(num_shards), squash_width_freq_arr(num_shards) {
 }
@@ -347,4 +351,12 @@ void ServerState::UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::Chan
   channel_store_ = replacement;
 }
 
+void ServerState::RecordCmd(bool is_main_conn) {
+  if (is_main_conn) {
+    ++tl_connection_stats()->command_cnt_main;
+  } else {
+    ++tl_connection_stats()->command_cnt_other;
+  }
+  qps_.Inc();
+}
 }  // end of namespace dfly

@@ -15,9 +15,6 @@ namespace dfly {
 using facade::CmdArgList;
 using facade::OpResult;
 
-class CommandRegistry;
-class CommandContext;
-
 class GenericFamily {
  public:
   static void Register(CommandRegistry* registry);

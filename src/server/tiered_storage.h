@@ -10,7 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include "server/common.h"
+#include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
+#include "server/stats.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/entry_map.h"

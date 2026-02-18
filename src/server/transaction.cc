@@ -11,14 +11,15 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/facade_stats.h"
 #include "facade/op_status.h"
 #include "redis/redis_aux.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
-#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
@@ -1573,14 +1574,11 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   }
   // Record to journal autojournal commands, here we allow await which anables writing to sync
   // the journal change.
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_);
+  LogJournalOnShard(std::move(entry_payload), unique_shard_cnt_);
 }
 
-void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt) const {
-  auto journal = shard->journal();
-  CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
+void Transaction::LogJournalOnShard(journal::Entry::Payload&& payload, uint32_t shard_cnt) const {
+  journal::RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
                        unique_slot_checker_.GetUniqueSlotId(), std::move(payload));
 }
 
@@ -1692,12 +1690,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     } else {
       end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    if (cid->opt_mask() & CO::INTERLEAVED_KEYS) {
-      if (cid->name() == "JSON.MSET") {
-        step = 3;
-      } else {
-        step = 2;
-      }
+    if (cid->interleaved_step()) {
+      step = cid->interleaved_step();
     } else {
       step = 1;
     }

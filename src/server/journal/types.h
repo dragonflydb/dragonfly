@@ -7,7 +7,8 @@
 #include <string>
 #include <variant>
 
-#include "server/common.h"
+#include "common/backed_args.h"
+#include "server/common_types.h"
 #include "server/table.h"
 
 namespace dfly {

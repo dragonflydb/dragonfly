@@ -11,12 +11,14 @@
 
 #include "core/qlist.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_stats.h"
 #include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/replica.h"
 #include "server/server_state.h"
+#include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/future.h"
 
@@ -376,6 +378,8 @@ class ServerFamily {
   // REPLICAOF implementation. See arguments above
   void ReplicaOfInternal(CmdArgList args, CommandContext* cmnd_cntx,
                          ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+
+  void StartJournalInShardThreads(Replica* repl_ptr);
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
