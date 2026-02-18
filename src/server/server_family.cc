@@ -2902,8 +2902,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
         result.tx_queue_len = shard->txq()->size();
 
       if (shard->journal()) {
-        journal::LsnBufferSize();
-        journal::LsnBufferBytes();
+        result.lsn_buffer_size += journal::LsnBufferSize();
+        result.lsn_buffer_bytes += journal::LsnBufferBytes();
       }
     }  // if (shard)
 
