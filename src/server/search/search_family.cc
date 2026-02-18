@@ -36,6 +36,7 @@
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
@@ -1281,6 +1282,13 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
         return OpStatus::OK;
       },
       true);
+
+  static bool do_once = true;
+  if (!ServerState::tlocal()->is_master) {
+    VLOG(0) << "Causing an error";
+    do_once = false;
+    return builder->SendError("Bad lucj");
+  }
 
   builder->SendOk();
 }
