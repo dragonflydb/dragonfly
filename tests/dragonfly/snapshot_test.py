@@ -631,7 +631,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     assert await DebugPopulateSeeder.capture(async_client) == start_capture
 
 
-@pytest.mark.skip("Too heavy")
+@pytest.mark.large
 @pytest.mark.opt_only
 @dfly_args(
     {
