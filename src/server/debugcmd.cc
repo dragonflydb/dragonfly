@@ -40,6 +40,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/main_service.h"
 #include "server/multi_command_squasher.h"
+#include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
 #include "server/transaction.h"

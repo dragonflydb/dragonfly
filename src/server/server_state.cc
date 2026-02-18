@@ -18,6 +18,7 @@ extern "C" {
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "server/channel_store.h"
+#include "server/common.h"
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
 

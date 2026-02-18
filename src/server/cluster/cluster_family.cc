@@ -15,6 +15,7 @@
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"

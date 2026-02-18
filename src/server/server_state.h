@@ -11,7 +11,6 @@
 #include "base/histogram.h"
 #include "core/interpreter.h"
 #include "server/acl/acl_log.h"
-#include "server/acl/user_registry.h"
 #include "server/channel_store.h"
 #include "server/common_types.h"
 #include "server/script_mgr.h"
@@ -30,6 +29,10 @@ class ListenerInterface;
 }
 
 namespace dfly {
+
+namespace acl {
+class UserRegistry;
+}  // namespace acl
 
 namespace journal {
 class Journal;

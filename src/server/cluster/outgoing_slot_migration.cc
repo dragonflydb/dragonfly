@@ -18,6 +18,7 @@
 #include "server/error.h"
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/server_family.h"
 #include "util/fibers/synchronization.h"
 

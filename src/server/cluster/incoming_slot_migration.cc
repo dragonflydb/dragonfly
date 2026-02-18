@@ -14,6 +14,7 @@
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
+#include "server/journal/serializer.h"
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 #include "util/fibers/synchronization.h"

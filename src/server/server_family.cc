@@ -42,11 +42,13 @@ extern "C" {
 #include "core/dense_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/user_registry.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -60,6 +62,7 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
 #include "server/multi_command_squasher.h"
+#include "server/namespaces.h"
 #include "server/protocol_client.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -2096,6 +2099,16 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
     }
   }
   return listeners;
+}
+
+bool ServerFamily::AreAllReplicasInStableSync() const {
+  auto roles = dfly_cmd_->GetReplicasRoleInfo();
+  if (roles.empty()) {
+    return true;
+  }
+  auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
+  return std::all_of(roles.begin(), roles.end(),
+                     [&match](auto& elem) { return elem.state == match; });
 }
 
 optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {

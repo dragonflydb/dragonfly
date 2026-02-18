@@ -19,6 +19,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"

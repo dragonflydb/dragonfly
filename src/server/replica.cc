@@ -32,6 +32,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 

@@ -10,12 +10,9 @@
 #include <string>
 
 #include "core/qlist.h"
-#include "facade/dragonfly_listener.h"
 #include "facade/facade_stats.h"
-#include "server/detail/save_stages_controller.h"
-#include "server/dflycmd.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
-#include "server/namespaces.h"
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "server/stats.h"
@@ -23,6 +20,10 @@
 #include "util/fibers/future.h"
 
 struct hdr_histogram;
+
+namespace facade {
+class Listener;
+}  // namespace facade
 
 namespace util {
 
@@ -35,6 +36,7 @@ namespace dfly {
 
 namespace detail {
 
+class SaveStagesController;
 class SnapshotStorage;
 
 }  // namespace detail
@@ -47,6 +49,7 @@ class Journal;
 
 class CommandContext;
 class CommandRegistry;
+class DflyCmd;
 class Service;
 class ScriptMgr;
 
@@ -304,11 +307,6 @@ class ServerFamily {
   // nullopt otherwise.
   std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
 
-  // Master-side acces method to replication info of that connection.
-  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state) const {
-    return dfly_cmd_->GetReplicaInfoFromConnection(state);
-  }
-
   void OnClose(ConnectionContext* cntx);
 
   void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
@@ -320,15 +318,7 @@ class ServerFamily {
 
   // Return true if no replicas are registered or if all replicas reached stable sync
   // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
-  bool AreAllReplicasInStableSync() const {
-    auto roles = dfly_cmd_->GetReplicasRoleInfo();
-    if (roles.empty()) {
-      return true;
-    }
-    auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
-    return std::all_of(roles.begin(), roles.end(),
-                       [&match](auto& elem) { return elem.state == match; });
-  }
+  bool AreAllReplicasInStableSync() const;
 
  private:
   // Helper to safely get save controller copy
