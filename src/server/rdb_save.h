@@ -130,7 +130,7 @@ class RdbSaver {
   }
 
   // Set the replica version for conditional serialization of new features.
-  // Must be called before StartSnapshotInShard.
+  // Must be called before SaveHeader() and StartSnapshotInShard().
   void SetDflyVersion(DflyVersion version);
 
   DflyVersion GetDflyVersion() const {

@@ -189,7 +189,8 @@ void SliceSnapshot::SerializeIndexMapping(
 
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
-  if (!absl::GetFlag(FLAGS_serialize_hnsw_index) || dfly_version_ < DflyVersion::VER6) {
+  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index) ||
+      dfly_version_ < DflyVersion::VER6) {
     return;
   }
 
