@@ -5,6 +5,7 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/instrumented_error.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
 
@@ -78,6 +79,46 @@ namespace {
 // Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
 // containing 2 or 3 items.
 constexpr size_t kMaxBlobLen = 4092;
+
+// Helper to create InstrumentedError and log it, returning the error_code
+template <typename... Args>
+inline std::error_code MakeError(errc ev, Args&&... args) {
+  InstrumentedError err{RdbError(ev)};
+  if constexpr (sizeof...(args) > 0) {
+    err.Context(std::forward<Args>(args)...);
+  }
+  LOG(ERROR) << err;
+  return err.ec_;
+}
+
+// Helper for returning unexpected with InstrumentedError
+template <typename... Args>
+inline auto MakeUnexpected(errc ev, Args&&... args) {
+  InstrumentedError err{RdbError(ev)};
+  if constexpr (sizeof...(args) > 0) {
+    err.Context(std::forward<Args>(args)...);
+  }
+  LOG(ERROR) << err;
+  return make_unexpected(err.ec_);
+}
+
+// Helper for tracing IO errors
+inline std::error_code TraceError(std::error_code ec) {
+  if (ec) {
+    InstrumentedError err{ec};
+    LOG(ERROR) << err.Trace();
+  }
+  return ec;
+}
+
+// Helper for tracing and returning unexpected
+inline auto TraceUnexpected(std::error_code ec) {
+  if (ec) {
+    InstrumentedError err{ec};
+    LOG(ERROR) << err.Trace();
+  }
+  return make_unexpected(ec);
+}
 
 inline auto Unexpected(errc ev) {
   return make_unexpected(RdbError(ev));
@@ -268,8 +309,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
   string tmp(lzfstr.uncompressed_len, '\0');
   if (lzf_decompress(lzfstr.compressed_blob.data(), lzfstr.compressed_blob.size(), tmp.data(),
                      tmp.size()) == 0) {
-    LOG(ERROR) << "Invalid LZF compressed string";
-    ec_ = RdbError(errc::rdb_file_corrupted);
+    ec_ = MakeError(errc::rdb_file_corrupted, "Invalid LZF compressed string");
     return;
   }
   HandleBlob(tmp);
@@ -356,8 +396,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       uint8_t success;
       inner_obj = intsetAdd((intset*)inner_obj, llval, &success);
       if (!success) {
-        LOG(ERROR) << "Duplicate set members detected";
-        ec_ = RdbError(errc::duplicate_key);
+        ec_ = MakeError(errc::duplicate_key, "Duplicate set members detected");
         return false;
       }
       return true;
@@ -394,8 +433,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         int64_t ttl_time = -1;
         string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var, &buf2_);
         if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-          LOG(ERROR) << "Can't parse set TTL " << ttl_str;
-          ec_ = RdbError(errc::rdb_file_corrupted);
+          ec_ = MakeError(errc::rdb_file_corrupted, "Can't parse set TTL", ttl_str);
           return;
         }
 
@@ -409,10 +447,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         }
       }
       if (!set->Add(element, ttl_sec)) {
-        LOG(ERROR) << "Duplicate set members detected " << absl::CHexEscape(element) << " with TTL "
-                   << ttl_sec << " " << rdb_type_ << " " << set->ExpirationUsed() << " "
-                   << config_.append;
-        ec_ = RdbError(errc::duplicate_key);
+        ec_ = MakeError(errc::duplicate_key, "Duplicate set members detected",
+                        absl::CHexEscape(element), "with TTL", ttl_sec);
         return;
       }
     }
@@ -509,9 +545,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         int64_t ttl_time = -1;
         string_view ttl_str = ToSV(ltrace->arr[i + 2].rdb_var, &buf3_);
         if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-          LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", ttl='" << ttl_str
-                     << "', val=" << val;
-          ec_ = RdbError(errc::rdb_file_corrupted);
+          ec_ = MakeError(errc::rdb_file_corrupted, "Can't parse hashmap TTL for", key, "ttl=", ttl_str, "val=", val);
           return;
         }
 
@@ -526,8 +560,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       }
 
       if (!string_map->AddOrSkip(key, val, ttl_sec)) {
-        LOG(ERROR) << "Duplicate hash fields detected for field " << key;
-        ec_ = RdbError(errc::rdb_file_corrupted);
+        ec_ = MakeError(errc::rdb_file_corrupted, "Duplicate hash fields detected for field", key);
         return;
       }
     }
@@ -581,8 +614,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
     if (rdb_type_ == RDB_TYPE_LIST_QUICKLIST_2) {
       uint8_t* src = (uint8_t*)sv.data();
       if (!lpValidateIntegrity(src, sv.size(), 0, nullptr, nullptr)) {
-        LOG(ERROR) << "Listpack integrity check failed.";
-        ec_ = RdbError(errc::rdb_file_corrupted);
+        ec_ = MakeError(errc::rdb_file_corrupted, "Listpack integrity check failed");
         return false;
       }
 
@@ -596,9 +628,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       lp = lpNew(sv.size());
       if (!ziplistValidateIntegrity((uint8_t*)sv.data(), sv.size(), 1,
                                     ziplistEntryConvertAndValidate, &lp)) {
-        LOG(ERROR) << "Ziplist integrity check failed: " << sv.size();
+        ec_ = MakeError(errc::rdb_file_corrupted, "Ziplist integrity check failed: size", sv.size());
         zfree(lp);
-        ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
       }
 
@@ -652,8 +683,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 
     size_t reserve = (config_.reserve > zsetlen) ? config_.reserve : zsetlen;
     if (reserve > 2 && !zs->Reserve(reserve)) {
-      LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
-      ec_ = RdbError(errc::out_of_memory);
+      ec_ = MakeError(errc::out_of_memory, "OOM in dictTryExpand", zsetlen);
       return;
     }
   }
@@ -677,8 +707,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     totelelen += sv.size();
 
     if (!zs->InsertNew(score, sv)) {
-      LOG(ERROR) << "Duplicate zset fields detected";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Duplicate zset fields detected");
       return false;
     }
 
@@ -729,8 +758,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     uint8_t* lp = (uint8_t*)data.data();
 
     if (!streamValidateListpackIntegrity(lp, data.size(), 0)) {
-      LOG(ERROR) << "Stream listpack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Stream listpack integrity check failed");
       return;
     }
     unsigned char* first = lpFirst(lp);
@@ -738,8 +766,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
       /* Serialized listpacks should never be empty, since on
        * deletion we should remove the radix tree key if the
        * resulting listpack is empty. */
-      LOG(ERROR) << "Empty listpack inside stream";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Empty listpack inside stream");
       return;
     }
     uint8_t* copy_lp = (uint8_t*)zmalloc(data.size());
@@ -749,8 +776,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
         raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
     if (!retval) {
       zfree(copy_lp);
-      LOG(ERROR) << "Listpack re-added with existing key";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Listpack re-added with existing key");
       return;
     }
   }
@@ -794,8 +820,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
       cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
       if (cgroup == NULL) {
-        LOG(ERROR) << "Duplicated consumer group name " << cgname;
-        ec_ = RdbError(errc::duplicate_key);
+        ec_ = MakeError(errc::duplicate_key, "Duplicated consumer group name", cgname);
         return;
       }
     }
@@ -807,8 +832,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
       if (!raxTryInsert(cgroup->pel, const_cast<uint8_t*>(pel.rawid.data()), pel.rawid.size(), nack,
                         NULL)) {
-        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
-        ec_ = RdbError(errc::duplicate_key);
+        ec_ = MakeError(errc::duplicate_key, "Duplicated global PEL entry loading stream consumer group");
         streamFreeNACK(nack);
         return;
       }
@@ -818,8 +842,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
       streamConsumer* consumer = StreamCreateConsumer(
           cgroup, ToSV(cons.name, &buf1_), cons.seen_time, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       if (!consumer) {
-        LOG(ERROR) << "Duplicate stream consumer detected.";
-        ec_ = RdbError(errc::duplicate_key);
+        ec_ = MakeError(errc::duplicate_key, "Duplicate stream consumer detected");
         return;
       }
 
@@ -831,8 +854,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
         streamNACK* nack = nullptr;
         int fres = raxFind(cgroup->pel, ptr, rawid.size(), (void**)&nack);
         if (fres == 0) {
-          LOG(ERROR) << "Consumer entry not found in group global PEL";
-          ec_ = RdbError(errc::rdb_file_corrupted);
+          ec_ = MakeError(errc::rdb_file_corrupted, "Consumer entry not found in group global PEL");
           return;
         }
 
@@ -841,9 +863,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
          * NACK structure also in the consumer-specific PEL. */
         nack->consumer = consumer;
         if (!raxTryInsert(consumer->pel, ptr, rawid.size(), nack, NULL)) {
-          LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
           streamFreeNACK(nack);
-          ec_ = RdbError(errc::duplicate_key);
+          ec_ = MakeError(errc::duplicate_key, "Duplicated consumer PEL entry loading a stream consumer group");
           return;
         }
       }
@@ -872,8 +893,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
   if (rdb_type_ == RDB_TYPE_SET_INTSET) {
     if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
-      LOG(ERROR) << "Intset integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Intset integrity check failed");
       return;
     }
 
@@ -885,8 +905,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       StringSet* set = SetFamily::ConvertToStrSet(is, len);
 
       if (!set) {
-        LOG(ERROR) << "OOM in ConvertToStrSet " << len;
-        ec_ = RdbError(errc::out_of_memory);
+        ec_ = MakeError(errc::out_of_memory, "OOM in ConvertToStrSet", len);
         return;
       }
       pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
@@ -897,8 +916,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     }
   } else if (rdb_type_ == RDB_TYPE_SET_LISTPACK) {
     if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-      LOG(ERROR) << "ListPack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "ListPack integrity check failed");
       return;
     }
 
@@ -908,8 +926,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       unsigned char field_buf[LP_INTBUF_SIZE];
       string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
       if (!set->Add(elem)) {
-        LOG(ERROR) << "Duplicate member " << elem;
-        ec_ = RdbError(errc::duplicate_key);
+        ec_ = MakeError(errc::duplicate_key, "Duplicate member", elem);
         break;
       }
     }
@@ -924,17 +941,15 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       case RDB_TYPE_HASH_ZIPLIST:  // legacy format
         if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(),
                                                      &lp)) {
-          LOG(ERROR) << "Zset ziplist integrity check failed.";
           zfree(lp);
-          ec_ = RdbError(errc::rdb_file_corrupted);
+          ec_ = MakeError(errc::rdb_file_corrupted, "Zset ziplist integrity check failed");
           return;
         }
         break;
       case RDB_TYPE_HASH_LISTPACK:
         if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-          LOG(ERROR) << "ListPack integrity check failed.";
           zfree(lp);
-          ec_ = RdbError(errc::rdb_file_corrupted);
+          ec_ = MakeError(errc::rdb_file_corrupted, "ListPack integrity check failed");
           return;
         }
         std::memcpy(lp, blob.data(), blob.size());
@@ -959,9 +974,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {  // legacy format
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {
-      LOG(ERROR) << "Zset ziplist integrity check failed.";
       zfree(lp);
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Zset ziplist integrity check failed");
       return;
     }
 
@@ -985,8 +999,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     return;
   } else if (rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
     if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-      LOG(ERROR) << "ListPack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "ListPack integrity check failed");
       return;
     }
     unsigned char* src_lp = (unsigned char*)blob.data();
@@ -1032,8 +1045,7 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj, ScratchB
     buf->resize(lzf->uncompressed_len);
     if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(), buf->data(),
                        lzf->uncompressed_len) == 0) {
-      LOG(ERROR) << "Invalid LZF compressed string";
-      ec_ = RdbError(errc::rdb_file_corrupted);
+      ec_ = MakeError(errc::rdb_file_corrupted, "Invalid LZF compressed string");
       return {buf->data(), 0};  // important to return non-null pointer to avoid UB with lp API.
     }
     return {buf->data(), buf->size()};
@@ -1077,9 +1089,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   next += to_copy;
 
   if (size + bytes_read_ > source_limit_) {
-    LOG(ERROR) << "Out of bound read " << size + bytes_read_ << " vs " << source_limit_;
-
-    return RdbError(errc::rdb_file_corrupted);
+    return MakeError(errc::rdb_file_corrupted, "Out of bound read", size + bytes_read_, "vs", source_limit_);
   }
 
   if (size > 512) {  // Worth reading directly into next.
@@ -1154,8 +1164,7 @@ auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
       case RDB_ENC_LZF:
         return FetchLzfStringObject();
       default:
-        LOG(ERROR) << "Unknown RDB string encoding len " << len;
-        return Unexpected(errc::rdb_file_corrupted);
+        return MakeUnexpected(errc::rdb_file_corrupted, "Unknown RDB string encoding len", len);
     }
   }
 
@@ -1183,8 +1192,7 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
 
   // TODO serialization and deserialization for data > 512 MB should be done via chunks
   if (len <= clen || clen == 0) {
-    LOG(ERROR) << "Bad compressed string";
-    return Unexpected(rdb::rdb_file_corrupted);
+    return MakeUnexpected(rdb::rdb_file_corrupted, "Bad compressed string len", len, "clen", clen);
   }
 
   if (mem_buf_->InputLen() >= clen) {
@@ -1204,8 +1212,7 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   string res(len, 0);
 
   if (lzf_decompress(cbuf, clen, res.data(), len) == 0) {
-    LOG(ERROR) << "Invalid LZF compressed string";
-    return Unexpected(errc::rdb_file_corrupted);
+    return MakeUnexpected(errc::rdb_file_corrupted, "Invalid LZF compressed string");
   }
 
   // FetchBuf consumes the input but if we have not went through that path
@@ -1332,9 +1339,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadSBF2();
       break;
     default:
-      LOG(ERROR) << "Unsupported rdb type " << rdbtype;
-
-      return RdbError(errc::invalid_encoding);
+      return MakeError(errc::invalid_encoding, "Unsupported rdb type", rdbtype);
   }
 
   if (!iores)
@@ -1370,8 +1375,7 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split)
         return error_code{};
       }
       default:
-        LOG(ERROR) << "Unknown RDB string encoding " << len;
-        return RdbError(errc::rdb_file_corrupted);
+        return MakeError(errc::rdb_file_corrupted, "Unknown RDB string encoding", len);
     }
   }
 
@@ -1418,8 +1422,7 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
   SET_OR_UNEXPECT(LoadLen(NULL), res.uncompressed_len);
 
   if (res.uncompressed_len > 1ULL << 29) {
-    LOG(ERROR) << "Uncompressed length is too big " << res.uncompressed_len;
-    return Unexpected(errc::rdb_file_corrupted);
+    return MakeUnexpected(errc::rdb_file_corrupted, "Uncompressed length is too big", res.uncompressed_len);
   }
 
   res.compressed_blob.resize(clen);
@@ -1574,8 +1577,7 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
       SET_OR_UNEXPECT(FetchDouble(), score);
     }
     if (isnan(score)) {
-      LOG(ERROR) << "Zset with NAN score detected";
-      return Unexpected(errc::rdb_file_corrupted);
+      return MakeUnexpected(errc::rdb_file_corrupted, "Zset with NAN score detected");
     }
     load_trace->arr[i].score = score;
   }
@@ -1615,8 +1617,7 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
 
       if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
           container != QUICKLIST_NODE_CONTAINER_PLAIN) {
-        LOG(ERROR) << "Quicklist integrity check failed.";
-        return Unexpected(errc::rdb_file_corrupted);
+        return MakeUnexpected(errc::rdb_file_corrupted, "Quicklist integrity check failed");
       }
     }
 
@@ -1667,17 +1668,14 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     if (ec)
       return make_unexpected(ec);
     if (StrLen(stream_id) != sizeof(streamID)) {
-      LOG(ERROR) << "Stream node key entry is not the size of a stream ID";
-
-      return Unexpected(errc::rdb_file_corrupted);
+      return MakeUnexpected(errc::rdb_file_corrupted, "Stream node key entry is not the size of a stream ID");
     }
 
     ec = ReadStringObj(&blob);
     if (ec)
       return make_unexpected(ec);
     if (StrLen(blob) == 0) {
-      LOG(ERROR) << "Stream listpacks loading failed";
-      return Unexpected(errc::rdb_file_corrupted);
+      return MakeUnexpected(errc::rdb_file_corrupted, "Stream listpacks loading failed");
     }
 
     load_trace->arr[2 * i].rdb_var = std::move(stream_id);
@@ -1764,7 +1762,9 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
       auto& pel = cgroup.pel_arr[j];
       error_code ec = FetchBuf(pel.rawid.size(), pel.rawid.data());
       if (ec) {
-        LOG(ERROR) << "Stream PEL ID loading failed.";
+        InstrumentedError err{ec};
+        err.Context("Stream PEL ID loading failed");
+        LOG(ERROR) << err.Trace();
         return make_unexpected(ec);
       }
 
@@ -1802,7 +1802,9 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
         // unsigned char rawid[sizeof(streamID)];
         error_code ec = FetchBuf(nack.size(), nack.data());
         if (ec) {
-          LOG(ERROR) << "Stream PEL ID loading failed.";
+          InstrumentedError err{ec};
+          err.Context("Stream PEL ID loading failed");
+          LOG(ERROR) << err.Trace();
           return make_unexpected(ec);
         }
         /*streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, rawid, sizeof(rawid));
@@ -1837,14 +1839,12 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
   constexpr string_view kJsonModule = "ReJSON-RL"sv;
   string module_name = ModuleTypeName(*json_magic_number);
   if (module_name != kJsonModule) {
-    LOG(ERROR) << "Unsupported module: " << module_name;
-    return Unexpected(errc::unsupported_operation);
+    return MakeUnexpected(errc::unsupported_operation, "Unsupported module:", module_name);
   }
 
   int encver = *json_magic_number & 1023;
   if (encver != 3) {
-    LOG(ERROR) << "Unsupported ReJSON version: " << encver;
-    return Unexpected(errc::unsupported_operation);
+    return MakeUnexpected(errc::unsupported_operation, "Unsupported ReJSON version:", encver);
   }
 
   auto opcode = FetchInt<uint8_t>();
@@ -2038,8 +2038,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     rdb_version_ = atoi(buf);
     if (rdb_version_ < 5 || rdb_version_ > RDB_VERSION) {  // We accept starting from 5.
-      LOG(ERROR) << "RDB Version " << rdb_version_ << " is not supported";
-      return RdbError(errc::bad_version);
+      return MakeError(errc::bad_version, "RDB Version", rdb_version_, "is not supported");
     }
 
     mem_buf_->ConsumeInput(9);
@@ -2072,9 +2071,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     /* Handle special types. */
     if (type == RDB_OPCODE_EXPIRETIME) {
-      LOG(ERROR) << "opcode RDB_OPCODE_EXPIRETIME not supported";
-
-      return RdbError(errc::invalid_encoding);
+      return MakeError(errc::invalid_encoding, "opcode RDB_OPCODE_EXPIRETIME not supported");
     }
 
     if (type == RDB_OPCODE_EXPIRETIME_MS) {
@@ -2294,13 +2291,15 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (!rdbIsObjectTypeDF(type)) {
-      LOG(ERROR) << "Unrecognized rdb object type: " << type;
-      LOG(ERROR) << "Last iteration: ";
-      LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
-      LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
-                 << "\npending_read_.reserve: " << pending_read_.reserve;
+      InstrumentedError err{RdbError(errc::invalid_rdb_type)};
+      err.Context("Unrecognized rdb object type:", type);
+      err.Context("Last iteration:");
+      err.Context("key loaded:", absl::CHexEscape(last_key_loaded_));
+      err.Context("pending_read_.remaining:", pending_read_.remaining,
+                  "pending_read_.reserve:", pending_read_.reserve);
+      LOG(ERROR) << err;
       // In case we encounter an error, it might worth peeking the InputBuffer()
-      return RdbError(errc::invalid_rdb_type);
+      return err.ec_;
     }
 
     ++keys_loaded;
@@ -2465,8 +2464,7 @@ error_code RdbLoaderBase::SkipModuleData() {
 
       default:
         // TODO: handle RDB_MODULE_OPCODE_FLOAT
-        LOG(ERROR) << "Unsupported module section: " << opcode;
-        return RdbError(errc::rdb_file_corrupted);
+        return MakeError(errc::rdb_file_corrupted, "Unsupported module section:", opcode);
     }
   }
 }
@@ -2712,7 +2710,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
       if (!is_set_expiry_type && key_is_not_expired) {
-        LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        InstrumentedError err{ec_};
+        err.Context("Count not to find append key", item->key, "in DB", db_ind);
+        LOG(ERROR) << err;
         return;
       }
       config_copy.append = false;
@@ -2731,13 +2731,17 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
         LOG(WARNING) << error;
       } else {
-        LOG(ERROR) << error;
+        InstrumentedError err{ec};
+        err.Context(error);
+        LOG(ERROR) << err.Trace();
       }
       return;
     }
-    LOG(ERROR) << "Could not load value for key '" << absl::CHexEscape(item->key) << "' in DB "
-               << db_ind << " " << item->load_config.streamed << " " << item->load_config.append
-               << " " << item->val.rdb_type;
+    InstrumentedError err{ec};
+    err.Context("Could not load value for key", absl::CHexEscape(item->key), "in DB", db_ind,
+                "streamed", item->load_config.streamed, "append", item->load_config.append,
+                "rdb_type", item->val.rdb_type);
+    LOG(ERROR) << err.Trace();
     stop_early_ = true;
     return;
   }
@@ -2766,8 +2770,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   auto op_res = db_slice->AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
   if (!op_res) {
-    LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
-    ec_ = RdbError(errc::out_of_memory);
+    ec_ = MakeError(errc::out_of_memory, "OOM failed to add key", item->key, "in DB", db_ind);
     stop_early_ = true;
     return;
   }
@@ -2935,7 +2938,9 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
   if (script_mgr_) {
     auto res = script_mgr_->Insert(body, interpreter);
     if (!res)
-      LOG(ERROR) << "Error compiling script";
+      InstrumentedError err{ec_};
+      err.Context("Error compiling script");
+      LOG(ERROR) << err;
   }
 }
 
@@ -2962,7 +2967,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
   auto res = parser.Parse(buffer, &consumed, &resp_vec);
 
   if (res != facade::RedisParser::Result::OK) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def;
+    InstrumentedError err{"Bad " + string(error_context)};
+    err.Context(def);
+    LOG(ERROR) << err;
     return;
   }
 
@@ -2997,7 +3004,9 @@ void LoadSearchCommandFromAux(Service* service, string&& def, string_view comman
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
+    InstrumentedError ierr{"Bad " + string(error_context)};
+    ierr.Context(def, err->first);
+    LOG(ERROR) << ierr;
   }
 }
 
@@ -3035,7 +3044,9 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
   try {
     auto json_opt = JsonFromString(def);
     if (!json_opt) {
-      LOG(ERROR) << "Invalid HNSW index metadata JSON: " << def;
+      InstrumentedError err{"Invalid HNSW index metadata JSON"};
+      err.Context(def);
+      LOG(ERROR) << err;
       return;
     }
     const auto& json = *json_opt;
@@ -3056,7 +3067,9 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
       pending_hnsw_metadata_.emplace_back(std::move(phm));
     }
   } catch (const std::exception& e) {
-    LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
+    InstrumentedError err{"Failed to parse HNSW index metadata JSON"};
+    err.Context(e.what(), "def:", def);
+    LOG(ERROR) << err;
   }
 }
 
@@ -3065,8 +3078,9 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
   // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
   if (!hnsw_index) {
-    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
-               << ". Skipping serialized graph data.";
+    InstrumentedError err{std::error_code{}};
+    err.Context("HNSW index not found for restoration:", index_key, ". Skipping serialized graph data.");
+    LOG(ERROR) << err;
     return SkipVectorIndex(index_key, elements_number);
   }
 
