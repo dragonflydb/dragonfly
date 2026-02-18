@@ -182,6 +182,78 @@ class DashTable : public detail::DashTableBase {
     return segment_[segment_id];
   }
 
+  // If there is no buddy for segment_id return segment_id
+  // Otherwise, return buddy_id.
+  unsigned FindBuddyId(unsigned segment_id) {
+    auto* seg = GetSegment(segment_id);
+    uint8_t depth = seg->local_depth();
+
+    assert(depth != 1);
+
+    const size_t bit_pos = global_depth_ - depth;
+    const size_t buddy_idx = segment_id ^ (1 << bit_pos);
+    assert(buddy_idx < segment_.size());
+
+    auto* buddy = GetSegment(buddy_idx);
+    // If buddy has different local depth, then the segment
+    // at buddy_idx is not actually a buddy. We return back
+    // the segment_id to denote that.
+    if (buddy->local_depth() != depth) {
+      return segment_id;
+    }
+
+    return buddy_idx;
+  }
+
+  // API Contract:
+  //  Do not call this function unless the combined
+  //  size of both segments is less than x * segment_capacity. With x:
+  //  0 < x < 0.25. Under uniform hash distribution insertions
+  //  during merge will never fail as long as x remains under 25%.
+  //  What is more, this 25% is not universal. For non default bucket size (14 slots)
+  //  this number needs to be calibrated.
+  void Merge(unsigned keep_id, unsigned buddy_id) {
+    auto* keep = GetSegment(keep_id);
+    auto* buddy = GetSegment(buddy_id);
+
+    assert((keep->local_depth() == buddy->local_depth()));
+    assert((keep->SlowSize() + buddy->SlowSize() < (0.25 * buddy->capacity())));
+    assert(keep->local_depth() != 1);
+    // TODO: This assertion needs updating for different slot configurations
+    // assert(kSlotNum == 14);
+
+    // Move all items from buddy to keep
+    buddy->TraverseAll([&](const auto& it) {
+      uint64_t hash = DoHash(buddy->Key(it.index, it.slot));
+      auto& src_bucket = buddy->GetBucket(it.index);
+      [[maybe_unused]] auto res =
+          keep->InsertUniq(std::move(src_bucket.key[it.slot]), std::move(src_bucket.value[it.slot]),
+                           hash, false, [](auto&&...) {});
+      // Because of preconditions
+      assert(res.found());
+    });
+
+    // Decrease depth (merge back to parent)
+    keep->set_local_depth(keep->local_depth() - 1);
+
+    // Same as Split()
+    uint32_t buddy_chunk_size = 1u << (global_depth_ - buddy->local_depth());
+    uint32_t buddy_start = buddy_id & ~(buddy_chunk_size - 1u);
+    for (size_t i = buddy_start; i < buddy_start + buddy_chunk_size; ++i) {
+      segment_[i] = keep;
+    }
+
+    // Free buddy segment
+    PMR_NS::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
+    using alloc_traits = std::allocator_traits<decltype(pa)>;
+    alloc_traits::destroy(pa, buddy);
+    alloc_traits::deallocate(pa, buddy, 1);
+
+    // Decrement unique segment counter
+    --unique_segments_;
+    bucket_count_ -= keep->num_buckets();
+  }
+
   size_t GetSegmentCount() const {
     return segment_.size();
   }

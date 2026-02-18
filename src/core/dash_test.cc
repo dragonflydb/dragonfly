@@ -373,6 +373,81 @@ TEST_F(DashTest, Split) {
   EXPECT_EQ(6 * Segment::kSlotNum, keys.size());
 }
 
+TEST_F(DashTest, Merge) {
+  constexpr size_t kNumItems = 4000;
+  std::vector<uint64_t> keys;
+
+  for (uint64_t i = 0; i < kNumItems; ++i) {
+    auto [it, inserted] = dt_.Insert(i, i);
+    if (inserted) {
+      keys.push_back(i);
+    }
+  }
+
+  EXPECT_EQ(dt_.depth(), 3);
+
+  // keep only ~5%
+  size_t keys_to_keep = keys.size() * 0.05;
+
+  for (size_t i = keys_to_keep; i < keys.size(); ++i) {
+    dt_.Erase(keys[i]);
+  }
+
+  keys.resize(keys_to_keep);
+
+  EXPECT_EQ(dt_.unique_segments(), 8);
+  size_t dir_size = dt_.GetSegmentCount();
+
+  // Segments repeat because the same segment is merged
+  // at a different level (in reverse order of split).
+  std::vector<uint64_t> expected_seg_id_to_merge = {1, 3, 1, 5, 7, 5};
+  auto expected_it = expected_seg_id_to_merge.begin();
+
+  for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+    auto* seg = dt_.GetSegment(seg_id);
+
+    size_t local_depth = seg->local_depth();
+    if (local_depth == 1)
+      continue;
+
+    size_t buddy_id = dt_.FindBuddyId(seg_id);
+    if (buddy_id == seg_id)
+      continue;
+
+    auto* buddy = dt_.GetSegment(buddy_id);
+    if (buddy->local_depth() != local_depth)
+      continue;
+
+    // Preconditions to merge: (< 25% of capacity)
+    size_t combined_size = seg->SlowSize() + buddy->SlowSize();
+    size_t safe_threshold = static_cast<size_t>(0.25 * seg->capacity());
+
+    if (combined_size <= safe_threshold) {
+      // Check that we found the correct buddy to merge with.
+      EXPECT_EQ(*expected_it, buddy_id);
+      ++expected_it;
+      LOG(INFO) << "Merging segments " << seg_id << " (depth=" << local_depth
+                << ", size=" << seg->SlowSize() << ") and " << buddy_id
+                << " (depth=" << buddy->local_depth() << ", size=" << buddy->SlowSize()
+                << "), combined=" << combined_size;
+
+      dt_.Merge(seg_id, buddy_id);
+    }
+  }
+
+  EXPECT_EQ(expected_it, expected_seg_id_to_merge.end());
+  EXPECT_EQ(dt_.unique_segments(), 2);
+  for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+    auto* seg = dt_.GetSegment(seg_id);
+    EXPECT_EQ(seg->local_depth(), 1);
+  }
+
+  for (size_t key : keys) {
+    EXPECT_EQ(dt_.Find(key).is_done(), false);
+  }
+  EXPECT_EQ(dt_.bucket_count(), (Segment::kBucketNum + Segment::kStashBucketNum) * 2);
+}
+
 TEST_F(DashTest, BumpUp) {
   set<Segment::Key_t> keys = FillSegment(0);
   constexpr unsigned kFirstStashId = Segment::kBucketNum;
