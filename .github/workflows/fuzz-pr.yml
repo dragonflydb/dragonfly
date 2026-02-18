@@ -1,3 +1,15 @@
+# Run AFL++ fuzzing on PRs that touch C++ code.
+#
+# For each PR, an LLM analyzes the diff and generates:
+#   1. Targeted seed files — initial inputs crafted to exercise the changed code paths.
+#      (A "seed" is a RESP-encoded sequence of Redis commands that the fuzzer starts from
+#       and mutates; see fuzz/seeds/resp/*.resp for the existing seed corpus.)
+#   2. Focus command list — commands the mutator should prefer (~70% of the time),
+#      so mutations concentrate on the affected code instead of spreading randomly.
+#
+# The fuzzer then runs for 15 minutes in "smoke" mode (stop on first crash).
+# When ANTHROPIC_API_KEY is unavailable (e.g. fork PRs), seed generation is skipped
+# and the fuzzer uses the existing seed corpus as-is.
 name: AFL++ PR Fuzzing
 
 on:

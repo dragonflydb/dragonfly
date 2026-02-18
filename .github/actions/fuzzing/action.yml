@@ -15,11 +15,11 @@ inputs:
     required: true
     type: string
   extra-seeds-dir:
-    description: "Directory containing additional seed files to merge into the corpus"
+    description: "Directory with additional .resp seed files (initial fuzzer inputs) to merge into the corpus"
     required: false
     default: ''
   focus-commands:
-    description: "JSON list of command names to focus mutations on"
+    description: "JSON list of command names for the mutator to prefer (~70% selection weight)"
     required: false
     default: ''
 

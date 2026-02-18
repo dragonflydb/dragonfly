@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
-"""Generate targeted fuzzing seeds from a PR diff using an LLM.
+"""Generate PR-targeted fuzzing inputs from a code diff using an LLM.
 
-Reads a unified diff from stdin, sends it to Claude along with existing seed
-examples, and gets back targeted RESP seeds + a focus command list.
+Fuzzing terminology used in this file:
+  - Seed:  An initial input file for the fuzzer. Each seed is a sequence of
+           commands encoded in RESP wire format (see fuzz/seeds/resp/*.resp for examples).
+           The fuzzer starts from these seeds and mutates them to explore code paths.
+  - Targeted seed:  A seed crafted specifically to exercise code paths changed in a PR.
+           We send the PR diff + a few existing seeds (as format examples) to an LLM, and
+           it generates new seeds that target the changed code.
+  - Focus commands:  A list of command names (e.g. ["SET", "GET"]) that the
+           AFL++ mutator should prefer. When set, the mutator picks these commands ~70%
+           of the time instead of choosing uniformly from all known commands.
 
-When ANTHROPIC_API_KEY is not available, exits with no output (the fuzzer
-will use the existing 79+ seed corpus as-is).
+Flow:
+  1. Read unified diff from stdin, extract changed C++ file paths.
+  2. Load a few existing seed files as format examples for the LLM.
+  3. Call Claude API: send the diff + examples, get back JSON with seeds + focus commands.
+  4. Fix RESP encoding (LLMs miscount byte lengths), validate, write to output dir.
+
+When ANTHROPIC_API_KEY is not available (e.g. fork PRs), exits with no output and
+the fuzzer runs with the existing seed corpus as-is.
 
 Usage:
     git diff base..HEAD | python3 fuzz/generate_targeted_seeds.py --output-dir /tmp/seeds
@@ -89,7 +103,11 @@ def extract_changed_files(diff_text):
 
 
 def load_example_seeds(seeds_dir, count=NUM_EXAMPLE_SEEDS):
-    """Load a diverse set of existing seed files as format examples."""
+    """Load existing seed files to show the LLM the expected RESP format.
+
+    We pick a diverse set covering different command families so the LLM
+    understands the format and can generate similar files for new commands.
+    """
     # Pick seeds that cover different command families
     preferred = [
         "string_ops.resp",

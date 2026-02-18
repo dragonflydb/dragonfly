@@ -1,7 +1,16 @@
 """AFL++ custom mutator for RESP protocol.
 
-Mutates at the command/argument level instead of random bytes,
-keeping RESP framing valid so inputs reach command execution.
+Instead of random byte-level mutations (which would break protocol framing and get
+rejected by the parser), this mutator operates at the command level: it parses
+the input into commands, then randomly replaces/inserts/removes/reorders commands and
+arguments while keeping RESP encoding valid. This ensures mutated inputs actually
+reach command execution code paths.
+
+Focus commands (optional, set via FUZZ_FOCUS_COMMANDS env var):
+    When running PR-targeted fuzzing, generate_targeted_seeds.py produces a list of
+    command names affected by the code change. This mutator reads that list and
+    picks those commands ~70% of the time, concentrating mutations on the changed code.
+    Commands not already in the COMMANDS table are auto-registered with default arity.
 
 Usage:
     export PYTHONPATH=/path/to/dragonfly/fuzz
