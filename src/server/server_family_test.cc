@@ -708,4 +708,21 @@ TEST_F(ServerFamilyTest, InfoMultipleSectionsInvalid) {
   EXPECT_EQ(info.find("# invalidsection"), std::string::npos);
 }
 
+TEST_F(ServerFamilyTest, MemoryArenaSummary) {
+  auto resp = Run({"MEMORY", "ARENA", "SUMMARY"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "0"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING", "0"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("Count"));
+}
+
 }  // namespace dfly

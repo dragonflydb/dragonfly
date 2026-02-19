@@ -51,34 +51,87 @@ bool MiArenaVisit(const mi_heap_t* heap, const mi_heap_area_t* area, void* block
   (*bmap)[bkey]++;
 
   return true;
+}
+
+struct BlockSummary {
+  size_t reserved;
+  size_t committed;
+  size_t used;
 };
 
-std::string MallocStatsCb(bool backing, unsigned tid) {
+using BlockSummaryMap = absl::flat_hash_map<size_t, BlockSummary>;
+
+bool MiArenaVisitSummary(const mi_heap_t*, const mi_heap_area_t* area, void*, size_t block_size,
+                         void* arg) {
+  BlockSummaryMap* bsm = static_cast<BlockSummaryMap*>(arg);
+  BlockSummary& block_stats = (*bsm)[block_size];
+  block_stats.committed += area->committed;
+  block_stats.reserved += area->reserved;
+  block_stats.used += area->used * block_size;
+  return true;
+}
+
+void SummarizeBlockStats(std::string* str, mi_heap_t* data_heap) {
+  BlockSummaryMap summary;
+  mi_heap_visit_blocks(data_heap, false, MiArenaVisitSummary, &summary);
+  std::vector<std::pair<size_t, BlockSummary>> entries{summary.begin(), summary.end()};
+  std::ranges::sort(entries, {},
+                    [](const auto& entry) { return entry.second.committed - entry.second.used; });
+  absl::StrAppend(str, absl::StrFormat("%10s %10s %10s %10s %10s %8s\n", "BlockSize", "Reserved",
+                                       "Committed", "Used", "Wasted", "Waste%"));
+  size_t total_reserved = 0;
+  size_t total_committed = 0;
+  size_t total_used = 0;
+  for (const auto& [size, block_summary] : entries) {
+    const size_t wasted = block_summary.committed > block_summary.used
+                              ? block_summary.committed - block_summary.used
+                              : 0;
+    const double waste_pct = 100.0 * wasted / std::max<size_t>(1, block_summary.committed);
+    absl::StrAppend(str, absl::StrFormat("%10zu %10zu %10zu %10zu %10zu %8.2f%%\n", size,
+                                         block_summary.reserved, block_summary.committed,
+                                         block_summary.used, wasted, waste_pct));
+    total_reserved += block_summary.reserved;
+    total_committed += block_summary.committed;
+    total_used += block_summary.used;
+  }
+  absl::StrAppend(
+      str, absl::StrFormat(
+               "%10s %10zu %10zu %10zu %10zu %8.2f%%\n", "Total:", total_reserved, total_committed,
+               total_used, total_committed - total_used,
+               100.0 * (total_committed - total_used) / std::max<size_t>(1UL, total_committed)));
+}
+
+std::string MallocStatsCb(bool backing, unsigned tid, bool summarize = false) {
   string str;
 
   uint64_t start = absl::GetCurrentTimeNanos();
 
   absl::StrAppend(&str, "\nArena statistics from thread:", tid, "\n");
-  absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
 
   mi_heap_t* data_heap = backing ? mi_heap_get_backing() : ServerState::tlocal()->data_heap();
-  BlockMap block_map;
 
-  mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
-  uint64_t reserved = 0, committed = 0, used = 0;
-  for (const auto& k_v : block_map) {
-    uint64_t count = k_v.second;
-    absl::StrAppend(&str, count, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
-                    get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
-    reserved += count * get<1>(k_v.first);
-    committed += count * get<2>(k_v.first);
-    used += count * get<3>(k_v.first);
+  if (!summarize) {
+    BlockMap block_map;
+
+    mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
+    uint64_t reserved = 0, committed = 0, used = 0;
+    absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
+    for (const auto& k_v : block_map) {
+      uint64_t count = k_v.second;
+      absl::StrAppend(&str, count, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
+                      get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
+      reserved += count * get<1>(k_v.first);
+      committed += count * get<2>(k_v.first);
+      used += count * get<3>(k_v.first);
+    }
+
+    absl::StrAppend(&str, "total reserved: ", reserved, ", committed: ", committed,
+                    ", used: ", used, " fragmentation waste: ",
+                    (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
+  } else {
+    SummarizeBlockStats(&str, data_heap);
   }
-
-  uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
-  absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
-                  " fragmentation waste: ",
-                  (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
+  const uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
   return str;
@@ -105,8 +158,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Shows breakdown of memory.",
         "MALLOC-STATS",
         "    Show global malloc stats as provided by allocator libraries",
-        "ARENA BACKING] [thread-id]",
+        "ARENA [SUMMARY] [BACKING] [thread-id]",
         "    Show mimalloc arena stats for a heap residing in specified thread-id. 0 by default.",
+        "    If SUMMARY is specified, show stats summarized by block size.",
         "    If BACKING is specified, show stats for the backing heap.",
         "ARENA SHOW",
         "    Prints the arena summary report for the entire process.",
@@ -331,6 +385,8 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
   uint32_t tid = 0;
   bool backing = false;
   bool show_arenas = false;
+  bool summarize = false;
+
   if (args.size() >= 2) {
     string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 1));
 
@@ -340,6 +396,15 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
       show_arenas = true;
     } else {
       unsigned tid_indx = 1;
+
+      if (sub_cmd == "SUMMARY") {
+        ++tid_indx;
+        summarize = true;
+
+        if (args.size() > tid_indx) {
+          sub_cmd = absl::AsciiStrToUpper(ArgS(args, tid_indx));
+        }
+      }
 
       if (sub_cmd == "BACKING") {
         ++tid_indx;
@@ -365,8 +430,8 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
     return cmd_cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
   }
 
-  string mi_malloc_info =
-      shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
+  string mi_malloc_info = shard_set->pool()->at(tid)->AwaitBrief(
+      [=] { return MallocStatsCb(backing, tid, summarize); });
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
   return rb->SendVerbatimString(mi_malloc_info);
