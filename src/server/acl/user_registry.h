@@ -12,7 +12,6 @@
 #include <utility>
 #include <vector>
 
-#include "server/acl/acl_commands_def.h"
 #include "server/acl/user.h"
 #include "util/fibers/synchronization.h"
 
