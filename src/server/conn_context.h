@@ -6,10 +6,10 @@
 
 #include <absl/container/flat_hash_set.h>
 
-#include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
 #include "facade/reply_mode.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 #include "server/tx_base.h"
 #include "server/version.h"
