@@ -70,6 +70,9 @@ class ParsedCommand : public cmn::BackedArguments {
   uint64_t parsed_cycle = 0;
   ParsedCommand* next = nullptr;
 
+  // Used for metrics tracking. Set to true if the command has CO::BLOCKING flag;
+  bool is_blocking_cmd = false;
+
   void Init(SinkReplyBuilder* rb, ConnectionContext* conn_cntx) {
     rb_ = rb;
     conn_cntx_ = conn_cntx;
