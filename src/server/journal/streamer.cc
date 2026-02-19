@@ -109,9 +109,8 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx,
-                                 JournalStreamer::Config config)
-    : cntx_(cntx), journal_(journal), config_(config) {
+JournalStreamer::JournalStreamer(ExecutionState* cntx, JournalStreamer::Config config)
+    : cntx_(cntx), config_(config) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
@@ -211,9 +210,9 @@ bool JournalStreamer::MaybePartialStreamLSNs() {
 
     LOG(INFO) << "Starting partial sync from lsn: " << lsn;
     // The replica sends the LSN of the next entry is wants to receive.
-    while (cntx_->IsRunning() && journal_->IsLSNInBuffer(lsn)) {
+    while (cntx_->IsRunning() && journal::IsLSNInBuffer(lsn)) {
       JournalChangeItem item;
-      item.journal_item.data = journal_->GetEntry(lsn);
+      item.journal_item.data = journal::GetEntry(lsn);
       item.journal_item.lsn = lsn;
       ConsumeJournalChange(item);
       lsn++;
@@ -413,9 +412,8 @@ bool JournalStreamer::IsStalled() const {
   return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                                 ExecutionState* cntx)
-    : JournalStreamer(journal, cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
+RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx)
+    : JournalStreamer(cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);

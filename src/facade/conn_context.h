@@ -8,8 +8,6 @@
 
 #include <string_view>
 
-#include "facade/acl_commands_def.h"
-
 namespace facade {
 
 class Connection;

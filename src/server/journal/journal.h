@@ -8,36 +8,23 @@
 
 namespace dfly {
 
-class Transaction;
-
 namespace journal {
 
-class Journal {
- public:
-  using Span = absl::Span<const std::string_view>;
+void StartInThread();
 
-  Journal();
+// Starts the journal at specified LSN
+// Also drops the (resets) the partial sync buffers
+void StartInThreadAtLsn(LSN lsn);
 
-  void StartInThread();
+std::error_code Close();
 
-  // Starts the journal at specified LSN
-  // Also drops the (resets) the partial sync buffers
-  void StartInThreadAtLsn(LSN lsn);
+//******* The following functions must be called in the context of the owning shard *********//
 
-  std::error_code Close();
+bool HasRegisteredCallbacks();
 
-  //******* The following functions must be called in the context of the owning shard *********//
+bool IsLSNInBuffer(LSN lsn);
 
-  bool HasRegisteredCallbacks() const;
-
-  bool IsLSNInBuffer(LSN lsn) const;
-  std::string_view GetEntry(LSN lsn) const;
-
-  size_t LsnBufferSize() const;
-  size_t LsnBufferBytes() const;
-
- private:
-};
+std::string_view GetEntry(LSN lsn);
 
 LSN GetLsn();
 uint32_t RegisterConsumer(JournalConsumerInterface* consumer);
@@ -46,11 +33,14 @@ void UnregisterConsumer(uint32_t id);
 void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, std::optional<SlotId> slot,
                  Entry::Payload payload);
 
+size_t LsnBufferSize();
+size_t LsnBufferBytes();
+
 void SetFlushMode(bool allow_flush);
 
 class DisableFlushGuard {
  public:
-  explicit DisableFlushGuard(Journal* journal) : journal_(journal != nullptr) {
+  explicit DisableFlushGuard(bool j) : journal_(j) {
     if (journal_ && counter_ == 0) {
       SetFlushMode(false);
     }

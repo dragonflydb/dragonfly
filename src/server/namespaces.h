@@ -10,11 +10,14 @@
 #include <string>
 #include <vector>
 
-#include "server/blocking_controller.h"
-#include "server/db_slice.h"
+#include "server/common_types.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
+
+class BlockingController;
+class DbSlice;
+class EngineShard;
 
 // A Namespace is a way to separate and isolate different databases in a single instance.
 // It can be used to allow multiple tenants to use the same server without hacks of using a common

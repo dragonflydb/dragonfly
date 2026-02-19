@@ -535,8 +535,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
       return;
     }
 
-    auto journal = EngineShard::tlocal()->journal();
-    if (journal == nullptr) {
+    if (!shard->journal()) {
       return;
     }
 

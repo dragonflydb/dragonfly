@@ -946,7 +946,9 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
-    if (index == 0) {  // TODO: Async dealloc?
+    if (index == 0) {
+      // TODO: Async dealloc?
+      // TODO: Drop of global HNSW index doesn't respect per-shard ordering
       owner_->search_indices()->DropAllIndices();
     }
 
@@ -1489,7 +1491,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 
   string tmp;
 
-  bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
+  bool record_keys = owner_->journal() || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {

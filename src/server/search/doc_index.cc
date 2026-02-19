@@ -867,18 +867,10 @@ unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
 }
 
 void ShardDocIndices::DropAllIndices() {
-  for (auto it = indices_.begin(); it != indices_.end(); it++) {
-    // Remove global HNSW indices for this index
-    auto info = it->second->GetInfo();
-    for (const auto& [fident, field] : info.base_index.schema.fields) {
-      if (field.type == search::SchemaField::VECTOR &&
-          !(field.flags & search::SchemaField::NOINDEX)) {
-        GlobalHnswIndexRegistry::Instance().Remove(it->first, field.short_name);
-      }
-    }
-    DropIndexCache(*it->second);
-  }
+  for (const auto& [_, idx] : indices_)
+    DropIndexCache(*idx);
   indices_.clear();
+  GlobalHnswIndexRegistry::Instance().Reset();
 }
 
 void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {

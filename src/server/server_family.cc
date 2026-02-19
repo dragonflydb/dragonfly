@@ -63,9 +63,9 @@ extern "C" {
 #include "server/memory_cmd.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
-#include "server/protocol_client.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
+#include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/search/search_family.h"
 #include "server/server_state.h"
@@ -1059,7 +1059,6 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   thread_safe_save_info_.Update([this](SaveInfoData* data) { data->save_time = start_time_; });
   script_mgr_.reset(new ScriptMgr());
-  journal_.reset(new journal::Journal());
 
   {
     absl::InsecureBitGen eng;
@@ -1255,7 +1254,7 @@ void ServerFamily::Shutdown() {
   client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
 
   pb_task_->Await([this] {
-    auto ec = journal_->Close();
+    auto ec = journal::Close();
     LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
     util::fb2::LockGuard lk(replicaof_mu_);
@@ -2901,17 +2900,17 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
       if (result.tx_queue_len < shard->txq()->size())
         result.tx_queue_len = shard->txq()->size();
+
+      if (shard->journal()) {
+        result.lsn_buffer_size += journal::LsnBufferSize();
+        result.lsn_buffer_bytes += journal::LsnBufferBytes();
+      }
     }  // if (shard)
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     result.lua_stats += InterpreterManager::tl_stats();
-
-    if (ss->journal()) {
-      result.lsn_buffer_size += ss->journal()->LsnBufferSize();
-      result.lsn_buffer_bytes += ss->journal()->LsnBufferBytes();
-    }
 
     auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
     for (auto& [k, v] : connections_lib_name_ver_map) {
@@ -3811,7 +3810,7 @@ void ServerFamily::StartJournalInShardThreads(Replica* repl_ptr) {
     auto flow_map = repl_ptr->GetFlowMapAtIndex(index);
     size_t rec_executed = repl_ptr->GetRecCountExecutedPerShard(flow_map);
     LOG(INFO) << "Shard " << index << " starts journal at: " << rec_executed;
-    journal()->StartInThreadAtLsn(rec_executed);
+    journal::StartInThreadAtLsn(rec_executed);
   });
 }
 

@@ -14,14 +14,12 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
-#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
-#include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -40,8 +38,13 @@ constexpr size_t kReqStorageSize = 88;
 constexpr size_t kReqStorageSize = 120;
 #endif
 
+namespace util {
+class HttpListenerBase;
+}  // namespace util
+
 namespace facade {
 
+struct ConnectionStats;
 class ConnectionContext;
 class ServiceInterface;
 class SinkReplyBuilder;

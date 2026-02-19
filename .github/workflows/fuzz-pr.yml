@@ -1,0 +1,134 @@
+# Run AFL++ fuzzing on PRs that touch C++ code.
+#
+# For each PR, an LLM analyzes the diff and generates:
+#   1. Targeted seed files — initial inputs crafted to exercise the changed code paths.
+#      (A "seed" is a RESP-encoded sequence of Redis commands that the fuzzer starts from
+#       and mutates; see fuzz/seeds/resp/*.resp for the existing seed corpus.)
+#   2. Focus command list — commands the mutator should prefer (~70% of the time),
+#      so mutations concentrate on the affected code instead of spreading randomly.
+#
+# The fuzzer then runs for 15 minutes in "smoke" mode (stop on first crash).
+# When ANTHROPIC_API_KEY is unavailable (e.g. fork PRs), seed generation is skipped
+# and the fuzzer uses the existing seed corpus as-is.
+name: AFL++ PR Fuzzing
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**/*.cc'
+      - 'src/**/*.h'
+      - 'helio/**/*.cc'
+      - 'helio/**/*.h'
+      - 'fuzz/**'
+      - '.github/workflows/fuzz-pr.yml'
+      - '.github/actions/fuzzing/**'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration in minutes'
+        required: false
+        default: '15'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz-pr:
+    runs-on: CI-LARGE-86
+    timeout-minutes: 60
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24-afl
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Generate PR diff
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            git diff ${{ github.event.pull_request.base.sha }}..HEAD > /tmp/pr_diff.txt
+          else
+            echo "" > /tmp/pr_diff.txt
+          fi
+
+          DIFF_LINES=$(wc -l < /tmp/pr_diff.txt)
+          echo "diff_lines=${DIFF_LINES}" >> "$GITHUB_OUTPUT"
+
+          echo "::group::PR diff summary"
+          echo "C++ diff lines: ${DIFF_LINES}"
+          if [ "$DIFF_LINES" -gt 0 ]; then
+            echo "Changed files:"
+            grep '^diff --git' /tmp/pr_diff.txt | sed 's|diff --git a/.* b/|  |' || true
+          else
+            echo "No C++ file changes in this PR — seed generation will be skipped"
+          fi
+          echo "::endgroup::"
+
+      - name: Generate targeted seeds
+        id: seeds
+        run: |
+          pip install 'anthropic>=0.39,<1' 2>/dev/null || pip install --break-system-packages 'anthropic>=0.39,<1' 2>/dev/null || true
+
+          SEEDS_DIR="${GITHUB_WORKSPACE}/fuzz/seeds/pr_targeted"
+          mkdir -p "$SEEDS_DIR"
+
+          python3 fuzz/generate_targeted_seeds.py \
+            --output-dir "$SEEDS_DIR" \
+            < /tmp/pr_diff.txt
+
+          FOCUS=""
+          if [ -f "$SEEDS_DIR/focus_commands.json" ]; then
+            FOCUS=$(cat "$SEEDS_DIR/focus_commands.json")
+          fi
+          echo "focus_commands=${FOCUS}" >> "$GITHUB_OUTPUT"
+          echo "seeds_dir=${SEEDS_DIR}" >> "$GITHUB_OUTPUT"
+
+          SEED_COUNT=$(ls "$SEEDS_DIR"/*.resp 2>/dev/null | wc -l || echo 0)
+
+          echo "::group::Seed generation results"
+          echo "Seeds generated: ${SEED_COUNT}"
+          echo "Focus commands: ${FOCUS:-none}"
+          if [ "$SEED_COUNT" -gt 0 ]; then
+            ls -la "$SEEDS_DIR"/*.resp
+          fi
+          echo "::endgroup::"
+
+          # Job summary
+          {
+            echo "### Fuzzing Seed Generation"
+            echo ""
+            if [ "$SEED_COUNT" -gt 0 ]; then
+              echo "- **Seeds generated:** ${SEED_COUNT}"
+              echo "- **Focus commands:** \`${FOCUS}\`"
+            elif [ "$(wc -l < /tmp/pr_diff.txt)" -eq 0 ]; then
+              echo "- No C++ changes in PR — using default seed corpus"
+            elif [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "- No API key — using default seed corpus"
+            else
+              echo "- LLM did not produce usable seeds — using default seed corpus"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Run AFL++ PR fuzzing
+        uses: ./.github/actions/fuzzing
+        with:
+          mode: smoke
+          duration-minutes: ${{ github.event.inputs.duration || '15' }}
+          run-number: ${{ github.run_number }}
+          extra-seeds-dir: ${{ steps.seeds.outputs.seeds_dir }}
+          focus-commands: ${{ steps.seeds.outputs.focus_commands }}

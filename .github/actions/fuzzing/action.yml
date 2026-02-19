@@ -14,6 +14,14 @@ inputs:
     description: "GitHub run number for artifact naming"
     required: true
     type: string
+  extra-seeds-dir:
+    description: "Directory with additional .resp seed files (initial fuzzer inputs) to merge into the corpus"
+    required: false
+    default: ''
+  focus-commands:
+    description: "JSON list of command names for the mutator to prefer (~70% selection weight)"
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -45,6 +53,21 @@ runs:
         cd ./build-dbg && ninja dragonfly && cd ..
         echo "Build complete"
         ls -lh ./build-dbg/dragonfly
+
+    - name: Merge targeted seeds
+      shell: bash
+      if: ${{ inputs.extra-seeds-dir != '' }}
+      run: |
+        EXTRA_DIR="${{ inputs.extra-seeds-dir }}"
+        SEEDS_DIR="fuzz/seeds/resp"
+
+        if [ -d "$EXTRA_DIR" ] && [ -n "$(ls -A "$EXTRA_DIR"/*.resp 2>/dev/null)" ]; then
+          COUNT=$(ls "$EXTRA_DIR"/*.resp 2>/dev/null | wc -l)
+          echo "Merging ${COUNT} targeted seeds into corpus"
+          cp "$EXTRA_DIR"/*.resp "$SEEDS_DIR/"
+        else
+          echo "No targeted seed files to merge"
+        fi
 
     - name: Run AFL++ fuzzing
       shell: bash
@@ -83,6 +106,7 @@ runs:
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_PERSISTENT_RECORD: 1000
         AFL_CUSTOM_MUTATOR_ONLY: 1
+        FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}
 
     - name: Analyze fuzzing results
       shell: bash

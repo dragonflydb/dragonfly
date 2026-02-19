@@ -5,7 +5,6 @@
 #include "server/engine_shard.h"
 
 #include <absl/strings/escaping.h>
-#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
@@ -19,6 +18,8 @@
 extern "C" {
 #include "redis/zmalloc.h"
 }
+#include "server/blocking_controller.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"

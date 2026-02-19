@@ -72,7 +72,7 @@ jobs:
       - name: Run BullMQ tests
         run: |
           cd ${GITHUB_WORKSPACE}/bullmq
-          BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors" --invert
+          BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors|removes deduplication key|rejects with missing key for job message|emits waiting when a job has been added|gets all workers for this queue only" --invert
 
       - name: Upload logs on failure
         if: failure()

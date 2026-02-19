@@ -4,6 +4,7 @@
 
 #include "server/memory_cmd.h"
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
 #ifdef __linux__
@@ -24,7 +25,6 @@
 #include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
-#include "server/snapshot.h"
 
 using namespace std;
 using namespace facade;
