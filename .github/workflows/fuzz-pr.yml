@@ -59,8 +59,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git config --global --add safe.directory "$GITHUB_WORKSPACE"
-            MERGE_BASE=$(git merge-base ${{ github.event.pull_request.base.sha }} HEAD)
-            git diff "$MERGE_BASE"..HEAD > /tmp/pr_diff.txt
+            BASE=${{ github.event.pull_request.base.sha }}
+            HEAD_SHA=${{ github.event.pull_request.head.sha }}
+            MERGE_BASE=$(git merge-base "$BASE" "$HEAD_SHA")
+            git diff "$MERGE_BASE".."$HEAD_SHA" > /tmp/pr_diff.txt
           else
             echo "" > /tmp/pr_diff.txt
           fi
