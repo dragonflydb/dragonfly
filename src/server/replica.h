@@ -190,7 +190,8 @@ class RdbLoader;
 class DflyShardReplica : public ProtocolClient {
  public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,
-                   Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe);
+                   Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe,
+                   class RdbLoadContext* load_context);
   ~DflyShardReplica();
 
   void Cancel();

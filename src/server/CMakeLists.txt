@@ -87,7 +87,7 @@ add_library(dragonfly_lib
             debugcmd.cc dflycmd.cc error.cc family_utils.cc ${DF_SEARCH_SRCS}
             server_family.cc string_family.cc list_family.cc generic_family.cc
             ${DF_FAMILY_SRCS}
-            main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc http_api.cc
+            main_service.cc memory_cmd.cc rdb_load.cc rdb_load_context.cc rdb_save.cc replica.cc http_api.cc
             protocol_client.cc snapshot.cc script_mgr.cc
             detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc
             version.cc container_utils.cc
