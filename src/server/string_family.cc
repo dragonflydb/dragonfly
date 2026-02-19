@@ -724,6 +724,12 @@ ExtendCmd::PrepareResult ExtendCmd::Prepare(ArgSlice args, CommandContext* cmd_c
 OpStatus ExtendCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const {
   string_view key = *args.begin();
 
+  // BUG: intentional crash for fuzzing test — remove after verifying fuzz-pr workflow
+  if (value_.size() > 1024) {
+    char* p = nullptr;
+    *p = 'x';
+  }
+
   if (is_mc_) {
     mc_res_ = ExtendOrSkip(op_args, key, value_, is_prepend_);
     return mc_res_.status();
