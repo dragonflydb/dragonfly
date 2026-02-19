@@ -4,7 +4,6 @@
 
 #include "server/snapshot.h"
 
-#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include <mutex>
@@ -12,8 +11,10 @@
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/search/base.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
