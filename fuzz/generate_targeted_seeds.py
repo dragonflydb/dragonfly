@@ -212,7 +212,7 @@ def write_output(output_dir, focus_commands, seeds):
 
     written = 0
     for seed in seeds:
-        name = seed.get("name", "pr_seed_%d.resp" % written)
+        name = seed.get("name") or "pr_seed_%d.resp" % written
         if not name.endswith(".resp"):
             name += ".resp"
         path = os.path.join(output_dir, name)
@@ -298,7 +298,7 @@ def main():
             continue
         content = encode_resp(clean_commands)
         if content:
-            valid_seeds.append({"name": s.get("name", ""), "content": content})
+            valid_seeds.append({"name": s.get("name") or "", "content": content})
         else:
             print("Discarding empty seed: %s" % s.get("name", "?"), file=sys.stderr)
 

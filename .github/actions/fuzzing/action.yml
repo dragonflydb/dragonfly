@@ -190,8 +190,11 @@ runs:
         find "$CRASHES_DIR" -maxdepth 1 -name 'id:*' ! -name 'RECORD:*' -type f | while read -r f; do
           CRASH_ID=$(basename "$f" | sed 's/^id:\([0-9]*\),.*/\1/')
           echo "Packaging crash ${CRASH_ID}..."
-          ( cd fuzz && ./package_crash.sh "$CRASH_ID" "$CRASHES_DIR" )
-          mv "fuzz/crash-${CRASH_ID}.tar.gz" fuzz/packaged/ 2>/dev/null || true
+          if ( cd fuzz && ./package_crash.sh "$CRASH_ID" "$CRASHES_DIR" ); then
+            mv "fuzz/crash-${CRASH_ID}.tar.gz" fuzz/packaged/ 2>/dev/null || true
+          else
+            echo "Warning: failed to package crash ${CRASH_ID}, continuing..."
+          fi
         done
 
         echo "Packaged crashes:"
