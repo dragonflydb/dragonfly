@@ -726,8 +726,7 @@ OpStatus ExtendCmd::operator()(const ShardArgs& args, const OpArgs& op_args) con
 
   // BUG: intentional crash for fuzzing test — remove after verifying fuzz-pr workflow
   if (key.size() > 3) {
-    char* p = nullptr;
-    *p = 'x';
+    abort();
   }
 
   if (is_mc_) {
