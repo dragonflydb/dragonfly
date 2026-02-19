@@ -194,7 +194,7 @@ bool ServerState::AllowInlineScheduling() const {
   // and a normally-scheduled command.
   // The problematic loop is in JournalSlice::AddLogRecord, going over all the callbacks.
 
-  if (journal_ && journal_->HasRegisteredCallbacks())
+  if (journal::HasRegisteredCallbacks())
     return false;
 
   return true;

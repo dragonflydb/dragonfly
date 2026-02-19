@@ -7,6 +7,7 @@
 
 #include "absl/strings/match.h"
 #include "facade/service_interface.h"
+#include "server/engine_shard.h"
 
 extern "C" {
 #include "redis/rdb.h"
@@ -1021,8 +1022,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-      auto* journal = ServerState::tlocal()->journal();
-      if (journal) {
+      if (EngineShard::tlocal() && EngineShard::tlocal()->journal()) {
         // We must register this entry to the journal to allow partial sync
         // if journal is active.
         journal::RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});

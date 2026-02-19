@@ -1489,7 +1489,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 
   string tmp;
 
-  bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
+  bool record_keys = owner_->journal() || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {

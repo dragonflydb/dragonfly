@@ -51,8 +51,4 @@ class Namespace;
 class CommandRegistry;
 class Interpreter;
 
-namespace journal {
-class Journal;
-}  // namespace journal
-
 }  // namespace dfly

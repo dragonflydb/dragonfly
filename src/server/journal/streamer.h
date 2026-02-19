@@ -25,7 +25,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     LSN start_partial_sync_at = 0;
   };
 
-  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, Config config);
+  JournalStreamer(ExecutionState* cntx, Config config);
 
   virtual ~JournalStreamer();
 
@@ -86,8 +86,6 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   bool IsStalled() const;
 
-  journal::Journal* journal_;
-
   util::fb2::Fiber stalled_data_writer_;
   util::fb2::Done stalled_data_writer_done_;
   void StartStalledDataWriterFiber();
@@ -111,8 +109,7 @@ class CmdSerializer;
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                  ExecutionState* cntx);
+  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx);
   ~RestoreStreamer() override;
 
   void Start(util::FiberSocketBase* dest) override;
