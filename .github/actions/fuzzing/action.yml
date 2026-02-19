@@ -125,7 +125,7 @@ runs:
         CORPUS_SIZE=0
 
         if [ -d "$CRASHES_DIR" ]; then
-          CRASH_COUNT=$(find "$CRASHES_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+          CRASH_COUNT=$(find "$CRASHES_DIR" -maxdepth 1 -type f -name 'id:*' 2>/dev/null | wc -l)
         fi
 
         if [ -d "$HANGS_DIR" ]; then
