@@ -174,24 +174,23 @@ runs:
       shell: bash
       if: failure()
       run: |
-        CRASHES_DIR="fuzz/artifacts/resp/default/crashes"
+        CRASHES_DIR="$(pwd)/fuzz/artifacts/resp/default/crashes"
 
         if [ ! -d "$CRASHES_DIR" ] || [ -z "$(ls -A "$CRASHES_DIR" 2>/dev/null)" ]; then
           echo "No crash artifacts to package"
           exit 0
         fi
 
+        echo "Raw crash directory contents:"
+        ls -la "$CRASHES_DIR"
+
         mkdir -p fuzz/packaged
 
-        # Extract crash IDs and package each one
-        for f in "$CRASHES_DIR"/id:*; do
-          [ -f "$f" ] || continue
-          # Skip RECORD files
-          basename "$f" | grep -q '^RECORD:' && continue
-
+        # Find crash input files (not RECORD files)
+        find "$CRASHES_DIR" -maxdepth 1 -name 'id:*' ! -name 'RECORD:*' -type f | while read -r f; do
           CRASH_ID=$(basename "$f" | sed 's/^id:\([0-9]*\),.*/\1/')
           echo "Packaging crash ${CRASH_ID}..."
-          cd fuzz && ./package_crash.sh "$CRASH_ID" "../$CRASHES_DIR" && cd ..
+          ( cd fuzz && ./package_crash.sh "$CRASH_ID" "$CRASHES_DIR" )
           mv "fuzz/crash-${CRASH_ID}.tar.gz" fuzz/packaged/ 2>/dev/null || true
         done
 
