@@ -11,9 +11,10 @@
 
 #include "core/qlist.h"
 #include "facade/facade_stats.h"
+#include "facade/facade_types.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
-#include "server/replica.h"
+#include "server/replica_types.h"
 #include "server/server_state.h"
 #include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -46,6 +47,7 @@ std::string GetPassword();
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;
+class Replica;
 class Service;
 class ScriptMgr;
 
@@ -132,10 +134,10 @@ struct Metrics {
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
 
   struct ReplicaInfo {
-    Replica::Summary summary;
+    ReplicaSummary summary;
 
     // cluster
-    std::vector<Replica::Summary> cl_repl_summary;
+    std::vector<ReplicaSummary> cl_repl_summary;
   };
 
   // Replica reconnect stats on the replica side. Undefined for master
@@ -285,7 +287,7 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
-  std::optional<Replica::LastMasterSyncData> GetLastMasterData() const {
+  std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;
   }
 
@@ -301,7 +303,7 @@ class ServerFamily {
 
   void OnClose(ConnectionContext* cntx);
 
-  void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
+  void CancelBlockingOnThread(std::function<facade::OpStatus(facade::ArgSlice)> = {});
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
@@ -429,7 +431,7 @@ class ServerFamily {
   std::unique_ptr<DflyCmd> dfly_cmd_;
 
   std::string master_replid_;
-  std::optional<Replica::LastMasterSyncData> last_master_data_;
+  std::optional<LastMasterSyncData> last_master_data_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 

@@ -6,12 +6,10 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
-#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
-#include <absl/strings/string_view.h>
 
 #include <atomic>
 #include <variant>
@@ -32,6 +30,7 @@
 #include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/search/aggregator.h"
