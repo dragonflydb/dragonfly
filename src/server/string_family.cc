@@ -725,7 +725,7 @@ OpStatus ExtendCmd::operator()(const ShardArgs& args, const OpArgs& op_args) con
   string_view key = *args.begin();
 
   // BUG: intentional crash for fuzzing test — remove after verifying fuzz-pr workflow
-  if (value_.size() > 1024) {
+  if (value_.size() > 3) {
     char* p = nullptr;
     *p = 'x';
   }
