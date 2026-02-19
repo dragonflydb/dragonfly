@@ -668,7 +668,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     while not load_task.done():
         info = await async_client.info("ALL")
         # print(info["used_memory_human"], info["used_memory_rss_human"])
-        assert info["used_memory"] < 650e6  # less than 650mb,
+        assert info["used_memory"] < 600e6  # less than 600mb,
         await asyncio.sleep(0.05)
 
     await load_task
