@@ -37,6 +37,7 @@ extern "C" {
 }
 
 #include "base/flags.h"
+#include "base/histogram.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/dense_set.h"
@@ -1562,6 +1563,21 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
+void AppendPipelineLatencySummary(string_view name, string_view help, const base::Histogram& hist,
+                                  uint64_t total_count, double total_sum_usec, string* dest) {
+  AppendMetricHeader(name, help, MetricType::SUMMARY, dest);
+  const string full_name = GetMetricFullName(name);
+  if (hist.count() > 0) {
+    auto [p95, p99] = hist.Percentiles(95, 99);
+    AppendMetricValue(name, p95 * 1e-6, {"quantile"}, {"0.95"}, dest);
+    AppendMetricValue(name, p99 * 1e-6, {"quantile"}, {"0.99"}, dest);
+  }
+  // Use monotonically increasing counters for _sum/_count so that Prometheus
+  // rate()/irate() functions work correctly even though the histogram is decayed.
+  absl::StrAppend(dest, full_name, "_sum ", total_sum_usec * 1e-6, "\n");
+  absl::StrAppend(dest, full_name, "_count ", total_count, "\n");
+}
+
 void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
                             StringResponse* resp, bool legacy) {
   // Server metrics
@@ -1610,6 +1626,12 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+
+  // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
+  // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
+  AppendPipelineLatencySummary("pipeline_latency_seconds", "Pipeline command latency distribution",
+                               conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
+                               conn_stats.pipelined_cmd_latency, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
                             m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,

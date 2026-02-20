@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 
+#include "base/histogram.h"
 namespace facade {
 
 struct ConnectionStats {
@@ -32,7 +33,8 @@ struct ConnectionStats {
   uint64_t command_cnt_main = 0;
   uint64_t command_cnt_other = 0;
   uint64_t pipelined_cmd_cnt = 0;
-  uint64_t pipelined_cmd_latency = 0;  // in microseconds
+  uint64_t pipelined_cmd_latency = 0;      // in microseconds
+  base::Histogram pipelined_latency_hist;  // distribution of per-command latencies (usec)
 
   // in microseconds, time spent waiting for the pipelined commands to start executing
   uint64_t pipelined_wait_latency = 0;

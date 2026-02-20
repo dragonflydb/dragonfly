@@ -451,7 +451,6 @@ class Connection : public util::Connection {
     size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
     size_t cmds = 0;                    // total number of commands executed
   } local_stats_;
-  ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;
