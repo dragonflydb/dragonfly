@@ -37,7 +37,7 @@ namespace dfly {
 
 namespace detail {
 
-class SaveStagesController;
+struct SaveStagesController;
 class SnapshotStorage;
 
 }  // namespace detail
