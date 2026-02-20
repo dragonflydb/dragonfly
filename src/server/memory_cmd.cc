@@ -54,9 +54,9 @@ bool MiArenaVisit(const mi_heap_t* heap, const mi_heap_area_t* area, void* block
 }
 
 struct BlockSummary {
-  size_t reserved;
-  size_t committed;
-  size_t used;
+  size_t reserved = 0;
+  size_t committed = 0;
+  size_t used = 0;
 };
 
 using BlockSummaryMap = absl::flat_hash_map<size_t, BlockSummary>;
@@ -71,22 +71,37 @@ bool MiArenaVisitSummary(const mi_heap_t*, const mi_heap_area_t* area, void*, si
   return true;
 }
 
-void SummarizeBlockStats(std::string* str, mi_heap_t* data_heap) {
+BlockSummaryMap CollectSummary(bool backing) {
   BlockSummaryMap summary;
+  const mi_heap_t* data_heap = backing ? mi_heap_get_backing() : ServerState::tlocal()->data_heap();
   mi_heap_visit_blocks(data_heap, false, MiArenaVisitSummary, &summary);
+  return summary;
+}
+
+vector<BlockSummaryMap> CollectSummaries(bool backing) {
+  std::vector<BlockSummaryMap> summaries(shard_set->size());
+  shard_set->RunBriefInParallel([&summaries, backing](EngineShard* shard) {
+    summaries[shard->shard_id()] = CollectSummary(backing);
+  });
+  return summaries;
+}
+
+void FormatSummary(std::string* str, const BlockSummaryMap& summary) {
+  absl::StrAppend(str, absl::StrFormat("%10s %10s %10s %10s %10s %8s\n", "BlockSize", "Reserved",
+                                       "Committed", "Used", "Wasted", "Waste%"));
   std::vector<std::pair<size_t, BlockSummary>> entries{summary.begin(), summary.end()};
   std::ranges::sort(entries, {},
                     [](const auto& entry) { return entry.second.committed - entry.second.used; });
-  absl::StrAppend(str, absl::StrFormat("%10s %10s %10s %10s %10s %8s\n", "BlockSize", "Reserved",
-                                       "Committed", "Used", "Wasted", "Waste%"));
+
   size_t total_reserved = 0;
   size_t total_committed = 0;
   size_t total_used = 0;
+
   for (const auto& [size, block_summary] : entries) {
     const size_t wasted = block_summary.committed > block_summary.used
                               ? block_summary.committed - block_summary.used
                               : 0;
-    const double waste_pct = 100.0 * wasted / std::max<size_t>(1, block_summary.committed);
+    const double waste_pct = 100.0 * wasted / std::max<size_t>(1UL, block_summary.committed);
     absl::StrAppend(str, absl::StrFormat("%10zu %10zu %10zu %10zu %10zu %8.2f%%\n", size,
                                          block_summary.reserved, block_summary.committed,
                                          block_summary.used, wasted, waste_pct));
@@ -94,14 +109,35 @@ void SummarizeBlockStats(std::string* str, mi_heap_t* data_heap) {
     total_committed += block_summary.committed;
     total_used += block_summary.used;
   }
+
   absl::StrAppend(
       str, absl::StrFormat(
                "%10s %10zu %10zu %10zu %10zu %8.2f%%\n", "Total:", total_reserved, total_committed,
-               total_used, total_committed - total_used,
+               total_used, total_committed > total_used ? total_committed - total_used : 0,
                100.0 * (total_committed - total_used) / std::max<size_t>(1UL, total_committed)));
 }
 
-std::string MallocStatsCb(bool backing, unsigned tid, bool summarize = false) {
+string FormatSummaries(const vector<BlockSummaryMap>& summaries) {
+  string str;
+  BlockSummaryMap machine_wide;
+  for (size_t i = 0; i < summaries.size(); ++i) {
+    absl::StrAppend(&str, "\nArena statistics for thread ", i, "\n");
+    FormatSummary(&str, summaries[i]);
+    for (const auto& [size, block_summary] : summaries[i]) {
+      BlockSummary& machine_block = machine_wide[size];
+      machine_block.reserved += block_summary.reserved;
+      machine_block.committed += block_summary.committed;
+      machine_block.used += block_summary.used;
+    }
+  }
+
+  absl::StrAppend(&str, "\nArena statistics for machine:\n");
+  FormatSummary(&str, machine_wide);
+
+  return str;
+}
+
+std::string MallocStatsCb(bool backing, unsigned tid) {
   string str;
 
   uint64_t start = absl::GetCurrentTimeNanos();
@@ -110,27 +146,23 @@ std::string MallocStatsCb(bool backing, unsigned tid, bool summarize = false) {
 
   mi_heap_t* data_heap = backing ? mi_heap_get_backing() : ServerState::tlocal()->data_heap();
 
-  if (!summarize) {
-    BlockMap block_map;
+  BlockMap block_map;
 
-    mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
-    uint64_t reserved = 0, committed = 0, used = 0;
-    absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
-    for (const auto& k_v : block_map) {
-      uint64_t count = k_v.second;
-      absl::StrAppend(&str, count, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
-                      get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
-      reserved += count * get<1>(k_v.first);
-      committed += count * get<2>(k_v.first);
-      used += count * get<3>(k_v.first);
-    }
-
-    absl::StrAppend(&str, "total reserved: ", reserved, ", committed: ", committed,
-                    ", used: ", used, " fragmentation waste: ",
-                    (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
-  } else {
-    SummarizeBlockStats(&str, data_heap);
+  mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
+  uint64_t reserved = 0, committed = 0, used = 0;
+  absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
+  for (const auto& k_v : block_map) {
+    uint64_t count = k_v.second;
+    absl::StrAppend(&str, count, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
+                    get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
+    reserved += count * get<1>(k_v.first);
+    committed += count * get<2>(k_v.first);
+    used += count * get<3>(k_v.first);
   }
+
+  absl::StrAppend(&str, "total reserved: ", reserved, ", committed: ", committed, ", used: ", used,
+                  " fragmentation waste: ",
+                  (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
   const uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
@@ -160,7 +192,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Show global malloc stats as provided by allocator libraries",
         "ARENA [SUMMARY] [BACKING] [thread-id]",
         "    Show mimalloc arena stats for a heap residing in specified thread-id. 0 by default.",
-        "    If SUMMARY is specified, show stats summarized by block size.",
+        "    If SUMMARY is specified, show stats summarized by block size",
+        "        per thread summary, followed by machine wide summary",
+        "        thread-id is ignored for summary output.",
         "    If BACKING is specified, show stats for the backing heap.",
         "ARENA SHOW",
         "    Prints the arena summary report for the entire process.",
@@ -421,6 +455,16 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
     return cmd_cntx_->rb()->SendOk();
   }
 
+  if (summarize) {
+    const uint64_t start = absl::GetCurrentTimeNanos();
+    const auto summaries = CollectSummaries(backing);
+    string report = FormatSummaries(summaries);
+    const uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
+    absl::StrAppend(&report, "\n--- End mimalloc statistics, took ", delta, "us ---\n");
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
+    return rb->SendVerbatimString(report);
+  }
+
   if (backing && tid >= shard_set->pool()->size()) {
     return cmd_cntx_->SendError(
         absl::StrCat("Thread id must be less than ", shard_set->pool()->size()));
@@ -430,8 +474,8 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
     return cmd_cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
   }
 
-  string mi_malloc_info = shard_set->pool()->at(tid)->AwaitBrief(
-      [=] { return MallocStatsCb(backing, tid, summarize); });
+  const string mi_malloc_info =
+      shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
   return rb->SendVerbatimString(mi_malloc_info);
