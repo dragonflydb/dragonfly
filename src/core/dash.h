@@ -182,8 +182,11 @@ class DashTable : public detail::DashTableBase {
     return segment_[segment_id];
   }
 
-  // If there is no buddy for segment_id return segment_id
-  // Otherwise, return buddy_id.
+  // - If there is no buddy for segment_id return segment_id.
+  //   Otherwise, return buddy_id.
+  // - A buddy is a sibling segment that was created from the
+  //   same parent during split and can be merged back together.
+  //   It's the adjacent subtree of the same depth.
   unsigned FindBuddyId(unsigned segment_id) {
     auto* seg = GetSegment(segment_id);
     uint8_t depth = seg->local_depth();
@@ -195,9 +198,7 @@ class DashTable : public detail::DashTableBase {
     assert(buddy_idx < segment_.size());
 
     auto* buddy = GetSegment(buddy_idx);
-    // If buddy has different local depth, then the segment
-    // at buddy_idx is not actually a buddy. We return back
-    // the segment_id to denote that.
+    // There is no adjacent subtree of different depth
     if (buddy->local_depth() != depth) {
       return segment_id;
     }
@@ -205,33 +206,84 @@ class DashTable : public detail::DashTableBase {
     return buddy_idx;
   }
 
-  // API Contract:
-  //  Do not call this function unless the combined
-  //  size of both segments is less than x * segment_capacity. With x:
-  //  0 < x < 0.25. Under uniform hash distribution insertions
-  //  during merge will never fail as long as x remains under 25%.
-  //  What is more, this 25% is not universal. For non default bucket size (14 slots)
-  //  this number needs to be calibrated.
-  void Merge(unsigned keep_id, unsigned buddy_id) {
+  // - Moves all items from `buddy_id` to `keep_id` (merges the two segments).
+  //   After merge completes, `buddy_id` segment is deleted.
+  // - Return true if the two segments merged successfully.
+  // - Prefer calling this function only when the combined
+  //   size of both segments is less than x * segment_capacity. With x:
+  //   0 < x < 0.25. Under uniform hash distribution insertion failures
+  //   during merge are statistically improbable as long as x remains under 25%.
+  //   What is more, this 25% is not universal. For non default bucket size (14 slots)
+  //   this number needs to be calibrated.
+  // - If an insertion fails we rollback and abort the merge (return false).
+  bool Merge(unsigned keep_id, unsigned buddy_id) {
     auto* keep = GetSegment(keep_id);
     auto* buddy = GetSegment(buddy_id);
 
+    if (keep == buddy)
+      return false;
+
     assert((keep->local_depth() == buddy->local_depth()));
-    assert((keep->SlowSize() + buddy->SlowSize() < (0.25 * buddy->capacity())));
+    // assert((keep->SlowSize() + buddy->SlowSize() < (0.25 * buddy->capacity())));
     assert(keep->local_depth() != 1);
-    // TODO: This assertion needs updating for different slot configurations
-    // assert(kSlotNum == 14);
+
+    bool should_rollback = false;
+
+    struct MovedRecords {
+      uint16_t source_bid_slot;
+      uint16_t dst_bid_slot;
+      uint64_t hash;
+      uint8_t src_bid() const {
+        return source_bid_slot >> 8;
+      }
+      uint8_t src_slot() const {
+        return source_bid_slot & 0xFF;
+      }
+      uint8_t dst_bid() const {
+        return dst_bid_slot >> 8;
+      }
+      uint8_t dst_slot() const {
+        return dst_bid_slot & 0xFF;
+      }
+    };
+
+    std::vector<MovedRecords> moved;
+    moved.reserve(buddy->SlowSize());
 
     // Move all items from buddy to keep
     buddy->TraverseAll([&](const auto& it) {
+      if (should_rollback) {
+        return;
+      }
+
       uint64_t hash = DoHash(buddy->Key(it.index, it.slot));
+
       auto& src_bucket = buddy->GetBucket(it.index);
-      [[maybe_unused]] auto res =
+      auto res =
           keep->InsertUniq(std::move(src_bucket.key[it.slot]), std::move(src_bucket.value[it.slot]),
                            hash, false, [](auto&&...) {});
-      // Because of preconditions
-      assert(res.found());
+
+      if (!res.found()) {
+        should_rollback = true;
+        return;
+      }
+
+      moved.emplace_back((it.index << 8) | it.slot, (res.index << 8) | res.slot, hash);
     });
+
+    if (should_rollback) {
+      for (const auto& rec : moved) {
+        auto& keep_bucket = keep->GetBucket(rec.dst_bid());
+        auto& buddy_bucket = buddy->GetBucket(rec.src_bid());
+
+        buddy_bucket.key[rec.src_slot()] = std::move(keep_bucket.key[rec.dst_slot()]);
+        buddy_bucket.value[rec.src_slot()] = std::move(keep_bucket.value[rec.dst_slot()]);
+        // Properly delete to handle metadata, etc
+        keep->Delete({rec.dst_bid(), rec.dst_slot()}, rec.hash);
+      }
+
+      return false;
+    }
 
     // Decrease depth (merge back to parent)
     keep->set_local_depth(keep->local_depth() - 1);
@@ -252,6 +304,8 @@ class DashTable : public detail::DashTableBase {
     // Decrement unique segment counter
     --unique_segments_;
     bucket_count_ -= keep->num_buckets();
+
+    return true;
   }
 
   size_t GetSegmentCount() const {

@@ -448,6 +448,87 @@ TEST_F(DashTest, Merge) {
   EXPECT_EQ(dt_.bucket_count(), (Segment::kBucketNum + Segment::kStashBucketNum) * 2);
 }
 
+TEST_F(DashTest, MergeFailureRollback) {
+  std::vector<uint64_t> all_keys;
+  std::vector<uint64_t> keep_keys;
+  std::vector<uint64_t> buddy_keys;
+
+  // Insert enough items to create 4 segments (depth 2) and fill them more
+  for (uint64_t i = 0; i < 5000; ++i) {
+    auto [it, inserted] = dt_.Insert(i, i);
+    if (inserted) {
+      all_keys.push_back(i);
+    }
+  }
+
+  EXPECT_GE(dt_.depth(), 2);
+
+  unsigned sid = 0;
+  size_t buddy_id = dt_.FindBuddyId(sid);
+  EXPECT_NE(buddy_id, sid);
+
+  // Collect keys from segment and buddy and record their positions
+  std::unordered_map<uint64_t, std::pair<uint8_t, uint8_t>> keep_positions;
+  std::unordered_map<uint64_t, std::pair<uint8_t, uint8_t>> buddy_positions;
+
+  auto* src = dt_.GetSegment(sid);
+  auto* buddy = dt_.GetSegment(buddy_id);
+
+  for (uint64_t key : all_keys) {
+    auto it = dt_.Find(key);
+    if (!it.is_done()) {
+      uint64_t hash = dt_.DoHash(key);
+      uint32_t seg_id = hash >> (64 - dt_.depth());
+
+      if (seg_id == 0) {
+        keep_keys.push_back(key);
+        auto seg_it = src->FindIt(hash, EqTo(key));
+        keep_positions[key] = {seg_it.index, seg_it.slot};
+      } else if (seg_id == buddy_id) {
+        buddy_keys.push_back(key);
+        auto seg_it = buddy->FindIt(hash, EqTo(key));
+        buddy_positions[key] = {seg_it.index, seg_it.slot};
+      }
+    }
+  }
+
+  size_t total_size_before = dt_.size();
+
+  bool merge_succeeded = dt_.Merge(sid, buddy_id);
+
+  EXPECT_EQ(dt_.size(), total_size_before);
+
+  // After rollback, src and buddy pointers should still be valid
+  for (auto key : keep_keys) {
+    uint64_t hash = dt_.DoHash(key);
+    auto it = src->FindIt(hash, EqTo(key));
+    EXPECT_TRUE(it.found());
+    // Bucket layout in keep segment changes during failed merge rollback.
+    // InsertUniq can displace existing items in the keep segment (via MoveToOther)
+    // to make room for items being moved from buddy. The on_move_cb passed to
+    // InsertUniq is empty [](auto&&...){}  so these displacements are not tracked.
+    // During rollback, only buddy->keep moves are reversed, but displaced items
+    // within keep are NOT restored to their original positions.
+    // Is it really a problem if the layout changed or data parity is enough ?
+    // auto [expected_index, expected_slot] = keep_positions[key];
+    // EXPECT_EQ(it.index, expected_index);
+    // EXPECT_EQ(it.slot, expected_slot);
+  }
+
+  for (auto key : buddy_keys) {
+    uint64_t hash = dt_.DoHash(key);
+    auto it = buddy->FindIt(hash, EqTo(key));
+    EXPECT_TRUE(it.found());
+    // Buddy segment positions should be preserved since we track buddy->keep moves 1-1
+    // and reverse them exactly during rollback.
+    auto [expected_index, expected_slot] = buddy_positions[key];
+    EXPECT_EQ(it.index, expected_index);
+    EXPECT_EQ(it.slot, expected_slot);
+  }
+
+  EXPECT_FALSE(merge_succeeded);
+}
+
 TEST_F(DashTest, BumpUp) {
   set<Segment::Key_t> keys = FillSegment(0);
   constexpr unsigned kFirstStashId = Segment::kBucketNum;
