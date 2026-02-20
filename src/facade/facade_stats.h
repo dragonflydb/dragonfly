@@ -32,8 +32,7 @@ struct ConnectionStats {
   uint64_t command_cnt_main = 0;
   uint64_t command_cnt_other = 0;
   uint64_t pipelined_cmd_cnt = 0;
-  uint64_t pipelined_cmd_latency = 0;           // in microseconds
-  uint64_t pipelined_blocking_cmd_latency = 0;  // in microseconds, subset of pipelined_cmd_latency
+  uint64_t pipelined_cmd_latency = 0;  // in microseconds
 
   // in microseconds, time spent waiting for the pipelined commands to start executing
   uint64_t pipelined_wait_latency = 0;

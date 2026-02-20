@@ -50,9 +50,9 @@ class ServiceInterface {
 
   virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
 
-  virtual DispatchManyResult DispatchManyCommands(
-      std::function<std::pair<ParsedArgs, bool*>()> arg_gen, unsigned count,
-      SinkReplyBuilder* builder, ConnectionContext* cntx) = 0;
+  virtual DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen,
+                                                  unsigned count, SinkReplyBuilder* builder,
+                                                  ConnectionContext* cntx) = 0;
 
   virtual DispatchResult DispatchMC(ParsedCommand* cmd, AsyncPreference) = 0;
 

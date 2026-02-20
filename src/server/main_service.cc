@@ -1493,8 +1493,6 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     return DispatchResult::ERROR;
   }
 
-  parsed_cmd->is_blocking_cmd = cid->IsBlocking();
-
   // Determine if command should run async
   switch (async_pref) {
     case AsyncPreference::ONLY_SYNC:
@@ -1513,6 +1511,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
+
+  if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
+    ++ServerState::tlocal()->stats.blocking_commands_in_pipelines;
+  }
 
   ArgSlice tail_args;
   if (cmd_cntx->IsDeferredReply()) {
@@ -1701,9 +1703,9 @@ DispatchResult Service::InvokeCmd(CmdArgList tail_args, CommandContext* cmd_cntx
   return res;
 }
 
-DispatchManyResult Service::DispatchManyCommands(
-    std::function<std::pair<facade::ParsedArgs, bool*>()> arg_gen, unsigned count,
-    SinkReplyBuilder* builder, facade::ConnectionContext* cntx) {
+DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArgs()> arg_gen,
+                                                 unsigned count, SinkReplyBuilder* builder,
+                                                 facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
   DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
@@ -1750,14 +1752,9 @@ DispatchManyResult Service::DispatchManyCommands(
   };
 
   for (unsigned i = 0; i < count; i++) {
-    auto [args, is_blocking_ptr] = arg_gen();
+    ParsedArgs args = arg_gen();
     string cmd = absl::AsciiStrToUpper(args.Front());
     const auto [cid, tail_args] = registry_.FindExtended(cmd, args.Tail());
-
-    // Mark if this is a blocking command for latency tracking
-    if (is_blocking_ptr && cid && cid->IsBlocking()) {
-      *is_blocking_ptr = true;
-    }
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible

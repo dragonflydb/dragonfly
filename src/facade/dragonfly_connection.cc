@@ -1487,11 +1487,10 @@ void Connection::SquashPipeline() {
   // This lambda advances a temporary pointer exec_cmd_ptr to feed the execution engine.
   // We do not modify parsed_to_execute_ yet, in case execution throws/fails.
   auto exec_cmd_ptr{parsed_to_execute_};
-  auto get_next_fn = [&exec_cmd_ptr]() mutable -> std::pair<ParsedArgs, bool*> {
+  auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
     DCHECK(exec_cmd_ptr);
     auto* cmd = exec_cmd_ptr;
-    exec_cmd_ptr = exec_cmd_ptr->next;
-    return {ParsedArgs{*cmd}, &cmd->is_blocking_cmd};
+    return ParsedArgs{*cmd};
   };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
@@ -2359,12 +2358,7 @@ void Connection::ReleaseParsedCommand(ParsedCommand* cmd, bool is_pipelined) {
 
   if (is_pipelined) {
     stats_->pipelined_cmd_cnt++;
-    uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
-    stats_->pipelined_cmd_latency += latency_usec;
-
-    if (cmd->is_blocking_cmd) {
-      stats_->pipelined_blocking_cmd_latency += latency_usec;
-    }
+    stats_->pipelined_cmd_latency += CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
   }
 
   if (parsed_cmd_ == nullptr) {

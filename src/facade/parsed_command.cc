@@ -50,7 +50,6 @@ string MCRender::RenderDeleted() const {
 void ParsedCommand::ResetForReuse() {
   is_deferred_reply_ = false;
   reply_ = std::monostate{};
-  is_blocking_cmd = false;
 
   offsets_.clear();
   if (HeapMemory() > 1024) {
