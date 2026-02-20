@@ -1,0 +1,246 @@
+name: ci-shared-build
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  #--------------------------------------------------------------------
+  # BUILD JOBS — run on LARGE runners, upload artifacts to S3
+  #--------------------------------------------------------------------
+  build:
+    runs-on: CI-LARGE-86
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: ensure-build-${{ github.sha }}-ubuntu20-gcc14-Debug
+      cancel-in-progress: false
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: ./.github/actions/ensure-build
+        with:
+          build-id: ubuntu20-gcc14-Debug
+          ninja-target: src/all
+          cmake-args: >-
+            -DCMAKE_BUILD_TYPE=Debug -GNinja
+            -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_UNWIND=OFF -DWITH_GPERF=OFF
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+            -DCMAKE_CXX_FLAGS="-Werror -no-pie"
+          s3-bucket: ${{ secrets.CI_BUILD_BUCKET }}
+
+  build-arm:
+    runs-on: CI-LARGE-ARM
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: ensure-build-${{ github.sha }}-arm64-gcc14-Release
+      cancel-in-progress: false
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: ./.github/actions/ensure-build
+        with:
+          build-id: arm64-gcc14-Release
+          ninja-target: dragonfly
+          cmake-args: >-
+            -DCMAKE_BUILD_TYPE=Release -GNinja
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DPRINT_STACKTRACES_ON_SIGNAL=ON
+            -DCMAKE_CXX_FLAGS=-no-pie
+          s3-bucket: ${{ secrets.CI_BUILD_BUCKET }}
+
+  #--------------------------------------------------------------------
+  # TEST JOBS — download artifacts, run tests
+  #--------------------------------------------------------------------
+  test-ctest:
+    needs: [build]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: ./.github/actions/fetch-build
+        with:
+          build-id: ubuntu20-gcc14-Debug
+          s3-bucket: ${{ secrets.CI_BUILD_BUCKET }}
+
+      - name: C++ Unit Tests - IoUring
+        run: |
+          echo "Run ctest -V -L DFLY"
+
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
+          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+
+          # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
+          FLAGS_fiber_safety_margin=4096 timeout 5m ./allocation_tracker_test
+
+          timeout 5m ./dragonfly_test
+          timeout 5m ./json_family_test --jsonpathv2=false
+          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+          timeout 5m ./search_test --use_numeric_range_tree=false
+          timeout 5m ./search_family_test --use_numeric_range_tree=false
+        working-directory: /build
+
+      - name: C++ Unit Tests - Epoll
+        run: |
+          # Create a rule that automatically prints stacktrace upon segfault
+          cat > ./init.gdb <<EOF
+          catch signal SIGSEGV
+          command
+          bt
+          end
+          EOF
+
+          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
+          GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true \
+          GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+
+          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
+        working-directory: /build
+
+      - name: C++ Unit Tests - Cluster mode
+        run: |
+          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+        working-directory: /build
+
+      - name: C++ Unit Tests - Cluster mode + hashtag lock
+        run: |
+          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true \
+          timeout 20m ctest -V -L DFLY
+        working-directory: /build
+
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: shared-build-unit-logs
+          path: /tmp/*INFO*
+
+  test-regression:
+    needs: [build]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: ./.github/actions/fetch-build
+        with:
+          build-id: ubuntu20-gcc14-Debug
+          s3-bucket: ${{ secrets.CI_BUILD_BUCKET }}
+      - uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          dragonfly-path: /build/dragonfly
+          run-only-on-ubuntu-latest: true
+          build-folder-name: build
+          filter: "(not slow) and (not opt_only)"
+          s3-bucket: ""
+      - name: Upload regression logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: shared-build-regression-logs
+          path: /tmp/failed/*
+
+  test-large-arm:
+    needs: [build-arm]
+    runs-on: CI-LARGE-ARM
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+      - uses: ./.github/actions/fetch-build
+        with:
+          build-id: arm64-gcc14-Release
+          s3-bucket: ${{ secrets.CI_BUILD_BUCKET }}
+      - uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          dragonfly-path: /build/dragonfly
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          run-only-on-ubuntu-latest: true
+          build-folder-name: build
+          filter: large
+          s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: shared-build-large-tests-arm-logs
+          path: /tmp/failed/*

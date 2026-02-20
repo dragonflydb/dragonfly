@@ -1,0 +1,42 @@
+name: Fetch Build
+description: >
+  Download and extract a pre-built artifact from S3.
+  Expects the artifact to have been uploaded by the ensure-build action.
+
+inputs:
+  build-id:
+    required: true
+    type: string
+    description: "Same build-id used in ensure-build (e.g., ubuntu20-gcc14-Debug)"
+  s3-bucket:
+    required: true
+    type: string
+    description: "S3 bucket name for storing build artifacts"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Download artifact from S3
+      shell: bash
+      run: |
+        export AWS_MAX_ATTEMPTS=3
+        S3_KEY="ci-builds/${GITHUB_SHA}/${{ inputs.build-id }}/artifact.tar.zst"
+        echo "Downloading s3://${{ inputs.s3-bucket }}/${S3_KEY}"
+        aws s3 cp --no-progress "s3://${{ inputs.s3-bucket }}/${S3_KEY}" /tmp/artifact.tar.zst
+        ls -lh /tmp/artifact.tar.zst
+
+    - name: Extract artifact
+      shell: bash
+      run: |
+        mkdir -p /build
+        cd /build
+        zstd -d /tmp/artifact.tar.zst --stdout | tar xf -
+        rm -f /tmp/artifact.tar.zst
+
+        # Ensure binaries are executable
+        chmod +x /build/dragonfly 2>/dev/null || true
+        find /build -maxdepth 1 -name '*_test' -type f -exec chmod +x {} \;
+
+        echo "=== Artifact extracted to /build ==="
+        ls -lh /build/dragonfly
+        echo "Test binaries: $(find /build -maxdepth 1 -name '*_test' -type f | wc -l)"
