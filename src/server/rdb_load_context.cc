@@ -33,12 +33,18 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
   def.insert(def.begin(), ' ');
-  def += "\r\n";  // RESP terminator
+
+  // Add resp terminator
+  constexpr std::string_view kRespTerminator = "\r\n";
+  def += kRespTerminator;
+
+  std::string_view printable_def{def.data(), def.size() - kRespTerminator.size()};
+
   io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
   auto res = parser.Parse(buffer, &consumed, &resp_vec);
 
   if (res != facade::RedisParser::Result::OK) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def;
+    LOG(ERROR) << "Bad " << error_context << ": " << printable_def;
     return;
   }
 
