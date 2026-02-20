@@ -220,12 +220,10 @@ class DashTable : public detail::DashTableBase {
     auto* keep = GetSegment(keep_id);
     auto* buddy = GetSegment(buddy_id);
 
-    if (keep == buddy)
-      return false;
-
     assert((keep->local_depth() == buddy->local_depth()));
     // assert((keep->SlowSize() + buddy->SlowSize() < (0.25 * buddy->capacity())));
     assert(keep->local_depth() != 1);
+    assert(keep != buddy);
 
     bool should_rollback = false;
 
