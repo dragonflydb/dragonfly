@@ -749,15 +749,15 @@ void ClusterFamily::StartNewSlotMigrations(const ClusterConfig& new_config) {
   util::fb2::LockGuard lk(migration_mu_);
 
   for (auto& m : out_migrations) {
-    auto migration = make_shared<OutgoingMigration>(std::move(m), this, server_family_);
-    outgoing_migration_jobs_.emplace_back(migration);
-    migration->Start();
+    auto migration = make_unique<OutgoingMigration>(std::move(m), this, server_family_);
+    outgoing_migration_jobs_.emplace_back(std::move(migration));
+    outgoing_migration_jobs_.back()->Start();
   }
 
   for (auto& m : in_migrations) {
-    auto migration = make_shared<IncomingSlotMigration>(m.node_info.id, &server_family_->service(),
+    auto migration = make_unique<IncomingSlotMigration>(m.node_info.id, &server_family_->service(),
                                                         m.slot_ranges);
-    incoming_migrations_jobs_.emplace_back(migration);
+    incoming_migrations_jobs_.emplace_back(std::move(migration));
   }
 }
 
@@ -845,18 +845,15 @@ void ClusterFamily::DflyMigrate(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
-    std::string_view source_id) {
+IncomingSlotMigration* ClusterFamily::GetIncomingMigration(std::string_view source_id) {
   util::fb2::LockGuard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (mj->GetSourceID() == source_id) {
-      return mj;
+      return mj.get();
     }
   }
   return nullptr;
 }
-
-ClusterFamily::PreparedToRemoveOutgoingMigrations::~PreparedToRemoveOutgoingMigrations() = default;
 
 [[nodiscard]] ClusterFamily::PreparedToRemoveOutgoingMigrations
 ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
@@ -894,7 +891,7 @@ ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
 namespace {
 
 // returns removed incoming migration
-bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
+bool RemoveIncomingMigrationImpl(std::vector<std::unique_ptr<IncomingSlotMigration>>& jobs,
                                  string_view source_id) {
   auto it = std::find_if(jobs.begin(), jobs.end(), [source_id](const auto& im) {
     // we can have only one migration per target-source pair
@@ -904,14 +901,13 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
     return false;
   }
   DCHECK(it->get() != nullptr);
-  std::shared_ptr<IncomingSlotMigration> migration = *it;
+  auto* migration = it->get();
 
   // Flush non-owned migrations
   SlotSet migration_slots(migration->GetSlots());
   SlotSet removed = migration_slots.GetRemovedSlots(ClusterConfig::Current()->GetOwnedSlots());
 
   migration->Stop();
-  // all migration fibers has migration shared_ptr so the object can be removed later
   jobs.erase(it);
 
   // TODO make it outside in one run with other slots that should be flushed
@@ -951,7 +947,7 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
 
   SlotRanges slot_ranges(std::move(slots));
 
-  std::shared_ptr<IncomingSlotMigration> migration;
+  std::unique_ptr<IncomingSlotMigration> migration;
   {
     util::fb2::LockGuard lk(migration_mu_);
 
@@ -962,7 +958,7 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
                       });
 
     if (it != incoming_migrations_jobs_.end()) {
-      migration = *it;
+      migration = std::move(*it);
     }
   }
 
@@ -998,7 +994,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, CommandContext* cmd_cntx) {
 
   cmd_cntx->conn()->SetName(absl::StrCat("migration_flow_", source_id));
 
-  auto migration = GetIncomingMigration(source_id);
+  auto* migration = GetIncomingMigration(source_id);
 
   if (!migration) {
     return cmd_cntx->SendError(kIdNotFound);
@@ -1090,7 +1086,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendSimpleString(kUnknownMigration);
   }
 
-  auto migration = GetIncomingMigration(source_id);
+  auto* migration = GetIncomingMigration(source_id);
   if (!migration)
     return cmd_cntx->SendError(kIdNotFound);
 
