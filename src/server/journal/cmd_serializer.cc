@@ -126,26 +126,14 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
 
 size_t CmdSerializer::SerializeDelayedEntries(bool force,
                                               absl::flat_hash_set<std::string>* tiered_keys) {
-  // If there are no delayed entries, or we're not forced to serialize them, or we have only a few
-  // of them, we can skip serialization for now and wait for more entries to accumulate or for force
-  // to be true.
-  // Check next comment that this can be removed once we have better support for skipping unresolved
-  // entries.
-  if (!force && delayed_entries_.size() < 32) {
-    return 0;
-  }
-
   size_t serialized = 0;
   for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
     auto& entry = it->second;
-
-    // TODO: Once https://github.com/romange/helio/pull/541 is merged we can skip entries that are
-    // not resolved yet.
-    // Skip unresolved entries unless force is true if (!force &&
-    // !entry->value.IsResolved()) {
-    //   ++it;
-    //   continue;
-    // }
+    // Skip unresolved entries unless force is true
+    if (!force && !entry->value.IsResolved()) {
+      ++it;
+      continue;
+    }
 
     // If tiered_keys filter is provided, only serialize matching keys
     // Compare the string key from the map with the keys in tiered_keys set
