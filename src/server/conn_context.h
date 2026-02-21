@@ -123,6 +123,7 @@ struct ConnectionState {
     size_t UsedMemory() const;
 
     absl::flat_hash_set<LockTag> lock_tags;  // declared tags
+    std::vector<std::string> key_backing;    // storage for keys provided from lua
     bool read_only = false;
 
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds

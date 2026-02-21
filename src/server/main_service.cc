@@ -2058,7 +2058,9 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 }
 
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
+  using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
   auto* tx = cmd_cntx->tx();
+
   DCHECK(tx);
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.script_info;
@@ -2066,20 +2068,26 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
 
   InterpreterReplier replier(ca.translator);
   optional<ErrorReply> findcmd_err;
-  if (ca.async) {
+
+  bool abort_on_error = (ca.call_type & CT::PCALL) == 0;
+  bool async_call = ca.call_type & CT::ACALL;
+  bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
+
+  if (async_call) {
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(cmd); cid != nullptr) {
-      auto reply_mode = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
-    } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
+    } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ca.args[0]);
     }
   }
 
-  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
+  bool need_flush = !async_call || findcmd_err.has_value() || tx_call;
+  if (auto err = FlushEvalAsyncCmds(cntx, need_flush); err) {
     CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
@@ -2088,16 +2096,39 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
   if (findcmd_err.has_value()) {
     auto* prev = cmd_cntx->SwapReplier(&replier);
     cmd_cntx->SendError(*findcmd_err);
-    *ca.requested_abort |= ca.error_abort;
+    *ca.requested_abort |= abort_on_error;
     cmd_cntx->SwapReplier(prev);
   }
 
-  if (ca.async)
-    return;
+  // Handle unlock/lock or default call
+  switch (ca.call_type) {
+    case CT::UNLOCK:
+      tx->UnlockMulti(true);
+      tx->StartMultiNonAtomic();
+      info->lock_tags.clear();
+      info->key_backing.clear();
+      return;
+    case CT::LOCK:
+      if (tx->GetMultiMode() != Transaction::NON_ATOMIC)
+        return;
 
-  auto* prev = cmd_cntx->SwapReplier(&replier);
-  DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
-  cmd_cntx->SwapReplier(prev);
+      info->key_backing.resize(ca.args.size());
+      for (size_t i = 0; i < ca.args.size(); i++) {
+        info->key_backing[i] = ca.args[i];  // copy key
+        info->lock_tags.insert(LockTag(info->key_backing[i]));
+      }
+
+      tx->MultiSwitchCmd(registry_.Find("EVAL"));  // change cid + refurbish
+      tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), ca.args, false);
+      return;
+    case CT::ACALL:
+    case CT::APCALL:  // was handled above
+      return;
+    default:  // regular call
+      auto* prev = cmd_cntx->SwapReplier(&replier);
+      DispatchCommand(ParsedArgs{ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      cmd_cntx->SwapReplier(prev);
+  }
 }
 
 void Service::Eval(CmdArgList args, CommandContext* cmd_cntx, bool read_only) {
@@ -2297,7 +2328,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cmd_cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
-      args.async = false;
+      args.call_type =
+          static_cast<Interpreter::CallArgs::Type>(args.call_type & ~Interpreter::CallArgs::ACALL);
       CallFromScript(args, cmd_cntx);
     });
 
