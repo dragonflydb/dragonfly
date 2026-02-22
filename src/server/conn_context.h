@@ -328,8 +328,8 @@ class ConnectionContext : public facade::ConnectionContext {
                          // of it as a state for the connection
   bool journal_emulated = false;  // whether it is used to dispatch journal commands
 
-  // Reference to a FlowInfo for this connection if from a master to a replica.
-  FlowInfo* replication_flow = nullptr;
+  // Reference to a master-side FlowInfo for this connection if it is a replication connection.
+  FlowInfo* master_repl_flow = nullptr;
 
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;

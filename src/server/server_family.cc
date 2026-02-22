@@ -4062,7 +4062,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.
 
-      if (!cntx->replication_flow) {
+      if (!cntx->master_repl_flow) {
         LOG(ERROR) << "No replication flow assigned";
         return;
       }
@@ -4073,7 +4073,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
         return;
       }
       VLOG(2) << "Received client ACK=" << ack;
-      cntx->replication_flow->last_acked_lsn = ack;
+      cntx->master_repl_flow->last_acked_lsn = ack;
       return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();

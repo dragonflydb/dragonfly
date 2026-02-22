@@ -206,11 +206,8 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  struct MemoryUsage {
-    size_t mem = 0;
-    io::IoBuf::MemoryUsage buf_mem;
-  };
-  MemoryUsage GetMemoryUsage() const;
+  // Returns memory usage of this connection's auxiliary members in bytes.
+  size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
 

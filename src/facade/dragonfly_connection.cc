@@ -2093,28 +2093,21 @@ bool Connection::IsHttp() const {
   return is_http_;
 }
 
-Connection::MemoryUsage Connection::GetMemoryUsage() const {
-  size_t mem = sizeof(*this) + cmn::HeapSize(dispatch_q_) + cmn::HeapSize(name_) +
-               cmn::HeapSize(memcache_parser_) + cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) +
-               cmn::HeapSize(reply_builder_);
+size_t Connection::GetMemoryUsage() const {
+  size_t mem = sizeof(*this) + cmn::HeapSize(name_) + cmn::HeapSize(memcache_parser_) +
+               cmn::HeapSize(redis_parser_) + cmn::HeapSize(cc_) + cmn::HeapSize(reply_builder_);
 
   // parsed_cmd_ can be null when dispatching a command, or for http connections.
   if (parsed_cmd_) {
     mem += UsedMemoryInternal(*parsed_cmd_);
   }
 
-  // Account for the pipelined commands waiting in the linked list
-  mem += parsed_cmd_q_bytes_;
-
   // We add a hardcoded 9k value to accommodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
   // according to our checks) is actually part of the RSS.
   mem += 9'000;
 
-  return {
-      .mem = mem,
-      .buf_mem = io_buf_.GetMemoryUsage(),
-  };
+  return mem;
 }
 
 void Connection::IncreaseConnStats() {
