@@ -102,7 +102,7 @@ class ClusterShardMigration {
         }
         if (!tx_data.command.empty()) {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by "
-                  << tx_data.command.Front();
+                  << tx_data.command.front();
         } else {
           VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by opcode "
                   << (int)tx_data.opcode;

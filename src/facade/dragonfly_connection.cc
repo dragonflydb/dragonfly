@@ -236,7 +236,7 @@ void OpenTrafficLogger(string_view base_path) {
 
 void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
                 ServiceInterface::ContextInfo ci) {
-  string_view cmd = args.Front();
+  string_view cmd = args.front();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
 
@@ -272,7 +272,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     return;
 
   // part_len, ...
-  for (auto part : args) {
+  for (auto part : args.view()) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
@@ -289,7 +289,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
   }
 
-  for (auto part : args) {
+  for (auto part : args.view()) {
     if (auto blob_len = part.size(); blob_len > 0) {
       blobs[index++] = iovec{.iov_base = const_cast<char*>(part.data()), .iov_len = blob_len};
 
@@ -505,7 +505,7 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
 }
 
 void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
-  DVLOG(2) << "Dispatching pipeline: " << cmd.Front();
+  DVLOG(2) << "Dispatching pipeline: " << cmd.front();
 
   ++self->local_stats_.cmds;
   self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC);
@@ -1247,7 +1247,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
     total_consumed += consumed;
     if (result == RespSrvParser::OK) {
       DCHECK(!parsed_cmd_->empty());
-      DVLOG(2) << "Got Args with first token " << parsed_cmd_->Front();
+      DVLOG(2) << "Got Args with first token " << parsed_cmd_->front();
 
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);

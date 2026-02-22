@@ -24,37 +24,26 @@ class StringOrView {
     return sov;
   }
 
-  StringOrView() = default;
-  StringOrView(const StringOrView& o) = default;
-  StringOrView(StringOrView&& o) = default;
-  StringOrView& operator=(const StringOrView& o) = default;
-  StringOrView& operator=(StringOrView&& o) = default;
-
-  bool operator==(const StringOrView& o) const {
-    return *this == o.view();
+  auto operator<=>(std::string_view o) const {
+    return view() <=> o;
   }
 
-  bool operator==(std::string_view o) const {
-    return view() == o;
-  }
-
-  bool operator!=(const StringOrView& o) const {
-    return *this != o.view();
-  }
-
-  bool operator!=(std::string_view o) const {
-    return !(*this == o);
+  auto operator<=>(const StringOrView& o) const {
+    return *this <=> o.view();
   }
 
   std::string_view view() const {
     return visit([](const auto& s) -> std::string_view { return s; }, val_);
   }
 
+  bool empty() const {
+    return visit([](const auto& s) { return s.empty(); }, val_);
+  }
+
   friend std::ostream& operator<<(std::ostream& o, const StringOrView& key) {
     return o << key.view();
   }
 
-  // Make hashable
   template <typename H> friend H AbslHashValue(H h, const StringOrView& c) {
     return H::combine(std::move(h), c.view());
   }
@@ -74,10 +63,6 @@ class StringOrView {
   std::string* GetMutable() {
     MakeOwned();
     return &std::get<std::string>(val_);
-  }
-
-  bool empty() const {
-    return visit([](const auto& s) { return s.empty(); }, val_);
   }
 
  private:

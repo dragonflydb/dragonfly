@@ -1447,7 +1447,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, const facade::A
 
   auto& pv = res_it->it->second;
   unsigned deleted = 0;
-  for (string_view member : members)
+  for (string_view member : members.view())
     deleted += ZsetDel(&pv, member);
 
   auto zlen = pv.Size();
@@ -1477,7 +1477,7 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
 
   auto& pv = res_it.value()->second;
   size_t i = 0;
-  for (string_view member : members.Range())
+  for (string_view member : members.view())
     scores[i++] = GetZsetScore(pv, member);
 
   return scores;
@@ -2590,7 +2590,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
   // BZMPOP have 1 extra argument as compared to ZMPOP hence adding 1 is is_blocking is true
   ArgRange arg_keys(args.subspan(1 + is_blocking, zmpop_args.num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
-  for (std::string_view key : arg_keys) {
+  for (std::string_view key : arg_keys.view()) {
     if (first_found_keys_for_shard.contains(key)) {
       key_to_pop = key;
       break;
