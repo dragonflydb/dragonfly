@@ -206,7 +206,7 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  // Returns memory usage of this connection's auxillary members in bytes.
+  // Returns memory usage of this connection's auxiliary members in bytes.
   size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
