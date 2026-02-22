@@ -8,6 +8,8 @@ extern "C" {
 #include <absl/functional/overload.h>
 #include <absl/strings/numbers.h>
 
+#include <ranges>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack.h"

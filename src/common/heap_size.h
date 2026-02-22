@@ -19,6 +19,7 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
+#include <concepts>
 #include <deque>
 #include <string>
 #include <string_view>

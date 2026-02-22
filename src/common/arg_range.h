@@ -6,6 +6,7 @@
 
 #include <absl/types/span.h>
 
+#include <ranges>
 #include <string_view>
 #include <variant>
 

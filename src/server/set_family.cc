@@ -4,7 +4,7 @@
 
 #include "server/set_family.h"
 
-#include "server/family_utils.h"
+#include <ranges>
 
 extern "C" {
 #include "redis/intset.h"
@@ -24,6 +24,7 @@ extern "C" {
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
