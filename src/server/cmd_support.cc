@@ -56,4 +56,21 @@ BlockResult HopCoordinator::SingleHop(CommandContext* cmd_cntx, Transaction::Run
   return tx_keepalive_->Blocker();
 }
 
+bool SingleHopWaiter::await_ready() noexcept {
+  return (blocker = SingleHop(cmd_cntx, callback)) == nullptr;
+}
+
+void SingleHopWaiter::await_suspend(std::coroutine_handle<> handle) const noexcept {
+  // TODO: functor calling resume is double indirection
+  cmd_cntx->Resolve(blocker, [handle](auto* rb) { handle.resume(); });
+}
+
+facade::OpStatus SingleHopWaiter::await_resume() const noexcept {
+  return *cmd_cntx->tx()->LocalResultPtr();
+}
+
+void CmdR::Coro::return_value(facade::ErrorReply&& err) const noexcept {
+  cmd_cntx->SendError(err);
+}
+
 }  // namespace dfly::cmd

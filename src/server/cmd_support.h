@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <coroutine>
 #include <variant>
 
 #include "facade/error.h"
@@ -19,6 +20,12 @@ using BlockResult = util::fb2::EmbeddedBlockingCounter*;
 
 // No execution was performed, the command is ready to reply
 struct JustReplySentinel {};
+
+// Request to perform a single hop
+using SingleHopSentinel = Transaction::RunnableType;
+SingleHopSentinel SingleHop(auto&& f) {
+  return f;
+}
 
 // Handler for dispatching hops, must be part of a context
 struct HopCoordinator {
@@ -99,5 +106,53 @@ struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
 // This macro includes the 'struct' keyword automatically.
 // Example: ASYNC_CMD(Get) { ... };
 #define ASYNC_CMD(Name) struct Cmd##Name : public ::dfly::cmd::SimpleContext<Cmd##Name>
+
+// Return type of async command
+struct CmdR {
+  struct Coro;
+  using promise_type = Coro;
+};
+
+struct SingleHopWaiter : HopCoordinator {
+  bool await_ready() noexcept;
+  void await_suspend(std::coroutine_handle<> handle) const noexcept;
+  facade::OpStatus await_resume() const noexcept;
+
+  CommandContext* cmd_cntx;
+  BlockResult blocker;
+  Transaction::RunnableType callback;
+};
+
+// Underlying driver (promise) of async
+struct CmdR::Coro {
+  Coro(facade::CmdArgList arg, CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  }
+
+  auto await_transform(SingleHopSentinel callback) {
+    return SingleHopWaiter{{}, cmd_cntx, nullptr, callback};
+  }
+
+  // Return error
+  void return_value(facade::ErrorReply&& err) const noexcept;
+
+  // Conclude command without any error
+  void return_value(std::nullopt_t) const noexcept {
+  }
+
+  // Blank default implmenetations
+  CmdR get_return_object() {
+    return {};
+  }
+  void unhandled_exception() noexcept {
+  }
+  std::suspend_never initial_suspend() noexcept {
+    return {};
+  }
+  std::suspend_never final_suspend() noexcept {
+    return {};
+  }
+
+  CommandContext* cmd_cntx;
+};
 
 }  // namespace dfly::cmd
