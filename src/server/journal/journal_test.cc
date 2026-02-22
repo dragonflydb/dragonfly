@@ -1,9 +1,17 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
+#include <absl/flags/flag.h>
+#include <absl/flags/reflection.h>
+
 #include <random>
 #include <string>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
+#include "journal_slice.h"
 #include "server/common.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
@@ -14,6 +22,9 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+
+ABSL_DECLARE_FLAG(uint64_t, shard_repl_backlog_max_bytes_soft);
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 
 namespace dfly {
 namespace journal {
@@ -219,6 +230,71 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+void RunLimitTest(size_t bytes, size_t count, std::function<void(JournalSlice&)> f) {
+  absl::FlagSaver fs;
+
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes_soft, bytes);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, count);
+
+  JournalSlice slice;
+  slice.Init();
+  f(slice);
+}
+
+TEST(JournalSlice, ByteLimit) {
+  RunLimitTest(500, 10240, [](JournalSlice& slice) {
+    std::string cmd(50, 'x');
+
+    for (TxId i : std::views::iota(1, 20)) {
+      const Entry entry{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
+      slice.AddLogRecord(entry);
+    }
+
+    EXPECT_LE(slice.GetRingBufferBytes(), 500);
+  });
+}
+
+TEST(JournalSlice, ItemTooLarge) {
+  constexpr auto large_entry_size = 1024;
+  constexpr auto max_bytes = 1200;
+  RunLimitTest(max_bytes, 10240, [&](JournalSlice& slice) {
+    for (const TxId i : std::views::iota(0, 10)) {
+      const Entry entry{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"xxxxxx", ShardArgs{}}};
+      slice.AddLogRecord(entry);
+    }
+
+    const std::string cmd(large_entry_size, 'x');
+    const Entry entry{0, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{cmd, ShardArgs{}}};
+    slice.AddLogRecord(entry);
+
+    // Some items evicted from the front
+    EXPECT_LE(slice.GetRingBufferSize(), 10);
+    // The slice grows over the limit temporarily
+    EXPECT_GE(slice.GetRingBufferBytes(), max_bytes);
+
+    // the size converges, eventually evicting the large entry
+    for (const TxId i : std::views::iota(0, 25)) {
+      const Entry e2{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"xxxxxx", ShardArgs{}}};
+      slice.AddLogRecord(e2);
+    }
+
+    // Now the slice can hold everything
+    EXPECT_GE(slice.GetRingBufferSize(), 20);
+    EXPECT_LE(slice.GetRingBufferBytes(), max_bytes);
+  });
+}
+
+TEST(JournalSlice, BothBytesAndCountLimited) {
+  RunLimitTest(300, 3, [](JournalSlice& slice) {
+    for (const TxId i : std::views::iota(0, 10)) {
+      const Entry entry{i, Op::COMMAND, 0, 0, std::nullopt, Entry::Payload{"x", ShardArgs{}}};
+      slice.AddLogRecord(entry);
+      EXPECT_LE(slice.GetRingBufferSize(), 3);
+      EXPECT_LE(slice.GetRingBufferBytes(), 300);
+    }
+  });
 }
 
 }  // namespace journal

@@ -68,6 +68,8 @@ class JournalSlice {
 
  private:
   void CallOnChange(JournalChangeItem* item);
+  // Evicts entries to progress towards ring_buffer_max_bytes_
+  void EvictEntries(size_t new_item_size);
   boost::circular_buffer<JournalItem> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
@@ -80,7 +82,8 @@ class JournalSlice {
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
 
-  size_t ring_buffer_bytes = 0;
+  size_t ring_buffer_bytes_ = 0;
+  size_t ring_buffer_max_bytes_ = 0;
 };
 
 }  // namespace journal
