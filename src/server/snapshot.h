@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <deque>
+#include <vector>
 
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
@@ -142,6 +142,9 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
                          uint32_t mc_flags);
 
+  // Wait for delayed entries futures, serialize them and flush afterwards. Return bytes flushed
+  size_t FlushExternal(bool force);
+
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
   // The data has already been extracted from the serializer and is owned here, ensuring correct
@@ -152,15 +155,13 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
 
-  // An entry whose value must be awaited
-
   DbSlice* db_slice_;
   const DbTableArray db_array_;
   PrimeTable::Cursor snapshot_cursor_;
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::deque<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::vector<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
