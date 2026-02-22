@@ -459,6 +459,9 @@ size_t SliceSnapshot::FlushExternal(bool force) {
   // Force expects all ongoing operations to have finished, so we use a latch
   // as delayed_entries_ can be empty while waiting for the last entry
   thread_local LocalLatch delayed_flush_latch_;
+  absl::Cleanup waiter = [&] { delayed_flush_latch_.Wait(); };
+  if (delayed_entries_.empty())
+    return 0;
 
   // If we don't force, reposition all unresolved entries at front and keep ready ones at back
   auto not_resolved = std::not_fn(&decltype(TieredDelayedEntry::value)::IsResolved);
@@ -468,7 +471,7 @@ size_t SliceSnapshot::FlushExternal(bool force) {
   // We must flush strictly before journal data, so we can't reuse the main one with journal enabled
   auto* serializer = serializer_.get();
   std::optional<RdbSerializer> separate_serializer;
-  if (journal_cb_id_ && !delayed_entries_.empty() /* don't created if not needed */) {
+  if (journal_cb_id_) {
     DCHECK(force);
     separate_serializer.emplace(compression_mode_);
     serializer = &*separate_serializer;
@@ -486,12 +489,9 @@ size_t SliceSnapshot::FlushExternal(bool force) {
       TieredDelayedEntry entry = std::move(delayed_entries_.back());
       delayed_entries_.pop_back();
 
-      // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
-      // there are a few problems with how we serialize external values.
-      // 1. We may block here too frequently, slowing down the process.
-      // 2. For small bin values, we issue multiple reads for the same page, creating
-      //    read factor amplification that can reach factor of ~60.
-      auto res = entry.value.Get();  // Blocking point
+      // TODO: Optimize serialization of small values, see #4654
+      // Blocking point
+      auto res = entry.value.Get();
       if (!res.has_value()) {
         cntx_->ReportError(make_error_code(errc::io_error),
                            absl::StrCat("Failed to read ", entry.key.ToString()));
@@ -504,24 +504,31 @@ size_t SliceSnapshot::FlushExternal(bool force) {
     } while (!delayed_entries_.empty());
 
     lk.unlock();
-    serialized += FlushSerialized(serializer);
+
+    // We are not forced to flush if we use the main serializer
+    if (separate_serializer)
+      serialized += FlushSerialized(serializer);
 
     if (!force)
       break;
   }
 
-  delayed_flush_latch_.Wait();
   return serialized;
 }
 
 bool SliceSnapshot::PushSerialized(bool force) {
-  if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
-    return false;
+  size_t serialized = 0;
 
   // Atomic bucket serialization might have accumulated some delayed values.
   // We can finally block in this function and handle them with FlushExternal
-  size_t serialized = FlushExternal(force || journal_cb_id_);
-  return serialized + FlushSerialized() > 0;
+  if (force || journal_cb_id_ || delayed_entries_.size() > 16)
+    serialized += FlushExternal(force || journal_cb_id_);
+
+  // Flush main serializer
+  if (force || serializer_->SerializedLen() > kMinBlobSize)
+    serialized += FlushSerialized();
+
+  return serialized > 0;
 }
 
 void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv,
