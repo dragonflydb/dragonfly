@@ -693,7 +693,7 @@ class MiMallocResource : public PMR_NS::memory_resource {
   }
 
   void do_deallocate(void* ptr, std::size_t size, std::size_t align) final {
-    mi_free_aligned(ptr, align);
+    mi_free_size_aligned(ptr, size, align);
   }
 
   bool do_is_equal(const PMR_NS::memory_resource& o) const noexcept final {
