@@ -327,7 +327,9 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         if (trim_strategy == TRIM_STRATEGY_MAXLEN && s->length <= maxlen)
             break;
 
-        unsigned char *lp = ri.data, *p = lpFirst(lp);
+        unsigned char *lp = ri.data;
+        checkListPackNotEmpty(lp);
+        unsigned char *p = lpFirst(lp);
         int64_t entries = lpGetInteger(p);
 
         /* Check if we exceeded the amount of work we could do */
