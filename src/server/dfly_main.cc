@@ -686,6 +686,23 @@ void RegisterBufRings(ProactorPool* pool) {
 #endif
 }
 
+class MiMallocResource : public PMR_NS::memory_resource {
+ private:
+  void* do_allocate(std::size_t size, std::size_t align) final {
+    return mi_malloc_aligned(size, align);
+  }
+
+  void do_deallocate(void* ptr, std::size_t size, std::size_t align) final {
+    mi_free_aligned(ptr, align);
+  }
+
+  bool do_is_equal(const PMR_NS::memory_resource& o) const noexcept final {
+    return this == &o;
+  }
+};
+
+MiMallocResource g_mi_resource;
+
 #ifdef USE_AFL
 // AFL++ fuzzing helper functions
 // These functions support AFL++ persistent mode fuzzing by handling server readiness checks,
@@ -998,7 +1015,7 @@ Usage: dragonfly [FLAGS]
   // To see the options after the override, use:
   // mi_options_print();
 
-  fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
+  fb2::SetDefaultStackResource(&g_mi_resource, kFiberDefaultStackSize);
 
   {
     unique_ptr<util::ProactorPool> pool;
@@ -1026,7 +1043,7 @@ Usage: dragonfly [FLAGS]
     SetupAllocationTracker(pool.get());
     RegisterBufRings(pool.get());
 
-    AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
+    AcceptServer acceptor(pool.get(), &g_mi_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
 #ifdef USE_AFL
