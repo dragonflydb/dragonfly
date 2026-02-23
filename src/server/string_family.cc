@@ -1462,7 +1462,11 @@ void MGetCmd::Reply(SinkReplyBuilder* rb) {
       // Note: Missed keys are silent.
       if (res.has_value()) {
         string value;
-        if (holds_alternative<string>(res->val)) {
+
+        if (mc_cmd_flags_.meta && !mc_cmd_flags_.return_value) {
+          // If it's a Meta command and the client didn't ask for the value,
+          // we don't need to materialize the string or wait for disk I/O.
+        } else if (holds_alternative<string>(res->val)) {
           value = get<string>(std::move(res->val));
         } else {
           auto io_res = get<TieredRes>(std::move(res->val)).Get();
