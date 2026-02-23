@@ -26,6 +26,7 @@ env:
 
 jobs:
   build_and_tag:
+    if: false  # TODO: uncomment after testing
     name: Build and Push ${{matrix.flavor}} ${{ matrix.os.arch }} image
     strategy:
       matrix:
@@ -270,7 +271,7 @@ jobs:
             create_and_push_manifests "${{ env.GCS_IMAGE }}" "$gar_sha_amd" "$gar_sha_arm" "${{ matrix.flavor }}" "${{ env.TAG_NAME }}" "${{ env.IS_PRERELEASE }}"
 
   release_helm_and_notify:
-    needs: [build_and_tag]  # TODO: restore to [merge_manifest] after testing
+    # TODO: restore to needs: [merge_manifest] after testing
     runs-on: ubuntu-latest
     permissions:
       contents: write
