@@ -126,6 +126,7 @@ jobs:
       sha_arm: ${{ steps.output-sha.outputs.sha_arm64 }}
 
   merge_manifest:
+    if: false  # TODO: uncomment after testing
     needs: [build_and_tag]
     runs-on: ubuntu-latest
     strategy:
@@ -269,7 +270,7 @@ jobs:
             create_and_push_manifests "${{ env.GCS_IMAGE }}" "$gar_sha_amd" "$gar_sha_arm" "${{ matrix.flavor }}" "${{ env.TAG_NAME }}" "${{ env.IS_PRERELEASE }}"
 
   release_helm_and_notify:
-    needs: [merge_manifest]
+    needs: [build_and_tag]  # TODO: restore to [merge_manifest] after testing
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -322,12 +323,13 @@ jobs:
 
         helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
 
-    - name: Discord notification
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
-      with:
-        args: 'DragonflyDB version [${{ env.TAG_NAME }}](https://github.com/dragonflydb/dragonfly/releases/tag/${{ env.TAG_NAME }}) has been released 🎉'
+    # TODO: uncomment after testing
+    # - name: Discord notification
+    #   env:
+    #     DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+    #   uses: Ilshidur/action-discord@d2594079a10f1d6739ee50a2471f0ca57418b554
+    #   with:
+    #     args: 'DragonflyDB version [${{ env.TAG_NAME }}](https://github.com/dragonflydb/dragonfly/releases/tag/${{ env.TAG_NAME }}) has been released 🎉'
 
     - name: Re-build Docs
       if: env.IS_PRERELEASE != 'true'
