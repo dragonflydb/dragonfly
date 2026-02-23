@@ -1421,14 +1421,22 @@ OpStatus MGetCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const
       if (!inserted) {
         size_t orig_idx = map_it->second;
 
-        // If the original lookup found a value (or pending disk read), copy it.
-        // If it was a miss, results_[i] is already nullopt, so we skip assignment.
-        if (results_[orig_idx]) {
-          results_[i] = results_[orig_idx];
+        if (!results_[orig_idx]) {
+          // original key was a miss. Leave this duplicate as a miss, skip OpMGet.
+          continue;
         }
 
-        // Skip the redundant OpMGet database lookup
-        continue;
+        if (std::get_if<string>(&results_[orig_idx]->val)) {
+          // original was a RAM hit. Safely copy the string. skip OpMGet
+          results_[i] = results_[orig_idx];
+          continue;
+        }
+
+        // Original key is a pending disk read (Future). In fb2::Future is single-consumer, we
+        // cannot copy it without risking a hang or empty result during consumption in Reply().
+        // While a two-pass alias-index solution could avoid redundant I/O, it adds significant
+        // structural complexity to the Reply logic. Given this is a rare edge case, refetching a
+        // fresh Future is the safest and most maintainable approach at this stage.
       }
     }
 
@@ -1488,6 +1496,8 @@ void MGetCmd::Reply(SinkReplyBuilder* rb) {
   } else {  // MGET
     auto* redis_rb = static_cast<RedisReplyBuilder*>(rb);
     redis_rb->StartArray(results_.size());
+    // An individual disk I/O errors is treated as a Null reply (miss)
+    // This is because a single tiered-storage read failure shouldn't abort the entire MGET batch.
     GetReplies replies{rb, /*null_on_io_error=*/true};
 
     for (auto& res : results_) {
