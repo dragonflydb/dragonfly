@@ -5,7 +5,10 @@
 
 namespace {
 constexpr auto kLoadFactorToShrinkPool = 0.2;
-}
+
+thread_local dfly::InternedStringStats tl_stats;
+
+}  // namespace
 
 namespace dfly::detail {
 
@@ -20,6 +23,9 @@ void InternedString::ResetPool() {
     InternedBlobHandle::Destroy(handle);
   }
   pool.clear();
+  tl_stats.pool_bytes = 0;
+  tl_stats.pool_entries = 0;
+  tl_stats.pool_table_bytes = 0;
 }
 
 InternedBlobHandle InternedString::Intern(const std::string_view sv) {
@@ -28,6 +34,7 @@ InternedBlobHandle InternedString::Intern(const std::string_view sv) {
 
   InternedBlobPool& pool_ref = GetPoolRef();
   if (const auto it = pool_ref.find(sv); it != pool_ref.end()) {
+    tl_stats.hits++;
     InternedBlobHandle blob = *it;
     blob.IncrRefCount();
     return blob;
@@ -35,6 +42,9 @@ InternedBlobHandle InternedString::Intern(const std::string_view sv) {
 
   InternedBlobHandle handle = InternedBlobHandle::Create(sv);
   pool_ref.emplace(handle);
+  tl_stats.pool_entries++;
+  tl_stats.pool_bytes += handle.MemUsed();
+  tl_stats.misses++;
   return handle;
 }
 
@@ -54,6 +64,8 @@ void InternedString::Release() {
   if (entry_.RefCount() == 0) {
     InternedBlobPool& pool_ref = GetPoolRef();
     pool_ref.erase(entry_);
+    tl_stats.pool_entries--;
+    tl_stats.pool_bytes -= entry_.MemUsed();
     InternedBlobHandle::Destroy(entry_);
 
     // When pool is underutilized, shrink it by swapping.
@@ -78,3 +90,22 @@ InternedBlobPool& InternedString::GetPoolRef() {
 }
 
 }  // namespace dfly::detail
+
+namespace dfly {
+
+InternedStringStats& InternedStringStats::operator+=(const InternedStringStats& other) {
+  pool_entries += other.pool_entries;
+  pool_bytes += other.pool_bytes;
+  hits += other.hits;
+  misses += other.misses;
+  pool_table_bytes += other.pool_table_bytes;
+  return *this;
+}
+
+InternedStringStats GetInternedStringStats() {
+  tl_stats.pool_table_bytes =
+      detail::InternedString::GetPoolRef().capacity() * sizeof(detail::InternedBlobHandle);
+  return tl_stats;
+}
+
+}  // namespace dfly

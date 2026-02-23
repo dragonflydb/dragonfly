@@ -2960,6 +2960,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
           min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
     }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
+    result.interned_string_stats += GetInternedStringStats();
   };  // cb
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
