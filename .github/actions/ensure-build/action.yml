@@ -26,7 +26,9 @@ runs:
   steps:
     - name: Install dependencies
       shell: bash
-      run: apt-get update -qq && apt-get install -y -qq awscli zstd > /dev/null
+      run: |
+        apt-get update -qq && apt-get install -y -qq zstd > /dev/null
+        pip3 install -q awscli 2>/dev/null || pip3 install -q --break-system-packages awscli
 
     - name: Check S3 for existing artifact
       id: check-s3
