@@ -37,6 +37,7 @@ void JournalSlice::Init() {
     return;
 
   ring_buffer_.set_capacity(absl::GetFlag(FLAGS_shard_repl_backlog_len));
+  ring_buffer_bytes_ = ring_buffer_.capacity() * sizeof(JournalItem);
 }
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
@@ -88,13 +89,16 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
 
-    io::BufSink buf_sink{&ring_serialize_buf_};
-    JournalWriter writer{&buf_sink};
+    io::StringSink sink;
+    JournalWriter writer{&sink};
     writer.Write(entry);
 
-    // Deep copy here
-    item.journal_item.data = io::View(ring_serialize_buf_.InputBuffer());
-    ring_serialize_buf_.Clear();
+    std::move(sink).str().swap(item.journal_item.data);
+
+    if (item.journal_item.data.size() > 32) {
+      // for non-SSO strings capacity should not be much higher than size.
+      DCHECK_LE(item.journal_item.data.capacity(), item.journal_item.data.size() * 2);
+    }
     VLOG(2) << "Writing item [" << item.journal_item.lsn << "]: " << entry.ToString();
   }
 
@@ -110,17 +114,25 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
     k_v.second->ConsumeJournalChange(*change_item);
   }
   auto& item = change_item->journal_item;
+
   // We preserve order here. After ConsumeJournalChange there can reordering
   if (ring_buffer_.size() == ring_buffer_.capacity()) {
-    const size_t bytes_removed = ring_buffer_.front().data.size() + sizeof(item);
-    DCHECK_GE(ring_buffer_bytes, bytes_removed);
-    ring_buffer_bytes -= bytes_removed;
+    const size_t bytes_removed = ring_buffer_.front().data.capacity();
+    DCHECK_GE(ring_buffer_bytes_, bytes_removed);
+    ring_buffer_bytes_ -= bytes_removed;
   }
   if (!ring_buffer_.empty()) {
     DCHECK(item.lsn == ring_buffer_.back().lsn + 1);
   }
   ring_buffer_.push_back(std::move(item));
-  ring_buffer_bytes += sizeof(item) + ring_buffer_.back().data.size();
+  auto& data = ring_buffer_.back().data;
+
+  // Small strings assignment keep the existing capacity intact due to SSO.
+  // Shrink strings in this case to prevent excessive memory usage.
+  if (data.size() < 32 && data.capacity() > 64) {
+    data.shrink_to_fit();
+  }
+  ring_buffer_bytes_ += data.capacity();
 
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
@@ -143,18 +155,6 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != journal_consumers_arr_.end());
   journal_consumers_arr_.erase(it);
-}
-
-size_t JournalSlice::GetRingBufferSize() const {
-  return ring_buffer_.size();
-}
-
-size_t JournalSlice::GetRingBufferBytes() const {
-  return ring_buffer_bytes;
-}
-
-void JournalSlice::ResetRingBuffer() {
-  ring_buffer_.clear();
 }
 
 }  // namespace journal
