@@ -1369,7 +1369,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   load_fibers.reserve(paths.size());
 
   LoadOptions load_opts;
-  auto load_context = std::make_shared<RdbLoadContext>();
+  auto load_context = std::make_unique<RdbLoadContext>();
   if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
     error_code load_ec = pool.GetNextProactor()->Await(
@@ -1394,9 +1394,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [file, existing_keys, load_opts, aggregated_result, load_context,
-                      this]() mutable {
-      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context.get());
+    auto load_func = [file, existing_keys, load_opts, aggregated_result,
+                      load_context = load_context.get(), this]() mutable {
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context);
       if (load_ec) {
         aggregated_result->first_error = load_ec;
       } else {
@@ -1410,7 +1410,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_func = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                         load_context, future]() mutable {
+                         load_context = std::move(load_context), future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
