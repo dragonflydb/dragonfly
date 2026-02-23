@@ -2012,6 +2012,15 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
 
+  AppendMetricHeader("defrag_skipped_total", "Defrag tasks skipped", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_mem_under_threshold,
+                    {"reason"}, {"mem_under_threshold"}, &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_within_check_interval,
+                    {"reason"}, {"within_check_interval"}, &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_not_enough_fragmentation,
+                    {"reason"}, {"not_enough_fragmentation"}, &resp->body());
+
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
 
