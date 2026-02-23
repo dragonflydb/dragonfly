@@ -301,7 +301,7 @@ jobs:
     - name: Update helm chart
       if: env.IS_PRERELEASE != 'true'
       run: |
-        git checkout -b helm-chart-update/${{ env.TAG_NAME }}
+        git checkout -b helm-chart-update/${{ env.TAG_NAME }} main
         sed -Ei \
             -e 's/^(version\:) .*/\1 '${{ env.TAG_NAME }}'/g' \
             -e 's/^(appVersion\:) .*/\1 "'${{ env.TAG_NAME }}'"/g' \
