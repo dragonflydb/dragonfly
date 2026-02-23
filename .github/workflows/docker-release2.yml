@@ -271,6 +271,10 @@ jobs:
   release_helm_and_notify:
     needs: [merge_manifest]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
     steps:
     - name: print_env
       run: env
@@ -296,7 +300,7 @@ jobs:
     - name: Update helm chart
       if: env.IS_PRERELEASE != 'true'
       run: |
-        git checkout main
+        git checkout -b helm-chart-update/${{ env.TAG_NAME }} origin/main
         sed -Ei \
             -e 's/^(version\:) .*/\1 '${{ env.TAG_NAME }}'/g' \
             -e 's/^(appVersion\:) .*/\1 "'${{ env.TAG_NAME }}'"/g' \
@@ -319,12 +323,6 @@ jobs:
 
         helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
 
-    - name: GitHub Push
-      if: env.IS_PRERELEASE != 'true'
-      run: |
-        # Push directly using the authenticated origin
-        git push origin main
-
     - name: Discord notification
       env:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -336,3 +334,16 @@ jobs:
       if: env.IS_PRERELEASE != 'true'
       run: |
         curl -s -X POST '${{ secrets.VERCEL_DOCS_WEBHOOK }}'
+
+    - name: Create Helm Chart PR
+      if: env.IS_PRERELEASE != 'true'
+      env:
+        GH_TOKEN: ${{ secrets.DRAGONFLY_TOKEN }}
+      run: |
+        git push origin helm-chart-update/${{ env.TAG_NAME }}
+        gh pr create \
+          --base main \
+          --head helm-chart-update/${{ env.TAG_NAME }} \
+          --title 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
+          --body 'Automated Helm chart version bump to ${{ env.TAG_NAME }}.' \
+          --reviewer vyavdoshenko
