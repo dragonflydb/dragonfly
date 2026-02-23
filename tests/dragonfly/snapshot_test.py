@@ -639,14 +639,14 @@ async def test_tiered_entries(async_client: aioredis.Redis):
         "dbfilename": "tiered-entries",
         "tiered_prefix": "/tmp/tiered/backing",
         "tiered_offload_threshold": "0.5",  # ask to keep below 0.5 * 2G
-        "tiered_storage_write_depth": 500,
+        "tiered_storage_write_depth": 1000,
         "tiered_experimental_cooling": "false",
     }
 )
 async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     """This test makes sure tieried entries are correctly persisted and loaded back under limited memory available"""
     await DebugPopulateSeeder(
-        key_target=1000_000, data_size=4096, variance=1, types=["STRING"]
+        key_target=1_000_000, data_size=4096, samples=20, variance=1, types=["STRING"]
     ).run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
