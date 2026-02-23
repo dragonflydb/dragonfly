@@ -16,9 +16,9 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install zstd
+    - name: Install dependencies
       shell: bash
-      run: apt-get update -qq && apt-get install -y -qq zstd > /dev/null
+      run: apt-get update -qq && apt-get install -y -qq awscli zstd > /dev/null
 
     - name: Download artifact from S3
       shell: bash
