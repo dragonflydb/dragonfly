@@ -1866,6 +1866,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("memory_by_class_bytes", m.search_stats.used_memory, {"class"}, {"search_used"},
                     &memory_by_class_bytes);
 
+  AppendMetricValue("memory_by_class_bytes", m.interned_string_stats.pool_bytes, {"class"},
+                    {"interned_string_pool"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.interned_string_stats.pool_table_bytes, {"class"},
+                    {"interned_string_table"}, &memory_by_class_bytes);
+
+  // Interned string stats
+  AppendMetricWithoutLabels("interned_string_entries", "Number of unique interned strings",
+                            m.interned_string_stats.pool_entries, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("interned_string_hits_total", "Interned string pool hits",
+                            m.interned_string_stats.hits, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("interned_string_misses_total", "Interned string pool misses",
+                            m.interned_string_stats.misses, MetricType::COUNTER, &resp->body());
+
   // Command stats
   if (!m.cmd_stats_map.empty()) {
     string command_metrics;
