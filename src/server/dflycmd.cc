@@ -296,7 +296,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
     eof_token = GetRandomHex(gen, 40);
 
     auto& flow = replica_ptr->flows[flow_id];
-    conn_cntx->replication_flow = &flow;
+    conn_cntx->master_repl_flow = &flow;
     flow.conn = cmd_cntx->conn();
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;

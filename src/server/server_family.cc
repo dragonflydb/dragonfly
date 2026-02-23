@@ -37,6 +37,7 @@ extern "C" {
 }
 
 #include "base/flags.h"
+#include "base/histogram.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/dense_set.h"
@@ -1562,6 +1563,21 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
+void AppendPipelineLatencySummary(string_view name, string_view help, const base::Histogram& hist,
+                                  uint64_t total_count, double total_sum_usec, string* dest) {
+  AppendMetricHeader(name, help, MetricType::SUMMARY, dest);
+  const string full_name = GetMetricFullName(name);
+  if (hist.count() > 0) {
+    auto [p95, p99] = hist.Percentiles(95, 99);
+    AppendMetricValue(name, p95 * 1e-6, {"quantile"}, {"0.95"}, dest);
+    AppendMetricValue(name, p99 * 1e-6, {"quantile"}, {"0.99"}, dest);
+  }
+  // Use monotonically increasing counters for _sum/_count so that Prometheus
+  // rate()/irate() functions work correctly even though the histogram is decayed.
+  absl::StrAppend(dest, full_name, "_sum ", total_sum_usec * 1e-6, "\n");
+  absl::StrAppend(dest, full_name, "_count ", total_count, "\n");
+}
+
 void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
                             StringResponse* resp, bool legacy) {
   // Server metrics
@@ -1610,6 +1626,12 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+
+  // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
+  // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
+  AppendPipelineLatencySummary("pipeline_latency_seconds", "Pipeline command latency distribution",
+                               conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
+                               conn_stats.pipelined_cmd_latency, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
                             m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
@@ -1989,6 +2011,15 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.shard_stats.defrag_attempt_total, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
+
+  AppendMetricHeader("defrag_skipped_total", "Defrag tasks skipped", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_mem_under_threshold,
+                    {"reason"}, {"mem_under_threshold"}, &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_within_check_interval,
+                    {"reason"}, {"within_check_interval"}, &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_not_enough_fragmentation,
+                    {"reason"}, {"not_enough_fragmentation"}, &resp->body());
 
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
@@ -4040,7 +4071,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.
 
-      if (!cntx->replication_flow) {
+      if (!cntx->master_repl_flow) {
         LOG(ERROR) << "No replication flow assigned";
         return;
       }
@@ -4051,7 +4082,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
         return;
       }
       VLOG(2) << "Received client ACK=" << ack;
-      cntx->replication_flow->last_acked_lsn = ack;
+      cntx->master_repl_flow->last_acked_lsn = ack;
       return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();

@@ -224,14 +224,17 @@ string EngineShard::TxQueueInfo::Format() const {
   return res;
 }
 
-EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 104);
+EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
+  static_assert(sizeof(Stats) == 128);
 
 #define ADD(x) x += o.x
 
   ADD(defrag_attempt_total);
   ADD(defrag_realloc_total);
   ADD(defrag_task_invocation_total);
+  ADD(defrag_skipped_mem_under_threshold);
+  ADD(defrag_skipped_within_check_interval);
+  ADD(defrag_skipped_not_enough_fragmentation);
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
@@ -265,17 +268,18 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 2. We have memory blocks that can be better utilized (there is a "wasted memory" in them).
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
-bool EngineShard::DefragTaskState::CheckRequired() {
+EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
+  using enum SkipReason;
   if (cursor > kCursorDoneState) {
     VLOG(2) << "cursor: " << cursor;
-    return true;
+    return NotSkipped;
   }
 
   size_t limit = max_memory_limit.load(memory_order_relaxed);
 
   const std::size_t memory_per_shard = limit / shard_set->size();
   if (memory_per_shard < (1 << 16)) {  // Too small.
-    return false;
+    return MemoryTooLow;
   }
 
   thread_local fragmentation_info finfo{
@@ -284,7 +288,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     finfo.bin = 0;  // reset.
-    return false;
+    return MemoryBelowThreshold;
   }
 
   if (finfo.bin == 0) {  // did not start the iterative checking yet
@@ -293,7 +297,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
     if (seconds_from_prev_check < mem_defrag_interval) {
-      return false;
+      return CheckWithinInterval;
     }
 
     // start checking.
@@ -319,11 +323,11 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
       VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
-      return true;
+      return NotSkipped;
     }
+    return NotEnoughFragmentation;
   }
-
-  return false;
+  return CheckInProgress;
 }
 
 std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
@@ -408,12 +412,14 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
+  using enum DefragTaskState::SkipReason;
+
   constexpr uint32_t kRunAtLowPriority = 0u;
   if (!namespaces) {
     return kRunAtLowPriority;
   }
 
-  if (defrag_state_.CheckRequired()) {
+  if (auto check_result = defrag_state_.CheckRequired(); check_result == NotSkipped) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
@@ -421,8 +427,34 @@ uint32_t EngineShard::DefragTask() {
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
     if (DoDefrag(&page_usage)) {
       // we didn't finish the scan
-      return util::ProactorBase::kOnIdleMaxLevel;
+      return ProactorBase::kOnIdleMaxLevel;
     }
+  } else {
+    std::string_view reason;
+    switch (check_result) {
+      case MemoryTooLow:
+        // Don't track stats for configuration which is not going to change
+        reason = "memory too low";
+        break;
+      case MemoryBelowThreshold:
+        reason = "rss below threshold";
+        stats_.defrag_skipped_mem_under_threshold++;
+        break;
+      case CheckWithinInterval:
+        reason = "defrag check ran too soon";
+        stats_.defrag_skipped_within_check_interval++;
+        break;
+      case NotEnoughFragmentation:
+        reason = "not enough fragmentation to defrag";
+        stats_.defrag_skipped_not_enough_fragmentation++;
+        break;
+      case CheckInProgress:
+        reason = "check is in progress";
+        break;
+      default:
+        DCHECK(false) << "unexpected result";
+    }
+    VLOG(2) << shard_id_ << " skipped defragmentation task: " << reason;
   }
   return 6;  // priority.
 }
