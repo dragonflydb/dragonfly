@@ -75,6 +75,7 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | service.metrics.portName | string | `"metrics"` | name for the metrics port |
 | service.metrics.serviceType | string | `"ClusterIP"` | serviceType for the metrics service |
 | service.port | int | `6379` | Dragonfly service port |
+| service.targetPort | string | `"dragonfly"` | Dragonfly target port on the pod. Can be a port number or a named port (dragonfly or memcached) |
 | service.type | string | `"ClusterIP"` | Service type to provision. Can be NodePort, ClusterIP or LoadBalancer |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
 | serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
@@ -88,6 +89,8 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | storage.enabled | bool | `false` | If /data should persist. This will provision a StatefulSet instead. |
 | storage.requests | string | `"128Mi"` | Volume size to request for the PVC |
 | storage.storageClassName | string | `""` | Global StorageClass for Persistent Volume(s) |
+| memcached.enabled | bool | `false` | Enable Memcached protocol support. When enabled, --memcached_port arg is auto-added, container port exposed, and memcached port added to the Service. |
+| memcached.port | int | `11211` | Memcached port number. Must not be the same as service.port. |
 | tls.cert | string | `""` | TLS certificate |
 | tls.createCerts | bool | `false` | use cert-manager to automatically create the certificate |
 | tls.duration | string | `"87600h0m0s"` | duration or ttl of the validity of the created certificate |
