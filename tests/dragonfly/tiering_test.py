@@ -110,6 +110,7 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
         "tiered_storage_write_depth": 1500,
+        "keys_output_limit": 16384,
     }
 )
 async def test_replication(
@@ -141,9 +142,17 @@ async def test_replication(
     async def fill_job():
         for i, key in enumerate(keys):
             await async_client.append(key, f":{i}:")
-            await asyncio.sleep(0.005)  # limit qps
+            await asyncio.sleep(0.01)  # limit qps
 
-    fill_tasks = [asyncio.create_task(fill_job()) for _ in range(3)]
+    # delete every 20th random key
+    async def delete_job():
+        del_keys = random.sample(keys, len(keys) // 20)
+        for key in del_keys:
+            await async_client.delete(key)
+            await asyncio.sleep(0.1)
+
+    tasks = [asyncio.create_task(fill_job()) for _ in range(3)]
+    tasks += [asyncio.create_task(delete_job())]
 
     # Start replication
     await replica_client.replicaof("localhost", df_server.port)
@@ -161,9 +170,9 @@ async def test_replication(
         )
 
     # cancel filler and wait for replica to catch up
-    for task in fill_tasks:
+    for task in tasks:
         task.cancel()
-    await asyncio.gather(*fill_tasks, return_exceptions=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
     await check_all_replicas_finished([replica_client], async_client, timeout=500)
 
     #

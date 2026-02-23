@@ -455,7 +455,7 @@ size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
   return serialized;
 }
 
-size_t SliceSnapshot::FlushExternal(bool force) {
+size_t SliceSnapshot::PushExternal(bool force) {
   // Force expects all ongoing operations to have finished, so we use a latch
   // as delayed_entries_ can be empty while waiting for the last entry
   thread_local LocalLatch delayed_flush_latch_;
@@ -522,7 +522,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
   // Atomic bucket serialization might have accumulated some delayed values.
   // We can finally block in this function and handle them with FlushExternal
   if (force || journal_cb_id_ || delayed_entries_.size() > 16)
-    serialized += FlushExternal(force || journal_cb_id_);
+    serialized += PushExternal(force || journal_cb_id_);
 
   // Flush main serializer
   if (force || serializer_->SerializedLen() > kMinBlobSize)
