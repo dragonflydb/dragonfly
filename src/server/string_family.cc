@@ -1393,10 +1393,13 @@ MGetCmd::PrepareResult MGetCmd::Prepare(ArgSlice args, CommandContext* cmd_cntx)
 }
 
 OpStatus MGetCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const {
-  // Only use a map if dedup_enabled_ is on and we have potential duplicates (>1 key) to save heap
-  // allocations. If args.Size() is 0 or 1, duplicates are impossible, so we save the heap
-  // allocation.
-  bool dedup = dedup_enabled_ && (args.Size() > 1);
+  // Only use a map if:
+  // 1) dedup_enabled_ is on AND
+  // 2)we have potential duplicates (>1 key) to save heap
+  //  allocations. If args.Size() is 0 or 1, duplicates are impossible, so we save the heap
+  //  allocation. AND
+  // 3) command is MGET
+  bool dedup = dedup_enabled_ && (args.Size() > 1) && !is_gat_;
   absl::flat_hash_map<string_view, size_t> key_first_idx;
   if (dedup) {
     key_first_idx.reserve(args.Size());
