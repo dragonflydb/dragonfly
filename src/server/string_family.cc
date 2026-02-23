@@ -1472,6 +1472,9 @@ void MGetCmd::Reply(SinkReplyBuilder* rb) {
         }
 
         string_view current_key = args_[i];
+        // Note: versioning is not supported. Dragonfly internal versions do not map correctly to
+        // CAS semantics, so we maintain backward compatibility by avoiding their use here, and
+        // return 0.
         mc_rb->SendValue(mc_cmd_flags_, current_key, value, 0, res->meta.mc_flag,
                          res->meta.ttl_sec);
       } else {  // Render a miss response
