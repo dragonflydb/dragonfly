@@ -2259,7 +2259,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
     opts.group_name = ArgS(args, id_indx);
     opts.consumer_name = ArgS(args, ++id_indx);
     if (opts.consumer_name.empty()) {
-      builder->SendError("consumer name can't be empty", kSyntaxErr);
+      builder->SendError("consumer name can't be empty", kSyntaxErrType);
       return std::nullopt;
     }
     id_indx++;
