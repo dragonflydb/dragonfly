@@ -761,6 +761,13 @@ TEST_F(StreamFamilyTest, XPendingMissingGroup) {
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 }
 
+TEST_F(StreamFamilyTest, XReadGroupEmptyConsumer) {
+  Run({"xadd", "s", "*", "x", "y"});
+  Run({"xgroup", "create", "s", "g", "0"});
+  auto resp = Run({"xreadgroup", "group", "g", "", "streams", "s", ">"});
+  EXPECT_THAT(resp, ErrArg("consumer name can't be empty"));
+}
+
 TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
