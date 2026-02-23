@@ -16,6 +16,10 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Install zstd
+      shell: bash
+      run: apt-get install -y -qq zstd > /dev/null
+
     - name: Download artifact from S3
       shell: bash
       run: |

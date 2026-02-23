@@ -54,6 +54,11 @@ runs:
         echo "=== Build complete ==="
         df -h
 
+    - name: Install zstd
+      if: steps.check-s3.outputs.found == 'false'
+      shell: bash
+      run: apt-get install -y -qq zstd > /dev/null
+
     - name: Package artifact
       if: steps.check-s3.outputs.found == 'false'
       shell: bash
