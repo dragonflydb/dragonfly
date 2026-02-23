@@ -1499,13 +1499,8 @@ void MGetCmd::Reply(SinkReplyBuilder* rb) {
     // An individual disk I/O errors is treated as a Null reply (miss)
     // This is because a single tiered-storage read failure shouldn't abort the entire MGET batch.
     GetReplies replies{rb, /*null_on_io_error=*/true};
-
     for (auto& res : results_) {
-      if (res.has_value()) {
-        replies.Send(std::move(res->val));
-      } else {
-        redis_rb->SendNull();  // Key not found (KEY_NOTFOUND)
-      }
+      replies.Send(res ? std::make_optional(std::move(res->val)) : std::nullopt);
     }
   }
 }
