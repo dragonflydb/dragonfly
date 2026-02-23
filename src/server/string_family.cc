@@ -520,7 +520,8 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
 
 // Helper for building replies for strings
 struct GetReplies {
-  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+  GetReplies(SinkReplyBuilder* rb, bool null_on_io_error = false)
+      : rb{static_cast<RedisReplyBuilder*>(rb)}, null_on_io_error_{null_on_io_error} {
     DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
   }
 
@@ -563,6 +564,7 @@ struct GetReplies {
   }
 
   RedisReplyBuilder* rb;
+  bool null_on_io_error_;
 };
 
 struct ExtendCmd : public dfly::cmd::SimpleContext<ExtendCmd> {
@@ -666,8 +668,8 @@ struct MGetMetadata {
 };
 
 OpResult<StringResult> OpMGet(const OpArgs& op_args, string_view key,
-                              optional<DbSlice::ExpireParams> expire_params,
-                              MGetMetadata* metadata = nullptr) {
+                              const optional<DbSlice::ExpireParams>& expire_params,
+                              MGetMetadata* metadata = nullptr, bool populate_ttl = false) {
   const PrimeValue* pv = nullptr;
 
   auto populate_meta = [&](const auto& it) {
@@ -680,7 +682,7 @@ OpResult<StringResult> OpMGet(const OpArgs& op_args, string_view key,
     if (it->second.HasFlag()) {
       metadata->mc_flag = db_slice.GetMCFlag(db_index, it->first);
     }
-    if (it->first.HasExpire()) {  // TTL
+    if (populate_ttl && it->first.HasExpire()) {  // TTL
       auto exp_it = db_slice.GetDBTable(db_index)->expire.Find(it->first);
       if (exp_it != db_slice.GetDBTable(db_index)->expire.end()) {
         int64_t expire_time_ms = db_slice.ExpireTime(exp_it->second);
@@ -1357,8 +1359,6 @@ struct MGetCmd : public dfly::cmd::SimpleContext<MGetCmd> {
   // If nullopt, it's a standard MGET.
   // If set, it's a GAT (and this is the new TTL).
   std::optional<DbSlice::ExpireParams> expire_params_;
-
-  mutable std::atomic<OpStatus> status_code_ = OpStatus::OK;
   MemcacheCmdFlags mc_cmd_flags_;
   ArgSlice args_;
   bool is_gat_ = false;
@@ -1398,11 +1398,15 @@ OpStatus MGetCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const
   //  allocation. AND
   // 3) command is MGET
   bool dedup = dedup_enabled_ && (args.Size() > 1) && !is_gat_;
+  // We can not make it thread-local because we may preempt during the Find loop due to
+  // replication of expiry events.
   absl::flat_hash_map<string_view, size_t> key_first_idx;
   if (dedup) {
     key_first_idx.reserve(args.Size());
   }
 
+  // Check if the Memcached client actually requested the TTL.
+  bool want_ttl = is_mc_ && mc_cmd_flags_.return_ttl;
   for (auto it = args.begin(); it != args.end(); ++it) {
     size_t i = it.index();
     string_view key = *it;
@@ -1412,40 +1416,28 @@ OpStatus MGetCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const
       if (!inserted) {
         size_t orig_idx = map_it->second;
 
-        // If the original result is already fetched and is a string (RAM hit),
-        // we copy it to avoid a second database lookup.
-        // If it's a Tiered Future (Disk hit), we fall through to fetch it again because
-        // sharing or cloning futures is complex and slower than a second lookup.
-        if (results_[orig_idx].has_value()) {
-          if (auto* val_str = std::get_if<string>(&results_[orig_idx]->val)) {
-            results_[i] = Result{*val_str, results_[orig_idx]->meta};
-            continue;
-          }
+        // If the original lookup found a value (or pending disk read), copy it.
+        // If it was a miss, results_[i] is already nullopt, so we skip assignment.
+        if (results_[orig_idx]) {
+          results_[i] = results_[orig_idx];
         }
+
+        // Skip the redundant OpMGet database lookup
+        continue;
       }
     }
 
     MGetMetadata meta;
-    auto result = OpMGet(op_args, key, expire_params_, is_mc_ ? &meta : nullptr);
-    if (result) {
+    if (auto result = OpMGet(op_args, key, expire_params_, is_mc_ ? &meta : nullptr, want_ttl)) {
       results_[i] = Result{std::move(result.value()), meta};
-    } else {
-      auto status = result.status();
-      if ((status == OpStatus::KEY_NOTFOUND) || (status == OpStatus::WRONG_TYPE)) {  // soft errors
-        results_[i] = std::nullopt;
-      } else {  // hard errors (e.g OUT_OF_MEMORY)
-        status_code_.store(status, std::memory_order_relaxed);
-        return status;
-      }
     }
+    // If result is falsy (KEY_NOTFOUND, WRONG_TYPE), results_[i] remains nullopt (miss).
+    // Hard errors like OUT_OF_MEMORY throw std::bad_alloc per Dragonfly convention.
   }
   return OpStatus::OK;
 }
 
 void MGetCmd::Reply(SinkReplyBuilder* rb) {
-  if (OpStatus status = status_code_.load(std::memory_order_relaxed); status != OpStatus::OK) {
-    return rb->SendError(status);
-  }
   using TieredRes = TieredStorage::TResult<string>;
   if (is_mc_) {
     auto* mc_rb = static_cast<MCReplyBuilder*>(rb);
@@ -1491,20 +1483,11 @@ void MGetCmd::Reply(SinkReplyBuilder* rb) {
   } else {  // MGET
     auto* redis_rb = static_cast<RedisReplyBuilder*>(rb);
     redis_rb->StartArray(results_.size());
+    GetReplies replies{rb, /*null_on_io_error=*/true};
+
     for (auto& res : results_) {
       if (res.has_value()) {
-        if (holds_alternative<string>(res->val)) {
-          redis_rb->SendBulkString(get<string>(std::move(res->val)));
-        } else {
-          auto io_res = get<TieredRes>(std::move(res->val)).Get();
-          if (io_res) {
-            redis_rb->SendBulkString(*io_res);
-          } else {
-            // We can't send error, else we violate RESP protocol
-            // Treat disk failure as a miss
-            redis_rb->SendNull();
-          }
-        }
+        replies.Send(std::move(res->val));
       } else {
         redis_rb->SendNull();  // Key not found (KEY_NOTFOUND)
       }
