@@ -57,7 +57,7 @@ runs:
     - name: Install zstd
       if: steps.check-s3.outputs.found == 'false'
       shell: bash
-      run: apt-get install -y -qq zstd > /dev/null
+      run: apt-get update -qq && apt-get install -y -qq zstd > /dev/null
 
     - name: Package artifact
       if: steps.check-s3.outputs.found == 'false'
