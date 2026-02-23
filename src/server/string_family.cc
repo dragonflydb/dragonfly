@@ -551,8 +551,13 @@ struct GetReplies {
     io::Result<T> iores = get<1>(std::move(res)).Get();
     if (iores.has_value())
       Send(*iores);
-    else
-      Send(iores.error().message());
+    else {
+      if (null_on_io_error_) {
+        rb->SendNull();
+      } else {
+        Send(iores.error().message());
+      }
+    }
   }
 
   void Send(size_t val) const {
