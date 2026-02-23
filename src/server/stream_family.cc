@@ -3661,7 +3661,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
       << CI{"XGROUP", CO::JOURNALED | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
       << CI{"XINFO", CO::READONLY, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
       << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kXLen}.HFUNC(XLen)
-      << CI{"XPENDING", CO::READONLY, -2, 1, 1, acl::kXPending}.HFUNC(XPending)
+      << CI{"XPENDING", CO::READONLY, -3, 1, 1, acl::kXPending}.HFUNC(XPending)
       << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)
       << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, acl::kXRevRange}.HFUNC(XRevRange)
       << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)

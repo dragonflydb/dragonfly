@@ -756,6 +756,11 @@ TEST_F(StreamFamilyTest, XPending) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(StreamFamilyTest, XPendingMissingGroup) {
+  auto resp = Run({"xpending", "?"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
 TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
