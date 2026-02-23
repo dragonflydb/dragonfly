@@ -55,10 +55,6 @@ def main():
     pattern = os.path.join(crash_dir, f"RECORD:{crash_id},cnt:*")
     records = sorted(glob.glob(pattern))
 
-    if not records:
-        print(f"\033[0;31m[ERROR]\033[0m No RECORD files for crash {crash_id}")
-        sys.exit(1)
-
     # Find crash input file
     crash_files = [
         f
