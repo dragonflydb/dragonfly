@@ -15,6 +15,7 @@ extern "C" {
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -1526,6 +1527,54 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 }  // namespace
+
+auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
+    LOG(ERROR) << "Intset integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  const intset* is = (const intset*)blob.data();
+
+  unsigned len = intsetLen(is);
+
+  if (len > SetFamily::MaxIntsetEntries()) {
+    StringSet* set = SetFamily::ConvertToStrSet(is, len);
+
+    if (!set) {
+      LOG(ERROR) << "OOM in ConvertToStrSet " << len;
+      return LoadBlobResult::kOutOfMemory;
+    }
+    pv->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  } else {
+    intset* mine = reinterpret_cast<intset*>(CompactObj::memory_resource()->allocate(blob.size()));
+    ::memcpy(mine, blob.data(), blob.size());
+    pv->InitRobj(OBJ_SET, kEncodingIntSet, mine);
+  }
+
+  return LoadBlobResult::kSuccess;
+}
+
+auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "ListPack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* lp = (unsigned char*)blob.data();
+  StringSet* set = CompactObj::AllocateMR<StringSet>();
+  for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
+    unsigned char field_buf[LP_INTBUF_SIZE];
+    string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
+    if (!set->Add(elem)) {
+      LOG(ERROR) << "Duplicate member " << elem;
+      CompactObj::DeleteMR<StringSet>(set);
+      return LoadBlobResult::kCorrupted;
+    }
+  }
+  pv->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  return LoadBlobResult::kSuccess;
+}
 
 StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
   int64_t intele;

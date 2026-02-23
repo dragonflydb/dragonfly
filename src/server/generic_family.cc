@@ -230,7 +230,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
       config.append = true;
     }
     if (pending_read_.remaining > 0) {
-      config.streamed = true;
+      config.chunked = true;
     }
     config.reserve = pending_read_.reserve;
 
