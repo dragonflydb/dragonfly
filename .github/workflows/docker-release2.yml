@@ -314,15 +314,16 @@ jobs:
           contrib/charts/dragonfly/Chart.yaml \
           contrib/charts/dragonfly/ci || true
 
-    - name: Push Helm chart as OCI to Github
-      if: env.IS_PRERELEASE != 'true'
-      run: |
-        echo "${{ secrets.GITHUB_TOKEN }}" | \
-          helm registry login -u ${{ github.actor }} --password-stdin ghcr.io
-
-        helm package contrib/charts/dragonfly
-
-        helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
+    # TODO: uncomment after testing
+    # - name: Push Helm chart as OCI to Github
+    #   if: env.IS_PRERELEASE != 'true'
+    #   run: |
+    #     echo "${{ secrets.GITHUB_TOKEN }}" | \
+    #       helm registry login -u ${{ github.actor }} --password-stdin ghcr.io
+    #
+    #     helm package contrib/charts/dragonfly
+    #
+    #     helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
 
     # TODO: uncomment after testing
     # - name: Discord notification
