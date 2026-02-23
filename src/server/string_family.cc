@@ -662,7 +662,6 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
 
 struct MGetMetadata {
   uint32_t mc_flag = 0;
-  uint64_t mc_ver = 0;
   uint32_t ttl_sec = 0;
 };
 
@@ -677,7 +676,6 @@ OpResult<StringResult> OpMGet(const OpArgs& op_args, string_view key,
 
     auto& db_slice = op_args.GetDbSlice();
     DbIndex db_index = op_args.db_cntx.db_index;
-    metadata->mc_ver = it.GetVersion();
 
     if (it->second.HasFlag()) {
       metadata->mc_flag = db_slice.GetMCFlag(db_index, it->first);
@@ -1474,7 +1472,7 @@ void MGetCmd::Reply(SinkReplyBuilder* rb) {
         }
 
         string_view current_key = args_[i];
-        mc_rb->SendValue(mc_cmd_flags_, current_key, value, res->meta.mc_ver, res->meta.mc_flag,
+        mc_rb->SendValue(mc_cmd_flags_, current_key, value, 0, res->meta.mc_flag,
                          res->meta.ttl_sec);
       } else {  // Render a miss response
         std::string miss_resp = mc_render.RenderMiss();
