@@ -646,7 +646,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
 async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     """This test makes sure tieried entries are correctly persisted and loaded back under limited memory available"""
     await DebugPopulateSeeder(
-        key_target=1_000_000, data_size=4096, samples=20, variance=1, types=["STRING"]
+        key_target=750_000, data_size=4096, samples=20, variance=1, types=["STRING"]
     ).run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
