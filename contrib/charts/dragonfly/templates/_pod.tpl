@@ -83,6 +83,13 @@ containers:
     {{- end }}
     args:
       - "--alsologtostderr"
+      {{- if .Values.snapshot.enabled }}
+      - "--snapshot_cron"
+      - "{{ .Values.snapshot.schedule }}"
+      {{- if eq .Values.snapshot.format "rdb" }}
+      - "--nodf_snapshot_format"
+      {{- end }}
+      {{- end }}
     {{- with .Values.extraArgs }}
       {{- toYaml . | trim | nindent 6 }}
     {{- end }}
@@ -123,6 +130,31 @@ containers:
     envFrom:
       {{- toYaml . | trim | nindent 6 }}
     {{- end }}
+  {{- if .Values.snapshot.enabled }}
+  - name: snapshot-cleaner
+    image: {{ .Values.snapshot.cleaner.image }}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          {{- if eq .Values.snapshot.format "dragonfly" }}
+          # Keep only the last {{ .Values.snapshot.cleaner.max_count }} snapshots (composed of two files each)
+          ls -1t /data/dump-*.dfs | tail -n +{{ add 1 (mul .Values.snapshot.cleaner.max_count 2) }} | xargs rm -f
+          {{- else }}
+          # Keep only the last {{ .Values.snapshot.cleaner.max_count }} snapshots
+          ls -1t /data/dump-*.rdb | tail -n +{{ add 1 .Values.snapshot.cleaner.max_count }} | xargs rm -f
+          {{- end }}
+          sleep {{ .Values.snapshot.cleaner.interval }}
+        done
+    volumeMounts:
+      - mountPath: /data
+        name: "{{ .Release.Name }}-data"
+    {{- with .Values.snapshot.cleaner.resources }}
+    resources:
+      {{- toYaml . | trim | nindent 6 }}
+    {{- end }}
+  {{- end }}
 
 {{- if or (.Values.tls.enabled) (.Values.extraVolumes) }}
 volumes:
