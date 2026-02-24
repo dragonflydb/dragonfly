@@ -2451,6 +2451,17 @@ void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
+    if (absl::EqualsIgnoreCase(token, "HELP")) {
+      auto replier = [](RedisReplyBuilder* rb) {
+        string_view help_arr[] = {
+            "RM cursor [MATCH <glob>] [COUNT <count>]",
+            "    MATCH <glob> - pattern to match keys against",
+            "    COUNT <count> - number of keys to delete per call",
+        };
+        rb->SendSimpleStrArr(help_arr);
+      };
+      return cmd_cntx->ReplyWith(std::move(replier));
+    }
     return cmd_cntx->SendError("invalid cursor");
   }
 
