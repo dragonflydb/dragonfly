@@ -519,6 +519,8 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
+  auto cluster_config_before = cluster::ClusterConfig::Current();
+
   LOG(INFO) << "Takeover initiated, locking down the database.";
   absl::Duration timeout_dur = absl::Seconds(timeout);
   absl::Time end_time = absl::Now() + timeout_dur;
@@ -617,6 +619,11 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     return;
   }
 
+  auto cluster_config_after = cluster::ClusterConfig::Current();
+  if (cluster_config_after.get() != cluster_config_before.get()) {
+    LOG(INFO) << "ReconcileMasterSlots() early exit. Config already updated";
+    return;
+  }
   sf_->service().cluster_family().ReconcileMasterSlots(replica_ptr->id);
 }
 
