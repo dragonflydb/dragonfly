@@ -2463,7 +2463,7 @@ void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
       };
       return cmd_cntx->ReplyWith(std::move(replier));
     }
-    return cmd_cntx->SendError("invalid cursor");
+    return cmd_cntx->SendError("invalid cursor", kSyntaxErrType);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
