@@ -3700,6 +3700,11 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{maybe} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
               query_vec});
   EXPECT_THAT(resp, IntArg(0));
+
+  // Verify that empty prefilter return zero results
+  resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
+              "vec", query_vec});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(SearchFamilyTest, KnnHnswCosineDistanceCalculation) {
