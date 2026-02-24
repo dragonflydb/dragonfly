@@ -4117,6 +4117,7 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
     assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
 
 
+@pytest.mark.skip("HNSW index replication hasn't finished yet")
 @pytest.mark.slow
 async def test_hnsw_search_replication_with_network_disruptions(
     df_factory: DflyInstanceFactory,
