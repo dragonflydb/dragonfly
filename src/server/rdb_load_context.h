@@ -34,6 +34,13 @@ struct PendingHnswMetadata {
   search::HnswIndexMetadata metadata;
 };
 
+// Deferred HNSW graph nodes for restoration when shard counts differ.
+struct PendingHnswNodes {
+  std::string index_name;
+  std::string field_name;
+  std::vector<search::HnswNodeData> nodes;
+};
+
 // Shared context for collecting search-related state across multiple RdbLoader instances
 // during a single load session. Consumed by PerformPostLoad after all loaders finish.
 //
@@ -48,6 +55,13 @@ class RdbLoadContext {
   void AddPendingSynonymCommand(std::string cmd);
   void AddPendingIndexMapping(uint32_t shard_id, PendingIndexMapping mapping);
   void AddPendingHnswMetadata(PendingHnswMetadata metadata);
+  void AddPendingHnswNodes(PendingHnswNodes nodes);
+  void SetMasterShardCount(uint32_t count);
+
+  // Mark a specific index's HNSW restoration as failed. Its key mappings are removed in
+  // PerformPostLoad (after all loaders finish), avoiding a race with concurrent
+  // AddPendingIndexMapping calls. Other indices' mappings are preserved.
+  void MarkHnswRestoreFailed(std::string index_name);
 
   std::optional<search::HnswIndexMetadata> FindHnswMetadata(std::string_view index_name,
                                                             std::string_view field_name) const;
@@ -59,12 +73,25 @@ class RdbLoadContext {
  private:
   std::vector<std::string> TakePendingSynonymCommands();
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> TakePendingIndexMappings();
+  std::vector<PendingHnswNodes> TakePendingHnswNodes();
+
+  // Redistributes key mappings from master shard layout to replica shard layout,
+  // builds a global_id remap table, and remaps HNSW node global_ids accordingly.
+  // On failure (missing metadata, incomplete remap), the affected index mappings are removed
+  // so the index falls back to a full rebuild.
+  void RemapForDifferentShardCount(
+      absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
+      std::vector<PendingHnswNodes>& pending_nodes,
+      const std::vector<PendingHnswMetadata>& hnsw_metadata);
 
   mutable util::fb2::Mutex mu_;
   std::vector<std::string> pending_synonym_cmds_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> pending_index_mappings_
       ABSL_GUARDED_BY(mu_);
   std::vector<PendingHnswMetadata> pending_hnsw_metadata_ ABSL_GUARDED_BY(mu_);
+  std::vector<PendingHnswNodes> pending_hnsw_nodes_ ABSL_GUARDED_BY(mu_);
+  std::vector<std::string> failed_hnsw_indices_ ABSL_GUARDED_BY(mu_);
+  uint32_t master_shard_count_ ABSL_GUARDED_BY(mu_) = 0;
 };
 
 }  // namespace dfly
