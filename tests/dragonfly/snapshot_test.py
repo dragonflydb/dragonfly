@@ -234,7 +234,7 @@ async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_clien
     await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total + 1)
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron-set"})
 async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)

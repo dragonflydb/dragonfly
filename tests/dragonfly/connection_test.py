@@ -430,7 +430,7 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
         await pub
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({"proactor_threads": "4"})
 async def test_pubsub_busy_connections(df_server: DflyInstance):
     sleep = 60

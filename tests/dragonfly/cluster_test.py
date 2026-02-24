@@ -2887,7 +2887,7 @@ For each migration we start migration, wait for it to finish and once it is fini
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})

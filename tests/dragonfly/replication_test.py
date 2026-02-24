@@ -26,7 +26,7 @@ DISCONNECT_NORMAL_STABLE_SYNC = 2
 
 M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.slow]
-M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+M_STRESS = [pytest.mark.large, pytest.mark.opt_only]
 M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
@@ -3188,6 +3188,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
     assert len(lines) == 0
 
 
+@pytest.mark.large
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
