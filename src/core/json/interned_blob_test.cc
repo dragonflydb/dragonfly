@@ -120,20 +120,33 @@ void StringCheck(const InternedString& s, const char* ptr) {
 }  // namespace
 
 TEST_F(InternedBlobTest, StringPool) {
+  size_t hits = GetInternedStringStats().hits;
+  size_t misses = GetInternedStringStats().misses;
   const auto& pool = InternedString::GetPoolRef();
   EXPECT_TRUE(pool.empty());
   {
     const InternedString s1{"foobar"};
     StringCheck(s1, "foobar");
     EXPECT_EQ(pool.size(), 1);
+    misses += 1;
+    EXPECT_EQ(GetInternedStringStats().misses, misses);
+    EXPECT_EQ(GetInternedStringStats().pool_entries, 1);
     {
       const InternedString s2{"foobar"};
       StringCheck(s2, "foobar");
       EXPECT_EQ(pool.size(), 1);
+      EXPECT_EQ(GetInternedStringStats().misses, misses);
+      EXPECT_EQ(GetInternedStringStats().pool_entries, 1);
+      hits += 1;
+      EXPECT_EQ(GetInternedStringStats().hits, hits);
     }
     EXPECT_EQ(pool.size(), 1);
   }
   EXPECT_TRUE(pool.empty());
+  EXPECT_EQ(GetInternedStringStats().misses, misses);
+  EXPECT_EQ(GetInternedStringStats().pool_entries, 0);
+  EXPECT_EQ(GetInternedStringStats().pool_bytes, 0);
+  EXPECT_EQ(GetInternedStringStats().hits, hits);
 
   std::vector<InternedString> strings;
   for (auto i = 0; i < 1000; ++i) {
@@ -141,13 +154,21 @@ TEST_F(InternedBlobTest, StringPool) {
   }
 
   EXPECT_EQ(pool.size(), 1000);
+  EXPECT_EQ(GetInternedStringStats().pool_entries, 1000);
+  misses += 1000;
+  EXPECT_EQ(GetInternedStringStats().misses, misses);
   strings.clear();
   EXPECT_TRUE(pool.empty());
+  EXPECT_EQ(GetInternedStringStats().pool_entries, 0);
+  EXPECT_EQ(GetInternedStringStats().pool_bytes, 0);
 
   for (auto i = 0; i < 1000; ++i) {
     strings.emplace_back("zyx");
   }
   EXPECT_EQ(pool.size(), 1);
+  EXPECT_EQ(GetInternedStringStats().pool_entries, 1);
+  hits += 999;
+  EXPECT_EQ(GetInternedStringStats().hits, hits);
   strings.clear();
   EXPECT_TRUE(pool.empty());
 
