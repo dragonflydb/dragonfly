@@ -2617,7 +2617,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
-      << CI{"RM", CO::NO_AUTOJOURNAL, -2, 0, 0, acl::kRm}.HFUNC(Rm)
+      << CI{"RM", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 0, 0, acl::kRm}.HFUNC(Rm)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
