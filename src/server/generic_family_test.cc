@@ -1677,6 +1677,11 @@ TEST_F(GenericFamilyTest, Rm) {
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec()[1], IntArg(0));
 
+  // With TYPE arg — still parses OK
+  resp = Run({"rm", "0", "type", "string"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
   // With COUNT arg — still parses OK
   resp = Run({"rm", "0", "match", "foo*", "count", "100"});
   ASSERT_THAT(resp, ArrLen(2));

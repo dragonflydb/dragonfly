@@ -2454,8 +2454,9 @@ void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
       auto replier = [](RedisReplyBuilder* rb) {
         string_view help_arr[] = {
-            "RM cursor [MATCH <glob>] [COUNT <count>]",
+            "RM cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>]",
             "    MATCH <glob> - pattern to match keys against",
+            "    TYPE <type> - type of values to match (string, list, set, zset, hash, stream)",
             "    COUNT <count> - number of keys to delete per call",
         };
         rb->SendSimpleStrArr(help_arr);
