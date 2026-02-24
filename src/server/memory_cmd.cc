@@ -161,9 +161,10 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
     used += count * get<3>(k_v.first);
   }
 
-  absl::StrAppend(&str, "total reserved: ", reserved, ", committed: ", committed, ", used: ", used,
-                  " fragmentation waste: ",
-                  (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
+  absl::StrAppend(
+      &str, "total reserved: ", reserved, ", committed: ", committed, ", used: ", used,
+      " fragmentation waste: ",
+      100.0 * (committed > used ? committed - used : 0) / std::max<size_t>(1UL, committed), "%\n");
   const uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
