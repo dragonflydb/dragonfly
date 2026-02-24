@@ -503,27 +503,15 @@ TEST_F(DashTest, MergeFailureRollback) {
     uint64_t hash = dt_.DoHash(key);
     auto it = src->FindIt(hash, EqTo(key));
     EXPECT_TRUE(it.found());
-    // Bucket layout in keep segment changes during failed merge rollback.
-    // InsertUniq can displace existing items in the keep segment (via MoveToOther)
-    // to make room for items being moved from buddy. The on_move_cb passed to
-    // InsertUniq is empty [](auto&&...){}  so these displacements are not tracked.
-    // During rollback, only buddy->keep moves are reversed, but displaced items
-    // within keep are NOT restored to their original positions.
-    // Is it really a problem if the layout changed or data parity is enough ?
-    // auto [expected_index, expected_slot] = keep_positions[key];
-    // EXPECT_EQ(it.index, expected_index);
-    // EXPECT_EQ(it.slot, expected_slot);
   }
 
   for (auto key : buddy_keys) {
+    // Bucket layout in keep segment changes during failed merge rollback.
+    // InsertUniq can displace existing items in the keep segment
+    // to make room for items being moved from buddy.
     uint64_t hash = dt_.DoHash(key);
     auto it = buddy->FindIt(hash, EqTo(key));
     EXPECT_TRUE(it.found());
-    // Buddy segment positions should be preserved since we track buddy->keep moves 1-1
-    // and reverse them exactly during rollback.
-    auto [expected_index, expected_slot] = buddy_positions[key];
-    EXPECT_EQ(it.index, expected_index);
-    EXPECT_EQ(it.slot, expected_slot);
   }
 
   EXPECT_FALSE(merge_succeeded);

@@ -245,8 +245,8 @@ class DashTable : public detail::DashTableBase {
       }
     };
 
-    std::vector<MovedRecords> moved;
-    moved.reserve(buddy->SlowSize());
+    // Decrease depth (merge back to parent)
+    keep->set_local_depth(keep->local_depth() - 1);
 
     // Move all items from buddy to keep
     buddy->TraverseAll([&](const auto& it) {
@@ -266,25 +266,20 @@ class DashTable : public detail::DashTableBase {
         return;
       }
 
-      moved.emplace_back((it.index << 8) | it.slot, (res.index << 8) | res.slot, hash);
+      // Clear the slot in buddy so rollback can reuse the space
+      src_bucket.Delete(it.slot);
     });
 
     if (should_rollback) {
-      for (const auto& rec : moved) {
-        auto& keep_bucket = keep->GetBucket(rec.dst_bid());
-        auto& buddy_bucket = buddy->GetBucket(rec.src_bid());
-
-        buddy_bucket.key[rec.src_slot()] = std::move(keep_bucket.key[rec.dst_slot()]);
-        buddy_bucket.value[rec.src_slot()] = std::move(keep_bucket.value[rec.dst_slot()]);
-        // Properly delete to handle metadata, etc
-        keep->Delete({rec.dst_bid(), rec.dst_slot()}, rec.hash);
-      }
+      auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
+      keep->Split(hash_fn, buddy,
+                  [&](uint32_t segment_from, detail::PhysicalBid from, uint32_t segment_to,
+                      detail::PhysicalBid to) {
+                    // no-op
+                  });
 
       return false;
     }
-
-    // Decrease depth (merge back to parent)
-    keep->set_local_depth(keep->local_depth() - 1);
 
     // Same as Split()
     uint32_t buddy_chunk_size = 1u << (global_depth_ - buddy->local_depth());
