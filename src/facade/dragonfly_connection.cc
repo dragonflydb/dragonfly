@@ -1544,7 +1544,7 @@ void Connection::SquashPipeline() {
       conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
     }
 
-    ReleaseParsedCommand(current, result.account_in_stats);
+    ReleaseParsedCommand(current, result.account_in_stats /* is_pipelined */);
     current = next;
   }
   parsed_head_ = current;

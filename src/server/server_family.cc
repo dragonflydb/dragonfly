@@ -1628,6 +1628,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipelined_blocking_commands_total", "",
+                            m.coordinator_stats.blocking_commands_in_pipelines, MetricType::COUNTER,
+                            &resp->body());
 
   // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
   // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
@@ -3178,7 +3181,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("pipeline_throttle_total", conn_stats.pipeline_throttle_count);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
-    append("pipelined_blocking_cmd_total", m.coordinator_stats.blocking_commands_in_pipelines);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
     append("connection_recv_provided_calls", conn_stats.num_recv_provided_calls);

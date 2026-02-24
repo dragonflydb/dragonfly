@@ -32,6 +32,7 @@ class OkService : public ServiceInterface {
     cmd->rb()->SendOk();
     return DispatchResult::OK;
   }
+
   DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen, unsigned count,
                                           SinkReplyBuilder* builder,
                                           ConnectionContext* cntx) final {
