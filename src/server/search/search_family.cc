@@ -1090,11 +1090,13 @@ vector<SearchResult> SearchGlobalHnswIndex(
   // Search HNSW index
   std::vector<std::pair<float, search::GlobalDocId>> knn_results;
 
-  if (prefilter_global_docs_ids)
+  if (prefilter_global_docs_ids) {
+    VLOG(1) << "Searching HNSW index with prefilter size: " << prefilter_global_docs_ids->size();
     knn_results =
         index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
-  else
+  } else {
     knn_results = index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+  }
 
   std::vector<SerializedSearchDoc> knn_search_serialized_docs;
   knn_search_serialized_docs.reserve(knn_results.size());
@@ -1628,8 +1630,11 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
+  const bool knn_has_prefilter = knn && knn->HasPreFilter();
+  bool empty_prefilter_result = true;
+
   // If the query does not contain knn component, or it is a hybrid query
-  if (!knn || (knn && knn->HasPreFilter())) {
+  if (!knn || knn_has_prefilter) {
     cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
         docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
@@ -1642,12 +1647,13 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(string{index_name} + ": no such index");
 
     for (const auto& res : docs) {
+      empty_prefilter_result &= res.docs.empty();
       if (res.error)
         return cmd_cntx->SendError(*res.error);
     }
   }
 
-  if (knn_node) {
+  if (knn_node && (!knn_has_prefilter || !empty_prefilter_result)) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, knn->field);
     if (!hnsw_index) {
       return builder->SendError(string{index_name} + ": no such global hnsw index");

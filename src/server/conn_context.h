@@ -6,10 +6,10 @@
 
 #include <absl/container/flat_hash_set.h>
 
-#include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
 #include "facade/reply_mode.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 #include "server/tx_base.h"
 #include "server/version.h"
@@ -328,8 +328,8 @@ class ConnectionContext : public facade::ConnectionContext {
                          // of it as a state for the connection
   bool journal_emulated = false;  // whether it is used to dispatch journal commands
 
-  // Reference to a FlowInfo for this connection if from a master to a replica.
-  FlowInfo* replication_flow = nullptr;
+  // Reference to a master-side FlowInfo for this connection if it is a replication connection.
+  FlowInfo* master_repl_flow = nullptr;
 
   // The related connection is bound to main listener or serves the memcached protocol
   bool has_main_or_memcache_listener = false;

@@ -434,11 +434,17 @@ int DragonflyHashCommand(lua_State* lua) {
   lua_remove(lua, 1);
   lua_remove(lua, 1);
 
-  // Compute key hash, we assume it's always second after the command
+  // Compute key hash; for MGET hash all key arguments, otherwise just the first
   {
-    size_t len;
-    const char* key = lua_tolstring(lua, 2, &len);
-    hash = XXH64(key, len, hash);
+    size_t cmd_len;
+    const char* cmd = lua_tolstring(lua, 1, &cmd_len);
+    int top = lua_gettop(lua);
+    int key_end = absl::EqualsIgnoreCase(absl::string_view(cmd, cmd_len), "mget") ? top : 2;
+    for (int i = 2; i <= key_end; ++i) {
+      size_t len;
+      const char* key = lua_tolstring(lua, i, &len);
+      hash = XXH64(key, len, hash);
+    }
   }
 
   // Collect output into custom string collector

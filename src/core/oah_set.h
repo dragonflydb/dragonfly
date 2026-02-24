@@ -129,7 +129,7 @@ class OAHSet {  // Open Addressing Hash Set
     // TODO maybe we should split memory allocation and copying for the case when we can't add it
     // into set
     OAHEntry entry(str, at);
-    entry.SetHash(hash, capacity_log_, kShiftLog);
+    SetEntryHash(entry, hash);
 
     if (FastCheck(bucket_id, str, hash)) {
       return false;
@@ -310,7 +310,7 @@ class OAHSet {  // Open Addressing Hash Set
     uint64_t hash = Hash(member);
     auto bucket_id = BucketId(hash, capacity_log_);
 
-    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    const auto ext_hash = CalcExtHash(hash, capacity_log_);
 
     // fast check
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
@@ -380,6 +380,14 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
  private:
+  static uint64_t Hash(std::string_view str) {
+    constexpr XXH64_hash_t kHashSeed = 24061983;
+    return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+  }
+
+  static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
+    return hash >> (64 - capacity_log);
+  }
   // was Grow in StringSet
   void Rehash(uint32_t prev_capacity_log, uint32_t prev_size) {
     if (prev_size == 0) {
@@ -396,8 +404,7 @@ class OAHSet {  // Open Addressing Hash Set
       auto bucket = std::move(entries_[bucket_id]);
       for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
         if (bucket[pos]) {
-          auto new_bucket_id =
-              bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
+          auto new_bucket_id = RehashEntry(bucket[pos], bucket_id, prev_capacity_log);
           new_bucket_id = FindEmptyAround(new_bucket_id);
           ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
         }
@@ -410,8 +417,7 @@ class OAHSet {  // Open Addressing Hash Set
       auto& bucket = old_buckets[bucket_id];
       for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
         if (bucket[pos]) {
-          auto new_bucket_id =
-              bucket[pos].Rehash(bucket_id, prev_capacity_log, capacity_log_, kShiftLog);
+          auto new_bucket_id = RehashEntry(bucket[pos], bucket_id, prev_capacity_log);
           new_bucket_id = FindEmptyAround(new_bucket_id);
           ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
         }
@@ -439,7 +445,7 @@ class OAHSet {  // Open Addressing Hash Set
 
         auto hash = Hash(bucket[pos].Key());
         auto new_bucket_id = BucketId(hash, capacity_log_);
-        bucket[pos].SetHash(hash, capacity_log_, kShiftLog);
+        SetEntryHash(bucket[pos], hash);
         new_bucket_id = FindEmptyAround(new_bucket_id);
         ptr_vectors_alloc_used_ += entries_[new_bucket_id].Insert(std::move(bucket[pos]));
       }
@@ -456,7 +462,7 @@ class OAHSet {  // Open Addressing Hash Set
   }
 
   bool FastCheck(const uint32_t bid, std::string_view str, uint64_t hash) {
-    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    const auto ext_hash = CalcExtHash(hash, capacity_log_);
     const auto ext_bid = GetExtensionPoint(bid);
 
     bool res = true;
@@ -474,8 +480,7 @@ class OAHSet {  // Open Addressing Hash Set
         }
       }
       if (!res) {
-        auto pos = entries_[ext_bid].Find(str, ext_hash, capacity_log_, kShiftLog, &size_,
-                                          &obj_alloc_used_, time_now_);
+        auto pos = FindInBucket(entries_[ext_bid], str, ext_hash);
         if (pos) {
           return true;
         }
@@ -490,7 +495,7 @@ class OAHSet {  // Open Addressing Hash Set
   bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
     if (!entry.IsVector()) {
       entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-      if (entry.CheckBucketAffiliation(bucket_id, capacity_log_, kShiftLog)) {
+      if (CheckBucketAffiliation(entry, bucket_id)) {
         cb(entry.Key());
         return true;
       }
@@ -499,7 +504,7 @@ class OAHSet {  // Open Addressing Hash Set
       bool result = false;
       for (auto& el : arr) {
         el.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
-        if (el.CheckBucketAffiliation(bucket_id, capacity_log_, kShiftLog)) {
+        if (CheckBucketAffiliation(el, bucket_id)) {
           cb(el.Key());
           result = true;
         }
@@ -526,13 +531,33 @@ class OAHSet {  // Open Addressing Hash Set
     return bid;
   }
 
+  // Searches for a string within a bucket entry (which may be a single entry or a vector).
+  // Returns the position within the bucket if found, or std::nullopt if not found.
+  std::optional<uint32_t> FindInBucket(OAHEntry& bucket, std::string_view str, uint64_t ext_hash) {
+    if (bucket.IsEntry()) {
+      bucket.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+      return CheckExtendedHash(bucket, ext_hash) && bucket.Key() == str ? 0
+                                                                        : std::optional<uint32_t>();
+    }
+    if (bucket.IsVector()) {
+      auto& vec = bucket.AsVector();
+      auto raw_arr = vec.Raw();
+      for (size_t i = 0, size = vec.Size(); i < size; ++i) {
+        raw_arr[i].ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);
+        if (CheckExtendedHash(raw_arr[i], ext_hash) && raw_arr[i].Key() == str) {
+          return i;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
   // return bucket_id and position otherwise max
   iterator FindInternal(uint32_t bid, std::string_view str, uint64_t hash) {
-    const auto ext_hash = OAHEntry::CalcExtHash(hash, capacity_log_, kShiftLog);
+    const auto ext_hash = CalcExtHash(hash, capacity_log_);
     for (uint32_t i = 0; i < kDisplacementSize; i++) {
       const uint32_t bucket_id = bid + i;
-      auto pos = entries_[bucket_id].Find(str, ext_hash, capacity_log_, kShiftLog, &size_,
-                                          &obj_alloc_used_, time_now_);
+      auto pos = FindInBucket(entries_[bucket_id], str, ext_hash);
       if (pos) {
         return iterator{this, bucket_id, *pos};
       }
@@ -544,6 +569,80 @@ class OAHSet {  // Open Addressing Hash Set
   static constexpr std::uint32_t kShiftLog = 2;                         // TODO make template
   static constexpr std::uint32_t kMinCapacityLog = kShiftLog;           // should be >= ShiftLog
   static constexpr std::uint32_t kDisplacementSize = (1 << kShiftLog);  // TODO check
+
+  static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log) {
+    const uint32_t start_hash_bit = capacity_log > kShiftLog ? capacity_log - kShiftLog : 0;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - OAHEntry::kExtHashSize;
+    return (hash >> ext_hash_shift) & OAHEntry::kExtHashMask;
+  }
+
+  uint64_t SetEntryHash(OAHEntry& entry, uint64_t hash) {
+    uint64_t ext_hash = CalcExtHash(hash, capacity_log_);
+    entry.SetExtHash(ext_hash);
+    return ext_hash;
+  }
+
+  bool CheckBucketAffiliation(OAHEntry& entry, uint32_t bucket_id) {
+    assert(!entry.IsVector());
+    if (entry.Empty())
+      return false;
+    uint32_t bucket_id_hash_part = capacity_log_ > kShiftLog ? kShiftLog : capacity_log_;
+    uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
+    bucket_id &= bucket_mask;
+    auto stored_hash = entry.GetHash();
+    if (!stored_hash) {
+      stored_hash = SetEntryHash(entry, Hash(entry.Key()));
+    }
+    uint32_t stored_bucket_id = stored_hash >> (OAHEntry::kExtHashSize - bucket_id_hash_part);
+    return bucket_id == stored_bucket_id;
+  }
+
+  bool CheckExtendedHash(OAHEntry& entry, uint64_t ext_hash) {
+    auto stored_hash = entry.GetHash();
+    if (!stored_hash) {
+      if (entry.IsEntry()) {
+        stored_hash = SetEntryHash(entry, Hash(entry.Key()));
+      } else {
+        return false;
+      }
+    }
+    return stored_hash == ext_hash;
+  }
+
+  // return new bucket_id
+  uint32_t RehashEntry(OAHEntry& entry, uint32_t current_bucket_id, uint32_t prev_capacity_log) {
+    assert(!entry.IsVector());
+    auto stored_hash = entry.GetHash();
+
+    const uint32_t logs_diff = capacity_log_ - prev_capacity_log;
+    const uint32_t prev_significant_bits =
+        prev_capacity_log > kShiftLog ? kShiftLog : prev_capacity_log;
+    const uint32_t needed_hash_bits = prev_significant_bits + logs_diff;
+
+    if (!stored_hash || needed_hash_bits > OAHEntry::kExtHashSize) {
+      auto hash = Hash(entry.Key());
+      SetEntryHash(entry, hash);
+      return BucketId(hash, capacity_log_);
+    }
+
+    const uint32_t real_bucket_end =
+        stored_hash >> (OAHEntry::kExtHashSize - prev_significant_bits);
+    const uint32_t prev_shift_mask = (1 << prev_significant_bits) - 1;
+    const uint32_t curr_shift = (current_bucket_id - real_bucket_end) & prev_shift_mask;
+    const uint32_t prev_bucket_mask = (1 << prev_capacity_log) - 1;
+    const uint32_t base_bucket_id = (current_bucket_id - curr_shift) & prev_bucket_mask;
+
+    const uint32_t last_bits_mask = (1 << logs_diff) - 1;
+    const uint32_t stored_hash_shift = OAHEntry::kExtHashSize - needed_hash_bits;
+    const uint32_t last_bits = (stored_hash >> stored_hash_shift) & last_bits_mask;
+    const uint32_t new_bucket_id = (base_bucket_id << logs_diff) | last_bits;
+
+    entry.ClearHash();  // the cache is invalid after rehash operation
+
+    assert(BucketId(Hash(entry.Key()), capacity_log_) == new_bucket_id);
+
+    return new_bucket_id;
+  }
 
   mutable size_t obj_alloc_used_ = 0;
   mutable size_t ptr_vectors_alloc_used_ = 0;

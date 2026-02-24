@@ -37,7 +37,7 @@ namespace dfly {
 
 namespace detail {
 
-class SaveStagesController;
+struct SaveStagesController;
 class SnapshotStorage;
 
 }  // namespace detail
@@ -50,6 +50,7 @@ class DflyCmd;
 class Replica;
 class Service;
 class ScriptMgr;
+class RdbLoadContext;
 
 struct ReplicaRoleInfo {
   std::string id;
@@ -382,7 +383,7 @@ class ServerFamily {
   // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
   // may use them for consistency checks.
   std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                          LoadOptions* load_opts);
+                          LoadOptions* load_opts, RdbLoadContext* load_context);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 

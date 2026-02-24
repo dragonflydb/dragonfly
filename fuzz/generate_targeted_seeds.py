@@ -6,17 +6,20 @@ Fuzzing terminology used in this file:
            commands encoded in RESP wire format (see fuzz/seeds/resp/*.resp for examples).
            The fuzzer starts from these seeds and mutates them to explore code paths.
   - Targeted seed:  A seed crafted specifically to exercise code paths changed in a PR.
-           We send the PR diff + a few existing seeds (as format examples) to an LLM, and
-           it generates new seeds that target the changed code.
+           We send the PR diff + all existing seeds to an LLM, and it generates new seeds
+           that target the changed code.
   - Focus commands:  A list of command names (e.g. ["SET", "GET"]) that the
            AFL++ mutator should prefer. When set, the mutator picks these commands ~70%
            of the time instead of choosing uniformly from all known commands.
 
 Flow:
   1. Read unified diff from stdin, extract changed C++ file paths.
-  2. Load a few existing seed files as format examples for the LLM.
-  3. Call Claude API: send the diff + examples, get back JSON with seeds + focus commands.
-  4. Fix RESP encoding (LLMs miscount byte lengths), validate, write to output dir.
+  2. Load all existing seed files so the LLM knows what's already covered.
+  3. Call Claude API: send the diff + seeds, get back JSON with command arrays + focus commands.
+  4. Encode commands as RESP wire format, write to output dir.
+
+The LLM returns commands as plain arrays (e.g. ["SET", "key", "value"]) and we handle
+RESP encoding ourselves — this avoids JSON escaping issues and byte-count mismatches.
 
 When ANTHROPIC_API_KEY is not available (e.g. fork PRs), exits with no output and
 the fuzzer runs with the existing seed corpus as-is.
@@ -32,16 +35,13 @@ import os
 import re
 import sys
 
-# Max diff lines to send to the LLM (keeps cost/latency down)
-MAX_DIFF_LINES = 8000
-
-# How many existing seed files to include as format examples
-NUM_EXAMPLE_SEEDS = 5
+# Max diff lines to send to the LLM (Haiku handles ~200K tokens, so this is generous)
+MAX_DIFF_LINES = 20000
 
 LLM_SYSTEM_PROMPT = """\
 You are a fuzzing expert for Dragonfly, a Redis-compatible in-memory database written in C++.
 
-Your job: given a code diff and example seed files, generate NEW fuzzing seeds that \
+Your job: given a code diff and existing seed files, generate NEW fuzzing seeds that \
 target the changed code paths. You also return a list of Redis commands to focus on.
 
 ## Dragonfly architecture (for context)
@@ -56,16 +56,6 @@ target the changed code paths. You also return a list of Redis commands to focus
 - src/server/search/ — search module (FT.* commands)
 - src/server/tiering/ — SSD tiering
 
-## RESP protocol format
-Each command is a RESP array:
-*<N>\\r\\n     (N = number of arguments including command name)
-$<len>\\r\\n   (length of next argument)
-<arg>\\r\\n    (the argument itself)
-...repeated for each argument...
-
-Example — SET mykey myvalue:
-*3\\r\\n$3\\r\\nSET\\r\\n$5\\r\\nmykey\\r\\n$7\\r\\nmyvalue\\r\\n
-
 ## What to generate
 Based on the diff, figure out:
 1. What commands are affected (new, modified, or impacted by infrastructure changes)
@@ -77,10 +67,23 @@ Return valid JSON (no markdown, no explanation):
 {
   "focus_commands": ["CMD1", "CMD2", ...],
   "seeds": [
-    {"name": "pr_something.resp", "content": "*3\\r\\n$3\\r\\nSET\\r\\n..."},
-    ...
+    {
+      "name": "pr_something.resp",
+      "commands": [
+        ["SET", "mykey", "myvalue"],
+        ["GET", "mykey"]
+      ]
+    }
   ]
 }
+
+Each "commands" entry is a list of Redis commands. Each command is a list of strings \
+(command name + arguments). We handle RESP wire encoding — just give plain strings.
+
+CRITICAL: Output must be valid JSON. Do NOT use code expressions like "x" * 1024 or \
+string concatenation. For long values write actual repeated characters inline, e.g. \
+"xxxxxxxxxx" (just the literal string). Keep values short (under 100 chars) — \
+the fuzzer will mutate and grow them.
 
 Rules for seeds:
 - 3-10 commands per seed, forming a logical sequence
@@ -89,7 +92,7 @@ Rules for seeds:
 - Include at least one seed wrapping commands in MULTI/EXEC
 - Generate 3-8 seeds total
 - Prefix all names with "pr_"
-- Use literal \\r\\n in content strings"""
+"""
 
 
 def extract_changed_files(diff_text):
@@ -102,48 +105,17 @@ def extract_changed_files(diff_text):
     return sorted(set(files))
 
 
-def load_example_seeds(seeds_dir, count=NUM_EXAMPLE_SEEDS):
-    """Load existing seed files to show the LLM the expected RESP format.
+def load_example_seeds(seeds_dir):
+    """Load ALL existing seed files to show the LLM what's already covered.
 
-    We pick a diverse set covering different command families so the LLM
-    understands the format and can generate similar files for new commands.
+    We send every seed so the LLM has full context about existing coverage
+    and can generate complementary seeds for new/changed code paths.
     """
-    # Pick seeds that cover different command families
-    preferred = [
-        "string_ops.resp",
-        "hash_ops.resp",
-        "list_ops.resp",
-        "transaction.resp",
-        "json.resp",
-        "set_ops.resp",
-        "zset_ops.resp",
-        "stream_ops.resp",
-    ]
-
     examples = []
-    seen = set()
-
-    # First try preferred files
-    for name in preferred:
-        path = os.path.join(seeds_dir, name)
-        if os.path.isfile(path) and name not in seen:
-            with open(path) as f:
-                examples.append({"name": name, "content": f.read()})
-            seen.add(name)
-        if len(examples) >= count:
-            break
-
-    # Fill remaining from directory
-    if len(examples) < count:
-        for path in sorted(glob.glob(os.path.join(seeds_dir, "*.resp"))):
-            name = os.path.basename(path)
-            if name not in seen:
-                with open(path) as f:
-                    examples.append({"name": name, "content": f.read()})
-                seen.add(name)
-            if len(examples) >= count:
-                break
-
+    for path in sorted(glob.glob(os.path.join(seeds_dir, "*.resp"))):
+        name = os.path.basename(path)
+        with open(path) as f:
+            examples.append({"name": name, "content": f.read()})
     return examples
 
 
@@ -155,53 +127,21 @@ def truncate_diff(diff_text, max_lines=MAX_DIFF_LINES):
     return "".join(lines[:max_lines]), max_lines
 
 
-def validate_resp(content):
-    """Validate that content is parseable as RESP protocol."""
-    pos = 0
-    data = content.encode() if isinstance(content, str) else content
-    found_any = False
+def encode_resp(commands):
+    """Encode a list of commands as RESP wire format.
 
-    while pos < len(data):
-        while pos < len(data) and data[pos : pos + 1] in (b"\r", b"\n", b" "):
-            pos += 1
-        if pos >= len(data):
-            break
-        if data[pos : pos + 1] != b"*":
-            return False
-
-        end = data.find(b"\r\n", pos)
-        if end < 0:
-            return False
-        try:
-            nargs = int(data[pos + 1 : end])
-        except ValueError:
-            return False
-        if nargs < 0:
-            return False
-        pos = end + 2
-
-        for _ in range(nargs):
-            if pos >= len(data) or data[pos : pos + 1] != b"$":
-                return False
-            end = data.find(b"\r\n", pos)
-            if end < 0:
-                return False
-            try:
-                slen = int(data[pos + 1 : end])
-            except ValueError:
-                return False
-            pos = end + 2
-            if slen < 0:
-                continue
-            if pos + slen + 2 > len(data):
-                return False
-            if data[pos + slen : pos + slen + 2] != b"\r\n":
-                return False
-            pos += slen + 2
-
-        found_any = True
-
-    return found_any
+    Each command is a list of string arguments, e.g. ["SET", "key", "value"].
+    Returns bytes in RESP format: *N\\r\\n$len\\r\\narg\\r\\n...
+    """
+    result = bytearray()
+    for cmd in commands:
+        if not cmd:
+            continue
+        result.extend(b"*%d\r\n" % len(cmd))
+        for arg in cmd:
+            arg_bytes = arg.encode() if isinstance(arg, str) else arg
+            result.extend(b"$%d\r\n%s\r\n" % (len(arg_bytes), arg_bytes))
+    return bytes(result)
 
 
 def call_llm(diff_text, changed_files, example_seeds, api_key, model):
@@ -214,13 +154,13 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
 
     truncated, num_lines = truncate_diff(diff_text)
 
-    # Build examples section
+    # Build examples section — show existing seeds so the LLM knows what's covered
     examples_text = ""
     for ex in example_seeds:
         examples_text += "--- %s ---\n%s\n\n" % (ex["name"], ex["content"].rstrip())
 
     prompt = (
-        "Here are existing seed files for reference (RESP format):\n\n"
+        "Here are ALL existing seed files (RESP wire format) so you know what's already covered:\n\n"
         "%s\n"
         "Now analyze this diff and generate targeted fuzzing seeds.\n\n"
         "Changed files: %s\n\n"
@@ -238,81 +178,27 @@ def call_llm(diff_text, changed_files, example_seeds, api_key, model):
 
     text = response.content[0].text.strip()
 
-    # Handle markdown code blocks
+    # Try to extract JSON from the response (LLMs sometimes wrap in markdown)
     json_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     if json_match:
         text = json_match.group(1)
 
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
 
-
-def normalize_resp_content(content):
-    """Normalize LLM-generated RESP content to have proper \\r\\n."""
-    if not isinstance(content, str):
-        return content
-    content = content.replace("\\r\\n", "\r\n")
-    if "\r\n" not in content and "\n" in content:
-        content = content.replace("\n", "\r\n")
-    return content
-
-
-def fix_resp_content(content):
-    """Re-encode RESP content, fixing both *N array counts and $len bulk string lengths.
-
-    LLMs frequently miscount byte lengths and argument counts. This parses the
-    intent (command names + argument payloads) and re-encodes with correct values.
-    """
-    data = content.encode() if isinstance(content, str) else content
-    commands = []
-    pos = 0
-
-    while pos < len(data):
-        # Skip whitespace between commands
-        while pos < len(data) and data[pos : pos + 1] in (b"\r", b"\n", b" "):
-            pos += 1
-        if pos >= len(data):
-            break
-        if data[pos : pos + 1] != b"*":
-            pos += 1
-            continue
-
-        end = data.find(b"\r\n", pos)
-        if end < 0:
-            break
+    # Try to find the outermost { ... } and parse that
+    brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if brace_match:
         try:
-            nargs = int(data[pos + 1 : end])
-        except ValueError:
-            break
-        pos = end + 2
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
 
-        args = []
-        for _ in range(nargs):
-            if pos >= len(data) or data[pos : pos + 1] != b"$":
-                break
-            end = data.find(b"\r\n", pos)
-            if end < 0:
-                break
-            pos = end + 2
-            # Find actual payload by looking for next \r\n
-            payload_end = data.find(b"\r\n", pos)
-            if payload_end < 0:
-                args.append(data[pos:])
-                pos = len(data)
-                break
-            args.append(data[pos:payload_end])
-            pos = payload_end + 2
-
-        if args:
-            commands.append(args)
-
-    # Re-encode with correct counts and lengths
-    result = bytearray()
-    for cmd in commands:
-        result.extend(b"*%d\r\n" % len(cmd))
-        for arg in cmd:
-            result.extend(b"$%d\r\n%s\r\n" % (len(arg), arg))
-
-    return bytes(result)
+    # Log raw response for debugging and raise
+    print("Raw LLM response (first 2000 chars):\n%s" % text[:2000], file=sys.stderr)
+    raise ValueError("Could not parse LLM response as JSON")
 
 
 def write_output(output_dir, focus_commands, seeds):
@@ -326,17 +212,12 @@ def write_output(output_dir, focus_commands, seeds):
 
     written = 0
     for seed in seeds:
-        name = seed.get("name", "pr_seed_%d.resp" % written)
+        name = seed.get("name") or "pr_seed_%d.resp" % written
         if not name.endswith(".resp"):
             name += ".resp"
         path = os.path.join(output_dir, name)
-        content = seed["content"]
-        if isinstance(content, bytes):
-            with open(path, "wb") as f:
-                f.write(content)
-        else:
-            with open(path, "w", newline="") as f:
-                f.write(content)
+        with open(path, "wb") as f:
+            f.write(seed["content"])
         written += 1
 
     print("Wrote %d seed files to %s" % (written, output_dir), file=sys.stderr)
@@ -384,7 +265,7 @@ def main():
         seeds_dir = os.path.join(script_dir, "seeds", "resp")
 
     example_seeds = load_example_seeds(seeds_dir)
-    print("Loaded %d example seeds" % len(example_seeds), file=sys.stderr)
+    print("Loaded %d existing seeds" % len(example_seeds), file=sys.stderr)
 
     try:
         result = call_llm(diff_text, changed_files, example_seeds, api_key, args.model)
@@ -400,24 +281,33 @@ def main():
     if not isinstance(focus_commands, list):
         focus_commands = []
 
-    # Extract and validate seeds
+    # Encode command arrays as RESP and collect valid seeds
     valid_seeds = []
     for s in result.get("seeds", []):
-        if not isinstance(s, dict) or "content" not in s:
+        if not isinstance(s, dict) or "commands" not in s:
             continue
-        s["content"] = normalize_resp_content(s["content"])
-        s["content"] = fix_resp_content(s["content"])
-        if validate_resp(s["content"]):
-            valid_seeds.append(s)
+        commands = s["commands"]
+        if not isinstance(commands, list) or not commands:
+            continue
+        # Filter out non-list entries and ensure all args are strings
+        clean_commands = []
+        for cmd in commands:
+            if isinstance(cmd, list) and cmd:
+                clean_commands.append([str(arg) for arg in cmd])
+        if not clean_commands:
+            continue
+        content = encode_resp(clean_commands)
+        if content:
+            valid_seeds.append({"name": s.get("name") or "", "content": content})
         else:
-            print("Discarding invalid seed: %s" % s.get("name", "?"), file=sys.stderr)
+            print("Discarding empty seed: %s" % s.get("name", "?"), file=sys.stderr)
 
     if not valid_seeds and not focus_commands:
         print("LLM returned no usable output", file=sys.stderr)
         return
 
     print(
-        "LLM generated %d valid seeds, %d focus commands" % (len(valid_seeds), len(focus_commands)),
+        "Generated %d seeds, %d focus commands" % (len(valid_seeds), len(focus_commands)),
         file=sys.stderr,
     )
     write_output(args.output_dir, focus_commands, valid_seeds)

@@ -205,14 +205,9 @@ void MemoryCmd::Run(CmdArgList args) {
 namespace {
 
 struct ConnectionMemoryUsage {
-  size_t connection_count = 0;
   size_t connection_size = 0;
-  size_t pipelined_bytes = 0;
-  io::IoBuf::MemoryUsage connections_memory;
-
   size_t replication_connection_count = 0;
   size_t replication_connection_size = 0;
-  io::IoBuf::MemoryUsage replication_memory;
 };
 
 ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
@@ -227,44 +222,23 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
       auto* dfly_conn = static_cast<facade::Connection*>(conn);
       auto* cntx = static_cast<ConnectionContext*>(dfly_conn->cntx());
 
-      auto usage = dfly_conn->GetMemoryUsage();
-      if (cntx == nullptr || cntx->replication_flow == nullptr) {
-        mems[thread_index].connection_count++;
-        mems[thread_index].connection_size += usage.mem;
-        mems[thread_index].connections_memory += usage.buf_mem;
+      size_t usage = dfly_conn->GetMemoryUsage();
+      if (cntx == nullptr || cntx->master_repl_flow == nullptr) {
+        mems[thread_index].connection_size += usage;
       } else {
         mems[thread_index].replication_connection_count++;
-        mems[thread_index].replication_connection_size += usage.mem;
-        mems[thread_index].replication_memory += usage.buf_mem;
+        mems[thread_index].replication_connection_size += usage;
       }
     });
   }
 
-  shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
-    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_cmd_cache_bytes;
-    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.dispatch_queue_bytes;
-    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_queue_bytes;
-  });
-
   ConnectionMemoryUsage mem;
   for (const auto& m : mems) {
-    mem.connection_count += m.connection_count;
-    mem.pipelined_bytes += m.pipelined_bytes;
     mem.connection_size += m.connection_size;
-    mem.connections_memory += m.connections_memory;
     mem.replication_connection_count += m.replication_connection_count;
     mem.replication_connection_size += m.replication_connection_size;
-    mem.replication_memory += m.replication_memory;
   }
   return mem;
-}
-
-void PushMemoryUsageStats(const base::IoBuf::MemoryUsage& mem, string_view prefix, size_t total,
-                          vector<pair<string, size_t>>* stats) {
-  stats->push_back({absl::StrCat(prefix, ".total_bytes"), total});
-  stats->push_back({absl::StrCat(prefix, ".consumed_bytes"), mem.consumed});
-  stats->push_back({absl::StrCat(prefix, ".pending_input_bytes"), mem.input_length});
-  stats->push_back({absl::StrCat(prefix, ".pending_output_bytes"), mem.append_length});
 }
 
 }  // namespace
@@ -275,21 +249,12 @@ void MemoryCmd::Stats() {
   ConnectionMemoryUsage connection_memory = GetConnectionMemoryUsage(owner_);
 
   // Connection stats, excluding replication connections
-  stats.push_back({"connections.count", connection_memory.connection_count});
   stats.push_back({"connections.direct_bytes", connection_memory.connection_size});
-  PushMemoryUsageStats(
-      connection_memory.connections_memory, "connections",
-      connection_memory.connections_memory.GetTotalSize() + connection_memory.connection_size,
-      &stats);
 
   // Replication connection stats
   stats.push_back(
       {"replication.connections_count", connection_memory.replication_connection_count});
   stats.push_back({"replication.direct_bytes", connection_memory.replication_connection_size});
-  PushMemoryUsageStats(connection_memory.replication_memory, "replication",
-                       connection_memory.replication_memory.GetTotalSize() +
-                           connection_memory.replication_connection_size,
-                       &stats);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
   rb->StartCollection(stats.size(), CollectionType::MAP);

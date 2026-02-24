@@ -37,6 +37,7 @@ extern "C" {
 }
 
 #include "base/flags.h"
+#include "base/histogram.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/dense_set.h"
@@ -1368,10 +1369,11 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   load_fibers.reserve(paths.size());
 
   LoadOptions load_opts;
+  auto load_context = std::make_unique<RdbLoadContext>();
   if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    error_code load_ec =
-        pool.GetNextProactor()->Await([&] { return LoadRdb(path, existing_keys, &load_opts); });
+    error_code load_ec = pool.GetNextProactor()->Await(
+        [&] { return LoadRdb(path, existing_keys, &load_opts, load_context.get()); });
     if (load_ec)
       return immediate(load_ec);
   }
@@ -1392,8 +1394,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       proactor = pool.GetNextProactor();
     }
 
-    auto load_func = [file, existing_keys, load_opts, aggregated_result, this]() mutable {
-      error_code load_ec = LoadRdb(file, existing_keys, &load_opts);
+    auto load_func = [file, existing_keys, load_opts, aggregated_result,
+                      load_context = load_context.get(), this]() mutable {
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context);
       if (load_ec) {
         aggregated_result->first_error = load_ec;
       } else {
@@ -1407,16 +1410,16 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_func = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                         future]() mutable {
+                         load_context = std::move(load_context), future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
 
     if (aggregated_result->first_error) {
-      RdbLoader::PerformPostLoad(&service_, true);
+      load_context->PerformPostLoad(&service_, true);
       LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
     } else {
-      RdbLoader::PerformPostLoad(&service_);
+      load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     }
 
@@ -1463,7 +1466,7 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                                      LoadOptions* load_opts) {
+                                      LoadOptions* load_opts, RdbLoadContext* load_context) {
   DCHECK(load_opts);
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
@@ -1481,7 +1484,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
 
     io::FileSource fs(*res);
 
-    RdbLoader loader{&service_, filt_snapshot_id};
+    RdbLoader loader{&service_, load_context, filt_snapshot_id};
     loader.SetShardCount(load_opts->shard_count);
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
@@ -1562,6 +1565,21 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
+void AppendPipelineLatencySummary(string_view name, string_view help, const base::Histogram& hist,
+                                  uint64_t total_count, double total_sum_usec, string* dest) {
+  AppendMetricHeader(name, help, MetricType::SUMMARY, dest);
+  const string full_name = GetMetricFullName(name);
+  if (hist.count() > 0) {
+    auto [p95, p99] = hist.Percentiles(95, 99);
+    AppendMetricValue(name, p95 * 1e-6, {"quantile"}, {"0.95"}, dest);
+    AppendMetricValue(name, p99 * 1e-6, {"quantile"}, {"0.99"}, dest);
+  }
+  // Use monotonically increasing counters for _sum/_count so that Prometheus
+  // rate()/irate() functions work correctly even though the histogram is decayed.
+  absl::StrAppend(dest, full_name, "_sum ", total_sum_usec * 1e-6, "\n");
+  absl::StrAppend(dest, full_name, "_count ", total_count, "\n");
+}
+
 void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
                             StringResponse* resp, bool legacy) {
   // Server metrics
@@ -1610,6 +1628,12 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+
+  // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
+  // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
+  AppendPipelineLatencySummary("pipeline_latency_seconds", "Pipeline command latency distribution",
+                               conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
+                               conn_stats.pipelined_cmd_latency, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_stats_ignored_total", "",
                             m.coordinator_stats.squash_stats_ignored, MetricType::COUNTER,
@@ -1989,6 +2013,15 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.shard_stats.defrag_attempt_total, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("defrag_objects_moved", "Objects moved",
                             m.shard_stats.defrag_realloc_total, MetricType::COUNTER, &resp->body());
+
+  AppendMetricHeader("defrag_skipped_total", "Defrag tasks skipped", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_mem_under_threshold,
+                    {"reason"}, {"mem_under_threshold"}, &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_within_check_interval,
+                    {"reason"}, {"within_check_interval"}, &resp->body());
+  AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_not_enough_fragmentation,
+                    {"reason"}, {"not_enough_fragmentation"}, &resp->body());
 
   AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
                             m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
@@ -4041,7 +4074,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.
 
-      if (!cntx->replication_flow) {
+      if (!cntx->master_repl_flow) {
         LOG(ERROR) << "No replication flow assigned";
         return;
       }
@@ -4052,7 +4085,7 @@ void ServerFamily::ReplConf(CmdArgList args, CommandContext* cmd_cntx) {
         return;
       }
       VLOG(2) << "Received client ACK=" << ack;
-      cntx->replication_flow->last_acked_lsn = ack;
+      cntx->master_repl_flow->last_acked_lsn = ack;
       return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();

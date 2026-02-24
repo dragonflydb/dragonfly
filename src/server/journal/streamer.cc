@@ -602,6 +602,11 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
   // Only track tiered keys when needed and flush delayed entries
   // 1. When we have tiered storage
   // 2. We're called from a OnDbChange callback
+  //
+  // We need to track all keys in bucket with tiering. Even if they are not set as external. There
+  // is situation when we request externalization of key and key is read - marking it as not
+  // external but not yet flushed. When OnDbChange callback is called we need to flush it and than
+  // write journal changes - so we cannot realy on IsExternal flag and need to track all keys.
   const bool track_tiered_keys =
       on_db_change_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
 
@@ -622,7 +627,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
           expire = db_slice_->ExpireTime(eit->second);
         }
         // Track tiered keys that will need delayed entry flushing
-        if (track_tiered_keys && pv.IsExternal() && !pv.IsCool()) {
+        if (track_tiered_keys) {
           tiered_keys.emplace(key);
         }
         WriteEntry(key, it->first, pv, expire);
@@ -636,9 +641,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
     // for force-flushing their delayed entries
     if (track_tiered_keys) {
       for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-        const auto& pv = it->second;
         string_view key = it->first.GetSlice(&key_buffer);
-        if (ShouldWrite(key) && pv.IsExternal() && !pv.IsCool()) {
+        if (ShouldWrite(key)) {
           tiered_keys.emplace(key);
         }
       }

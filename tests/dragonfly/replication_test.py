@@ -14,7 +14,7 @@ import pymemcache
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyInstance
 from .proxy import Proxy
-from .seeder import DebugPopulateSeeder
+from .seeder import DebugPopulateSeeder, HnswSearchSeeder
 from .seeder import Seeder as SeederV2
 from .utility import *
 
@@ -3152,7 +3152,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@pytest.mark.skip("too heavy")
+@pytest.mark.large
 @pytest.mark.opt_only
 @dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
@@ -4086,7 +4086,7 @@ async def test_replication_replica_larger_dbnum(
 # BF.RESERVE with error_rate=0.00001 and capacity=1e9 creates a single bloom filter
 # of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
 # filter size, which silently overflowed to 0 and broke the RDB stream.
-@pytest.mark.skip("Requires ~12GiB RAM for two instances with 4GiB bloom filter")
+@pytest.mark.large
 @pytest.mark.slow
 async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
     master = df_factory.create(
@@ -4115,3 +4115,62 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
     await check_all_replicas_finished([c_replica], c_master)
 
     assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
+
+
+@pytest.mark.slow
+async def test_hnsw_search_replication_with_network_disruptions(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Test HNSW search index replication under continuous traffic and a network disruption.
+
+    Creates a master with an HNSW vector index, starts concurrent write traffic and
+    search queries, replicates through a proxy, and drops the connection at a random
+    moment within the first 10 seconds (may hit full sync or stable sync).
+    """
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    seeder = HnswSearchSeeder(num_initial_docs=200)
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    traffic_task = asyncio.create_task(seeder.run_traffic(c_master))
+    search_task = asyncio.create_task(seeder.run_search_queries(c_master))
+    replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
+    await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+    try:
+        await asyncio.sleep(random.uniform(0, 10))
+        proxy.drop_connection()
+
+        # Give time to detect dropped connection and reconnect
+        await asyncio.sleep(1.0)
+
+        await wait_available_async(c_replica)
+        seeder.stop()
+        await traffic_task
+        await search_task
+        await replica_search_task
+
+        # Log replica FT.INFO for debugging if assertion fails later
+        info = await c_replica.execute_command("FT.INFO", seeder.index_name)
+        logging.info(f"Replica FT.INFO: {info}")
+
+        await check_all_replicas_finished([c_replica], c_master)
+        await seeder.verify(c_master, c_replica)
+
+    finally:
+        seeder.stop()
+        traffic_task.cancel()
+        search_task.cancel()
+        replica_search_task.cancel()
+        await proxy.close(proxy_task)

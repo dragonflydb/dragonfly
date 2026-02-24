@@ -206,11 +206,8 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  struct MemoryUsage {
-    size_t mem = 0;
-    io::IoBuf::MemoryUsage buf_mem;
-  };
-  MemoryUsage GetMemoryUsage() const;
+  // Returns memory usage of this connection's auxiliary members in bytes.
+  size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
 
@@ -451,7 +448,6 @@ class Connection : public util::Connection {
     size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
     size_t cmds = 0;                    // total number of commands executed
   } local_stats_;
-  ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;
