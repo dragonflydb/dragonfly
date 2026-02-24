@@ -1628,7 +1628,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
-  AppendMetricWithoutLabels("pipelined_blocking_commands_total", "",
+  AppendMetricWithoutLabels("pipeline_blocking_commands_total", "",
                             m.coordinator_stats.blocking_commands_in_pipelines, MetricType::COUNTER,
                             &resp->body());
 
