@@ -497,10 +497,10 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   for (size_t i = 0; i < cmds.size(); ++i) {
     backed_args_vec[i] = cmn::BackedArguments(cmds[i].begin(), cmds[i].end(), cmds[i].size());
   }
-  auto next_fn = [it = backed_args_vec.begin()]() mutable -> std::pair<ParsedArgs, bool*> {
+  auto next_fn = [it = backed_args_vec.begin()]() mutable -> ParsedArgs {
     ParsedArgs args(*it);
     ++it;
-    return {args, nullptr};
+    return {args};
   };
   service_->DispatchManyCommands(next_fn, cmds.size(), conn_wrapper->builder(), context);
   DCHECK(context->transaction == nullptr);

@@ -1489,8 +1489,7 @@ void Connection::SquashPipeline() {
   auto exec_cmd_ptr{parsed_to_execute_};
   auto get_next_fn = [&exec_cmd_ptr]() mutable -> ParsedArgs {
     DCHECK(exec_cmd_ptr);
-    auto* cmd = exec_cmd_ptr;
-    return ParsedArgs{*cmd};
+    return ParsedArgs{*std::exchange(exec_cmd_ptr, exec_cmd_ptr->next)};
   };
 
   // async_dispatch is a guard to prevent concurrent writes into reply_builder_, hence
@@ -1532,7 +1531,7 @@ void Connection::SquashPipeline() {
       stats_->pipelined_wait_latency += CycleClock::ToUsec(start - current->parsed_cycle);
     }
 
-    ReleaseParsedCommand(current, true);
+    ReleaseParsedCommand(current, result.account_in_stats);
     current = next;
   }
   parsed_head_ = current;
