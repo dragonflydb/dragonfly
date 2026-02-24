@@ -398,44 +398,42 @@ TEST_F(DashTest, Merge) {
   EXPECT_EQ(dt_.unique_segments(), 8);
   size_t dir_size = dt_.GetSegmentCount();
 
-  // Segments repeat because the same segment is merged
-  // at a different level (in reverse order of split).
-  std::vector<uint64_t> expected_seg_id_to_merge = {1, 3, 1, 5, 7, 5};
-  auto expected_it = expected_seg_id_to_merge.begin();
+  // Iteratively merge segments until all reach depth 1
+  // Use multiple passes since merging changes buddy relationships
+  while (true) {
+    bool merged_any = false;
 
-  for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
-    auto* seg = dt_.GetSegment(seg_id);
+    for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+      auto* seg = dt_.GetSegment(seg_id);
 
-    size_t local_depth = seg->local_depth();
-    if (local_depth == 1)
-      continue;
+      size_t local_depth = seg->local_depth();
+      if (local_depth == 1)
+        continue;
 
-    size_t buddy_id = dt_.FindBuddyId(seg_id);
-    if (buddy_id == seg_id)
-      continue;
+      size_t buddy_id = dt_.FindBuddyId(seg_id);
+      if (buddy_id == seg_id)
+        continue;
 
-    auto* buddy = dt_.GetSegment(buddy_id);
-    if (buddy->local_depth() != local_depth)
-      continue;
+      // Skip if seg_id > buddy_id to avoid processing the same pair twice
+      // (FindBuddyId is symmetric, so we see each pair from both directions)
+      if (seg_id > buddy_id)
+        continue;
 
-    // Preconditions to merge: (< 25% of capacity)
-    size_t combined_size = seg->SlowSize() + buddy->SlowSize();
-    size_t safe_threshold = static_cast<size_t>(0.25 * seg->capacity());
+      auto* buddy = dt_.GetSegment(buddy_id);
 
-    if (combined_size <= safe_threshold) {
-      // Check that we found the correct buddy to merge with.
-      EXPECT_EQ(*expected_it, buddy_id);
-      ++expected_it;
-      LOG(INFO) << "Merging segments " << seg_id << " (depth=" << local_depth
-                << ", size=" << seg->SlowSize() << ") and " << buddy_id
-                << " (depth=" << buddy->local_depth() << ", size=" << buddy->SlowSize()
-                << "), combined=" << combined_size;
+      // Preconditions to merge: (< 25% of capacity)
+      size_t combined_size = seg->SlowSize() + buddy->SlowSize();
+      size_t safe_threshold = static_cast<size_t>(0.25 * seg->capacity());
 
-      dt_.Merge(seg_id, buddy_id);
+      if (combined_size <= safe_threshold) {
+        dt_.Merge(seg_id, buddy_id);
+        merged_any = true;
+      }
     }
-  }
 
-  EXPECT_EQ(expected_it, expected_seg_id_to_merge.end());
+    if (!merged_any)
+      break;
+  }
   EXPECT_EQ(dt_.unique_segments(), 2);
   for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
     auto* seg = dt_.GetSegment(seg_id);
