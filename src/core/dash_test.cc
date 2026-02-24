@@ -448,65 +448,6 @@ TEST_F(DashTest, Merge) {
   EXPECT_EQ(dt_.bucket_count(), (Segment::kBucketNum + Segment::kStashBucketNum) * 2);
 }
 
-TEST_F(DashTest, MergeSegmentIdUpdate) {
-  // Test that segment_id is correctly updated to the start of the chunk after merge.
-  // After merge, keep's local_depth decreases by 1, doubling its chunk_size.
-  // The bug: segment_id must be updated to the new chunk start, especially when
-  // keep_id is in the second half of the merged chunk.
-
-  std::vector<uint64_t> keys;
-
-  // Insert and then delete most items to create mergeable segments
-  for (uint64_t i = 0; i < 3000; ++i) {
-    auto [it, inserted] = dt_.Insert(i, i);
-    if (inserted) {
-      keys.push_back(i);
-    }
-  }
-
-  ASSERT_GE(dt_.depth(), 2);
-
-  // Keep only ~5% to enable merging
-  keys.resize(keys.size() * 0.05);
-  for (uint64_t i = 0; i < 100000; ++i) {
-    if (std::find(keys.begin(), keys.end(), i) == keys.end()) {
-      dt_.Erase(i);
-    }
-  }
-
-  // Test merging segments 1 and 0 (buddies at depth 2), keeping segment 1
-  // This is the problematic case: keep_id=1 is NOT at chunk start
-  // After merge at depth 1, the chunk covers [0, 2) and segment_id should be 0
-  unsigned seg_id = 1;
-  unsigned buddy_id = dt_.FindBuddyId(seg_id);
-  EXPECT_NE(buddy_id, seg_id);
-
-  auto* seg = dt_.GetSegment(seg_id);
-  auto* buddy = dt_.GetSegment(buddy_id);
-  uint8_t local_depth = seg->local_depth();
-
-  ASSERT_EQ(local_depth, 2);
-  ASSERT_EQ(buddy->local_depth(), 2);
-  ASSERT_LE(seg->SlowSize() + buddy->SlowSize(), static_cast<size_t>(0.25 * seg->capacity()));
-
-  uint32_t chunk_size_after = 1u << (dt_.depth() - 1);  // After merge: depth 2 -> 1
-  uint32_t expected_keep_start = 0;                     // seg_id=1 & ~(chunk_size_after - 1) = 0
-
-  LOG(INFO) << "Merging seg_id=" << seg_id << " (segment_id=" << seg->segment_id()
-            << "), buddy_id=" << buddy_id << ", expected chunk start=" << expected_keep_start;
-
-  ASSERT_TRUE(dt_.Merge(seg_id, buddy_id));
-
-  // Verify segment_id was updated to chunk start
-  EXPECT_EQ(seg->segment_id(), expected_keep_start)
-      << "After merge, keep segment_id should be updated to chunk start";
-
-  // Verify all chunk entries point to keep
-  for (size_t i = expected_keep_start; i < expected_keep_start + chunk_size_after; ++i) {
-    EXPECT_EQ(dt_.GetSegment(i), seg);
-  }
-}
-
 TEST_F(DashTest, MergeFailureRollback) {
   std::vector<uint64_t> all_keys;
   std::vector<uint64_t> keep_keys;

@@ -224,16 +224,12 @@ class DashTable : public detail::DashTableBase {
     // assert((keep->SlowSize() + buddy->SlowSize() < (0.25 * buddy->capacity())));
     assert(keep->local_depth() != 1);
     assert(keep != buddy);
+    assert(keep_id < buddy_id);  // Callers must iterate low to high to ensure correct orientation
 
     bool should_rollback = false;
 
     // Decrease depth (merge back to parent)
     keep->set_local_depth(keep->local_depth() - 1);
-
-    // Update keep's segment_id to the start of its new (larger) chunk
-    uint32_t keep_chunk_size = 1u << (global_depth_ - keep->local_depth());
-    uint32_t keep_start = keep_id & ~(keep_chunk_size - 1u);
-    keep->set_segment_id(keep_start);
 
     // Move all items from buddy to keep
     buddy->TraverseAll([&](const auto& it) {
@@ -259,11 +255,7 @@ class DashTable : public detail::DashTableBase {
 
     if (should_rollback) {
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
-      keep->Split(hash_fn, buddy,
-                  [&](uint32_t segment_from, detail::PhysicalBid from, uint32_t segment_to,
-                      detail::PhysicalBid to) {
-                    // no-op
-                  });
+      keep->Split(hash_fn, buddy, [](auto&&...) {});
 
       return false;
     }
