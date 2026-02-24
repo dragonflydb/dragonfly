@@ -467,10 +467,6 @@ TEST_F(DashTest, MergeFailureRollback) {
   size_t buddy_id = dt_.FindBuddyId(sid);
   EXPECT_NE(buddy_id, sid);
 
-  // Collect keys from segment and buddy and record their positions
-  std::unordered_map<uint64_t, std::pair<uint8_t, uint8_t>> keep_positions;
-  std::unordered_map<uint64_t, std::pair<uint8_t, uint8_t>> buddy_positions;
-
   auto* src = dt_.GetSegment(sid);
   auto* buddy = dt_.GetSegment(buddy_id);
 
@@ -482,12 +478,8 @@ TEST_F(DashTest, MergeFailureRollback) {
 
       if (seg_id == 0) {
         keep_keys.push_back(key);
-        auto seg_it = src->FindIt(hash, EqTo(key));
-        keep_positions[key] = {seg_it.index, seg_it.slot};
       } else if (seg_id == buddy_id) {
         buddy_keys.push_back(key);
-        auto seg_it = buddy->FindIt(hash, EqTo(key));
-        buddy_positions[key] = {seg_it.index, seg_it.slot};
       }
     }
   }
@@ -498,6 +490,10 @@ TEST_F(DashTest, MergeFailureRollback) {
 
   EXPECT_EQ(dt_.size(), total_size_before);
 
+  // Bucket layout might change after rollback. We only get data parity, not
+  // a complete layout rollback.
+  // For example, InsertUniq can displace existing items in the keep segment
+  // to make room for items being moved from buddy.
   // After rollback, src and buddy pointers should still be valid
   for (auto key : keep_keys) {
     uint64_t hash = dt_.DoHash(key);
@@ -506,9 +502,6 @@ TEST_F(DashTest, MergeFailureRollback) {
   }
 
   for (auto key : buddy_keys) {
-    // Bucket layout in keep segment changes during failed merge rollback.
-    // InsertUniq can displace existing items in the keep segment
-    // to make room for items being moved from buddy.
     uint64_t hash = dt_.DoHash(key);
     auto it = buddy->FindIt(hash, EqTo(key));
     EXPECT_TRUE(it.found());

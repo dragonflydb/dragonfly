@@ -227,24 +227,6 @@ class DashTable : public detail::DashTableBase {
 
     bool should_rollback = false;
 
-    struct MovedRecords {
-      uint16_t source_bid_slot;
-      uint16_t dst_bid_slot;
-      uint64_t hash;
-      uint8_t src_bid() const {
-        return source_bid_slot >> 8;
-      }
-      uint8_t src_slot() const {
-        return source_bid_slot & 0xFF;
-      }
-      uint8_t dst_bid() const {
-        return dst_bid_slot >> 8;
-      }
-      uint8_t dst_slot() const {
-        return dst_bid_slot & 0xFF;
-      }
-    };
-
     // Decrease depth (merge back to parent)
     keep->set_local_depth(keep->local_depth() - 1);
 
