@@ -140,6 +140,7 @@ struct InternedStringStats {
   size_t hits = 0;
   size_t misses = 0;
   size_t pool_table_bytes = 0;
+  size_t live_references = 0;
 
   InternedStringStats& operator+=(const InternedStringStats& other);
 };

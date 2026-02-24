@@ -1879,6 +1879,13 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             m.interned_string_stats.hits, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("interned_string_misses_total", "Interned string pool misses",
                             m.interned_string_stats.misses, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("interned_string_entries_dedup_factor",
+                            "Deduplication achieved by interned strings",
+                            m.interned_string_stats.pool_entries == 0
+                                ? 0.0
+                                : static_cast<double>(m.interned_string_stats.live_references) /
+                                      static_cast<double>(m.interned_string_stats.pool_entries),
+                            MetricType::GAUGE, &resp->body());
 
   // Command stats
   if (!m.cmd_stats_map.empty()) {

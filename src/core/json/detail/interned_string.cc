@@ -26,12 +26,14 @@ void InternedString::ResetPool() {
   tl_stats.pool_bytes = 0;
   tl_stats.pool_entries = 0;
   tl_stats.pool_table_bytes = 0;
+  tl_stats.live_references = 0;
 }
 
 InternedBlobHandle InternedString::Intern(const std::string_view sv) {
   if (sv.empty())
     return {};
 
+  tl_stats.live_references += 1;
   InternedBlobPool& pool_ref = GetPoolRef();
   if (const auto it = pool_ref.find(sv); it != pool_ref.end()) {
     tl_stats.hits++;
@@ -52,6 +54,7 @@ void InternedString::Acquire() {  // NOLINT
   if (!entry_)
     return;
 
+  tl_stats.live_references += 1;
   entry_.IncrRefCount();
 }
 
@@ -60,6 +63,7 @@ void InternedString::Release() {
     return;
 
   entry_.DecrRefCount();
+  tl_stats.live_references -= 1;
 
   if (entry_.RefCount() == 0) {
     InternedBlobPool& pool_ref = GetPoolRef();
@@ -99,6 +103,7 @@ InternedStringStats& InternedStringStats::operator+=(const InternedStringStats& 
   hits += other.hits;
   misses += other.misses;
   pool_table_bytes += other.pool_table_bytes;
+  live_references += other.live_references;
   return *this;
 }
 
