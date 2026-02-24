@@ -194,7 +194,7 @@ class DashTable : public detail::DashTableBase {
     assert(depth != 1);
 
     const size_t bit_pos = global_depth_ - depth;
-    const size_t buddy_idx = segment_id ^ (1 << bit_pos);
+    const size_t buddy_idx = segment_id ^ (1u << bit_pos);
     assert(buddy_idx < segment_.size());
 
     auto* buddy = GetSegment(buddy_idx);
@@ -229,6 +229,11 @@ class DashTable : public detail::DashTableBase {
 
     // Decrease depth (merge back to parent)
     keep->set_local_depth(keep->local_depth() - 1);
+
+    // Update keep's segment_id to the start of its new (larger) chunk
+    uint32_t keep_chunk_size = 1u << (global_depth_ - keep->local_depth());
+    uint32_t keep_start = keep_id & ~(keep_chunk_size - 1u);
+    keep->set_segment_id(keep_start);
 
     // Move all items from buddy to keep
     buddy->TraverseAll([&](const auto& it) {
