@@ -90,8 +90,10 @@ void FormatSummary(std::string* str, const BlockSummaryMap& summary) {
   absl::StrAppend(str, absl::StrFormat("%10s %10s %10s %10s %10s %8s\n", "BlockSize", "Reserved",
                                        "Committed", "Used", "Wasted", "Waste%"));
   std::vector<std::pair<size_t, BlockSummary>> entries{summary.begin(), summary.end()};
-  std::ranges::sort(entries, {},
-                    [](const auto& entry) { return entry.second.committed - entry.second.used; });
+  std::ranges::sort(entries, {}, [](const auto& entry) {
+    const BlockSummary& stats = entry.second;
+    return stats.committed > stats.used ? stats.committed - stats.used : 0;
+  });
 
   size_t total_reserved = 0;
   size_t total_committed = 0;
@@ -110,18 +112,17 @@ void FormatSummary(std::string* str, const BlockSummaryMap& summary) {
     total_used += block_summary.used;
   }
 
-  absl::StrAppend(
-      str, absl::StrFormat(
-               "%10s %10zu %10zu %10zu %10zu %8.2f%%\n", "Total:", total_reserved, total_committed,
-               total_used, total_committed > total_used ? total_committed - total_used : 0,
-               100.0 * (total_committed - total_used) / std::max<size_t>(1UL, total_committed)));
+  const size_t wasted = total_committed > total_used ? total_committed - total_used : 0;
+  absl::StrAppend(str, absl::StrFormat("%10s %10zu %10zu %10zu %10zu %8.2f%%\n", "Total:",
+                                       total_reserved, total_committed, total_used, wasted,
+                                       100.0 * wasted / std::max<size_t>(1UL, total_committed)));
 }
 
 string FormatSummaries(const vector<BlockSummaryMap>& summaries) {
   string str;
   BlockSummaryMap machine_wide;
   for (size_t i = 0; i < summaries.size(); ++i) {
-    absl::StrAppend(&str, "\nArena statistics for thread ", i, "\n");
+    absl::StrAppend(&str, "\nArena statistics for thread ", i, ":\n");
     FormatSummary(&str, summaries[i]);
     for (const auto& [size, block_summary] : summaries[i]) {
       BlockSummary& machine_block = machine_wide[size];
@@ -444,6 +445,11 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
         ++tid_indx;
         backing = true;
       }
+
+      if (summarize && args.size() > tid_indx) {
+        return cmd_cntx_->SendError(kSyntaxErr, kSyntaxErrType);
+      }
+
       if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
         return cmd_cntx_->SendError(kInvalidIntErr);
       }
