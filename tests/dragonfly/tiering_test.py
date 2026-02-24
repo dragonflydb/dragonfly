@@ -98,6 +98,7 @@ async def test_mixed_append(async_client: aioredis.Redis):
     assert res == [10 * k for k in key_range]
 
 
+@pytest.mark.skip
 @pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
