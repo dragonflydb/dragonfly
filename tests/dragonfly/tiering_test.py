@@ -173,8 +173,14 @@ async def test_replication(
     )
 
     if len(set(hashes)) != 1:
-        for key in keys:
-            key_master = await async_client.get(key)
-            key_replica = await replica_client.get(key)
-            assert key_master == key_replica
+        from itertools import zip_longest
+
+        def batcher(iterable, n):
+            args = [iter(iterable)] * n
+            return zip_longest(*args, fillvalue=None)
+
+        for keys in batcher(async_client.scan_iter(count=100), 10):
+            values_master = await async_client.mget(keys)
+            values_replica = await replica_client.mget(keys)
+            assert values_master == values_replica
         assert False, "Inconsistency detected, but key not determined"
