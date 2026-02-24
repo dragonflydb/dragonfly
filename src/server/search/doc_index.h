@@ -273,7 +273,7 @@ class ShardDocIndex {
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
-                      search::SearchAlgorithm* search_algo) const;
+                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,

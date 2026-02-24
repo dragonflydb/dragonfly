@@ -1637,7 +1637,8 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   if (!knn || knn_has_prefilter) {
     cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
-        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+        docs[es->shard_id()] =
+            index->Search(t->GetOpArgs(es), *params, &search_algo, knn_has_prefilter);
       else
         index_not_found.store(true, memory_order_relaxed);
       return OpStatus::OK;
@@ -1713,7 +1714,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
     const ShardId shard_id = es->shard_id();
 
     auto shard_start = absl::Now();
-    search_results[shard_id] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+    search_results[shard_id] = index->Search(t->GetOpArgs(es), *params, &search_algo, false);
     profile_results[shard_id] = {absl::Now() - shard_start};
 
     return OpStatus::OK;
