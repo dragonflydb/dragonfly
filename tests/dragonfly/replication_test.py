@@ -4175,3 +4175,35 @@ async def test_hnsw_search_replication_with_network_disruptions(
         search_task.cancel()
         replica_search_task.cancel()
         await proxy.close(proxy_task)
+
+
+async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("DEBUG", "POPULATE", "1000", "key", "100", "RAND")
+    assert await c_master.dbsize() == 1000
+
+    await c_master.execute_command("SAVE", "DF", dbfilename)
+
+    await c_master.execute_command("FLUSHALL")
+
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+    await wait_available_async(c_replica)
+
+    await c_master.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    assert await c_master.dbsize() == 1000
+
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.dbsize() == 1000
+
+    master_capture = await DebugPopulateSeeder.capture(c_master)
+    replica_capture = await DebugPopulateSeeder.capture(c_replica)
+    assert master_capture == replica_capture

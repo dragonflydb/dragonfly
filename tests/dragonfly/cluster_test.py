@@ -3797,3 +3797,46 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     # Verify that mutations are applied on the target node after migration
     info = await nodes[1].client.info("keyspace")
     assert info["db0"]["keys"] == keys - delete_succeded
+
+
+@dfly_args({"cluster_mode": "yes"})
+async def test_cluster_snapshot_load_replication(df_factory: DflyInstanceFactory):
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+    m1_node, r1_node = nodes
+    master_nodes = [m1_node]
+
+    m1_node.slots = [(0, 16383)]
+    m1_node.replicas = [r1_node]
+
+    logging.debug("Push initial config")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    await m1_node.client.execute_command("DEBUG", "POPULATE", "1000", "key", "100", "RAND")
+    assert await m1_node.client.dbsize() == 1000
+
+    await m1_node.client.execute_command("SAVE", "DF", dbfilename)
+
+    await m1_node.client.execute_command("FLUSHALL")
+
+    await r1_node.client.execute_command("REPLICAOF", "localhost", str(m1_node.instance.port))
+    await wait_available_async(r1_node.client)
+
+    await m1_node.client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    assert await m1_node.client.dbsize() == 1000
+
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
+    assert await r1_node.client.dbsize() == 1000
+
+    master_capture = await DebugPopulateSeeder.capture(m1_node.client)
+    replica_capture = await DebugPopulateSeeder.capture(r1_node.client)
+    assert master_capture == replica_capture
