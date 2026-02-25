@@ -602,8 +602,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   size_t limit = params.limit_offset + params.limit_total;
 
   // If we don't sort the documents, we don't need to copy more ids than are requested
-  // Also for KNN search, either FLAT or HNSW we cannot cut off the search
-  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() && is_knn_prefilter;
+  // Also for HNSW KNN search we don't cut results at the search stage.
+  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() && !is_knn_prefilter;
   size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
 
   auto result = search_algo->Search(&*indices_, id_cutoff_limit);
@@ -621,7 +621,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       limit = max(limit, ko->limit);
   }
 
-  // We don't apply limit if this is prefilter KNN search
+  // We don't apply limit if this is prefilter HNSW KNN search
   if (is_knn_prefilter) {
     limit = std::numeric_limits<size_t>::max();
   }
