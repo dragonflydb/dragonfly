@@ -18,6 +18,7 @@
 #include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/protocol_client.h"
+#include "server/replica_types.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
@@ -60,10 +61,7 @@ class Replica : ProtocolClient {
   // Returns true if initial link with master has been established or
   // false if it has failed.
   GenericError Start();
-  struct LastMasterSyncData {
-    std::string id;
-    std::vector<LSN> last_journal_LSNs;  // lsn for each master shard.
-  };
+  using LastMasterSyncData = dfly::LastMasterSyncData;
   void StartMainReplicationFiber(std::optional<LastMasterSyncData> data);
 
   // Sets the server state to have replication enabled.
@@ -118,27 +116,7 @@ class Replica : ProtocolClient {
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* dest);
 
  public: /* Utility */
-  struct Summary {
-    std::string host;
-    uint16_t port;
-    bool master_link_established;
-    bool full_sync_in_progress;
-    bool full_sync_done;
-    time_t master_last_io_sec;  // monotonic clock.
-    std::string master_id;
-    uint32_t reconnect_count;
-
-    // sum of the offsets on all the flows.
-    uint64_t repl_offset_sum;
-    size_t psync_attempts;
-    size_t psync_successes;
-    // We can't rely on full_sync_done or full_sync_in_progress because
-    // on disconnects the replica state mask is cleared. We use this variable
-    // to track if the replica reached full sync. When master disconnects,
-    // we use this variable to print the journal offsets in info command even
-    // when the link is down. It's reset whenever a full sync is initiated again.
-    bool passed_full_sync;
-  };
+  using Summary = ReplicaSummary;
 
   Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.
 
@@ -212,7 +190,8 @@ class RdbLoader;
 class DflyShardReplica : public ProtocolClient {
  public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,
-                   Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe);
+                   Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe,
+                   class RdbLoadContext* load_context);
   ~DflyShardReplica();
 
   void Cancel();

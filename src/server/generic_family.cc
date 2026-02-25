@@ -28,6 +28,7 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -760,6 +761,16 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   }
 
   return cursor;
+}
+
+uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted,
+                   ConnectionContext* cntx) {
+  // TODO: implement scan-and-delete logic
+  (void)cursor;
+  (void)scan_opts;
+  (void)cntx;
+  *deleted = 0;
+  return 0;
 }
 
 OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
@@ -2436,6 +2447,41 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
+void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view token = ArgS(args, 0);
+  uint64_t cursor = 0;
+  if (!absl::SimpleAtoi(token, &cursor)) {
+    if (absl::EqualsIgnoreCase(token, "HELP")) {
+      auto replier = [](RedisReplyBuilder* rb) {
+        string_view help_arr[] = {
+            "RM cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>]",
+            "    MATCH <glob> - pattern to match keys against",
+            "    TYPE <type> - type of values to match (string, list, set, zset, hash, stream)",
+            "    COUNT <count> - number of keys to delete per call",
+        };
+        rb->SendSimpleStrArr(help_arr);
+      };
+      return cmd_cntx->ReplyWith(std::move(replier));
+    }
+    return cmd_cntx->SendError("invalid cursor", kSyntaxErrType);
+  }
+
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
+  if (!ops) {
+    return cmd_cntx->SendError(ops.status());
+  }
+
+  uint32_t deleted = 0;
+  cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->server_conn_cntx());
+
+  auto replier = [cursor, deleted](RedisReplyBuilder* rb) {
+    RedisReplyBuilder::ArrayScope scope{rb, 2};
+    rb->SendBulkString(absl::StrCat(cursor));
+    rb->SendLong(deleted);
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
+}
+
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Exists: " << keys.Front();
   auto& db_slice = op_args.GetDbSlice();
@@ -2522,6 +2568,7 @@ constexpr uint32_t kCopy = KEYSPACE | WRITE | SLOW;
 constexpr uint32_t kRenamNX = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSelect = FAST | CONNECTION;
 constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
+constexpr uint32_t kRm = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kTTL = KEYSPACE | READ | FAST;
 constexpr uint32_t kPTTL = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldTtl = KEYSPACE | READ | FAST;
@@ -2570,6 +2617,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
+      << CI{"RM", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 0, 0, acl::kRm}.HFUNC(Rm)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)

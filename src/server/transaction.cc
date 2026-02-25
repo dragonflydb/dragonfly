@@ -1550,8 +1550,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   if (!cid_->IsJournaled() && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
-  auto journal = shard->journal();
-  if (journal == nullptr)
+  if (!shard->journal())
     return;
 
   if (result.status != OpStatus::OK) {

@@ -109,9 +109,8 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx,
-                                 JournalStreamer::Config config)
-    : cntx_(cntx), journal_(journal), config_(config) {
+JournalStreamer::JournalStreamer(ExecutionState* cntx, JournalStreamer::Config config)
+    : cntx_(cntx), config_(config) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
@@ -211,9 +210,9 @@ bool JournalStreamer::MaybePartialStreamLSNs() {
 
     LOG(INFO) << "Starting partial sync from lsn: " << lsn;
     // The replica sends the LSN of the next entry is wants to receive.
-    while (cntx_->IsRunning() && journal_->IsLSNInBuffer(lsn)) {
+    while (cntx_->IsRunning() && journal::IsLSNInBuffer(lsn)) {
       JournalChangeItem item;
-      item.journal_item.data = journal_->GetEntry(lsn);
+      item.journal_item.data = journal::GetEntry(lsn);
       item.journal_item.lsn = lsn;
       ConsumeJournalChange(item);
       lsn++;
@@ -413,9 +412,8 @@ bool JournalStreamer::IsStalled() const {
   return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                                 ExecutionState* cntx)
-    : JournalStreamer(journal, cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
+RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx)
+    : JournalStreamer(cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
@@ -604,6 +602,11 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
   // Only track tiered keys when needed and flush delayed entries
   // 1. When we have tiered storage
   // 2. We're called from a OnDbChange callback
+  //
+  // We need to track all keys in bucket with tiering. Even if they are not set as external. There
+  // is situation when we request externalization of key and key is read - marking it as not
+  // external but not yet flushed. When OnDbChange callback is called we need to flush it and than
+  // write journal changes - so we cannot realy on IsExternal flag and need to track all keys.
   const bool track_tiered_keys =
       on_db_change_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
 
@@ -624,7 +627,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
           expire = db_slice_->ExpireTime(eit->second);
         }
         // Track tiered keys that will need delayed entry flushing
-        if (track_tiered_keys && pv.IsExternal() && !pv.IsCool()) {
+        if (track_tiered_keys) {
           tiered_keys.emplace(key);
         }
         WriteEntry(key, it->first, pv, expire);
@@ -638,9 +641,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
     // for force-flushing their delayed entries
     if (track_tiered_keys) {
       for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-        const auto& pv = it->second;
         string_view key = it->first.GetSlice(&key_buffer);
-        if (ShouldWrite(key) && pv.IsExternal() && !pv.IsCool()) {
+        if (ShouldWrite(key)) {
           tiered_keys.emplace(key);
         }
       }

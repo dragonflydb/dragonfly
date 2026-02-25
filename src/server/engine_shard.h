@@ -28,6 +28,9 @@ class EngineShard {
     uint64_t defrag_attempt_total = 0;
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
+    uint64_t defrag_skipped_mem_under_threshold = 0;
+    uint64_t defrag_skipped_within_check_interval = 0;
+    uint64_t defrag_skipped_not_enough_fragmentation = 0;
     uint64_t poll_execution_total = 0;
 
     // number of optimistic executions - that were run as part of the scheduling.
@@ -139,12 +142,12 @@ class EngineShard {
     return counter_[unsigned(type)].SumTail();
   }
 
-  journal::Journal* journal() {
+  bool journal() const {
     return journal_;
   }
 
-  void set_journal(journal::Journal* j) {
-    journal_ = j;
+  void set_journal(bool enable) {
+    journal_ = enable;
   }
 
   void SetReplica(bool replica) {
@@ -215,9 +218,17 @@ class EngineShard {
     time_t last_check_time = 0;
     float page_utilization_threshold = 0.8;
 
-    // check the current threshold and return true if
-    // we need to do the defragmentation
-    bool CheckRequired();
+    enum class SkipReason : uint8_t {
+      MemoryTooLow,
+      MemoryBelowThreshold,
+      CheckWithinInterval,
+      NotEnoughFragmentation,
+      CheckInProgress,
+      NotSkipped,
+    };
+
+    // check the current threshold and return a reason if we skip the defragmentation
+    SkipReason CheckRequired();
 
     void UpdateScanState(uint64_t cursor_val);
 
@@ -276,6 +287,7 @@ class EngineShard {
 
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;
+  bool journal_ = false;
 
   // Precise tracking of used memory by persistent shard local values and structures
   MiMemoryResource mi_resource_;
@@ -290,7 +302,7 @@ class EngineShard {
   Transaction* continuation_trans_ = nullptr;
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
-  journal::Journal* journal_ = nullptr;
+
   IntentLock shard_lock_;
 
   uint32_t defrag_task_id_ = UINT32_MAX, huffman_check_task_id_ = UINT32_MAX;

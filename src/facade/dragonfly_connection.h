@@ -14,14 +14,12 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
-#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
-#include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -40,8 +38,13 @@ constexpr size_t kReqStorageSize = 88;
 constexpr size_t kReqStorageSize = 120;
 #endif
 
+namespace util {
+class HttpListenerBase;
+}  // namespace util
+
 namespace facade {
 
+struct ConnectionStats;
 class ConnectionContext;
 class ServiceInterface;
 class SinkReplyBuilder;
@@ -203,11 +206,8 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  struct MemoryUsage {
-    size_t mem = 0;
-    io::IoBuf::MemoryUsage buf_mem;
-  };
-  MemoryUsage GetMemoryUsage() const;
+  // Returns memory usage of this connection's auxiliary members in bytes.
+  size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
 
@@ -448,7 +448,6 @@ class Connection : public util::Connection {
     size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
     size_t cmds = 0;                    // total number of commands executed
   } local_stats_;
-  ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;

@@ -1,7 +1,16 @@
 """AFL++ custom mutator for RESP protocol.
 
-Mutates at the command/argument level instead of random bytes,
-keeping RESP framing valid so inputs reach command execution.
+Instead of random byte-level mutations (which would break protocol framing and get
+rejected by the parser), this mutator operates at the command level: it parses
+the input into commands, then randomly replaces/inserts/removes/reorders commands and
+arguments while keeping RESP encoding valid. This ensures mutated inputs actually
+reach command execution code paths.
+
+Focus commands (optional, set via FUZZ_FOCUS_COMMANDS env var):
+    When running PR-targeted fuzzing, generate_targeted_seeds.py produces a list of
+    command names affected by the code change. This mutator reads that list and
+    picks those commands ~70% of the time, concentrating mutations on the changed code.
+    Commands not already in the COMMANDS table are auto-registered with default arity.
 
 Usage:
     export PYTHONPATH=/path/to/dragonfly/fuzz
@@ -10,6 +19,8 @@ Usage:
     afl-fuzz ...
 """
 
+import json
+import os
 import random
 import struct
 
@@ -142,6 +153,39 @@ FUZZ_VALUES = [
     b"inf",
 ]
 
+# Focus commands: when set via FUZZ_FOCUS_COMMANDS env var (JSON list of command names),
+# the mutator will prefer these commands ~70% of the time. Used by PR fuzzing to
+# concentrate mutations on commands affected by the code change.
+_FOCUS_COMMANDS = []
+_FOCUS_WEIGHT = 0.7
+
+_focus_env = os.environ.get("FUZZ_FOCUS_COMMANDS", "")
+if _focus_env:
+    try:
+        raw = json.loads(_focus_env)
+        if isinstance(raw, str):
+            raw = [raw]
+        if isinstance(raw, list):
+            _focus_names = {s.strip().upper() for s in raw if isinstance(s, str) and s.strip()}
+        else:
+            _focus_names = set()
+        _FOCUS_COMMANDS = [c for c in COMMANDS if c[0].decode().upper() in _focus_names]
+        # Add unknown commands (e.g. newly added in a PR) with default arity
+        _known = {c[0].decode().upper() for c in COMMANDS}
+        for name in _focus_names - _known:
+            entry = (name.encode(), 1, 3)
+            COMMANDS.append(entry)
+            _FOCUS_COMMANDS.append(entry)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+
+def _pick_command():
+    """Pick a command tuple, preferring focus commands when available."""
+    if _FOCUS_COMMANDS and random.random() < _FOCUS_WEIGHT:
+        return random.choice(_FOCUS_COMMANDS)
+    return random.choice(COMMANDS)
+
 
 def init(seed):
     random.seed(seed)
@@ -179,7 +223,7 @@ def _random_arg():
 
 def _random_command():
     """Generate a single random RESP command."""
-    cmd_name, min_args, max_args = random.choice(COMMANDS)
+    cmd_name, min_args, max_args = _pick_command()
     nargs = random.randint(min_args, max_args)
     args = [cmd_name] + [_random_arg() for _ in range(nargs)]
     return _encode_resp(*args)
@@ -247,7 +291,7 @@ def _mutate_commands(commands):
     if mutation < 0.2 and len(result) > 0:
         # Replace a random command entirely
         idx = random.randint(0, len(result) - 1)
-        cmd_name, min_args, max_args = random.choice(COMMANDS)
+        cmd_name, min_args, max_args = _pick_command()
         nargs = random.randint(min_args, max_args)
         result[idx] = [cmd_name] + [_random_arg() for _ in range(nargs)]
 
@@ -263,7 +307,7 @@ def _mutate_commands(commands):
     elif mutation < 0.55:
         # Insert a new random command
         pos = random.randint(0, len(result))
-        cmd_name, min_args, max_args = random.choice(COMMANDS)
+        cmd_name, min_args, max_args = _pick_command()
         nargs = random.randint(min_args, max_args)
         result.insert(pos, [cmd_name] + [_random_arg() for _ in range(nargs)])
 

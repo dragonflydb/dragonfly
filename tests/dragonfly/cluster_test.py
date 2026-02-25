@@ -2669,7 +2669,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     await proxy.close(proxy_task)
 
 
-@pytest.mark.skip("Takes more than 10 minutes")
+@pytest.mark.large
 @dfly_args({"cluster_mode": "yes"})
 async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
@@ -3734,6 +3734,10 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
 
     keys = 1000000
     await nodes[0].client.execute_command(f"DEBUG POPULATE {keys} key 440")
+
+    # Expect that number of added keys is 1000000
+    info = await nodes[0].client.info("keyspace")
+    assert info["db0"]["keys"] == keys
 
     # Wait for some data to be offloaded to tiered storage
     await asyncio.sleep(10)

@@ -6,8 +6,6 @@
 
 #include <mimalloc.h>
 
-#include "server/acl/user_registry.h"
-
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -17,7 +15,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
-#include "server/channel_store.h"
+#include "facade/facade_stats.h"
 #include "server/common.h"
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
@@ -58,7 +56,7 @@ ServerState::Stats::Stats(unsigned num_shards)
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 25 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 26 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -77,6 +75,7 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(multi_squash_exec_reply_usec);
   ADD(squashed_commands);
   ADD(squash_stats_ignored);
+  ADD(blocking_commands_in_pipelines);
   ADD(blocked_on_interpreter);
   ADD(rdb_save_usec);
   ADD(rdb_save_count);
@@ -194,7 +193,7 @@ bool ServerState::AllowInlineScheduling() const {
   // and a normally-scheduled command.
   // The problematic loop is in JournalSlice::AddLogRecord, going over all the callbacks.
 
-  if (journal_ && journal_->HasRegisteredCallbacks())
+  if (journal::HasRegisteredCallbacks())
     return false;
 
   return true;

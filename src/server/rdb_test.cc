@@ -53,7 +53,8 @@ class RdbTest : public BaseFamilyTest {
     return pp_->at(0)->Await([&] {
       io::FileSource fs = GetSource(filename);
 
-      RdbLoader loader(service_.get());
+      RdbLoadContext load_context;
+      RdbLoader loader(service_.get(), &load_context);
       return loader.Load(&fs);
     });
   }

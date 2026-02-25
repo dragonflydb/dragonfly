@@ -34,10 +34,6 @@ namespace acl {
 class UserRegistry;
 }  // namespace acl
 
-namespace journal {
-class Journal;
-}  // namespace journal
-
 // This would be used as a thread local storage of sending
 // monitor messages.
 // Each thread will have its own list of all the connections that are
@@ -127,6 +123,7 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t multi_squash_exec_reply_usec = 0;
     uint64_t squashed_commands = 0;
     uint64_t squash_stats_ignored = 0;
+    uint64_t blocking_commands_in_pipelines = 0;
     uint64_t blocked_on_interpreter = 0;
 
     uint64_t rdb_save_usec = 0;
@@ -223,14 +220,6 @@ class ServerState {  // public struct - to allow initialization.
     return data_heap_;
   }
 
-  journal::Journal* journal() {
-    return journal_;
-  }
-
-  void set_journal(journal::Journal* j) {
-    journal_ = j;
-  }
-
   constexpr MonitorsRepo& Monitors() {
     return monitors_;
   }
@@ -323,7 +312,6 @@ class ServerState {  // public struct - to allow initialization.
   int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;
   mi_heap_t* data_heap_;
-  journal::Journal* journal_ = nullptr;
 
   InterpreterManager interpreter_mgr_;
   absl::flat_hash_map<ScriptMgr::ScriptKey, ScriptMgr::ScriptParams> cached_script_params_;

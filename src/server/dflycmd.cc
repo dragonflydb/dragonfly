@@ -23,7 +23,6 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
 #include "server/cluster_support.h"
-#include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -31,7 +30,7 @@
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/rdb_save.h"
-#include "server/script_mgr.h"
+#include "server/replica.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
@@ -297,7 +296,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
     eof_token = GetRandomHex(gen, 40);
 
     auto& flow = replica_ptr->flows[flow_id];
-    conn_cntx->replication_flow = &flow;
+    conn_cntx->master_repl_flow = &flow;
     flow.conn = cmd_cntx->conn();
     flow.eof_token = eof_token;
     flow.version = replica_ptr->version;
@@ -310,7 +309,7 @@ void DflyCmd::Flow(CmdArgList args, CommandContext* cmd_cntx) {
       return;
     }
 
-    sf_->journal()->StartInThread();
+    journal::StartInThread();
 
     std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
     std::optional<LSN> lsn_to_start_partial;
@@ -441,9 +440,7 @@ void DflyCmd::StartStable(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
-  auto* jrnl = sf_->journal();
-
-  const bool exists = journal::GetLsn() == lsn || jrnl->IsLSNInBuffer(lsn);
+  const bool exists = journal::GetLsn() == lsn || journal::IsLSNInBuffer(lsn);
   if (!exists) {
     LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
               << " that the replication buffer doesn't contain this anymore (current_lsn="
@@ -635,8 +632,7 @@ void DflyCmd::Expire(CmdArgList args, CommandContext* cmd_cntx) {
 void DflyCmd::ReplicaOffset(CmdArgList args, CommandContext* cmd_cntx) {
   std::vector<LSN> lsns(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    auto* journal = shard->journal();
-    lsns[shard->shard_id()] = journal ? journal::GetLsn() : 0;
+    lsns[shard->shard_id()] = shard->journal() ? journal::GetLsn() : 0;
   });
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
@@ -746,7 +742,7 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
   JournalStreamer::Config config{
       .should_sent_lsn = true, .init_from_stable_sync = true, .start_partial_sync_at = partial_lsn};
-  flow->streamer.reset(new JournalStreamer(sf_->journal(), exec_st, config));
+  flow->streamer.reset(new JournalStreamer(exec_st, config));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.

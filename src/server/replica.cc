@@ -7,6 +7,7 @@
 
 #include "absl/strings/match.h"
 #include "facade/service_interface.h"
+#include "server/engine_shard.h"
 
 extern "C" {
 #include "redis/rdb.h"
@@ -477,7 +478,8 @@ error_code Replica::InitiatePSync() {
       JournalExecutor{&service_}.FlushAll();
     }
 
-    RdbLoader loader(NULL);
+    RdbLoadContext load_context;
+    RdbLoader loader(NULL, &load_context);
     loader.SetLoadUnownedSlots(true);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
@@ -528,6 +530,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
+  auto load_context = std::make_shared<RdbLoadContext>();
+
   // Initialize shard flows.
   shard_flows_.resize(master_context_.num_flows);
   DCHECK(!shard_flows_.empty());
@@ -537,8 +541,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     if (shard_flows_[i]) {
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
-    shard_flows_[i].reset(
-        new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
+    shard_flows_[i].reset(new DflyShardReplica(server(), master_context_, i, &service_,
+                                               multi_shard_exe_, load_context.get()));
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
@@ -668,11 +672,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
     // Check if we woke up due to cancellation.
     if (!exec_st_.IsRunning()) {
-      RdbLoader::PerformPostLoad(&service_, true);
+      load_context->PerformPostLoad(&service_, true);
       return exec_st_.GetError();
     }
 
-    RdbLoader::PerformPostLoad(&service_);
+    load_context->PerformPostLoad(&service_);
   }
 
   passed_full_sync_ = true;
@@ -1021,8 +1025,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data.opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-      auto* journal = ServerState::tlocal()->journal();
-      if (journal) {
+      if (EngineShard::tlocal() && EngineShard::tlocal()->journal()) {
         // We must register this entry to the journal to allow partial sync
         // if journal is active.
         journal::RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
@@ -1111,14 +1114,15 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
 
 DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
                                    uint32_t flow_id, Service* service,
-                                   std::shared_ptr<MultiShardExecution> multi_shard_exe)
+                                   std::shared_ptr<MultiShardExecution> multi_shard_exe,
+                                   RdbLoadContext* load_context)
     : ProtocolClient(server_context),
       service_(*service),
       master_context_(master_context),
       multi_shard_exe_(multi_shard_exe),
       flow_id_(flow_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
-  rdb_loader_ = std::make_unique<RdbLoader>(&service_);
+  rdb_loader_ = std::make_unique<RdbLoader>(&service_, load_context);
   rdb_loader_->SetLoadUnownedSlots(true);
   rdb_loader_->SetShardCount(master_context.num_flows);
 }

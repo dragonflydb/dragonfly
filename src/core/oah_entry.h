@@ -19,15 +19,6 @@ namespace dfly {
 #define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
 #define FORCE_INLINE __attribute__((always_inline))
 
-static uint64_t Hash(std::string_view str) {
-  constexpr XXH64_hash_t kHashSeed = 24061983;
-  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
-}
-
-static uint32_t BucketId(uint64_t hash, uint32_t capacity_log) {
-  return hash >> (64 - capacity_log);
-}
-
 // TODO add allocator support
 template <class T> class PtrVector {
   static constexpr size_t kVectorBit = 1ULL << 0;          // first 3 bits aren't used by pointer
@@ -149,6 +140,7 @@ template <class T> class PtrVector {
 
 // doesn't possess memory, it should be created and release manually
 class OAHEntry {
+ public:
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
@@ -167,7 +159,6 @@ class OAHEntry {
 
   static constexpr size_t kTagMask = (4095ULL << 52) | 7;  // we reserve 12 high bits and 3 low.
 
- public:
   OAHEntry() = default;
 
   OAHEntry(std::string_view key, uint32_t expiry = UINT32_MAX);
@@ -240,30 +231,15 @@ class OAHEntry {
     return (data_ & kExtHashShiftedMask) >> kExtHashShift;
   }
 
-  bool CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log, uint32_t shift_log);
-
-  static uint64_t CalcExtHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log);
-
   bool CheckNoCollisions(const uint64_t ext_hash);
 
-  bool CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log, uint32_t shift_log);
-
-  // shift_log identify which bucket the element belongs to
-  uint64_t SetHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log);
+  void SetExtHash(uint64_t ext_hash);
 
   void ClearHash() {
     data_ &= ~kExtHashShiftedMask;
   }
 
-  // return new bucket_id
-  uint32_t Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log, uint32_t new_capacity_log,
-                  uint32_t shift_log);
-
   void SetExpiry(uint32_t at_sec);
-
-  std::optional<uint32_t> Find(std::string_view str, uint64_t ext_hash, uint32_t capacity_log,
-                               uint32_t shift_log, uint32_t* set_size, size_t* alloc_used,
-                               uint32_t time_now = 0);
 
   void ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used);
 

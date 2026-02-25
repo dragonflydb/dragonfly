@@ -11,9 +11,10 @@
 
 #include "core/qlist.h"
 #include "facade/facade_stats.h"
+#include "facade/facade_types.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
-#include "server/replica.h"
+#include "server/replica_types.h"
 #include "server/server_state.h"
 #include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -36,22 +37,20 @@ namespace dfly {
 
 namespace detail {
 
-class SaveStagesController;
+struct SaveStagesController;
 class SnapshotStorage;
 
 }  // namespace detail
 
 std::string GetPassword();
 
-namespace journal {
-class Journal;
-}  // namespace journal
-
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;
+class Replica;
 class Service;
 class ScriptMgr;
+class RdbLoadContext;
 
 struct ReplicaRoleInfo {
   std::string id;
@@ -136,10 +135,10 @@ struct Metrics {
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
 
   struct ReplicaInfo {
-    Replica::Summary summary;
+    ReplicaSummary summary;
 
     // cluster
-    std::vector<Replica::Summary> cl_repl_summary;
+    std::vector<ReplicaSummary> cl_repl_summary;
   };
 
   // Replica reconnect stats on the replica side. Undefined for master
@@ -285,15 +284,11 @@ class ServerFamily {
     return master_replid_;
   }
 
-  journal::Journal* journal() {
-    return journal_.get();
-  }
-
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
 
-  std::optional<Replica::LastMasterSyncData> GetLastMasterData() const {
+  std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;
   }
 
@@ -309,7 +304,7 @@ class ServerFamily {
 
   void OnClose(ConnectionContext* cntx);
 
-  void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
+  void CancelBlockingOnThread(std::function<facade::OpStatus(facade::ArgSlice)> = {});
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
@@ -388,7 +383,7 @@ class ServerFamily {
   // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
   // may use them for consistency checks.
   std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                          LoadOptions* load_opts);
+                          LoadOptions* load_opts, RdbLoadContext* load_context);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
@@ -434,11 +429,10 @@ class ServerFamily {
       ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
 
   std::unique_ptr<ScriptMgr> script_mgr_;
-  std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
 
   std::string master_replid_;
-  std::optional<Replica::LastMasterSyncData> last_master_data_;
+  std::optional<LastMasterSyncData> last_master_data_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 

@@ -9,7 +9,6 @@
 #include <shared_mutex>
 #include <string_view>
 
-#include "base/io_buf.h"
 #include "server/journal/types.h"
 #include "util/fibers/synchronization.h"
 
@@ -58,9 +57,18 @@ class JournalSlice {
   // with allow_flush=false and the subsequent call with allow_flush=true.
   void SetFlushMode(bool allow_flush);
 
-  size_t GetRingBufferSize() const;
-  size_t GetRingBufferBytes() const;
-  void ResetRingBuffer();
+  size_t GetRingBufferSize() const {
+    return ring_buffer_.size();
+  }
+
+  size_t GetRingBufferBytes() const {
+    return ring_buffer_bytes_;
+  }
+
+  void ResetRingBuffer() {
+    ring_buffer_.clear();
+    ring_buffer_bytes_ = ring_buffer_.capacity() * sizeof(JournalItem);
+  }
 
   void SetStartingLSN(LSN lsn) {
     lsn_ = lsn;
@@ -69,7 +77,6 @@ class JournalSlice {
  private:
   void CallOnChange(JournalChangeItem* item);
   boost::circular_buffer<JournalItem> ring_buffer_;
-  base::IoBuf ring_serialize_buf_;
 
   mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
   std::list<std::pair<uint32_t, JournalConsumerInterface*>> journal_consumers_arr_;
@@ -80,7 +87,7 @@ class JournalSlice {
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
 
-  size_t ring_buffer_bytes = 0;
+  size_t ring_buffer_bytes_ = 0;
 };
 
 }  // namespace journal
