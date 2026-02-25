@@ -1116,4 +1116,52 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
+size_t EngineShard::DashGC(double threshold) {
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  auto& prime = db_slice.GetDBTable(0)->prime;
+  size_t total_seg_merged = 0;
+
+  while (true) {
+    bool merged_any = false;
+
+    // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
+    for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
+      // Fetch segment pointer fresh each iteration
+      auto* seg = prime.GetSegment(seg_id);
+
+      size_t local_depth = seg->local_depth();
+      if (local_depth == 1)
+        continue;
+
+      unsigned buddy_id = prime.FindBuddyId(seg_id);
+      if (buddy_id == seg_id)
+        continue;
+
+      if (seg_id > buddy_id)
+        continue;
+
+      auto* buddy = prime.GetSegment(buddy_id);
+
+      const size_t combined = seg->SlowSize() + buddy->SlowSize();
+      const size_t max_size = threshold * seg->capacity();
+
+      if (combined > max_size)
+        continue;
+
+      if (prime.Merge(seg_id, buddy_id)) {
+        ++total_seg_merged;
+        merged_any = true;
+      }
+
+      // Yield after merge (don't hold pointers across yield)
+      util::ThisFiber::Yield();
+    }
+
+    if (!merged_any)
+      break;
+  }
+
+  return total_seg_merged;
+}
+
 }  // namespace dfly
