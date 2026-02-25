@@ -4,10 +4,13 @@ import logging
 import re
 import typing
 import math
+import redis
 import redis.asyncio as aioredis
 from dataclasses import dataclass
 import time
 import sys
+
+import numpy as np
 
 try:
     from importlib import resources as impresources
@@ -233,3 +236,152 @@ class Seeder(SeederBase):
             msg = f"{msg}. Total huge entries {huge_entries} added."
 
         logging.debug(msg)
+
+
+class HnswSearchSeeder:
+
+    def __init__(
+        self,
+        index_name="hnsw_idx",
+        prefix="doc:",
+        num_dims=4,
+        num_initial_docs=200,
+        seed=42,
+    ):
+        self.index_name = index_name
+        self.prefix = prefix
+        self.num_dims = num_dims
+        self.num_initial_docs = num_initial_docs
+        self.seed = seed
+
+        self._doc_counter = 0
+        self._stop_event = asyncio.Event()
+
+    def _make_embedding(self):
+        return np.random.uniform(-10, 10, self.num_dims).astype(np.float32)
+
+    async def create_index(self, client: aioredis.Redis):
+        await client.execute_command(
+            "FT.CREATE",
+            self.index_name,
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            self.prefix,
+            "SCHEMA",
+            "title",
+            "TEXT",
+            "embedding",
+            "VECTOR",
+            "HNSW",
+            "6",
+            "TYPE",
+            "FLOAT32",
+            "DIM",
+            str(self.num_dims),
+            "DISTANCE_METRIC",
+            "L2",
+        )
+
+    async def seed_initial_docs(self, client: aioredis.Redis):
+        pipe = client.pipeline(transaction=False)
+        for i in range(self.num_initial_docs):
+            emb = self._make_embedding()
+            pipe.hset(
+                f"{self.prefix}{i}",
+                mapping={
+                    "title": f"Product {i}",
+                    "embedding": emb.tobytes(),
+                },
+            )
+        await pipe.execute()
+        self._doc_counter = self.num_initial_docs
+
+    def stop(self):
+        self._stop_event.set()
+
+    async def verify(self, *clients: aioredis.Redis, num_queries=10):
+        if len(clients) < 2:
+            raise ValueError("Need at least two clients to compare")
+
+        sizes = [await c.dbsize() for c in clients]
+        for i in range(1, len(sizes)):
+            assert (
+                sizes[0] == sizes[i]
+            ), f"dbsize mismatch: client[0]={sizes[0]} vs client[{i}]={sizes[i]}"
+
+        # Verify HNSW search works and returns consistent results on all clients.
+        # For now we suppose that results should be 100% the same on all clients,
+        # in the future we can relax this assertion and check for some overlap in results instead,
+        # as HNSW is not deterministic and can return different results on different runs
+        for _ in range(num_queries):
+            query_vec = self._make_embedding().tobytes()
+            results = []
+            for c in clients:
+                r = await c.execute_command(
+                    "FT.SEARCH",
+                    self.index_name,
+                    "*=>[KNN 5 @embedding $vec]",
+                    "PARAMS",
+                    "2",
+                    "vec",
+                    query_vec,
+                    "LIMIT",
+                    "0",
+                    "5",
+                )
+                doc_ids = sorted(r[i] for i in range(1, len(r), 2))
+                results.append((r[0], doc_ids))
+            for i in range(1, len(results)):
+                assert results[0] == results[i]
+            assert results[0][0] > 0, "KNN search returned no results"
+
+    async def run_traffic(self, client: aioredis.Redis, sleep_interval=0.01):
+        self._stop_event.clear()
+        while not self._stop_event.is_set():
+            op = random.choice(["insert", "update", "delete"])
+            try:
+                if op == "insert":
+                    emb = self._make_embedding()
+                    await client.hset(
+                        f"{self.prefix}{self._doc_counter}",
+                        mapping={
+                            "title": f"Product {self._doc_counter}",
+                            "embedding": emb.tobytes(),
+                        },
+                    )
+                    self._doc_counter += 1
+                elif op == "update":
+                    key_id = random.randint(0, max(self._doc_counter - 1, 0))
+                    key = f"{self.prefix}{key_id}"
+                    if not await client.exists(key):
+                        continue
+                    emb = self._make_embedding()
+                    await client.hset(key, mapping={"embedding": emb.tobytes()})
+                elif op == "delete":
+                    key_id = random.randint(0, max(self._doc_counter - 1, 0))
+                    await client.delete(f"{self.prefix}{key_id}")
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
+                await asyncio.sleep(sleep_interval)
+            await asyncio.sleep(sleep_interval)
+
+    async def run_search_queries(self, client: aioredis.Redis, sleep_interval=0.05):
+        while not self._stop_event.is_set():
+            try:
+                query_vec = self._make_embedding().tobytes()
+                await client.execute_command(
+                    "FT.SEARCH",
+                    self.index_name,
+                    "*=>[KNN 5 @embedding $vec]",
+                    "PARAMS",
+                    "2",
+                    "vec",
+                    query_vec,
+                    "LIMIT",
+                    "0",
+                    "5",
+                )
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
+                pass
+            await asyncio.sleep(sleep_interval)
