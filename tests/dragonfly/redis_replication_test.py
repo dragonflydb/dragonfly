@@ -252,7 +252,7 @@ master_disconnect_cases = [
     pytest.param(
         [1, 4, 6],
         dict(keys=1_000, dbcount=2, unsupported_types=[ValueType.JSON]),
-        marks=pytest.mark.slow,
+        marks=pytest.mark.large,
     ),
 ]
 

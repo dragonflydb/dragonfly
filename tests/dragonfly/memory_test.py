@@ -11,7 +11,7 @@ from .instance import DflyInstanceFactory
 from .utility import tmp_file_name
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",

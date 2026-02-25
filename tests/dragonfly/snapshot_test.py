@@ -180,7 +180,7 @@ async def test_redis_load_snapshot(
     assert await c_master.dbsize() == dbsize
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
 async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
@@ -195,7 +195,7 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
 
 
 @pytest.mark.skip("Fails and also causes all TLS tests to fail")
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving", "snapshot_cron": "* * * * *"})
 async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_client: aioredis.Redis):
     await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
@@ -234,7 +234,7 @@ async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_clien
     await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total + 1)
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron-set"})
 async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
@@ -685,7 +685,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     "cont_type",
     [("HASH"), ("SET"), ("ZSET"), ("LIST"), ("STREAM")],
 )
-@pytest.mark.slow
+@pytest.mark.large
 async def test_big_value_serialization_memory_limit(df_factory, cont_type):
     dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(dbfilename=dbfilename)
