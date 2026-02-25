@@ -820,6 +820,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
     }
 
+    result.reserve(pv.Size());
     container_utils::IterateSet(find_res.value()->second,
                                 [&result](container_utils::ContainerEntry ce) {
                                   result.push_back(ce.ToString());
@@ -857,6 +858,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   std::sort(sets.begin(), sets.end(), comp);
 
   int encoding = sets.front().second;
+  result.reserve(SetTypeLen(t->GetDbContext(), sets.front()));
   if (encoding == kEncodingIntSet) {
     int ii = 0;
     intset* is = (intset*)sets.front().first;
