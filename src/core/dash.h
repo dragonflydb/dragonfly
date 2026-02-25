@@ -198,7 +198,7 @@ class DashTable : public detail::DashTableBase {
     assert(buddy_idx < segment_.size());
 
     auto* buddy = GetSegment(buddy_idx);
-    // There is no adjacent subtree of different depth
+    // There is no adjacent subtree of the same depth
     if (buddy->local_depth() != depth) {
       return segment_id;
     }
