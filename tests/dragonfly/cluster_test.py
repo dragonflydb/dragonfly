@@ -1549,7 +1549,7 @@ async def test_network_disconnect_during_migration(df_factory):
         pytest.param(3, 16, 20_000, 1_000_000, "true"),
         pytest.param(3, 16, 20_000, 1_000_000, "false"),
         pytest.param(
-            5, 20, 30_000, 1_000_000, "false", marks=[pytest.mark.slow, pytest.mark.opt_only]
+            5, 20, 30_000, 1_000_000, "false", marks=[pytest.mark.large, pytest.mark.opt_only]
         ),
     ],
 )

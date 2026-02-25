@@ -393,7 +393,7 @@ will eventually unblock when it disconnects.
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({"proactor_threads": "1", "publish_buffer_limit": "100"})
 async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
@@ -1018,7 +1018,7 @@ It should prolong the pause for all current commands.
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_nested_client_pause(async_client: aioredis.Redis):
     async def do_pause():
         await async_client.execute_command("CLIENT", "PAUSE", "1000", "WRITE")
