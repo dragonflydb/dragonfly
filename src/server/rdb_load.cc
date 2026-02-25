@@ -52,6 +52,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/transaction.h"
+#include "server/zset_family.h"
 #include "strings/human_readable.h"
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
@@ -85,50 +86,6 @@ inline auto Unexpected(errc ev) {
 
 const error_code kOk;
 
-struct ZiplistCbArgs {
-  long count = 0;
-  absl::flat_hash_set<string_view> fields;
-  unsigned char** lp;
-};
-
-/* callback for hashZiplistConvertAndValidateIntegrity.
- * Check that the ziplist doesn't have duplicate hash field names.
- * The ziplist element pointed by 'p' will be converted and stored into listpack. */
-int ziplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
-  unsigned char* str;
-  unsigned int slen;
-  long long vll;
-
-  ZiplistCbArgs* data = (ZiplistCbArgs*)userdata;
-
-  if (data->fields.empty()) {
-    data->fields.reserve(head_count / 2);
-  }
-
-  if (!ziplistGet(p, &str, &slen, &vll))
-    return 0;
-
-  /* Even records are field names, add to dict and check that's not a dup */
-  if (((data->count) & 1) == 0) {
-    sds field = str ? sdsnewlen(str, slen) : sdsfromlonglong(vll);
-    auto [_, inserted] = data->fields.emplace(field, sdslen(field));
-    if (!inserted) {
-      /* Duplicate, return an error */
-      sdsfree(field);
-      return 0;
-    }
-  }
-
-  if (str) {
-    *(data->lp) = lpAppend(*(data->lp), (unsigned char*)str, slen);
-  } else {
-    *(data->lp) = lpAppendInteger(*(data->lp), vll);
-  }
-
-  (data->count)++;
-  return 1;
-}
-
 /* callback for ziplistValidateIntegrity.
  * The ziplist element pointed by 'p' will be converted and stored into listpack. */
 int ziplistEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
@@ -147,29 +104,6 @@ int ziplistEntryConvertAndValidate(unsigned char* p, unsigned int head_count, vo
 
   return 1;
 }
-
-/* Validate the integrity of the data structure while converting it to
- * listpack and storing it at 'lp'.
- * The function is safe to call on non-validated ziplists, it returns 0
- * when encounter an integrity validation issue. */
-int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsigned char** lp) {
-  /* Keep track of the field names to locate duplicate ones */
-  ZiplistCbArgs data;
-  data.lp = lp;
-
-  int ret = ziplistValidateIntegrity(const_cast<uint8_t*>(zl), size, 1,
-                                     ziplistPairsEntryConvertAndValidate, &data);
-
-  /* make sure we have an even number of records. */
-  if (data.count & 1)
-    ret = 0;
-
-  for (auto field : data.fields) {
-    sdsfree((sds)field.data());
-  }
-  return ret;
-}
-
 string ModuleTypeName(uint64_t module_id) {
   static const char ModuleNameSet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -317,7 +251,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size();
 
   bool is_intset = true;
-  if (!config_.streamed && rdb_type_ == RDB_TYPE_HASH &&
+  if (!config_.chunked && rdb_type_ == RDB_TYPE_SET &&
       ltrace->arr.size() <= SetFamily::MaxIntsetEntries()) {
     Iterate(*ltrace, [&](const LoadBlob& blob) {
       if (!holds_alternative<long long>(blob.rdb_var)) {
@@ -328,7 +262,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     });
   } else {
     /* Use a regular set when there are too many entries, or when the
-     * set is being streamed. */
+     * set is being chunked. */
     is_intset = false;
   }
 
@@ -365,7 +299,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   } else {
     StringSet* set;
     if (config_.append) {
-      // Note we always use StringSet when the object is being streamed.
+      // Note we always use StringSet when the object is being chunked.
       if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
         return;
       }
@@ -438,7 +372,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = !config_.streamed && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
+  bool keep_lp = !config_.chunked && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -641,7 +575,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
   detail::SortedMap* zs;
   if (config_.append) {
-    // Note we always use SortedMap when the object is being streamed.
+    // Note we always use SortedMap when the object is being chunked.
     if (!EnsureObjEncoding(OBJ_ZSET, OBJ_ENCODING_SKIPLIST)) {
       return;
     }
@@ -689,7 +623,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (!config_.streamed && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
+  if (!config_.chunked && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
       maxelelen <= ZSET_MAX_LISTPACK_VALUE && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
@@ -858,6 +792,25 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
+  auto handle_load_result = [&](LoadBlobResult load_result) {
+    switch (load_result) {
+      case LoadBlobResult::kCorrupted:
+        LOG(ERROR) << "Corrupted blob detected with size " << blob.size() << " for rdb type "
+                   << rdb_type_;
+        ec_ = RdbError(errc::rdb_file_corrupted);
+        break;
+      case LoadBlobResult::kOutOfMemory:
+        LOG(ERROR) << "OOM in LoadBlob " << blob.size();
+        ec_ = RdbError(errc::out_of_memory);
+        break;
+      case LoadBlobResult::kEmpty:
+        ec_ = RdbError(errc::empty_key);
+        break;
+      default:
+        break;
+    }
+  };
+
   if (rdb_type_ == RDB_TYPE_STRING) {
     if (config_.append) {
       pv_->AppendString(blob);
@@ -870,130 +823,28 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     return;
   }
 
-  if (rdb_type_ == RDB_TYPE_SET_INTSET) {
-    if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
-      LOG(ERROR) << "Intset integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
-
-    const intset* is = (const intset*)blob.data();
-
-    unsigned len = intsetLen(is);
-
-    if (len > SetFamily::MaxIntsetEntries()) {
-      StringSet* set = SetFamily::ConvertToStrSet(is, len);
-
-      if (!set) {
-        LOG(ERROR) << "OOM in ConvertToStrSet " << len;
-        ec_ = RdbError(errc::out_of_memory);
-        return;
-      }
-      pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
-    } else {
-      intset* mine = (intset*)zmalloc(blob.size());
-      ::memcpy(mine, blob.data(), blob.size());
-      pv_->InitRobj(OBJ_SET, kEncodingIntSet, mine);
-    }
-  } else if (rdb_type_ == RDB_TYPE_SET_LISTPACK) {
-    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-      LOG(ERROR) << "ListPack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
-
-    unsigned char* lp = (unsigned char*)blob.data();
-    StringSet* set = CompactObj::AllocateMR<StringSet>();
-    for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-      unsigned char field_buf[LP_INTBUF_SIZE];
-      string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
-      if (!set->Add(elem)) {
-        LOG(ERROR) << "Duplicate member " << elem;
-        ec_ = RdbError(errc::duplicate_key);
-        break;
-      }
-    }
-    if (ec_) {
-      CompactObj::DeleteMR<StringSet>(set);
-      return;
-    }
-    pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
-  } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
-    unsigned char* lp = lpNew(blob.size());
-    switch (rdb_type_) {
-      case RDB_TYPE_HASH_ZIPLIST:  // legacy format
-        if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(),
-                                                     &lp)) {
-          LOG(ERROR) << "Zset ziplist integrity check failed.";
-          zfree(lp);
-          ec_ = RdbError(errc::rdb_file_corrupted);
-          return;
-        }
-        break;
-      case RDB_TYPE_HASH_LISTPACK:
-        if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-          LOG(ERROR) << "ListPack integrity check failed.";
-          zfree(lp);
-          ec_ = RdbError(errc::rdb_file_corrupted);
-          return;
-        }
-        std::memcpy(lp, blob.data(), blob.size());
-        break;
-    }
-
-    if (lpLength(lp) == 0) {
-      lpFree(lp);
-      ec_ = RdbError(errc::empty_key);
-      return;
-    }
-
-    if (lpBytes(lp) > server.max_listpack_map_bytes) {
-      StringMap* sm = HSetFamily::ConvertToStrMap(lp);
-      lpFree(lp);
-      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
-    } else {
-      lp = lpShrinkToFit(lp);
-      pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
-    }
+  if (rdb_type_ == RDB_TYPE_SET_INTSET || rdb_type_ == RDB_TYPE_SET_LISTPACK) {
+    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_SET_INTSET
+                                     ? SetFamily::LoadIntSetBlob(blob, pv_)
+                                     : SetFamily::LoadLPSetBlob(blob, pv_);
+    handle_load_result(load_result);
     return;
-  } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {  // legacy format
-    unsigned char* lp = lpNew(blob.size());
-    if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {
-      LOG(ERROR) << "Zset ziplist integrity check failed.";
-      zfree(lp);
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
+  }
 
-    if (lpLength(lp) == 0) {
-      lpFree(lp);
-      ec_ = RdbError(errc::empty_key);
-      return;
-    }
-
-    unsigned encoding = OBJ_ENCODING_LISTPACK;
-    void* inner;
-    if (lpBytes(lp) >= server.max_listpack_map_bytes) {
-      inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp);
-      lpFree(lp);
-      encoding = OBJ_ENCODING_SKIPLIST;
-    } else {
-      lp = lpShrinkToFit(lp);
-      inner = lp;
-    }
-    pv_->InitRobj(OBJ_ZSET, encoding, inner);
+  if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
+    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_HASH_ZIPLIST
+                                     ? HSetFamily::LoadZiplistBlob(blob, pv_)
+                                     : HSetFamily::LoadListpackBlob(blob, pv_);
+    handle_load_result(load_result);
     return;
-  } else if (rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
-    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-      LOG(ERROR) << "ListPack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
-    unsigned char* src_lp = (unsigned char*)blob.data();
-    unsigned long long bytes = lpBytes(src_lp);
-    unsigned char* lp = (uint8_t*)zmalloc(bytes);
-    std::memcpy(lp, src_lp, bytes);
-    pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+  }
+
+  if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST || rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
+    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
+                                     ? ZSetFamily::LoadZiplistBlob(blob, pv_)
+                                     : ZSetFamily::LoadListpackBlob(blob, pv_);
+    handle_load_result(load_result);
+    return;
   } else if (rdb_type_ == RDB_TYPE_JSON) {
     size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     {
@@ -2333,7 +2184,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
 
-  now_streamed_.clear();
+  now_chunked_.clear();
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -2699,9 +2550,9 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   };
 
   LoadConfig config_copy = item->load_config;
-  if (item->load_config.streamed && item->load_config.append) {
-    std::unique_lock lk{now_streamed_mu_};
-    if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
+  if (item->load_config.chunked && item->load_config.append) {
+    std::unique_lock lk{now_chunked_mu_};
+    if (auto it = now_chunked_.find(item->key); it != now_chunked_.end()) {
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2734,21 +2585,21 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       return;
     }
     LOG(ERROR) << "Could not load value for key '" << absl::CHexEscape(item->key) << "' in DB "
-               << db_ind << " " << item->load_config.streamed << " " << item->load_config.append
+               << db_ind << " " << item->load_config.chunked << " " << item->load_config.append
                << " " << item->val.rdb_type;
     stop_early_ = true;
     return;
   }
 
-  if (item->load_config.streamed) {
-    std::unique_lock lk{now_streamed_mu_};
-    if (!now_streamed_.contains(item->key))
-      now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+  if (item->load_config.chunked) {
+    std::unique_lock lk{now_chunked_mu_};
+    if (!now_chunked_.contains(item->key))
+      now_chunked_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
       return;
 
-    pv = std::move(*now_streamed_.extract(item->key).mapped());
+    pv = std::move(*now_chunked_.extract(item->key).mapped());
   }
 
   // We need this extra check because we don't return empty_key
@@ -2863,7 +2714,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
       item->key = std::move(key);
     }
 
-    item->load_config.streamed = streamed;
+    item->load_config.chunked = streamed;
     item->load_config.reserve = pending_read_.reserve;
     // Clear 'reserve' as we must only set when the object is first
     // initialized.

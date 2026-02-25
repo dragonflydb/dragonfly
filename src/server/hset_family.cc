@@ -1062,6 +1062,57 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
 }
 
+auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  unsigned char* lp = lpNew(blob.size());
+  if (!ZiplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
+    LOG(ERROR) << "Hash ziplist integrity check failed.";
+    zfree(lp);
+    return LoadBlobResult::kCorrupted;
+  }
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  if (lpBytes(lp) > server.max_listpack_map_bytes) {
+    StringMap* sm = ConvertToStrMap(lp);
+    lpFree(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  } else {
+    lp = lpShrinkToFit(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  }
+
+  return LoadBlobResult::kSuccess;
+}
+
+auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "Hash listpack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* lp = lpNew(blob.size());
+  std::memcpy(lp, blob.data(), blob.size());
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  if (lpBytes(lp) > server.max_listpack_map_bytes) {
+    StringMap* sm = ConvertToStrMap(lp);
+    lpFree(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  } else {
+    lp = lpShrinkToFit(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  }
+
+  return LoadBlobResult::kSuccess;
+}
+
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
   StringMap* sm = CompactObj::AllocateMR<StringMap>();
 
