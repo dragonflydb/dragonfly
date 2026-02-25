@@ -191,7 +191,9 @@ class DashTable : public detail::DashTableBase {
     auto* seg = GetSegment(segment_id);
     uint8_t depth = seg->local_depth();
 
-    assert(depth != 1);
+    if (depth <= 1) {
+      return segment_id;
+    }
 
     const size_t bit_pos = global_depth_ - depth;
     const size_t buddy_idx = segment_id ^ (1u << bit_pos);
