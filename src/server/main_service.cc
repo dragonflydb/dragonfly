@@ -1512,6 +1512,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
 
+  if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
+    ++ServerState::tlocal()->stats.blocking_commands_in_pipelines;
+  }
+
   ArgSlice tail_args;
   if (cmd_cntx->IsDeferredReply()) {
     args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
