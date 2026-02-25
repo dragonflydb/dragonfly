@@ -209,13 +209,11 @@ class DashTable : public detail::DashTableBase {
   // - Moves all items from `buddy_id` to `keep_id` (merges the two segments).
   //   After merge completes, `buddy_id` segment is deleted.
   // - Return true if the two segments merged successfully.
-  // - Prefer calling this function only when the combined
-  //   size of both segments is less than x * segment_capacity. With x:
-  //   0 < x < 0.25. Under uniform hash distribution insertion failures
-  //   during merge are statistically improbable as long as x remains under 25%.
-  //   What is more, this 25% is not universal. For non default bucket size (14 slots)
-  //   this number needs to be calibrated.
   // - If an insertion fails we rollback and abort the merge (return false).
+  // - Merge can run only if there are no active snapshots.
+  // - Prefer calling this function only when the combined size of both segments
+  //   than x * segment_capacity. With x: 0 < x < 0.25 as statistically this won't
+  //   trigger rollbacks.
   bool Merge(unsigned keep_id, unsigned buddy_id) {
     auto* keep = GetSegment(keep_id);
     auto* buddy = GetSegment(buddy_id);
