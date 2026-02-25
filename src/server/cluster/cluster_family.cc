@@ -1152,14 +1152,13 @@ void ClusterFamily::ReconcileMasterSlots(std::string_view repl_id) {
                                    [repl_id](const auto& e) { return e.id == repl_id; });
 
         if (target == info.replicas.end()) {
-          std::string replicas = "[";
-          for (auto& replica : info.replicas) {
-            absl::StrAppend(&replicas, replica.id, ",");
-          }
-          replicas.pop_back();  // remove last ','
-          replicas.push_back(']');
+          auto topology =
+              absl::StrCat("[",
+                           absl::StrJoin(info.replicas, ",",
+                                         [](std::string* out, const auto& r) { *out = r.id; }),
+                           "]");
           LOG(ERROR) << "info.master.id=" << id_ << ". Missing repl_id=" << repl_id
-                     << " from cluster topology " << replicas
+                     << " from cluster topology " << topology
                      << ". Slot redirection after takeover corrupted.";
 
           return;
