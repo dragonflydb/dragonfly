@@ -4088,7 +4088,6 @@ async def test_replication_replica_larger_dbnum(
 # of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
 # filter size, which silently overflowed to 0 and broke the RDB stream.
 @pytest.mark.large
-@pytest.mark.large
 async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
