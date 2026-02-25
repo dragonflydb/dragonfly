@@ -508,6 +508,305 @@ TEST_F(DashTest, MergeFailureRollback) {
   EXPECT_FALSE(merge_succeeded);
 }
 
+// Verify that FindBuddyId is symmetric: if FindBuddyId(x) = y, then FindBuddyId(y) = x.
+TEST_F(DashTest, FindBuddySymmetry) {
+  for (uint64_t i = 0; i < 4000; ++i) {
+    dt_.Insert(i, i);
+  }
+
+  EXPECT_GE(dt_.depth(), 3);
+  size_t dir_size = dt_.GetSegmentCount();
+
+  for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+    auto* seg = dt_.GetSegment(seg_id);
+    if (seg->local_depth() == 1)
+      continue;
+
+    size_t buddy_id = dt_.FindBuddyId(seg_id);
+    if (buddy_id == seg_id)
+      continue;
+
+    // Symmetry check
+    size_t reverse_buddy_id = dt_.FindBuddyId(buddy_id);
+    EXPECT_EQ(reverse_buddy_id, seg_id)
+        << "FindBuddyId not symmetric: FindBuddyId(" << seg_id << ")=" << buddy_id
+        << " but FindBuddyId(" << buddy_id << ")=" << reverse_buddy_id;
+  }
+}
+
+// Verify dt_.size() is unchanged after merge (items moved, not deleted).
+TEST_F(DashTest, MergePreservesSize) {
+  for (uint64_t i = 0; i < 4000; ++i) {
+    dt_.Insert(i, i);
+  }
+
+  // Delete most keys to make merge feasible
+  for (uint64_t i = 200; i < 4000; ++i) {
+    dt_.Erase(i);
+  }
+
+  size_t size_before = dt_.size();
+  size_t dir_size = dt_.GetSegmentCount();
+
+  // Do one merge pass
+  for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+    auto* seg = dt_.GetSegment(seg_id);
+    if (seg->local_depth() == 1)
+      continue;
+
+    size_t buddy_id = dt_.FindBuddyId(seg_id);
+    if (buddy_id == seg_id || seg_id > buddy_id)
+      continue;
+
+    auto* buddy = dt_.GetSegment(buddy_id);
+    size_t combined_size = seg->SlowSize() + buddy->SlowSize();
+    if (combined_size <= static_cast<size_t>(0.25 * seg->capacity())) {
+      bool merged = dt_.Merge(seg_id, buddy_id);
+      if (merged) {
+        // Size must be unchanged after each merge
+        EXPECT_EQ(dt_.size(), size_before)
+            << "size changed after merging seg_id=" << seg_id << " buddy_id=" << buddy_id;
+      }
+    }
+  }
+}
+
+// After merging, verify all remaining keys are still findable via dt_.Find().
+// This tests that directory routing is correct after merge.
+TEST_F(DashTest, MergeKeyLookupConsistency) {
+  constexpr size_t kNumItems = 4000;
+  std::vector<uint64_t> all_keys;
+
+  for (uint64_t i = 0; i < kNumItems; ++i) {
+    auto [it, inserted] = dt_.Insert(i, i);
+    if (inserted)
+      all_keys.push_back(i);
+  }
+
+  // Keep only ~10% of keys
+  size_t keep_count = all_keys.size() / 10;
+  for (size_t i = keep_count; i < all_keys.size(); ++i) {
+    dt_.Erase(all_keys[i]);
+  }
+  all_keys.resize(keep_count);
+
+  size_t dir_size = dt_.GetSegmentCount();
+
+  // Merge all eligible pairs
+  bool merged_any = true;
+  while (merged_any) {
+    merged_any = false;
+    for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+      auto* seg = dt_.GetSegment(seg_id);
+      if (seg->local_depth() == 1)
+        continue;
+
+      size_t buddy_id = dt_.FindBuddyId(seg_id);
+      if (buddy_id == seg_id || seg_id > buddy_id)
+        continue;
+
+      auto* buddy = dt_.GetSegment(buddy_id);
+      size_t combined_size = seg->SlowSize() + buddy->SlowSize();
+      if (combined_size <= static_cast<size_t>(0.25 * seg->capacity())) {
+        if (dt_.Merge(seg_id, buddy_id)) {
+          merged_any = true;
+        }
+      }
+    }
+  }
+
+  // All remaining keys must be findable via the table-level Find
+  for (uint64_t key : all_keys) {
+    auto it = dt_.Find(key);
+    EXPECT_FALSE(it.is_done()) << "Key " << key << " not found after merge";
+  }
+}
+
+// Test that after merging to depth 1, inserting more keys works correctly —
+// the table can split again and all data remains intact.
+TEST_F(DashTest, MergeAndGrow) {
+  constexpr size_t kPhase1 = 4000;
+  std::vector<uint64_t> surviving_keys;
+
+  for (uint64_t i = 0; i < kPhase1; ++i) {
+    dt_.Insert(i, i);
+  }
+
+  // Delete enough to enable merge
+  size_t keep_count = kPhase1 / 20;  // ~5%
+  for (uint64_t i = keep_count; i < kPhase1; ++i) {
+    dt_.Erase(i);
+  }
+  for (uint64_t i = 0; i < keep_count; ++i) {
+    surviving_keys.push_back(i);
+  }
+
+  size_t dir_size = dt_.GetSegmentCount();
+  bool merged_any = true;
+  while (merged_any) {
+    merged_any = false;
+    for (size_t seg_id = 0; seg_id < dir_size; seg_id++) {
+      auto* seg = dt_.GetSegment(seg_id);
+      if (seg->local_depth() == 1)
+        continue;
+
+      size_t buddy_id = dt_.FindBuddyId(seg_id);
+      if (buddy_id == seg_id || seg_id > buddy_id)
+        continue;
+
+      auto* buddy = dt_.GetSegment(buddy_id);
+      size_t combined = seg->SlowSize() + buddy->SlowSize();
+      if (combined <= static_cast<size_t>(0.25 * seg->capacity())) {
+        dt_.Merge(seg_id, buddy_id);
+        merged_any = true;
+      }
+    }
+  }
+
+  EXPECT_EQ(dt_.unique_segments(), 2);
+
+  // Now insert a new batch — the table should grow (split) again
+  constexpr size_t kPhase2 = 3000;
+  for (uint64_t i = kPhase1; i < kPhase1 + kPhase2; ++i) {
+    auto [it, inserted] = dt_.Insert(i, i);
+    if (inserted)
+      surviving_keys.push_back(i);
+  }
+
+  EXPECT_GT(dt_.depth(), 1);
+
+  // ALL surviving keys must be findable after growth
+  for (uint64_t key : surviving_keys) {
+    auto it = dt_.Find(key);
+    EXPECT_FALSE(it.is_done()) << "Key " << key << " lost after merge+grow";
+  }
+}
+
+// Verify that after merging, all directory entries that span the merged
+// segment range point to the same segment object (the kept one).
+TEST_F(DashTest, MergeDirectoryConsistency) {
+  // Insert enough for depth 2 (4 segments)
+  for (uint64_t i = 0; i < 2000; ++i) {
+    dt_.Insert(i, i);
+  }
+
+  EXPECT_GE(dt_.depth(), 2);
+
+  // Delete most items to enable merge
+  for (uint64_t i = 50; i < 2000; ++i) {
+    dt_.Erase(i);
+  }
+
+  unsigned keep_id = 0;
+  unsigned buddy_id = dt_.FindBuddyId(0);
+
+  if (buddy_id == 0) {
+    // No buddy for segment 0 - try segment 2
+    keep_id = 2;
+    buddy_id = dt_.FindBuddyId(2);
+  }
+
+  // Only proceed if we found a mergeable buddy pair
+  if (buddy_id != keep_id) {
+    auto* keep = dt_.GetSegment(keep_id);
+    auto* buddy = dt_.GetSegment(buddy_id);
+
+    if (keep->local_depth() == buddy->local_depth() && keep->local_depth() > 1 &&
+        keep_id < buddy_id) {
+      uint8_t depth = keep->local_depth();
+      size_t combined = keep->SlowSize() + buddy->SlowSize();
+
+      if (combined <= static_cast<size_t>(0.25 * keep->capacity())) {
+        bool merged = dt_.Merge(keep_id, buddy_id);
+        ASSERT_TRUE(merged);
+
+        // After merge, all dir entries that covered buddy must now point to keep
+        auto* kept_seg = dt_.GetSegment(keep_id);
+        uint32_t chunk_size = 1u << (dt_.depth() - (depth - 1));
+        uint32_t start = keep_id & ~(chunk_size - 1u);
+
+        for (size_t i = start; i < start + chunk_size; ++i) {
+          EXPECT_EQ(dt_.GetSegment(i), kept_seg)
+              << "Directory entry " << i << " does not point to merged segment";
+        }
+      }
+    }
+  }
+}
+
+// Test merging a table with global_depth > local_depth (aliased directory entries).
+// When a segment at depth D < global_depth is merged with its buddy,
+// the merged segment at depth D-1 should span the correct directory range.
+TEST_F(DashTest, MergeWithAliasedEntries) {
+  // Create depth-3 table (8 dir entries), then merge two depth-3 pairs to get depth-2 segments
+  // alongside other depth-3 segments. This creates aliased entries.
+  for (uint64_t i = 0; i < 4000; ++i) {
+    dt_.Insert(i, i);
+  }
+
+  EXPECT_EQ(dt_.depth(), 3);
+
+  // Delete most items
+  for (uint64_t i = 200; i < 4000; ++i) {
+    dt_.Erase(i);
+  }
+
+  // Merge segments 0 and 1 (both at depth 3) -> depth 2 segment spanning entries {0,1}
+  auto* seg0 = dt_.GetSegment(0);
+  auto* seg1 = dt_.GetSegment(1);
+
+  if (seg0->local_depth() == 3 && seg1->local_depth() == 3) {
+    size_t combined = seg0->SlowSize() + seg1->SlowSize();
+    size_t threshold = static_cast<size_t>(0.25 * seg0->capacity());
+
+    if (combined <= threshold) {
+      bool ok = dt_.Merge(0, 1);
+      ASSERT_TRUE(ok);
+
+      // Now segment at entries 0 and 1 is the same depth-2 object
+      EXPECT_EQ(dt_.GetSegment(0), dt_.GetSegment(1));
+      EXPECT_EQ(dt_.GetSegment(0)->local_depth(), 2);
+
+      // global_depth should still be 3
+      EXPECT_EQ(dt_.depth(), 3);
+
+      // Entries 2 and 3 should still be distinct depth-3 segments
+      EXPECT_NE(dt_.GetSegment(2), dt_.GetSegment(3));
+
+      // Since entries 2 and 3 are still at depth 3 (not yet merged into a depth-2 segment),
+      // the true buddy of the depth-2 segment {0,1} does NOT yet exist.
+      // FindBuddyId computes: bit_pos = global_depth(3) - local_depth(2) = 1
+      //   FindBuddyId(0) -> buddy_idx = 0^2 = 2, GetSegment(2)->local_depth() = 3 != 2 -> returns 0
+      //   FindBuddyId(1) -> buddy_idx = 1^2 = 3, GetSegment(3)->local_depth() = 3 != 2 -> returns 1
+      // Both aliased entries correctly report "no buddy" (returning themselves).
+      EXPECT_EQ(dt_.FindBuddyId(0), 0u)
+          << "No buddy exists for depth-2 segment when entries 2,3 are still depth-3";
+      EXPECT_EQ(dt_.FindBuddyId(1), 1u)
+          << "Aliased entry 1 of same depth-2 segment also finds no buddy";
+
+      // Now merge entries 2 and 3 to create a second depth-2 segment covering {2,3}
+      auto* seg2 = dt_.GetSegment(2);
+      auto* seg3 = dt_.GetSegment(3);
+      if (seg2 != seg3) {
+        size_t combined23 = seg2->SlowSize() + seg3->SlowSize();
+        if (combined23 <= static_cast<size_t>(0.25 * seg2->capacity())) {
+          bool ok23 = dt_.Merge(2, 3);
+          if (ok23) {
+            // Now both {0,1} and {2,3} are depth-2 segments — they ARE buddies
+            // FindBuddyId(0): bit_pos=1, buddy_idx=0^2=2, GetSegment(2)->local_depth()=2 == 2 -> 2
+            // FindBuddyId(2): bit_pos=1, buddy_idx=2^2=0, GetSegment(0)->local_depth()=2 == 2 -> 0
+            EXPECT_EQ(dt_.FindBuddyId(0), 2u)
+                << "After both pairs merged to depth-2, FindBuddyId(0)=2";
+            EXPECT_EQ(dt_.FindBuddyId(2), 0u) << "FindBuddyId(2) should return 0 (symmetric)";
+            // Aliased entry 1 looks for buddy at 1^2=3
+            EXPECT_EQ(dt_.FindBuddyId(1), 3u) << "FindBuddyId(1) returns 3 (alias buddy)";
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_F(DashTest, BumpUp) {
   set<Segment::Key_t> keys = FillSegment(0);
   constexpr unsigned kFirstStashId = Segment::kBucketNum;
