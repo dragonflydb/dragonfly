@@ -1406,21 +1406,26 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   // Brute-force KNN search over a pre-filtered set of label IDs.
   // Computes distances for all provided IDs and returns the top-k closest, ordered by distance.
-  std::priority_queue<std::pair<dist_t, labeltype>> filteredKnnSearch(
+  std::priority_queue<std::pair<dist_t, labeltype>> subsetKnnSearch(
       const void* query_data, size_t k, const std::vector<labeltype>& ids) const {
     std::priority_queue<std::pair<dist_t, labeltype>> result;
-    if (cur_element_count == 0 || ids.empty())
+
+    if (cur_element_count == 0 || ids.empty() || k == 0)
       return result;
 
     for (const auto& label : ids) {
       auto it = label_lookup_.find(label);
+
       if (it == label_lookup_.end()) {
         continue;
       }
+
       tableint internal_id = it->second;
+
       if (isMarkedDeleted(internal_id)) {
         continue;
       }
+
       dist_t dist = fstdistfunc_(query_data, getDataByInternalId(internal_id), dist_func_param_);
       if (result.size() < k) {
         result.emplace(dist, label);
