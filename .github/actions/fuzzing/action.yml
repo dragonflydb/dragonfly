@@ -6,6 +6,11 @@ inputs:
     description: "Fuzzing mode: 'smoke' (stop on first crash) or 'long' (collect all crashes)"
     required: true
     type: string
+  target:
+    description: "Fuzz target: 'resp' or 'memcache'"
+    required: false
+    default: 'resp'
+    type: string
   duration-minutes:
     description: "Fuzzing duration in minutes"
     required: true
@@ -15,7 +20,7 @@ inputs:
     required: true
     type: string
   extra-seeds-dir:
-    description: "Directory with additional .resp seed files (initial fuzzer inputs) to merge into the corpus"
+    description: "Directory with additional seed files (initial fuzzer inputs) to merge into the corpus"
     required: false
     default: ''
   focus-commands:
@@ -59,12 +64,13 @@ runs:
       if: ${{ inputs.extra-seeds-dir != '' }}
       run: |
         EXTRA_DIR="${{ inputs.extra-seeds-dir }}"
-        SEEDS_DIR="fuzz/seeds/resp"
+        SEEDS_DIR="fuzz/seeds/${{ inputs.target }}"
 
-        if [ -d "$EXTRA_DIR" ] && [ -n "$(ls -A "$EXTRA_DIR"/*.resp 2>/dev/null)" ]; then
-          COUNT=$(ls "$EXTRA_DIR"/*.resp 2>/dev/null | wc -l)
+        # Copy only seed files, skip metadata like focus_commands.json
+        COUNT=$(find "$EXTRA_DIR" -maxdepth 1 -type f ! -name '*.json' 2>/dev/null | wc -l)
+        if [ "$COUNT" -gt 0 ]; then
           echo "Merging ${COUNT} targeted seeds into corpus"
-          cp "$EXTRA_DIR"/*.resp "$SEEDS_DIR/"
+          find "$EXTRA_DIR" -maxdepth 1 -type f ! -name '*.json' -exec cp -t "$SEEDS_DIR/" {} +
         else
           echo "No targeted seed files to merge"
         fi
@@ -77,6 +83,7 @@ runs:
 
         echo "Starting AFL++ fuzzing..."
         echo "Configuration:"
+        echo "  Target: ${{ inputs.target }}"
         echo "  Mode: ${MODE}"
         echo "  Duration: ${DURATION_MINUTES} minutes"
 
@@ -84,7 +91,7 @@ runs:
         export BUILD_DIR="${GITHUB_WORKSPACE}/build-dbg"
 
         # Run fuzzer with timeout
-        timeout ${DURATION_MINUTES}m ./run_fuzzer.sh || EXIT_CODE=$?
+        timeout ${DURATION_MINUTES}m ./run_fuzzer.sh "${{ inputs.target }}" || EXIT_CODE=$?
 
         # timeout returns 124 if it timed out (expected), 0 if finished naturally
         if [ "${EXIT_CODE:-0}" -eq 124 ]; then
@@ -115,9 +122,10 @@ runs:
       run: |
         echo "Analyzing fuzzing results..."
 
-        CRASHES_DIR="fuzz/artifacts/resp/default/crashes"
-        HANGS_DIR="fuzz/artifacts/resp/default/hangs"
-        QUEUE_DIR="fuzz/artifacts/resp/default/queue"
+        TARGET="${{ inputs.target }}"
+        CRASHES_DIR="fuzz/artifacts/${TARGET}/default/crashes"
+        HANGS_DIR="fuzz/artifacts/${TARGET}/default/hangs"
+        QUEUE_DIR="fuzz/artifacts/${TARGET}/default/queue"
 
         # Count results
         CRASH_COUNT=0
@@ -143,7 +151,7 @@ runs:
 
         # Show statistics for long mode
         if [ "${{ inputs.mode }}" = "long" ]; then
-          STATS_FILE="fuzz/artifacts/resp/default/fuzzer_stats"
+          STATS_FILE="fuzz/artifacts/${TARGET}/default/fuzzer_stats"
           if [ -f "$STATS_FILE" ]; then
             echo ""
             echo "Key Statistics:"
@@ -174,7 +182,7 @@ runs:
       shell: bash
       if: failure()
       run: |
-        CRASHES_DIR="$(pwd)/fuzz/artifacts/resp/default/crashes"
+        CRASHES_DIR="$(pwd)/fuzz/artifacts/${{ inputs.target }}/default/crashes"
 
         if [ ! -d "$CRASHES_DIR" ] || [ -z "$(ls -A "$CRASHES_DIR" 2>/dev/null)" ]; then
           echo "No crash artifacts to package"
@@ -204,9 +212,9 @@ runs:
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: fuzz-${{ inputs.mode }}-crashes-${{ inputs.run-number }}
+        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-crashes-${{ inputs.run-number }}
         path: |
           fuzz/packaged/*.tar.gz
-          fuzz/artifacts/resp/default/fuzzer_stats
+          fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
         retention-days: 10
         if-no-files-found: ignore

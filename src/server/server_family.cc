@@ -1628,6 +1628,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipeline_blocking_commands_total", "",
+                            m.coordinator_stats.blocking_commands_in_pipelines, MetricType::COUNTER,
+                            &resp->body());
 
   // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
   // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
