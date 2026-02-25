@@ -125,10 +125,10 @@ struct HnswlibAdapter {
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
-  vector<pair<float, GlobalDocId>> FilteredKnn(float* target, size_t k,
-                                               const vector<GlobalDocId>& docs) {
+  vector<pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+                                             const vector<GlobalDocId>& docs) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    return QueueToVec(world_.filteredKnnSearch(target, k, docs));
+    return QueueToVec(world_.subsetKnnSearch(target, k, docs));
   }
 
   HnswIndexMetadata GetMetadata() const {
@@ -424,9 +424,9 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
   return adapter_->Knn(target, k, ef, allowed);
 }
 
-std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::FilteredKnn(
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::SubsetKnn(
     float* target, size_t k, const std::vector<GlobalDocId>& docs) const {
-  return adapter_->FilteredKnn(target, k, docs);
+  return adapter_->SubsetKnn(target, k, docs);
 }
 
 void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
