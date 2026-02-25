@@ -721,7 +721,9 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     from .instance import DflyInstanceFactory
 
     master = df_factory.create(proactor_threads=master_threads)
-    replica = df_factory.create(proactor_threads=replica_threads)
+    # logbuflevel=-1 forces glog to flush every log line immediately, so INFO messages
+    # are visible in the log file when we read it (before the process exits).
+    replica = df_factory.create(proactor_threads=replica_threads, logbuflevel=-1)
 
     df_factory.start_all([master, replica])
 

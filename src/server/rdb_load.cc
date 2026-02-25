@@ -3027,6 +3027,22 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
       load_context_->MarkHnswRestoreFailed(std::string{index_name});
       return {};
     }
+    // Validate internal_ids before RestoreFromNodes, which CHECK-crashes on out-of-bounds ids.
+    bool valid = true;
+    for (const auto& node : nodes) {
+      if (node.internal_id >= metadata->cur_element_count) {
+        LOG(ERROR) << "HNSW node internal_id " << node.internal_id << " >= cur_element_count "
+                   << metadata->cur_element_count << " for " << index_key
+                   << ". Index will be rebuilt from scratch.";
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) {
+      load_context_->MarkHnswRestoreFailed(std::string{index_name});
+      return {};
+    }
+
     hnsw_index->RestoreFromNodes(nodes, *metadata);
     LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   }
