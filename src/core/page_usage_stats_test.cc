@@ -609,6 +609,34 @@ TEST_F(PageUsageStatsTest, DefragReducesWaste) {
   EXPECT_LT(after.total_committed, before.total_committed);
 }
 
+TEST_F(PageUsageStatsTest, MixedFlagHandling) {
+  PageUsage p{CollectPageStats::YES, 0.0};
+  auto add_pages = [&](size_t count, uintptr_t start_address, uint8_t flags) {
+    for (const size_t i : std::views::iota(0UL, count)) {
+      p.ConsumePageStats({.page_address = uintptr_t{start_address + i},
+                          .block_size = 100,
+                          .capacity = 1000,
+                          .reserved = 100,
+                          .used = 99,
+                          .flags = flags});
+    }
+  };
+
+  add_pages(2000, 10, MI_DFLY_PAGE_FULL | MI_DFLY_PAGE_USED_FOR_MALLOC | MI_DFLY_HEAP_MISMATCH);
+  add_pages(500, 50000, MI_DFLY_PAGE_BELOW_THRESHOLD);
+
+  const auto stats = p.CollectedStats();
+
+  constexpr auto tolerance = 60;
+  EXPECT_NEAR(stats.pages_full, 2000, tolerance);
+  EXPECT_NEAR(stats.pages_reserved_for_malloc, 2000, tolerance);
+  EXPECT_NEAR(stats.pages_with_heap_mismatch, 2000, tolerance);
+  EXPECT_EQ(stats.pages_full, stats.pages_reserved_for_malloc);
+  EXPECT_EQ(stats.pages_full, stats.pages_with_heap_mismatch);
+
+  EXPECT_NEAR(stats.pages_marked_for_realloc, 500, 15);
+}
+
 namespace {
 
 void InitBenchMemRes() {
