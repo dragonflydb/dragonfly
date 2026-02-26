@@ -135,10 +135,10 @@ class RdbLoaderBase {
   };
 
   struct LoadConfig {
-    bool streamed = false;  // Big value streamed incrementally
+    bool chunked = false;   // Big value streamed incrementally
     size_t reserve = 0;     // Number of elements to reserve to optimize big value load
-    bool append = false;    // Append stream to existing object
-    bool finalize = false;  // Last portion of stream, finalize object
+    bool append = false;    // Append chunk to existing object
+    bool finalize = false;  // Last portion of chunked stream, finalize object
   };
 
   class OpaqueObjLoader;
@@ -378,9 +378,9 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
-  // Map of currently streamed big values
-  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
-  base::SpinLock now_streamed_mu_;  // guards now_streamed_
+  // Map of currently chunked big values
+  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_chunked_;
+  base::SpinLock now_chunked_mu_;  // guards now_chunked_
 
   std::string last_key_loaded_;
 };

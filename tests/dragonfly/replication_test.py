@@ -25,8 +25,8 @@ DISCONNECT_CRASH_STABLE_SYNC = 1
 DISCONNECT_NORMAL_STABLE_SYNC = 2
 
 M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.slow]
-M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+M_SLOW = [pytest.mark.large]
+M_STRESS = [pytest.mark.large, pytest.mark.opt_only]
 M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
@@ -316,7 +316,7 @@ master_crash_cases = [
 ]
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(
     df_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
@@ -385,7 +385,7 @@ Test re-connecting replica to different masters.
 rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
 async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, seeder_config):
     replica = df_factory.create(proactor_threads=t_replica)
@@ -420,7 +420,7 @@ async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_mast
         fill_task.cancel()
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_cancel_replication_immediately(df_factory, df_seeder_factory: DflySeederFactory):
     """
     Issue 100 replication commands. This checks that the replication state
@@ -1157,7 +1157,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 async def test_flushall_in_full_sync(df_factory):
     master = df_factory.create(proactor_threads=4)
@@ -2016,7 +2016,7 @@ async def test_search_with_stream(df_factory: DflyInstanceFactory):
     ]
 
 
-# @pytest.mark.slow
+# @pytest.mark.large
 async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -3188,6 +3188,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
     assert len(lines) == 0
 
 
+@pytest.mark.large
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
@@ -3550,7 +3551,7 @@ async def test_mc_gat_replication(df_factory):
 
 
 @pytest.mark.skip("Fails constantly on CI")
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.parametrize("serialization_max_size", [1, 64000])
 async def test_replication_onmove_flow(df_factory, serialization_max_size):
     master = df_factory.create(
@@ -3661,7 +3662,7 @@ async def test_big_strings(df_factory):
     assert peak_bytes < value_size
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     master = df_factory.create(proactor_threads=4, vmodule="dflycmd=1")
     replicas = [df_factory.create(proactor_threads=2) for _ in range(3)]
@@ -3700,7 +3701,7 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     assert not timeout_logs
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_takeover_timeout_on_unresponsive_master(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=2)
@@ -3867,7 +3868,7 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     assert len(lines) == 0
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_replica_reconnection_leaks_connections(df_factory: DflyInstanceFactory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -4087,7 +4088,6 @@ async def test_replication_replica_larger_dbnum(
 # of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
 # filter size, which silently overflowed to 0 and broke the RDB stream.
 @pytest.mark.large
-@pytest.mark.slow
 async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
@@ -4118,7 +4118,7 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
 
 
 @pytest.mark.skip("HNSW index replication hasn't finished yet")
-@pytest.mark.slow
+@pytest.mark.large
 async def test_hnsw_search_replication_with_network_disruptions(
     df_factory: DflyInstanceFactory,
 ):

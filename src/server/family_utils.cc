@@ -1,18 +1,65 @@
 #include "server/family_utils.h"
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/str_cat.h>
 #include <xxhash.h>
 
 #include "base/logging.h"
 
 extern "C" {
+#include "redis/listpack.h"
+#include "redis/sds.h"
 #include "redis/stream.h"
+#include "redis/ziplist.h"
 #include "redis/zmalloc.h"
 }
 
 namespace dfly {
 
 using namespace std;
+
+namespace {
+
+struct ZiplistCbArgs {
+  long count = 0;
+  absl::flat_hash_set<string_view> fields;
+  unsigned char** lp;
+};
+
+int ZiplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
+  unsigned char* str;
+  unsigned int slen;
+  long long vll;
+
+  ZiplistCbArgs* data = (ZiplistCbArgs*)userdata;
+
+  if (data->fields.empty()) {
+    data->fields.reserve(head_count / 2);
+  }
+
+  if (!ziplistGet(p, &str, &slen, &vll))
+    return 0;
+
+  if (((data->count) & 1) == 0) {
+    sds field = str ? sdsnewlen(str, slen) : sdsfromlonglong(vll);
+    auto [_, inserted] = data->fields.emplace(field, sdslen(field));
+    if (!inserted) {
+      sdsfree(field);
+      return 0;
+    }
+  }
+
+  if (str) {
+    *(data->lp) = lpAppend(*(data->lp), (unsigned char*)str, slen);
+  } else {
+    *(data->lp) = lpAppendInteger(*(data->lp), vll);
+  }
+
+  (data->count)++;
+  return 1;
+}
+
+}  // namespace
 
 string XXH3_Digest(std::string_view s) {
   uint64_t hash = XXH3_64bits(s.data(), s.size());
@@ -75,6 +122,22 @@ streamConsumer* StreamCreateConsumer(streamCG* cg, string_view name, uint64_t no
   consumer->active_time = -1;
 
   return consumer;
+}
+
+int ZiplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsigned char** lp) {
+  ZiplistCbArgs data;
+  data.lp = lp;
+
+  int ret = ziplistValidateIntegrity(const_cast<uint8_t*>(zl), size, 1,
+                                     ZiplistPairsEntryConvertAndValidate, &data);
+
+  if (data.count & 1)
+    ret = 0;
+
+  for (auto field : data.fields) {
+    sdsfree((sds)field.data());
+  }
+  return ret;
 }
 
 }  // namespace dfly

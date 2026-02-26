@@ -87,6 +87,10 @@ void AddKeyToIndexesIfNeeded(std::string_view key, const DbContext& db_cntx, Pri
 void RemoveKeyFromIndexesIfNeeded(std::string_view key, const DbContext& db_cntx,
                                   const PrimeValue& pv, EngineShard* shard);
 
+// Validate and convert field/value ziplist pairs into listpack.
+// Returns 1 on success, 0 on integrity failure.
+int ZiplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsigned char** lp);
+
 // Returns true if this key type could potentially be indexed.
 // Or in other words, if the key is of type HSET or JSON.
 bool IsIndexedKeyType(const PrimeValue& pv);
