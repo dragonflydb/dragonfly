@@ -2237,9 +2237,10 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      if (!deserialize_hnsw_index_ || shard_count_ == 0) {
+      if (!deserialize_hnsw_index_) {
         RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
       } else {
+        DCHECK_GT(shard_count_, 0u);
         // Parse "index_name:field_name" from the composite key.
         size_t colon_pos = index_key.rfind(':');
         string_view index_name{index_key.data(),
@@ -2288,9 +2289,10 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      if (!deserialize_hnsw_index_ || shard_count_ == 0) {
+      if (!deserialize_hnsw_index_) {
         continue;
       }
+      DCHECK_GT(shard_count_, 0u);
 
       VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
               << " entries";
@@ -2628,9 +2630,7 @@ error_code RdbLoader::HandleAux() {
     uint32_t shard_count;
     if (absl::SimpleAtoi(auxval, &shard_count)) {
       shard_count_ = shard_count;
-      if (load_context_) {
-        load_context_->SetMasterShardCount(shard_count);
-      }
+      load_context_->SetMasterShardCount(shard_count);
     }
   } else if (auxkey == "shard-id") {
     uint32_t shard_id;
@@ -3010,9 +3010,7 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
   // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
   if (!hnsw_index) {
-    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
-               << ". Index will be rebuilt from scratch.";
-    load_context_->MarkHnswRestoreFailed(std::string{index_name});
+    LOG(ERROR) << "HNSW index not found for restoration: " << index_key;
     return SkipVectorIndex(index_key, elements_number);
   }
 
@@ -3021,27 +3019,7 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
 
   if (!nodes.empty()) {
     auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
-    if (!metadata) {
-      LOG(ERROR) << "HNSW metadata not found for restoration: " << index_key
-                 << ". Index will be rebuilt from scratch.";
-      load_context_->MarkHnswRestoreFailed(std::string{index_name});
-      return {};
-    }
-    // Validate internal_ids before RestoreFromNodes, which CHECK-crashes on out-of-bounds ids.
-    bool valid = true;
-    for (const auto& node : nodes) {
-      if (node.internal_id >= metadata->cur_element_count) {
-        LOG(ERROR) << "HNSW node internal_id " << node.internal_id << " >= cur_element_count "
-                   << metadata->cur_element_count << " for " << index_key
-                   << ". Index will be rebuilt from scratch.";
-        valid = false;
-        break;
-      }
-    }
-    if (!valid) {
-      load_context_->MarkHnswRestoreFailed(std::string{index_name});
-      return {};
-    }
+    DCHECK(metadata) << "HNSW metadata missing for " << index_key;
 
     hnsw_index->RestoreFromNodes(nodes, *metadata);
     LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";

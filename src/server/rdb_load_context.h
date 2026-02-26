@@ -91,7 +91,7 @@ class RdbLoadContext {
   std::vector<PendingHnswMetadata> pending_hnsw_metadata_ ABSL_GUARDED_BY(mu_);
   std::vector<PendingHnswNodes> pending_hnsw_nodes_ ABSL_GUARDED_BY(mu_);
   std::vector<std::string> failed_hnsw_indices_ ABSL_GUARDED_BY(mu_);
-  uint32_t master_shard_count_ ABSL_GUARDED_BY(mu_) = 0;
+  uint32_t master_shard_count_ = 0;  // Set identically by all loaders from AUX field.
 };
 
 }  // namespace dfly

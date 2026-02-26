@@ -108,7 +108,6 @@ void RdbLoadContext::AddPendingHnswNodes(PendingHnswNodes nodes) {
 }
 
 void RdbLoadContext::SetMasterShardCount(uint32_t count) {
-  util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
   master_shard_count_ = count;
 }
 
@@ -145,9 +144,7 @@ RdbLoadContext::TakePendingIndexMappings() {
 
 std::vector<PendingHnswNodes> RdbLoadContext::TakePendingHnswNodes() {
   util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-  std::vector<PendingHnswNodes> result;
-  std::swap(result, pending_hnsw_nodes_);
-  return result;
+  return std::move(pending_hnsw_nodes_);
 }
 
 void RdbLoadContext::RemapForDifferentShardCount(
@@ -178,8 +175,7 @@ void RdbLoadContext::RemapForDifferentShardCount(
       auto& counters = doc_id_counters[pim.index_name];
 
       for (const auto& [key, old_doc_id] : pim.mappings) {
-        search::GlobalDocId old_gid =
-            search::CreateGlobalDocId(static_cast<search::ShardId>(master_shard_id), old_doc_id);
+        search::GlobalDocId old_gid = search::CreateGlobalDocId(master_shard_id, old_doc_id);
         ShardId new_shard_id = Shard(key, new_shard_count);
         search::DocId new_doc_id = counters[new_shard_id]++;
         search::GlobalDocId new_gid = search::CreateGlobalDocId(new_shard_id, new_doc_id);
@@ -241,41 +237,16 @@ void RdbLoadContext::RemapForDifferentShardCount(
     }
 
     // Find metadata for the graph from the extracted local copy.
-    search::HnswIndexMetadata metadata;
-    bool found_metadata = false;
+    const PendingHnswMetadata* phm_ptr = nullptr;
     for (const auto& phm : hnsw_metadata) {
       if (phm.index_name == pn.index_name && phm.field_name == pn.field_name) {
-        metadata = phm.metadata;
-        found_metadata = true;
+        phm_ptr = &phm;
         break;
       }
     }
+    DCHECK(phm_ptr) << "HNSW metadata missing for " << pn.index_name << ":" << pn.field_name;
 
-    if (!found_metadata) {
-      LOG(ERROR) << "HNSW metadata not found for deferred restoration: " << pn.index_name << ":"
-                 << pn.field_name << ". Will rebuild from scratch.";
-      failed_remap_indices.insert(pn.index_name);
-      continue;
-    }
-
-    // Validate node internal_ids are within the expected range before passing to
-    // RestoreFromNodes, which would CHECK-crash on out-of-bounds internal_ids.
-    bool valid = true;
-    for (const auto& node : pn.nodes) {
-      if (node.internal_id >= metadata.cur_element_count) {
-        LOG(ERROR) << "HNSW node internal_id " << node.internal_id << " >= cur_element_count "
-                   << metadata.cur_element_count << " for index " << pn.index_name << ":"
-                   << pn.field_name << ". Will rebuild from scratch.";
-        valid = false;
-        break;
-      }
-    }
-    if (!valid) {
-      failed_remap_indices.insert(pn.index_name);
-      continue;
-    }
-
-    hnsw_index->RestoreFromNodes(pn.nodes, metadata);
+    hnsw_index->RestoreFromNodes(pn.nodes, phm_ptr->metadata);
     LOG(INFO) << "Restored HNSW index " << pn.index_name << ":" << pn.field_name << " with "
               << pn.nodes.size() << " nodes (" << remapped << " global_ids remapped)";
   }
@@ -301,16 +272,15 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   auto index_mappings = TakePendingIndexMappings();
   auto pending_nodes = TakePendingHnswNodes();
 
-  // Extract all remaining shared state in one lock. After this, no member access is needed.
+  // Extract remaining shared state under lock. After this, no member access is needed.
   std::vector<std::string> failed_indices;
-  uint32_t master_shards;
   std::vector<PendingHnswMetadata> hnsw_metadata;
   {
     util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
     failed_indices.swap(failed_hnsw_indices_);
-    master_shards = master_shard_count_;
     hnsw_metadata.swap(pending_hnsw_metadata_);
   }
+  uint32_t master_shards = master_shard_count_;
 
   bool has_hnsw_restore = !hnsw_metadata.empty();
 
