@@ -88,6 +88,11 @@ jobs:
           ls ./
           echo ls covout
           ls covout/
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: build/main_coverage.info
+          fail_ci_if_error: false
       - name: Upload coverage
         uses: actions/upload-artifact@v6
         with:
