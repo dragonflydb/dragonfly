@@ -1004,8 +1004,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  RETURN_ON_BAD_STATUS(res_it);
   const CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
   return s->length;
@@ -1015,8 +1014,7 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
                                          EngineShard* shard) {
   auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  RETURN_ON_BAD_STATUS(res_it);
 
   vector<GroupInfo> result;
   const CompactObj& cobj = (*res_it)->second;
@@ -1150,8 +1148,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
                                int full, size_t count) {
   auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  RETURN_ON_BAD_STATUS(res_it);
 
   vector<StreamInfo> result;
   const CompactObj& cobj = (*res_it)->second;
@@ -1212,8 +1209,7 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
                                            string_view stream_name, string_view group_name) {
   auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, stream_name, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  RETURN_ON_BAD_STATUS(res_it);
 
   vector<ConsumerInfo> result;
   const CompactObj& cobj = (*res_it)->second;
@@ -1390,6 +1386,20 @@ void AppendClaimResultItem(ClaimInfo& result, stream* s, streamID id) {
   streamIteratorStop(&it);
 }
 
+// Reassigns a pending NACK entry to a new consumer, updating the PELs of both the old and new
+// consumer. If the NACK already belongs to the target consumer, this is a no-op for the PELs.
+void ReassignNACKToConsumer(streamNACK* nack, streamConsumer* consumer, uint8_t* key_buf,
+                            size_t key_len, uint64_t now_ms) {
+  if (nack->consumer != consumer) {
+    if (nack->consumer) {
+      raxRemove(nack->consumer->pel, key_buf, key_len, nullptr);
+    }
+    raxInsert(consumer->pel, key_buf, key_len, nack, nullptr);
+    nack->consumer = consumer;
+  }
+  consumer->active_time = now_ms;
+}
+
 // XCLAIM key group consumer min-idle-time id
 OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts,
                             absl::Span<streamID> ids) {
@@ -1446,17 +1456,6 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
         }
       }
 
-      // If the entry belongs to the same consumer, we don't have to
-      // do anything. Else remove the entry from the old consumer.
-      if (nack->consumer != consumer) {
-        /* Remove the entry from the old consumer.
-         * Note that nack->consumer is NULL if we created the
-         * NACK above because of the FORCE option. */
-        if (nack->consumer) {
-          raxRemove(nack->consumer->pel, buf.begin(), sizeof(buf), nullptr);
-          LOG_IF(DFATAL, nack->consumer->pel->numnodes == 0) << "Invalid rax state";
-        }
-      }
       // Set the delivery time for the entry.
       nack->delivery_time = opts.delivery_time;
       /* Set the delivery attempts counter if given, otherwise
@@ -1466,12 +1465,8 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       } else if (!(opts.flags & kClaimJustID)) {
         nack->delivery_count++;
       }
-      if (nack->consumer != consumer) {
-        /* Add the entry in the new consumer local PEL. */
-        raxInsert(consumer->pel, buf.begin(), sizeof(buf), nack, nullptr);
-        nack->consumer = consumer;
-      }
-      consumer->active_time = now_ms;
+      // Note: nack->consumer is NULL if we created the NACK above because of the FORCE option.
+      ReassignNACKToConsumer(nack, consumer, buf.begin(), sizeof(buf), now_ms);
 
       /* Send the reply for this entry. */
       AppendClaimResultItem(result, cgr_res->s, id);
@@ -1623,8 +1618,7 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<streamID> ids) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  RETURN_ON_BAD_STATUS(res_it);
 
   PrimeValue& pv = res_it->it->second;
   stream* stream_inst = (stream*)pv.RObjPtr();
@@ -1759,25 +1753,11 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
         continue;
     }
 
-    if (nack->consumer != consumer) {
-      /* Remove the entry from the old consumer.
-       * Note that nack->consumer is NULL if we created the
-       * NACK above because of the FORCE option. */
-      if (nack->consumer) {
-        raxRemove(nack->consumer->pel, ri.key, ri.key_len, nullptr);
-      }
-    }
-
     nack->delivery_time = now_ms;
     if (!result.justid) {
       nack->delivery_count++;
     }
-
-    if (nack->consumer != consumer) {
-      raxInsert(consumer->pel, ri.key, ri.key_len, nack, nullptr);
-      nack->consumer = consumer;
-    }
-    consumer->active_time = now_ms;
+    ReassignNACKToConsumer(nack, consumer, ri.key, ri.key_len, now_ms);
     AppendClaimResultItem(result, stream, id);
     count--;
     // TODO: propagate xclaim to replica
