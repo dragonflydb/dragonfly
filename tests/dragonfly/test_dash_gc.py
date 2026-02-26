@@ -58,7 +58,7 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
 
     a) Grow the dash table via DEBUG POPULATE with a prefix
     b) Delete all populated keys to create sparse segments
-    c) Run DEBUG DASH_GC concurrently with SeederV2 (Seeder)
+    c) Run DEBUG DASH_GC concurrently with Seeder
     d) Assert all data seeded by Seeder exists in the dash table
     """
     # a) Grow the dash table by seeding a large number of keys with a prefix

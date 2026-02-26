@@ -1117,7 +1117,7 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
-size_t EngineShard::DashGC(double threshold, size_t db_idx) {
+size_t EngineShard::DashGC(double threshold, DbIndex db_idx) {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   auto& prime = db_slice.GetDBTable(db_idx)->prime;
   size_t total_seg_merged = 0;
