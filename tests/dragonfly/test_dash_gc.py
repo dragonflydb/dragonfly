@@ -6,7 +6,7 @@ import logging
 
 
 @dfly_args({"proactor_threads": 2, "maxmemory": "1G"})
-async def test_gc_merges_segments_and_reclaims_memory(async_client: aioredis.Redis):
+async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Redis):
     value_size = 50
     target_keys = 10_000
     value = "x" * value_size
@@ -21,7 +21,7 @@ async def test_gc_merges_segments_and_reclaims_memory(async_client: aioredis.Red
 
     await asyncio.sleep(0.5)
 
-    info_before = await async_client.info("MEMORY")
+    stats_before = await async_client.info("MEMORY")
 
     # Delete 90% of keys to create very sparse segments
     keys_to_delete = [f"key{i}" for i in range(target_keys) if i % 10 != 0]
@@ -33,12 +33,18 @@ async def test_gc_merges_segments_and_reclaims_memory(async_client: aioredis.Red
     # Run GC with aggressive threshold to trigger merges
     segments_merged = await async_client.execute_command("DEBUG", "DASH_GC", "0.5")
 
-    await asyncio.sleep(1.0)
-
-    info_after = await async_client.info("MEMORY")
+    stats_after = await async_client.info("MEMORY")
     assert segments_merged > 0
+    # Fewer segments means fewer buckets, so the table's total capacity must shrink
+    assert stats_after["prime_capacity"] < stats_before["prime_capacity"], (
+        f"Table capacity should shrink after GC: before={stats_before['prime_capacity']}, "
+        f"after={stats_after['prime_capacity']}"
+    )
 
-    logging.info(f"DASH✓GC merged {segments_merged} segments")
+    logging.info(
+        f"DASH_GC merged {segments_merged} segments, "
+        f"capacity {stats_before['prime_capacity']} -> {stats_after['prime_capacity']}"
+    )
 
     for key in keys_left:
         res = await async_client.get(key)
@@ -73,7 +79,7 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
     # c) Run DASH_GC concurrently with Seeder so GC reclaims sparse segments
     #    while new data is being written
     key_target = 5_000
-    seeder = Seeder(units=4, key_target=key_target, data_size=100)
+    seeder = Seeder(key_target=key_target, data_size=100)
 
     async def run_gc():
         for _ in range(10):
@@ -85,5 +91,16 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
         run_gc(),
     )
 
-    capture = await Seeder.capture(async_client)
-    assert any(h != 0 for h in capture)
+    # d) Capture a reference snapshot of the data seeder wrote, then run GC again
+    #    and verify the full dataset is unchanged (no corruption or partial loss).
+    capture_before = await Seeder.capture(async_client)
+    assert all(h != 0 for h in capture_before), "Seeder should have written data for all types"
+
+    for _ in range(5):
+        await async_client.execute_command("DEBUG", "DASH_GC", "0.5")
+        await asyncio.sleep(0.05)
+
+    capture_after = await Seeder.capture(async_client)
+    assert (
+        capture_before == capture_after
+    ), "Data should be identical after GC: seeder dataset must survive concurrent GC runs"

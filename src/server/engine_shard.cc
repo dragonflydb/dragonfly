@@ -25,6 +25,7 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
+#include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fibers/proactor_base.h"
@@ -1116,12 +1117,15 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
-size_t EngineShard::DashGC(double threshold) {
+size_t EngineShard::DashGC(double threshold, size_t db_idx) {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-  auto& prime = db_slice.GetDBTable(0)->prime;
+  auto& prime = db_slice.GetDBTable(db_idx)->prime;
   size_t total_seg_merged = 0;
 
   while (true) {
+    if (SliceSnapshot::IsSnaphotInProgress()) {
+      return total_seg_merged;
+    }
     bool merged_any = false;
 
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
