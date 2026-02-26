@@ -1514,6 +1514,9 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
 
   if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
     ++ServerState::tlocal()->stats.blocking_commands_in_pipelines;
+    if (auto* conn = cmd_cntx->conn()) {
+      conn->FlushReplies();
+    }
   }
 
   ArgSlice tail_args;
