@@ -1,0 +1,108 @@
+name: Ensure Build
+description: >
+  Check S3 for a pre-built artifact for the current SHA+config.
+  If missing, build from source and upload. If present, skip build.
+
+inputs:
+  build-id:
+    required: true
+    type: string
+    description: "Unique ID for this build config (e.g., ubuntu20-gcc14-Debug)"
+  ninja-target:
+    required: true
+    type: string
+    description: "Ninja target: 'src/all' (full, for ctest) or 'dragonfly' (minimal, for pytest only)"
+  cmake-args:
+    required: true
+    type: string
+    description: "Full cmake args string passed through to cmake"
+  s3-bucket:
+    required: true
+    type: string
+    description: "S3 bucket name for storing build artifacts"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        apt-get update -qq && apt-get install -y -qq zstd > /dev/null
+        pip3 install -q awscli 2>/dev/null || pip3 install -q --break-system-packages awscli
+
+    - name: Check S3 for existing artifact
+      id: check-s3
+      shell: bash
+      run: |
+        S3_KEY="ci-builds/${GITHUB_SHA}/${{ inputs.build-id }}/artifact.tar.zst"
+        echo "s3_key=${S3_KEY}" >> $GITHUB_OUTPUT
+
+        if aws s3api head-object --bucket "${{ inputs.s3-bucket }}" --key "${S3_KEY}" > /dev/null 2>&1; then
+          echo "found=true" >> $GITHUB_OUTPUT
+          echo "::notice::Artifact found for ${GITHUB_SHA}/${{ inputs.build-id }}, skipping build"
+        else
+          echo "found=false" >> $GITHUB_OUTPUT
+          echo "::notice::No artifact for ${GITHUB_SHA}/${{ inputs.build-id }}, building from source"
+        fi
+
+    - name: Configure CMake
+      if: steps.check-s3.outputs.found == 'false'
+      shell: bash
+      run: |
+        cmake -B /build ${{ inputs.cmake-args }} -L
+
+    - name: Build
+      if: steps.check-s3.outputs.found == 'false'
+      shell: bash
+      run: |
+        cd /build
+        ninja ${{ inputs.ninja-target }}
+        echo "=== Build complete ==="
+        df -h
+
+    - name: Package artifact
+      if: steps.check-s3.outputs.found == 'false'
+      shell: bash
+      run: |
+        cd /build
+
+        if [ "${{ inputs.ninja-target }}" = "dragonfly" ]; then
+          # Minimal package: just the dragonfly binary
+          tar --dereference -cf - dragonfly | zstd -3 -o /tmp/artifact.tar.zst
+        else
+          # Full package: dragonfly + test binaries + CTestTestfile tree + runfiles
+          BINARIES="dragonfly"
+
+          # Collect test binaries (top-level *_test files)
+          TEST_BINS=$(find . -maxdepth 1 -name '*_test' -type f | sed 's|^\./||')
+          if [ -n "$TEST_BINS" ]; then
+            BINARIES="$BINARIES $TEST_BINS"
+          fi
+
+          # Collect CTestTestfile.cmake files (needed for ctest -L DFLY)
+          CTEST_FILES=$(find . -name 'CTestTestfile.cmake' | sed 's|^\./||')
+
+          # Collect runfiles directories (test data symlinks resolved by --dereference)
+          RUNFILES=$(find . -name '*.runfiles' -type d | sed 's|^\./||')
+
+          # Build the file list
+          FILE_LIST=""
+          for f in $BINARIES $CTEST_FILES $RUNFILES; do
+            FILE_LIST="$FILE_LIST $f"
+          done
+
+          echo "=== Packaging $(echo $FILE_LIST | wc -w) items ==="
+          echo "$FILE_LIST" | tr ' ' '\n' | sort
+          tar --dereference -cf - $FILE_LIST | zstd -3 -o /tmp/artifact.tar.zst
+        fi
+
+        ls -lh /tmp/artifact.tar.zst
+
+    - name: Upload to S3
+      if: steps.check-s3.outputs.found == 'false'
+      shell: bash
+      run: |
+        export AWS_MAX_ATTEMPTS=3
+        aws s3 cp --no-progress /tmp/artifact.tar.zst \
+          "s3://${{ inputs.s3-bucket }}/${{ steps.check-s3.outputs.s3_key }}"
+        echo "::notice::Artifact uploaded to s3://${{ inputs.s3-bucket }}/${{ steps.check-s3.outputs.s3_key }}"

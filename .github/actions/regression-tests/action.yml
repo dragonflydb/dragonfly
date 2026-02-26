@@ -33,6 +33,10 @@ inputs:
   epoll:
     required: false
     type: string
+  dragonfly-path:
+    required: false
+    type: string
+    description: "Absolute path to dragonfly binary. If set, overrides build-folder-name/dfly-executable."
   df-arg:
     default: ""
     required: false
@@ -87,7 +91,11 @@ runs:
         echo "=== Running S3 snapshot tests with local MinIO ==="
         cd ${GITHUB_WORKSPACE}/tests
 
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        if [ -n "${{ inputs.dragonfly-path }}" ]; then
+          export DRAGONFLY_PATH="${{ inputs.dragonfly-path }}"
+        else
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        fi
 
         # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
         MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py --log-cli-level=INFO -v
@@ -100,7 +108,11 @@ runs:
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
         # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        if [ -n "${{ inputs.dragonfly-path }}" ]; then
+          export DRAGONFLY_PATH="${{ inputs.dragonfly-path }}"
+        else
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        fi
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
@@ -186,6 +198,9 @@ runs:
       if: failure() && contains(runner.labels, 'self-hosted')
       shell: bash
       run: |
-        cd ${GITHUB_WORKSPACE}/build
         timestamp=$(date +%Y-%m-%d_%H:%M:%S)
-        mv ./dragonfly /var/crash/dragonfly_${timestamp}
+        if [ -n "${{ inputs.dragonfly-path }}" ]; then
+          mv "${{ inputs.dragonfly-path }}" /var/crash/dragonfly_${timestamp}
+        else
+          mv "${GITHUB_WORKSPACE}/${{ inputs.build-folder-name }}/dragonfly" /var/crash/dragonfly_${timestamp}
+        fi
