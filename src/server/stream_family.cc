@@ -731,8 +731,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   if (res != 0) {
     if (add_res.is_new) {
       std::move(on_exit).Cancel();
-      add_res.post_updater.Run();
-      db_slice.Del(op_args.db_cntx, add_res.it);
+      db_slice.DelMutable(op_args.db_cntx, std::move(add_res));
     }
     if (res == ERANGE)
       return OpStatus::OUT_OF_RANGE;
@@ -1287,8 +1286,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
       id = parsed_id.val;
     } else {
       if (stream_created_by_mkstream) {
-        res_it->post_updater.Run();
-        db_slice.Del(op_args.db_cntx, res_it->it);
+        db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
       }
       return OpStatus::SYNTAX_ERR;
     }
