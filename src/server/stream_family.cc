@@ -729,6 +729,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
                              parsed_id.id_given ? &passed_id : nullptr, parsed_id.has_seq);
 
   if (res != 0) {
+    if (add_res.is_new) {
+      std::move(on_exit).Cancel();
+      add_res.post_updater.Run();
+      db_slice.Del(op_args.db_cntx, add_res.it);
+    }
     if (res == ERANGE)
       return OpStatus::OUT_OF_RANGE;
     if (res == EDOM)
@@ -1254,6 +1259,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   StreamMemTracker mem_tracker;
+  bool stream_created_by_mkstream = false;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
       // MKSTREAM is enabled, so create the stream
@@ -1263,6 +1269,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 
       stream* s = streamNew();
       res_it->it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+      stream_created_by_mkstream = true;
     } else {
       return res_it.status();
     }
@@ -1279,6 +1286,10 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
     if (ParseID(opts.id, true, 0, &parsed_id)) {
       id = parsed_id.val;
     } else {
+      if (stream_created_by_mkstream) {
+        res_it->post_updater.Run();
+        db_slice.Del(op_args.db_cntx, res_it->it);
+      }
       return OpStatus::SYNTAX_ERR;
     }
   }
