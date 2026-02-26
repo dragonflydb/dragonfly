@@ -1,27 +1,23 @@
-import random
-import logging
-import string
-import pytest
 import asyncio
-import time
-import socket
-from threading import Thread
+import logging
 import random
+import socket
 import ssl
-from redis import asyncio as aioredis
-import redis as base_redis
-import hiredis
-from redis.cache import CacheConfig
-
-from redis.exceptions import ConnectionError, ResponseError
+import string
+import time
+from dataclasses import dataclass
+from threading import Thread
 
 import async_timeout
-from dataclasses import dataclass
-from aiohttp import ClientSession
+import pytest
+import redis as base_redis
+from redis import asyncio as aioredis
+from redis.cache import CacheConfig
+from redis.exceptions import ConnectionError, ResponseError
 
-from .utility import tick_timer, assert_eventually
 from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
+from .utility import tick_timer, assert_eventually
 
 BASE_PORT = 1111
 
@@ -1651,3 +1647,63 @@ async def test_tls_partial_header_read(
     # Verify server is still alive by making a valid connection
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     assert await client.ping()
+
+
+async def test_blocking_command_pipeline_flush(df_server: DflyInstance):
+    """
+    When multiple blocking commands are pipelined on a single connection,
+    a response that becomes ready must be flushed to the client immediately rather
+    than buffered until the entire pipeline batch completes.
+    """
+    num_pipeline = 3
+    blpop_timeout = 5
+    push_after = 1.0
+    max_allowed_delay = 2.0
+    src_key = "__blpop_pipeline_flush_test__"
+
+    pusher = aioredis.Redis(port=df_server.port)
+    await pusher.delete(src_key)
+
+    # Build a raw RESP pipeline of N BLPOP commands, raw TCP to avoid
+    # client-library buffering that could mask the flush timing issue.
+    def encode_resp_command(*args):
+        encoded_args = [str(a).encode() for a in args]
+        header = f"*{len(encoded_args)}\r\n".encode()
+        body = b"".join(f"${len(a)}\r\n".encode() + a + b"\r\n" for a in encoded_args)
+        return header + body
+
+    pipeline_data = b"".join(
+        encode_resp_command("BLPOP", src_key, blpop_timeout) for _ in range(num_pipeline)
+    )
+
+    conn_reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    writer.write(pipeline_data)
+    await writer.drain()
+
+    # Push a value from a separate connection after a delay
+    async def delayed_push():
+        await asyncio.sleep(push_after)
+        await pusher.lpush(src_key, "hello")
+
+    push_task = asyncio.create_task(delayed_push())
+
+    # Wait for the first RESP response and measure latency
+    t0 = time.monotonic()
+    total_timeout = blpop_timeout * num_pipeline + 5
+    try:
+        response = await asyncio.wait_for(conn_reader.readline(), timeout=total_timeout)
+        first_response_time = time.monotonic() - t0
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+        await push_task
+        await pusher.delete(src_key)
+        await pusher.aclose()
+
+    assert response == b"*2\r\n", f"Expected BLPOP success, got {response!r}"
+    assert first_response_time < max_allowed_delay, (
+        f"First BLPOP response took {first_response_time:.2f}s, expected < {max_allowed_delay}s. "
+        f"The response was likely buffered until all pipelined commands completed "
+        f"instead of being flushed immediately."
+    )
