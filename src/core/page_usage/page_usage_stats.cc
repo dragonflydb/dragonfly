@@ -150,27 +150,28 @@ PageUsage::UniquePages::~UniquePages() {
 
 void PageUsage::UniquePages::AddStat(mi_page_usage_stats_t stat) {  // NOLINT should not be const
   const auto data = reinterpret_cast<const unsigned char*>(&stat.page_address);
-  constexpr size_t size = sizeof(stat.page_address);
-  pfadd_dense(pages_scanned, data, size);
+
+  auto record = [&data](HllBufferPtr ctr) { pfadd_dense(ctr, data, sizeof(stat.page_address)); };
+
+  record(pages_scanned);
 
   if (stat.flags & MI_DFLY_PAGE_BELOW_THRESHOLD) {
-    pfadd_dense(pages_marked_for_realloc, data, size);
+    record(pages_marked_for_realloc);
   }
   if (stat.flags & MI_DFLY_PAGE_FULL) {
-    pfadd_dense(pages_full, data, size);
+    record(pages_full);
   }
   if (stat.flags & MI_DFLY_HEAP_MISMATCH) {
-    pfadd_dense(pages_with_heap_mismatch, data, size);
+    record(pages_with_heap_mismatch);
   }
   if (stat.flags & MI_DFLY_PAGE_USED_FOR_MALLOC) {
-    pfadd_dense(pages_reserved_for_malloc, data, size);
+    record(pages_reserved_for_malloc);
   }
   if (stat.flags == 0) {
     // No special flags means the page is above the threshold but not full - record usage for
     // histogram. This allows tuning the threshold for future commands.
-    pfadd_dense(pages_above_threshold, data, size);
-    const double perc = static_cast<double>(stat.used) / static_cast<double>(stat.capacity);
-    hdr_record_value(page_usage_hist, perc * 100);
+    record(pages_above_threshold);
+    hdr_record_value(page_usage_hist, 100.0 * stat.used / stat.capacity);
   }
 }
 
