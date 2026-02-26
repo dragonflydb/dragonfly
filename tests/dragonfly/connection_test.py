@@ -1651,3 +1651,76 @@ async def test_tls_partial_header_read(
     # Verify server is still alive by making a valid connection
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     assert await client.ping()
+
+
+async def test_blocking_command_pipeline_flush(df_server: DflyInstance):
+    """
+    When multiple blocking commands (BLPOP) are pipelined on a single connection,
+    a response that becomes ready must be flushed to the client immediately rather
+    than buffered until the entire pipeline batch completes.
+
+    Regression test: Dragonfly's pipeline dispatcher batched all responses and only
+    flushed when every pipelined command finished, causing blocking command responses
+    to be delayed by the sum of subsequent timeouts.
+    """
+    NUM_PIPELINE = 3
+    BLPOP_TIMEOUT = 5
+    PUSH_AFTER = 1.0
+    MAX_ALLOWED_DELAY = 2.0  # generous: push at 1s, must see response before 3s
+
+    src_key = "__blpop_pipeline_flush_test__"
+
+    client = aioredis.Redis(port=df_server.port, single_connection_client=True)
+    pusher = aioredis.Redis(port=df_server.port)
+    await client.delete(src_key)
+
+    # Build raw RESP pipeline: N BLPOP commands
+    def encode_resp(*args):
+        parts = [f"*{len(args)}\r\n"]
+        for a in args:
+            a = str(a)
+            parts.append(f"${len(a)}\r\n{a}\r\n")
+        return "".join(parts).encode()
+
+    pipeline_data = b""
+    for _ in range(NUM_PIPELINE):
+        pipeline_data += encode_resp("BLPOP", src_key, BLPOP_TIMEOUT)
+
+    # Open a raw TCP connection and send the pipeline
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    writer.write(pipeline_data)
+    await writer.drain()
+
+    # Push a value after PUSH_AFTER seconds
+    async def do_push():
+        await asyncio.sleep(PUSH_AFTER)
+        await pusher.lpush(src_key, "hello")
+
+    push_task = asyncio.create_task(do_push())
+
+    # Read the first RESP response and measure how long it takes
+    t0 = time.monotonic()
+
+    # Read until we get one complete RESP array response (*2\r\n$...\r\n...\r\n$...\r\n...\r\n)
+    first_response = b""
+    while True:
+        chunk = await asyncio.wait_for(reader.read(4096), timeout=BLPOP_TIMEOUT * NUM_PIPELINE + 5)
+        first_response += chunk
+        # A BLPOP success response starts with *2, a nil with *-1
+        # We just need at least one complete response
+        if b"\r\n" in first_response:
+            break
+
+    first_response_time = time.monotonic() - t0
+
+    writer.close()
+    await push_task
+    await client.delete(src_key)
+    await client.aclose()
+    await pusher.aclose()
+
+    assert first_response_time < MAX_ALLOWED_DELAY, (
+        f"First BLPOP response took {first_response_time:.2f}s, expected < {MAX_ALLOWED_DELAY}s. "
+        f"The response was likely buffered until all pipelined commands completed "
+        f"instead of being flushed immediately."
+    )
