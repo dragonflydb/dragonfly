@@ -957,6 +957,21 @@ stream* GetReadOnlyStream(const CompactObj& cobj) {
   return const_cast<stream*>((const stream*)cobj.RObjPtr());
 }
 
+// Reassigns a pending NACK entry to a new consumer, updating the PELs of both the old and new
+// consumer. If the NACK already belongs to the target consumer, this is a no-op for the PELs.
+void ReassignNACKToConsumer(streamNACK* nack, streamConsumer* consumer, uint8_t* key_buf,
+                            size_t key_len, uint64_t now_ms) {
+  if (nack->consumer != consumer) {
+    if (nack->consumer) {
+      raxRemove(nack->consumer->pel, key_buf, key_len, nullptr);
+      LOG_IF(DFATAL, nack->consumer->pel->numnodes == 0) << "Invalid rax state";
+    }
+    raxInsert(consumer->pel, key_buf, key_len, nack, nullptr);
+    nack->consumer = consumer;
+  }
+  consumer->active_time = now_ms;
+}
+
 }  // namespace
 
 // Returns the range response for each stream on this shard in order of
@@ -1384,20 +1399,6 @@ void AppendClaimResultItem(ClaimInfo& result, stream* s, streamID id) {
     result.records.push_back(std::move(rec));
   }
   streamIteratorStop(&it);
-}
-
-// Reassigns a pending NACK entry to a new consumer, updating the PELs of both the old and new
-// consumer. If the NACK already belongs to the target consumer, this is a no-op for the PELs.
-void ReassignNACKToConsumer(streamNACK* nack, streamConsumer* consumer, uint8_t* key_buf,
-                            size_t key_len, uint64_t now_ms) {
-  if (nack->consumer != consumer) {
-    if (nack->consumer) {
-      raxRemove(nack->consumer->pel, key_buf, key_len, nullptr);
-    }
-    raxInsert(consumer->pel, key_buf, key_len, nack, nullptr);
-    nack->consumer = consumer;
-  }
-  consumer->active_time = now_ms;
 }
 
 // XCLAIM key group consumer min-idle-time id
@@ -2949,6 +2950,11 @@ void CmdXClaim(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
+
+  if (opts.group.empty() || opts.consumer.empty()) {
+    return cmd_cntx->SendError(kSyntaxErr);
+  }
+
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
@@ -3554,6 +3560,10 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (opts.group.empty() || opts.consumer.empty()) {
+    return cmd_cntx->SendError(kSyntaxErr);
+  }
 
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
     return rb->SendError(kSyntaxErr);
