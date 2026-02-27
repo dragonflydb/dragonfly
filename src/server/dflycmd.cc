@@ -667,13 +667,14 @@ void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  // After loading, cancel all active replicas and reset the partial sync buffers
-  // to force them to reconnect with a full sync. This is necessary because the
-  // loaded data bypasses the journal, so replicas would not receive the new keys
-  // through partial replication.
+  // After loading, cancel all active replicas to force them to reconnect with
+  // a full sync. This is necessary because the loaded data bypasses the journal,
+  // so replicas would not receive the new keys through partial replication.
+  // We advance the journal LSN and clear the ring buffer to ensure that reconnecting
+  // replicas cannot do a partial sync (their old LSN won't match the new one).
   shard_set->RunBriefInParallel([](EngineShard* shard) {
     if (shard->journal())
-      journal::ResetBuffer();
+      journal::StartInThreadAtLsn(journal::GetLsn() + 1);
   });
 
   ReplicaInfoMap pending;

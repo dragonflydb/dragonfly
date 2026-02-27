@@ -36,9 +36,6 @@ void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, std::op
 size_t LsnBufferSize();
 size_t LsnBufferBytes();
 
-// Resets the partial sync ring buffer. Must be called in the context of the owning shard.
-void ResetBuffer();
-
 void SetFlushMode(bool allow_flush);
 
 class DisableFlushGuard {
