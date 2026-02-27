@@ -372,10 +372,9 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
     // We extend entry with new bytes
     string existing_entry{element_access.Value()};
     existing_entry.resize(GetByteIndex(offset) + 1, 0);
-    old_value = SetBitValue(offset, bit_value, &existing_entry);
-    if (old_value != bit_value) {  // we made a "real" change to the entry, save it
-      element_access.Commit(existing_entry);
-    }
+    SetBitValue(offset, bit_value, &existing_entry);
+    // We always need to commit the extended key
+    element_access.Commit(existing_entry);
   } else {
     // Update single byte in place
     uint32_t byte_index = GetByteIndex(offset);
