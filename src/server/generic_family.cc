@@ -694,9 +694,10 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
   const auto start_cycles = base::CycleClock::Now();
+
   // Don't allow it to monopolize cpu time.
-  // Approximately 15 microseconds.
-  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
+  // Approximately 30 microseconds.
+  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 15;
 
   do {
     cur = prime_table->Traverse(
@@ -714,7 +715,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
-  constexpr uint64_t kMaxScanTimeMs = 25;
+  constexpr uint64_t kMaxScanTimeMs = 50;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -763,14 +764,82 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   return cursor;
 }
 
+void RecordDelete(DbIndex dbid, string_view key) {
+  journal::RecordEntry(0, journal::Op::COMMAND, dbid, 1, KeySlot(key),
+                       journal::Entry::Payload("DEL", ArgSlice{key}));
+}
+
+void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
+                     uint32_t* deleted) {
+  StringVec keys;
+  OpScan(op_args, scan_opts, cursor, &keys);
+
+  auto& db_slice = op_args.GetDbSlice();
+  uint32_t count = 0;
+  for (const auto& key : keys) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+    if (!IsValid(it))
+      continue;
+    db_slice.Del(op_args.db_cntx, it);
+    if (op_args.shard->journal()) {
+      RecordDelete(op_args.db_cntx.db_index, key);
+    }
+    ++count;
+  }
+  *deleted += count;
+}
+
 uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted,
                    ConnectionContext* cntx) {
-  // TODO: implement scan-and-delete logic
-  (void)cursor;
-  (void)scan_opts;
-  (void)cntx;
+  ShardId sid = cursor % 1024;
+
+  EngineShardSet* ess = shard_set;
+  unsigned shard_count = ess->size();
+  constexpr uint64_t kMaxRmTimeMs = 100;
+
+  CHECK_LT(shard_count, 1024u);
+
+  if (sid >= shard_count) {
+    return 0;
+  }
+
+  cursor >>= 10;
+  DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
+
   *deleted = 0;
-  return 0;
+
+  do {
+    auto cb = [&] {
+      OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
+      OpScanAndDelete(op_args, scan_opts, &cursor, deleted);
+    };
+
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
+      cb();
+      util::ThisFiber::Yield();
+    } else {
+      ess->Await(sid, cb);
+    }
+
+    if (cursor == 0) {
+      ++sid;
+      if (unsigned(sid) == shard_count)
+        break;
+    }
+
+    uint64_t time_now_ms = GetCurrentTimeMs();
+    if (time_now_ms > db_cntx.time_now_ms + kMaxRmTimeMs) {
+      break;
+    }
+  } while (*deleted < scan_opts.limit);
+
+  if (sid < shard_count) {
+    cursor = (cursor << 10) | sid;
+  } else {
+    DCHECK_EQ(0u, cursor);
+  }
+
+  return cursor;
 }
 
 OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {

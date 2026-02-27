@@ -4175,3 +4175,54 @@ async def test_hnsw_search_replication_with_network_disruptions(
         search_task.cancel()
         replica_search_task.cancel()
         await proxy.close(proxy_task)
+
+
+async def test_rm_replication(df_factory: DflyInstanceFactory):
+    """Test that RM command propagates deletions to replica and is rejected on replica."""
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    master.start()
+    replica.start()
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Populate master with keys before replication starts
+    for i in range(20):
+        await c_master.set(f"key:{i}", f"val{i}")
+    for i in range(5):
+        await c_master.set(f"other:{i}", f"val{i}")
+
+    # Set up replication
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Verify replica has all keys
+    assert await c_replica.dbsize() == 25
+    logging.info("Replica has all keys")
+
+    # Run RM on master with a MATCH filter to delete only "key:*" keys
+    cursor = 0
+    while True:
+        result = await c_master.execute_command("RM", cursor, "MATCH", "key:*")
+        cursor = int(result[0])
+        if cursor == 0:
+            break
+
+    # Master should have only "other:*" keys left
+    assert await c_master.dbsize() == 5
+
+    # Wait for replication to propagate
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Replica should reflect deletions
+    assert await c_replica.dbsize() == 5
+    for i in range(5):
+        assert await c_replica.exists(f"other:{i}") == 1
+    for i in range(20):
+        assert await c_replica.exists(f"key:{i}") == 0
+
+    # RM must be rejected on replica (it's a write command)
+    with pytest.raises((aioredis.ResponseError, aioredis.ReadOnlyError)):
+        await c_replica.execute_command("RM", 0)
