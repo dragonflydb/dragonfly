@@ -1247,20 +1247,17 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-    } else {
+    } else if (taglen_ == SMALL_TAG) {
       CHECK_EQ(SMALL_TAG, taglen_);
       auto& ss = u_.small_str;
-      char* copy_dest;
-      if (str_encoding.enc_ == HUFFMAN_ENC) {
-        tl.tmp_buf.resize(ss.size());
-      } else {
-        // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
-        size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
-        tl.tmp_buf.resize(decoded_len - ss.size());
-      }
-      copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+      tl.tmp_buf.resize(ss.size());
+      char* copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
       ss.Get(copy_dest);
       decode_blob = {copy_dest, ss.size()};
+    } else if (IsInline()) {
+      decode_blob = {u_.inline_str, taglen_};
+    } else {
+      LOG(FATAL) << "Bad encoding tag " << int(taglen_);
     }
     if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
       LOG(INFO) << "Offset out of bounds for encoded string: " << idx
