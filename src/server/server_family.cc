@@ -3076,6 +3076,16 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("executable", base::kProgramName);
     absl::CommandLineFlag* flagfile_flag = absl::FindCommandLineFlag("flagfile");
     append("config_file", flagfile_flag->CurrentValue());
+
+    for (const facade::Listener* listener : listeners_) {
+      if (listener->HasTLS()) {
+        const auto& cert = listener->GetCertInfo();
+        append("tls_cert_common_name", cert.commonName);
+        append("tls_cert_issue_date", std::to_string(cert.issueDate));
+        append("tls_cert_expiration_date", std::to_string(cert.expirationDate));
+        break;
+      }
+    }
   };
 
   auto add_clients_info = [&] {

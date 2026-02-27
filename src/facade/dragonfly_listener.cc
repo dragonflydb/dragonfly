@@ -13,7 +13,12 @@
 #include "facade/tls_helpers.h"
 
 #ifdef DFLY_USE_SSL
+#include <openssl/bio.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include <ctime>
 #endif
 #include "base/flags.h"
 #include "base/logging.h"
@@ -133,6 +138,51 @@ void OverriddenSSLFree(void* addr, const char* file, int line) {
   mi_free(addr);
 }
 
+TLSCertificateInfo GetCertInfoFromCtx(const SSL_CTX* ctx) {
+  TLSCertificateInfo info;
+  info.commonName = "none";
+  info.issueDate = 0;
+  info.expirationDate = 0;
+
+  X509* cert = SSL_CTX_get0_certificate(ctx);
+  if (!cert) {
+    return info;
+  }
+
+  X509_NAME* subject = X509_get_subject_name(cert);
+  if (subject) {
+    int loc = X509_NAME_get_index_by_NID(subject, NID_commonName, -1);
+    if (loc >= 0) {
+      X509_NAME_ENTRY* entry = X509_NAME_get_entry(subject, loc);
+      ASN1_STRING* data = X509_NAME_ENTRY_get_data(entry);
+      unsigned char* utf8 = nullptr;
+      int len = ASN1_STRING_to_UTF8(&utf8, data);
+      if (utf8 && len > 0) {
+        info.commonName.assign(reinterpret_cast<char*>(utf8), len);
+        OPENSSL_free(utf8);
+      }
+    }
+  }
+
+  const ASN1_TIME* notBefore = X509_get_notBefore(cert);
+  const ASN1_TIME* notAfter = X509_get_notAfter(cert);
+
+  if (!notBefore || !notAfter) {
+    return info;
+  }
+
+  struct tm tm_notBefore = {0};
+  struct tm tm_notAfter = {0};
+
+  if (!ASN1_TIME_to_tm(notBefore, &tm_notBefore) || !ASN1_TIME_to_tm(notAfter, &tm_notAfter)) {
+    return info;
+  }
+  info.issueDate = timegm(&tm_notBefore);
+  info.expirationDate = timegm(&tm_notAfter);
+
+  return info;
+}
+
 }  // namespace
 
 Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
@@ -222,6 +272,7 @@ bool Listener::ReconfigureTLS() {
     if (!ctx) {
       return false;
     }
+    cert_info_ = GetCertInfoFromCtx(ctx);
     ctx_ = ctx;
   } else {
     ctx_ = nullptr;
