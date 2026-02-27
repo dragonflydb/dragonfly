@@ -4,6 +4,7 @@
 
 #include "core/search/hnsw_index.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
 #include <hnswlib/hnswlib.h>
 #include <hnswlib/space_ip.h>
@@ -89,10 +90,7 @@ struct HnswlibAdapter {
       }
     }
     // Could not acquire write lock — defer the operation.
-    {
-      std::lock_guard g(deferred_mu_);
-      deferred_ops_.emplace_back(id, true, data, data_size_, copy_vector_);
-    }
+    AddDeferredOp(id, DeferredOp(true, data, data_size_, copy_vector_));
     TryProcessDeferred();
   }
 
@@ -107,10 +105,7 @@ struct HnswlibAdapter {
         return;
       }
     }
-    {
-      std::lock_guard g(deferred_mu_);
-      deferred_ops_.emplace_back(id, false, nullptr, 0, false);
-    }
+    AddDeferredOp(id, DeferredOp(false, nullptr, 0, false));
     TryProcessDeferred();
   }
 
@@ -180,7 +175,7 @@ struct HnswlibAdapter {
   }
 
   std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    DCHECK(mrmw_mutex_.IsReadLocked());
     size_t count = world_.cur_element_count.load();
     end = std::min(end, count);
     start = std::min(start, end);
@@ -216,13 +211,12 @@ struct HnswlibAdapter {
  private:
   // A single deferred Add or Remove operation.
   struct DeferredOp {
-    const GlobalDocId id;
-    const bool is_add;
+    bool is_add;
     bool owns_data;        // If true, data_ptr was allocated by us and must be freed.
     const void* data_ptr;  // Pointer to vector data (owned or borrowed).
 
-    DeferredOp(GlobalDocId id, bool is_add, const void* data, size_t data_size, bool copy)
-        : id(id), is_add(is_add), owns_data(copy && data != nullptr) {
+    DeferredOp(bool is_add, const void* data, size_t data_size, bool copy)
+        : is_add(is_add), owns_data(copy && data != nullptr) {
       if (owns_data) {
         void* buf = mi_malloc(data_size);
         memcpy(buf, data, data_size);
@@ -238,14 +232,20 @@ struct HnswlibAdapter {
     }
 
     DeferredOp(DeferredOp&& o) noexcept
-        : id(o.id), is_add(o.is_add), owns_data(o.owns_data), data_ptr(o.data_ptr) {
+        : is_add(o.is_add), owns_data(o.owns_data), data_ptr(o.data_ptr) {
       o.owns_data = false;
       o.data_ptr = nullptr;
     }
 
+    DeferredOp& operator=(DeferredOp&& o) noexcept {
+      auto lhs = std::tie(is_add, owns_data, data_ptr);
+      auto rhs = std::tie(o.is_add, o.owns_data, o.data_ptr);
+      std::swap(lhs, rhs);
+      return *this;
+    }
+
     DeferredOp(const DeferredOp&) = delete;
     DeferredOp& operator=(const DeferredOp&) = delete;
-    DeferredOp& operator=(DeferredOp&&) = delete;
   };
 
   // Actually add the point. Must be called while holding mrmw write lock.
@@ -275,19 +275,29 @@ struct HnswlibAdapter {
     }
   }
 
+  // Add a deferred operation, replacing any previous one for the same document.
+  void AddDeferredOp(GlobalDocId id, DeferredOp op) {
+    std::lock_guard g(deferred_mu_);
+    deferred_ops_.insert_or_assign(id, std::move(op));
+  }
+
+  // Take all deferred operations out of the queue.
+  absl::flat_hash_map<GlobalDocId, DeferredOp> TakeDeferredOps() {
+    std::lock_guard g(deferred_mu_);
+    absl::flat_hash_map<GlobalDocId, DeferredOp> ops;
+    ops.swap(deferred_ops_);
+    return ops;
+  }
+
   // Drain the deferred operations queue. Must be called while holding the mrmw
   // write lock.
   void ProcessDeferred() {
-    std::vector<DeferredOp> ops;
-    {
-      std::lock_guard g(deferred_mu_);
-      ops.swap(deferred_ops_);
-    }
-    for (auto& op : ops) {
+    auto ops = TakeDeferredOps();
+    for (auto& [id, op] : ops) {
       if (op.is_add) {
-        DoAdd(op.data_ptr, op.id);
+        DoAdd(op.data_ptr, id);
       } else {
-        DoRemove(op.id);
+        DoRemove(id);
       }
     }
   }
@@ -472,10 +482,10 @@ struct HnswlibAdapter {
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
 
-  bool copy_vector_;                      // Whether vectors are copied into hnswlib.
-  size_t data_size_;                      // Byte size of a single vector.
-  base::SpinLock deferred_mu_;            // Protects deferred_ops_.
-  std::vector<DeferredOp> deferred_ops_;  // GUARDED_BY(deferred_mu_)
+  bool copy_vector_;            // Whether vectors are copied into hnswlib.
+  size_t data_size_;            // Byte size of a single vector.
+  base::SpinLock deferred_mu_;  // Protects deferred_ops_.
+  absl::flat_hash_map<GlobalDocId, DeferredOp> deferred_ops_;  // GUARDED_BY(deferred_mu_)
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,

@@ -50,6 +50,12 @@ class MRMWMutex {
     }
   }
 
+  // Check if the mutex is currently held in read mode with at least one active runner.
+  // For use in DCHECKs only - not thread-safe without external synchronization.
+  bool IsReadLocked() const {
+    return active_runners_ > 0 && lock_mode_ == LockMode::kReadLock;
+  }
+
   // Non-blocking lock attempt. Returns true if the lock was acquired.
   bool TryLock(LockMode mode) {
     if (!mutex_.try_lock()) {
