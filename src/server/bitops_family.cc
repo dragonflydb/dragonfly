@@ -268,9 +268,16 @@ class ElementAccess {
     return updater_.is_new;
   }
 
+  size_t Size() const {
+    return IsNewEntry() ? 0 : updater_.it->second.Size();
+  }
+
   string Value() const;
 
+  uint8_t GetByteAtIndex(size_t idx) const;
+
   void Commit(string_view new_value) const;
+  void SetByteAtIndex(size_t idx, uint8_t value) const;
 
   // return nullopt when key exists but it's not encoded as string
   // return true if key exists and false if it doesn't
@@ -303,6 +310,15 @@ string ElementAccess::Value() const {
   return IsNewEntry() ? string{} : GetString(updater_.it->second);
 }
 
+uint8_t ElementAccess::GetByteAtIndex(size_t idx) const {
+  if (IsNewEntry()) {
+    return 0;
+  }
+  uint8_t res = 0;
+  updater_.it->second.GetByteAtIndex(idx, &res);
+  return res;
+}
+
 void ElementAccess::Commit(string_view new_value) const {
   if (new_value.empty()) {
     if (!IsNewEntry()) {
@@ -317,6 +333,15 @@ void ElementAccess::Commit(string_view new_value) const {
       updater_.post_updater.ReduceHeapUsage();
     }
     updater_.it->second.SetString(new_value);
+    updater_.post_updater.Run();
+  }
+}
+
+void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
+  DCHECK(!IsNewEntry());
+  auto [success, in_place] = updater_.it->second.SetByteAtIndex(idx, val);
+  // If in_place is false, it means that we had to rewrite the string.
+  if (success) {
     updater_.post_updater.Run();
   }
 }
@@ -336,20 +361,31 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
     return find_res;
   }
 
+  size_t entry_size = element_access.Size();
+
   if (element_access.IsNewEntry()) {
+    // We create a new entry
     string new_entry(GetByteIndex(offset) + 1, 0);
     old_value = SetBitValue(offset, bit_value, &new_entry);
     element_access.Commit(new_entry);
-  } else {
-    bool reset = false;
+  } else if ((entry_size * OFFSET_FACTOR) <= offset) {
+    // We extend entry with new bytes
     string existing_entry{element_access.Value()};
-    if ((existing_entry.size() * OFFSET_FACTOR) <= offset) {
-      existing_entry.resize(GetByteIndex(offset) + 1, 0);
-      reset = true;
-    }
+    existing_entry.resize(GetByteIndex(offset) + 1, 0);
     old_value = SetBitValue(offset, bit_value, &existing_entry);
-    if (reset || old_value != bit_value) {  // we made a "real" change to the entry, save it
+    if (old_value != bit_value) {  // we made a "real" change to the entry, save it
       element_access.Commit(existing_entry);
+    }
+  } else {
+    // Update single byte in place
+    uint32_t byte_index = GetByteIndex(offset);
+    uint8_t existing_byte = element_access.GetByteAtIndex(byte_index);
+    uint32_t bit_index = GetNormalizedBitIndex(offset);
+    old_value = CheckBitStatus(existing_byte, bit_index);
+    if (old_value != bit_value) {
+      existing_byte =
+          bit_value ? TurnBitOn(existing_byte, bit_index) : TurnBitOff(existing_byte, bit_index);
+      element_access.SetByteAtIndex(byte_index, existing_byte);
     }
   }
   return old_value;
