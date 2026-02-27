@@ -165,6 +165,10 @@ RdbLoadContext::HnswRemapTable RdbLoadContext::RemapHnswForDifferentShardCount(
 
       for (const auto& [key, old_doc_id] : pim.mappings) {
         ShardId new_shard_id = Shard(key, new_shard_count);
+        // Counter starts at 0 for each (index, shard) — equivalent to DocKeyIndex::Add() on a
+        // fresh index (free_ids_ empty → id = last_id_++). DocKeyIndex::Restore() is later called
+        // with these exact (key, doc_id) pairs, so the key_index stays consistent with the
+        // global_ids stored in the remapped HNSW graph.
         search::DocId new_doc_id = counters[new_shard_id]++;
         search::GlobalDocId new_gid = search::CreateGlobalDocId(new_shard_id, new_doc_id);
 
