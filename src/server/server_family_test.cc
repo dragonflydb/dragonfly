@@ -708,4 +708,32 @@ TEST_F(ServerFamilyTest, InfoMultipleSectionsInvalid) {
   EXPECT_EQ(info.find("# invalidsection"), std::string::npos);
 }
 
+TEST_F(ServerFamilyTest, MemoryArenaSummary) {
+  auto resp = Run({"MEMORY", "ARENA", "SUMMARY"});
+  const auto response = resp.GetString();
+
+  EXPECT_THAT(response, HasSubstr("BlockSize"));
+
+  for (const auto shard_id : std::views::iota(0UL, shard_set->size())) {
+    EXPECT_THAT(response, HasSubstr("Arena statistics for thread " + std::to_string(shard_id)));
+  }
+
+  EXPECT_THAT(response, HasSubstr("Arena statistics for machine"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "X"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("Count"));
+}
+
 }  // namespace dfly
