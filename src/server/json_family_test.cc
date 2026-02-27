@@ -3499,4 +3499,19 @@ TEST_F(JsonFamilyTest, TOGGLE_RESP3NestedArrayBug) {
   EXPECT_THAT(resp.GetVec()[1], IntArg(1));
 }
 
+TEST_F(JsonFamilyTest, SetOverLargeStringKey) {
+  // Create a key with a large string value (must be heap-allocated, >16 bytes).
+  string large_value(16000, 'x');
+  Run({"SET", "key", large_value});
+
+  // Overwrite the string key with a small JSON using root path.
+  // Without the fix, freeing the old string inside SetJson caused a negative
+  // memory diff in JsonAutoUpdater::SetJsonSize while bytes_used was 0.
+  auto resp = Run({"JSON.SET", "key", "$", "1"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_EQ(resp, "1");
+}
+
 }  // namespace dfly
