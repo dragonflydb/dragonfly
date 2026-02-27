@@ -74,7 +74,7 @@ jobs:
       - name: Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          ninja dragonfly
+          ninja
 
       - name: Run C++ Unit Tests
         run: |
