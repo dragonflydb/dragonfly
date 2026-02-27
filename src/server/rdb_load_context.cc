@@ -4,9 +4,11 @@
 
 #include "server/rdb_load_context.h"
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "base/logging.h"
 #include "facade/redis_parser.h"
@@ -20,6 +22,10 @@
 #include "server/sharding.h"
 
 namespace dfly {
+
+namespace {
+constexpr search::GlobalDocId kInvalidRemapGid = std::numeric_limits<search::GlobalDocId>::max();
+}  // namespace
 
 void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_view command_name,
                               std::string_view error_context, bool add_NX) {
@@ -147,84 +153,66 @@ std::vector<PendingHnswNodes> RdbLoadContext::TakePendingHnswNodes() {
   return std::move(pending_hnsw_nodes_);
 }
 
-void RdbLoadContext::RemapForDifferentShardCount(
-    absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
+RdbLoadContext::HnswRemapTable RdbLoadContext::RemapHnswForDifferentShardCount(
+    const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
     std::vector<PendingHnswNodes>& pending_nodes,
     const std::vector<PendingHnswMetadata>& hnsw_metadata) {
   const ShardId new_shard_count = shard_set->size();
 
-  // Per-index remapping: collect all (key, old_global_id) across all master shards,
-  // redistribute to replica shards, assign new doc_ids, build remap table.
-  // index_name -> {old_global_id -> new_global_id}
-  absl::flat_hash_map<std::string, absl::flat_hash_map<search::GlobalDocId, search::GlobalDocId>>
-      remap_tables;
-
-  // New mappings keyed by replica shard_id.
-  absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> new_index_mappings;
-
-  // Per-index, per-new-shard doc_id counter for sequential assignment.
-  // index_name -> (new_shard_id -> next_doc_id)
+  // Build compact remap table: for each (index, master_shard, old_doc_id) store new_global_id.
+  HnswRemapTable remap_table;
   absl::flat_hash_map<std::string, absl::flat_hash_map<uint32_t, search::DocId>> doc_id_counters;
 
-  // Lookup: (shard_id, index_name) -> position in new_index_mappings[shard_id] vector.
-  absl::flat_hash_map<uint32_t, absl::flat_hash_map<std::string, size_t>> shard_index_pos;
-
-  for (auto& [master_shard_id, pim_vec] : index_mappings) {
-    for (auto& pim : pim_vec) {
-      auto& remap = remap_tables[pim.index_name];
+  for (const auto& [master_shard_id, pim_vec] : index_mappings) {
+    for (const auto& pim : pim_vec) {
+      auto& shard_remap = remap_table[pim.index_name];
       auto& counters = doc_id_counters[pim.index_name];
 
       for (const auto& [key, old_doc_id] : pim.mappings) {
-        search::GlobalDocId old_gid = search::CreateGlobalDocId(master_shard_id, old_doc_id);
         ShardId new_shard_id = Shard(key, new_shard_count);
         search::DocId new_doc_id = counters[new_shard_id]++;
         search::GlobalDocId new_gid = search::CreateGlobalDocId(new_shard_id, new_doc_id);
 
-        remap[old_gid] = new_gid;
-
-        // Add to new mappings grouped by replica shard_id.
-        auto& shard_mappings = new_index_mappings[new_shard_id];
-        auto& positions = shard_index_pos[new_shard_id];
-        auto [pos_it, inserted] = positions.emplace(pim.index_name, shard_mappings.size());
-        if (inserted) {
-          shard_mappings.push_back({pim.index_name, {}});
+        auto& vec = shard_remap[master_shard_id];
+        if (old_doc_id >= vec.size()) {
+          vec.resize(old_doc_id + 1, kInvalidRemapGid);
         }
-        shard_mappings[pos_it->second].mappings.emplace_back(key, new_doc_id);
+        vec[old_doc_id] = new_gid;
       }
     }
   }
 
-  // Replace old mappings with redistributed ones.
-  index_mappings = std::move(new_index_mappings);
-
-  // Collect indices that fail remapping/restoration, then remove their mappings in one pass.
-  absl::flat_hash_set<std::string> failed_remap_indices;
-
   // Remap global_ids in deferred HNSW nodes and restore the graphs.
+  absl::flat_hash_set<std::string> failed_indices;
+
   for (auto& pn : pending_nodes) {
-    auto remap_it = remap_tables.find(pn.index_name);
+    auto remap_it = remap_table.find(pn.index_name);
 
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(pn.index_name, pn.field_name);
     if (!hnsw_index) {
       LOG(ERROR) << "HNSW index not found for deferred restoration: " << pn.index_name << ":"
                  << pn.field_name << ". Will rebuild from scratch.";
-      failed_remap_indices.insert(pn.index_name);
+      failed_indices.insert(pn.index_name);
       continue;
     }
 
-    if (remap_it == remap_tables.end()) {
+    if (remap_it == remap_table.end()) {
       LOG(WARNING) << "No remap table for index " << pn.index_name << ":" << pn.field_name
                    << " (no key mappings). Will rebuild from scratch.";
-      failed_remap_indices.insert(pn.index_name);
+      failed_indices.insert(pn.index_name);
       continue;
     }
 
     size_t remapped = 0;
     for (auto& node : pn.nodes) {
-      auto gid_it = remap_it->second.find(node.global_id);
-      if (gid_it != remap_it->second.end()) {
-        node.global_id = gid_it->second;
-        ++remapped;
+      auto [shard_id, doc_id] = search::DecomposeGlobalDocId(node.global_id);
+      auto shard_it = remap_it->second.find(shard_id);
+      if (shard_it != remap_it->second.end() && doc_id < shard_it->second.size()) {
+        search::GlobalDocId new_gid = shard_it->second[doc_id];
+        if (new_gid != kInvalidRemapGid) {
+          node.global_id = new_gid;
+          ++remapped;
+        }
       }
     }
 
@@ -232,11 +220,10 @@ void RdbLoadContext::RemapForDifferentShardCount(
       LOG(WARNING) << "Incomplete remap for HNSW index " << pn.index_name << ":" << pn.field_name
                    << " (" << remapped << "/" << pn.nodes.size()
                    << " nodes). Will rebuild from scratch.";
-      failed_remap_indices.insert(pn.index_name);
+      failed_indices.insert(pn.index_name);
       continue;
     }
 
-    // Find metadata for the graph from the extracted local copy.
     const PendingHnswMetadata* phm_ptr = nullptr;
     for (const auto& phm : hnsw_metadata) {
       if (phm.index_name == pn.index_name && phm.field_name == pn.field_name) {
@@ -251,16 +238,12 @@ void RdbLoadContext::RemapForDifferentShardCount(
               << pn.nodes.size() << " nodes (" << remapped << " global_ids remapped)";
   }
 
-  // Remove key mappings for all indices that failed remapping, so they fall back to full rebuild.
-  if (!failed_remap_indices.empty()) {
-    for (auto& [shard_id, pim_vec] : index_mappings) {
-      pim_vec.erase(std::remove_if(pim_vec.begin(), pim_vec.end(),
-                                   [&](const PendingIndexMapping& m) {
-                                     return failed_remap_indices.contains(m.index_name);
-                                   }),
-                    pim_vec.end());
-    }
+  // Remove failed indices — their key mappings won't be redistributed, causing full rebuild.
+  for (const auto& name : failed_indices) {
+    remap_table.erase(name);
   }
+
+  return remap_table;
 }
 
 void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
@@ -301,29 +284,73 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
     }
   }
 
-  // When shard counts differ, remap key mappings and HNSW global_ids before applying.
+  // When shard counts differ, remap HNSW global_ids and redistribute key mappings on-the-fly.
   bool shard_count_differs = master_shards != 0 && master_shards != shard_set->size();
-  if (shard_count_differs && !index_mappings.empty()) {
-    RemapForDifferentShardCount(index_mappings, pending_nodes, hnsw_metadata);
-  } else if (shard_count_differs && !pending_nodes.empty()) {
-    LOG(WARNING) << "Have " << pending_nodes.size()
-                 << " deferred HNSW node sets but no key mappings for remapping. "
-                    "Affected indices will be rebuilt from scratch.";
-  }
 
-  if (!index_mappings.empty()) {
-    shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
-      auto it = index_mappings.find(es->shard_id());
-      if (it == index_mappings.end())
-        return;
-      for (const auto& pim : it->second) {
-        if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
-          index->RestoreKeyIndex(pim.mappings);
-          VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
-                  << pim.index_name << " on shard " << es->shard_id();
+  if (shard_count_differs && !index_mappings.empty()) {
+    auto remap_table =
+        RemapHnswForDifferentShardCount(index_mappings, pending_nodes, hnsw_metadata);
+
+    // Each shard filters its own keys from all original mappings using the remap table.
+    // This avoids building a pre-redistributed copy of all key strings.
+    shard_set->AwaitRunningOnShardQueue([&](EngineShard* es) {
+      const ShardId my_shard = es->shard_id();
+      absl::flat_hash_map<std::string, std::vector<std::pair<std::string, search::DocId>>>
+          per_index;
+
+      for (const auto& [master_shard_id, pim_vec] : index_mappings) {
+        for (const auto& pim : pim_vec) {
+          auto idx_it = remap_table.find(pim.index_name);
+          if (idx_it == remap_table.end())
+            continue;
+          auto shard_it = idx_it->second.find(master_shard_id);
+          if (shard_it == idx_it->second.end())
+            continue;
+          const auto& remap_vec = shard_it->second;
+
+          for (const auto& [key, old_doc_id] : pim.mappings) {
+            if (old_doc_id >= remap_vec.size())
+              continue;
+            search::GlobalDocId new_gid = remap_vec[old_doc_id];
+            if (new_gid == kInvalidRemapGid)
+              continue;
+            auto [new_shard_id, new_doc_id] = search::DecomposeGlobalDocId(new_gid);
+            if (new_shard_id != my_shard)
+              continue;
+            per_index[pim.index_name].emplace_back(key, new_doc_id);
+          }
+        }
+      }
+
+      for (auto& [name, mappings] : per_index) {
+        if (auto* index = es->search_indices()->GetIndex(name); index) {
+          index->RestoreKeyIndex(mappings);
+          VLOG(1) << "Restored " << mappings.size() << " key mappings for index " << name
+                  << " on shard " << my_shard;
         }
       }
     });
+  } else {
+    if (shard_count_differs && !pending_nodes.empty()) {
+      LOG(WARNING) << "Have " << pending_nodes.size()
+                   << " deferred HNSW node sets but no key mappings for remapping. "
+                      "Affected indices will be rebuilt from scratch.";
+    }
+
+    if (!index_mappings.empty()) {
+      shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
+        auto it = index_mappings.find(es->shard_id());
+        if (it == index_mappings.end())
+          return;
+        for (const auto& pim : it->second) {
+          if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
+            index->RestoreKeyIndex(pim.mappings);
+            VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
+                    << pim.index_name << " on shard " << es->shard_id();
+          }
+        }
+      });
+    }
   }
   shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
     OpArgs op_args{es, nullptr,

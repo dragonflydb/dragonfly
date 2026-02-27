@@ -75,12 +75,16 @@ class RdbLoadContext {
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> TakePendingIndexMappings();
   std::vector<PendingHnswNodes> TakePendingHnswNodes();
 
-  // Redistributes key mappings from master shard layout to replica shard layout,
-  // builds a global_id remap table, and remaps HNSW node global_ids accordingly.
-  // On failure (missing metadata, incomplete remap), the affected index mappings are removed
-  // so the index falls back to a full rebuild.
-  void RemapForDifferentShardCount(
-      absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
+  // Compact remap: index_name -> master_shard_id -> new_global_ids indexed by old doc_id.
+  using HnswRemapTable =
+      absl::flat_hash_map<std::string,
+                          absl::flat_hash_map<uint32_t, std::vector<search::GlobalDocId>>>;
+
+  // Builds compact remap table, remaps HNSW node global_ids, and restores HNSW graphs.
+  // Failed indices are erased from the returned table so their key mappings are not applied,
+  // causing a full index rebuild instead.
+  HnswRemapTable RemapHnswForDifferentShardCount(
+      const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
       std::vector<PendingHnswNodes>& pending_nodes,
       const std::vector<PendingHnswMetadata>& hnsw_metadata);
 
