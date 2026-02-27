@@ -1214,6 +1214,37 @@ TEST_F(HnswDeferredOpsTest, DuplicateDeferredOpsAddOverridesRemove) {
   EXPECT_TRUE(ids.contains(1));
 }
 
+// Verify deferred Add works correctly with copy_vector=false (borrowed vector pointers).
+TEST_F(HnswDeferredOpsTest, AddWhileReadLockedBorrowedVectors) {
+  // Recreate the index with copy_vector=false.
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kCapacity;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  index_ = std::make_unique<HnswVectorIndex>(params, /*copy_vector=*/false);
+
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    index_->Add(0, doc0, "vec");
+    index_->Add(1, doc1, "vec");
+
+    auto ids = KnnIds(10);
+    EXPECT_TRUE(ids.empty());
+  }
+
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(1));
+}
+
 TEST_F(SearchTest, GeoSearch) {
   auto schema = MakeSimpleSchema({{"name", SchemaField::TEXT}, {"location", SchemaField::GEO}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
