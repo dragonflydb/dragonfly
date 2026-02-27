@@ -1236,6 +1236,153 @@ uint8_t CompactObj::GetFirstByte() const {
   return 0;
 }
 
+void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
+  CHECK(!IsExternal());
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  if (encoding_) {
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view decode_blob;
+    if (taglen_ == ROBJ_TAG) {
+      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+      decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
+    } else {
+      CHECK_EQ(SMALL_TAG, taglen_);
+      auto& ss = u_.small_str;
+      char* copy_dest;
+      if (str_encoding.enc_ == HUFFMAN_ENC) {
+        tl.tmp_buf.resize(ss.size());
+      } else {
+        // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
+        size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
+        tl.tmp_buf.resize(decoded_len - ss.size());
+      }
+      copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+      ss.Get(copy_dest);
+      decode_blob = {copy_dest, ss.size()};
+    }
+    if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
+      LOG(INFO) << "Offset out of bounds for encoded string: " << idx
+                << " >= " << str_encoding.DecodedSize(decode_blob.size(), decode_blob[0]);
+      *res = 0;
+    };
+    return;
+  }
+
+  // no encoding
+
+  if (IsInline()) {
+    CHECK_LT(idx, taglen_);
+    if (idx >= taglen_) {
+      LOG(INFO) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
+      *res = 0;
+    } else {
+      *res = u_.inline_str[idx];
+    }
+    return;
+  }
+
+  if (taglen_ == INT_TAG) {
+    absl::AlphaNum an(u_.ival);
+    CHECK_LT(idx, an.size());
+    if (idx >= an.size()) {
+      LOG(INFO) << "Offset out of bounds for integer string: " << idx << " >= " << an.size();
+      *res = 0;
+    } else {
+      *res = an.Piece()[idx];
+    }
+    return;
+  }
+
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    CHECK_LT(idx, u_.r_obj.Size());
+    if (idx >= u_.r_obj.Size()) {
+      LOG(INFO) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
+      *res = 0;
+    } else {
+      *res = to_byte(u_.r_obj.inner_obj())[idx];
+    }
+    return;
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    CHECK_LT(idx, u_.small_str.size());
+    std::string small_str;
+    u_.small_str.Get(&small_str);
+    if (idx >= small_str.size()) {
+      LOG(INFO) << "Offset out of bounds for small string: " << idx << " >= " << small_str.size();
+      *res = 0;
+    } else {
+      *res = small_str[idx];
+    }
+    return;
+  }
+
+  LOG(FATAL) << "Bad tag " << int(taglen_);
+}
+
+std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
+  CHECK(!IsExternal());
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  // Inline string without encoding: modify directly.
+  if (IsInline() && !encoding_) {
+    CHECK_LT(idx, taglen_);
+    if (idx >= taglen_) {
+      LOG(INFO) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
+      return {false, false};
+    } else {
+      u_.inline_str[idx] = val;
+    }
+    return {true, true};
+  }
+
+  // ROBJ_TAG raw string without encoding: modify the underlying buffer directly.
+  if (taglen_ == ROBJ_TAG && !encoding_) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    CHECK_LT(idx, u_.r_obj.Size());
+    if (idx >= u_.r_obj.Size()) {
+      LOG(INFO) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
+      return {false, false};
+    } else {
+      reinterpret_cast<char*>(u_.r_obj.inner_obj())[idx] = val;
+    }
+    return {true, true};
+  }
+
+  // For ASCII encoded strings ROBJ we can modify the underlying buffer directly.
+  if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) && taglen_ == ROBJ_TAG &&
+      absl::ascii_isascii(val)) {
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    size_t decoded_len =
+        GetStrEncoding().DecodedSize(u_.r_obj.Size(), *(uint8_t*)u_.r_obj.inner_obj());
+    if (idx >= decoded_len) {
+      LOG(INFO) << "Offset out of bounds for ASCII encoded string: " << idx
+                << " >= " << decoded_len;
+      return {false, false};
+    }
+    detail::ascii_pack_byte((uint8_t*)u_.r_obj.inner_obj(), decoded_len, idx, val);
+    return {true, true};
+  }
+
+  // For encoded strings, INT_TAG, SMALL_TAG  we need to write again string.
+  string str;
+  GetString(&str);
+  CHECK_LT(idx, str.size());
+  if (idx >= str.size()) {
+    LOG(INFO) << "Offset out of bounds for string: " << idx << " >= " << str.size();
+    return {false, false};
+  }
+  // Update byte in the string and write back
+  str[idx] = val;
+  SetString(str);
+  return {true, false};
+}
+
 // Frees all resources if owns.
 void CompactObj::Free() {
   DCHECK(HasAllocated());
@@ -1646,6 +1793,38 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
     }
   };
   return decoded_len;
+}
+
+bool CompactObj::StrEncoding::DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const {
+  if (blob.empty()) {
+    *dest = 0;
+    return false;
+  }
+  size_t decoded_len = DecodedSize(blob);
+  if (idx >= decoded_len) {
+    LOG(INFO) << "Index out of bounds for string: " << idx << " >= " << decoded_len;
+    *dest = 0;
+    return false;
+  }
+  switch (enc_) {
+    case NONE_ENC:
+      *dest = blob[idx];
+      break;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      detail::ascii_unpack_byte(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, idx,
+                                dest);
+      break;
+    case HUFFMAN_ENC: {
+      std::string decoded_huff_string(decoded_len, 0);
+      auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
+      const auto& decoder = tl.GetHuffmanDecoder(domain);
+      decoder.Decode(blob.substr(1), decoded_len, decoded_huff_string.data());
+      *dest = decoded_huff_string[idx];
+      break;
+    }
+  };
+  return true;
 }
 
 StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
