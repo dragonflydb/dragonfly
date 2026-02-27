@@ -37,6 +37,7 @@ ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json objec
 
 namespace dfly {
 using namespace std;
+using detail::ascii_len;
 using detail::binpacked_len;
 using MemoryResource = detail::RobjWrapper::MemoryResource;
 
@@ -344,13 +345,6 @@ pair<void*, bool> DefragList(unsigned encoding, void* ptr, PageUsage* page_usage
 
 inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
-}
-
-// converts 7-bit packed length back to ascii length. Note that this conversion
-// is not accurate since it maps 7 bytes to 8 bytes (rounds up), while we may have
-// 7 byte strings converted to 7 byte as well.
-inline constexpr size_t ascii_len(size_t bin_len) {
-  return (bin_len * 8) / 7;
 }
 
 inline const uint8_t* to_byte(const void* s) {
@@ -1236,7 +1230,7 @@ uint8_t CompactObj::GetFirstByte() const {
   return 0;
 }
 
-void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
+bool CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
   CHECK(!IsExternal());
   DCHECK_EQ(ObjType(), OBJ_STRING);
 
@@ -1246,9 +1240,8 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
     if (taglen_ == ROBJ_TAG) {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
+      decode_blob = {reinterpret_cast<const char*>(u_.r_obj.inner_obj()), u_.r_obj.Size()};
     } else if (taglen_ == SMALL_TAG) {
-      CHECK_EQ(SMALL_TAG, taglen_);
       auto& ss = u_.small_str;
       tl.tmp_buf.resize(ss.size());
       char* copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
@@ -1260,61 +1253,23 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
       LOG(FATAL) << "Bad encoding tag " << int(taglen_);
     }
     if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
-      LOG(INFO) << "Offset out of bounds for encoded string: " << idx
-                << " >= " << str_encoding.DecodedSize(decode_blob.size(), decode_blob[0]);
+      VLOG(1) << "Offset out of bounds for encoded string: " << idx
+              << " >= " << str_encoding.DecodedSize(decode_blob.size(), decode_blob[0]);
       *res = 0;
-    };
-    return;
-  }
-
-  // no encoding
-
-  if (IsInline()) {
-    if (idx >= taglen_) {
-      LOG(INFO) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
-      *res = 0;
-    } else {
-      *res = u_.inline_str[idx];
+      return false;
     }
-    return;
+    return true;
   }
 
-  if (taglen_ == INT_TAG) {
-    absl::AlphaNum an(u_.ival);
-    if (idx >= an.size()) {
-      LOG(INFO) << "Offset out of bounds for integer string: " << idx << " >= " << an.size();
-      *res = 0;
-    } else {
-      *res = an.Piece()[idx];
-    }
-    return;
+  // No encoding, we can directly access the byte at index.
+  string_view sv = GetSlice(&tl.tmp_str);
+  if (idx >= sv.size()) {
+    VLOG(1) << "Offset out of bounds: " << idx << " >= " << sv.size();
+    *res = 0;
+    return false;
   }
-
-  if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    if (idx >= u_.r_obj.Size()) {
-      LOG(INFO) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
-      *res = 0;
-    } else {
-      *res = to_byte(u_.r_obj.inner_obj())[idx];
-    }
-    return;
-  }
-
-  if (taglen_ == SMALL_TAG) {
-    std::string small_str;
-    u_.small_str.Get(&small_str);
-    if (idx >= small_str.size()) {
-      LOG(INFO) << "Offset out of bounds for small string: " << idx << " >= " << small_str.size();
-      *res = 0;
-    } else {
-      *res = small_str[idx];
-    }
-    return;
-  }
-
-  LOG(FATAL) << "Bad tag " << int(taglen_);
+  *res = sv[idx];
+  return true;
 }
 
 std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
@@ -1324,11 +1279,10 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   // Inline string without encoding: modify directly.
   if (IsInline() && !encoding_) {
     if (idx >= taglen_) {
-      LOG(INFO) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
+      VLOG(1) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
       return {false, false};
-    } else {
-      u_.inline_str[idx] = val;
     }
+    u_.inline_str[idx] = val;
     return {true, true};
   }
 
@@ -1337,37 +1291,34 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
     if (idx >= u_.r_obj.Size()) {
-      LOG(INFO) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
+      VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
       return {false, false};
-    } else {
-      reinterpret_cast<char*>(u_.r_obj.inner_obj())[idx] = val;
     }
+    reinterpret_cast<char*>(u_.r_obj.inner_obj())[idx] = val;
     return {true, true};
   }
 
-  // For ASCII encoded strings ROBJ we can modify the underlying buffer directly.
+  // For ASCII encoded ROBJ strings we can modify the underlying buffer directly.
   if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) && taglen_ == ROBJ_TAG &&
       absl::ascii_isascii(val)) {
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    size_t decoded_len =
-        GetStrEncoding().DecodedSize(u_.r_obj.Size(), *(uint8_t*)u_.r_obj.inner_obj());
+    auto* buf = reinterpret_cast<uint8_t*>(u_.r_obj.inner_obj());
+    size_t decoded_len = GetStrEncoding().DecodedSize(u_.r_obj.Size(), buf[0]);
     if (idx >= decoded_len) {
-      LOG(INFO) << "Offset out of bounds for ASCII encoded string: " << idx
-                << " >= " << decoded_len;
+      VLOG(1) << "Offset out of bounds for ASCII encoded string: " << idx << " >= " << decoded_len;
       return {false, false};
     }
-    detail::ascii_pack_byte((uint8_t*)u_.r_obj.inner_obj(), decoded_len, idx, val);
+    detail::ascii_pack_byte(buf, decoded_len, idx, val);
     return {true, true};
   }
 
-  // For encoded strings, INT_TAG, SMALL_TAG  we need to write again string.
+  // For other encoded strings, INT_TAG, SMALL_TAG we need to decode, modify, and re-encode.
   string str;
   GetString(&str);
   if (idx >= str.size()) {
-    LOG(INFO) << "Offset out of bounds for string: " << idx << " >= " << str.size();
+    VLOG(1) << "Offset out of bounds: " << idx << " >= " << str.size();
     return {false, false};
   }
-  // Update byte in the string and write back
   str[idx] = val;
   SetString(str);
   return {true, false};
@@ -1787,13 +1738,10 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
 
 bool CompactObj::StrEncoding::DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const {
   if (blob.empty()) {
-    *dest = 0;
     return false;
   }
   size_t decoded_len = DecodedSize(blob);
   if (idx >= decoded_len) {
-    LOG(INFO) << "Index out of bounds for string: " << idx << " >= " << decoded_len;
-    *dest = 0;
     return false;
   }
   switch (enc_) {
