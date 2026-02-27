@@ -2649,13 +2649,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   DCHECK(!db_slice.IsCacheMode());
 
-  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
-
   for (const auto* item : ib) {
-    if (dry_run) {
-      continue;
-    }
-
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
       return;
@@ -2679,6 +2673,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   SET_OR_RETURN(ReadKey(), key);
   last_key_loaded_ = key;
 
+  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
   bool streamed = false;
   do {
     // If there is a cached Item in the free pool, take it, otherwise allocate
@@ -2704,6 +2699,9 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
       pending_read_.reserve = 0;
       continue;
     }
+
+    if (dry_run)
+      continue;
 
     item->load_config.finalize = pending_read_.remaining == 0;
     if (!item->load_config.finalize) {
