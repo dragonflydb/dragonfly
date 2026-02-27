@@ -769,4 +769,119 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
   EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }
 
+// Test Redis format expiration options: EX, PX, EXAT, PXAT, KEEPTTL
+TEST_F(HSetFamilyTest, HSetExRedisFormatExpiration) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+  uint64_t now_sec = TEST_current_time_ms / 1000;
+
+  // EX (seconds)
+  auto resp = Run({"HSETEX", "k1", "EX", "10", "FIELDS", "2", "f1", "v1", "f2", "v2"});
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ(Run({"HGET", "k1", "f1"}), "v1");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k1", "f1"}), 10);
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k1", "f2"}), 10);
+
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGET", "k1", "f1"}), ArgType(RespExpr::NIL));
+
+  // PX (milliseconds) - 2500ms rounds up to 3s
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+  resp = Run({"HSETEX", "k2", "PX", "2500", "FIELDS", "1", "f", "v"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k2", "f"}), 3);
+
+  AdvanceTime(2'000);
+  EXPECT_EQ(Run({"HGET", "k2", "f"}), "v");
+  AdvanceTime(1'000);
+  EXPECT_THAT(Run({"HGET", "k2", "f"}), ArgType(RespExpr::NIL));
+
+  // EXAT (unix timestamp in seconds)
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+  resp = Run({"HSETEX", "k3", "EXAT", absl::StrCat(now_sec + 15), "FIELDS", "1", "f", "v"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k3", "f"}), 15);
+
+  // PXAT (unix timestamp in milliseconds) - 5500ms rounds up to 6s
+  resp = Run(
+      {"HSETEX", "k4", "PXAT", absl::StrCat(TEST_current_time_ms + 5500), "FIELDS", "1", "f", "v"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k4", "f"}), 6);
+
+  // KEEPTTL preserves existing TTL on update
+  Run({"HSETEX", "k5", "EX", "100", "FIELDS", "1", "f1", "v1"});
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k5", "f1"}), 100);
+
+  Run({"HSETEX", "k5", "KEEPTTL", "FIELDS", "2", "f1", "updated", "f2", "v2"});
+  EXPECT_EQ(Run({"HGET", "k5", "f1"}), "updated");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k5", "f1"}), 100);
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k5", "f2"}), -1);
+}
+
+// Test Redis format FNX/FXX field existence flags
+TEST_F(HSetFamilyTest, HSetExRedisFormatFieldFlags) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // FNX: only set if field doesn't exist
+  auto resp = Run({"HSETEX", "k", "FNX", "EX", "10", "FIELDS", "1", "f", "v1"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "f"}), "v1");
+
+  resp = Run({"HSETEX", "k", "FNX", "EX", "10", "FIELDS", "1", "f", "v2"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"HGET", "k", "f"}), "v1");
+
+  // FXX: only set if field already exists
+  resp = Run({"HSETEX", "k", "FXX", "EX", "10", "FIELDS", "1", "newf", "v1"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"HGET", "k", "newf"}), ArgType(RespExpr::NIL));
+
+  Run({"HSET", "k", "existing", "original"});
+  resp = Run({"HSETEX", "k", "FXX", "EX", "10", "FIELDS", "1", "existing", "updated"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"HGET", "k", "existing"}), "updated");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "existing"}), 10);
+}
+
+// Test backward compatibility: Dragonfly format and interop with Redis format
+TEST_F(HSetFamilyTest, HSetExBackwardCompat) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Basic Dragonfly format
+  auto resp = Run({"HSETEX", "k", "10", "f1", "v1", "f2", "v2"});
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ(Run({"HGET", "k", "f1"}), "v1");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "f1"}), 10);
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "f2"}), 10);
+
+  // NX flag
+  resp = Run({"HSETEX", "k", "NX", "20", "f1", "newval", "f3", "v3"});
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(Run({"HGET", "k", "f1"}), "v1");
+  EXPECT_EQ(Run({"HGET", "k", "f3"}), "v3");
+
+  // KEEPTTL flag
+  resp = Run({"HSETEX", "k", "KEEPTTL", "30", "f1", "updated"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_EQ(Run({"HGET", "k", "f1"}), "updated");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "f1"}), 10);
+
+  // Redis format on the same key
+  Run({"HSETEX", "k", "EX", "20", "FIELDS", "1", "f4", "v4"});
+  EXPECT_EQ(Run({"HGET", "k", "f4"}), "v4");
+  EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "f4"}), 20);
+  EXPECT_EQ(Run({"HGET", "k", "f1"}), "updated");
+}
+
+// Test error cases for Redis format
+TEST_F(HSetFamilyTest, HSetExRedisFormatErrors) {
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "f", "v"}),
+              AnyOf(ErrArg("syntax error"), ErrArg("value is not an integer")));
+
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "10", "FIELDS", "2", "f", "v"}),
+              ErrArg("wrong number of arguments"));
+
+  EXPECT_THAT(Run({"HSETEX", "k", "EX", "invalid", "FIELDS", "1", "f", "v"}),
+              AnyOf(ErrArg("value is not an integer"), ErrArg("out of range")));
+}
+
 }  // namespace dfly
