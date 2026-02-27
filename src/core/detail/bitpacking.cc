@@ -283,7 +283,7 @@ void ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx, uint8_t
   size_t idx_in_group = idx % 8;
 
   if (group >= packed_groups) {
-    *dest = bin[idx_in_group];
+    *dest = bin[packed_groups * 7 + idx_in_group];
     return;
   }
 

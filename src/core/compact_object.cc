@@ -1273,7 +1273,6 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
   // no encoding
 
   if (IsInline()) {
-    CHECK_LT(idx, taglen_);
     if (idx >= taglen_) {
       LOG(INFO) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
       *res = 0;
@@ -1285,7 +1284,6 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
 
   if (taglen_ == INT_TAG) {
     absl::AlphaNum an(u_.ival);
-    CHECK_LT(idx, an.size());
     if (idx >= an.size()) {
       LOG(INFO) << "Offset out of bounds for integer string: " << idx << " >= " << an.size();
       *res = 0;
@@ -1298,7 +1296,6 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
   if (taglen_ == ROBJ_TAG) {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    CHECK_LT(idx, u_.r_obj.Size());
     if (idx >= u_.r_obj.Size()) {
       LOG(INFO) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
       *res = 0;
@@ -1309,7 +1306,6 @@ void CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
   }
 
   if (taglen_ == SMALL_TAG) {
-    CHECK_LT(idx, u_.small_str.size());
     std::string small_str;
     u_.small_str.Get(&small_str);
     if (idx >= small_str.size()) {
@@ -1330,7 +1326,6 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 
   // Inline string without encoding: modify directly.
   if (IsInline() && !encoding_) {
-    CHECK_LT(idx, taglen_);
     if (idx >= taglen_) {
       LOG(INFO) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
       return {false, false};
@@ -1344,7 +1339,6 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   if (taglen_ == ROBJ_TAG && !encoding_) {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    CHECK_LT(idx, u_.r_obj.Size());
     if (idx >= u_.r_obj.Size()) {
       LOG(INFO) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
       return {false, false};
@@ -1372,7 +1366,6 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   // For encoded strings, INT_TAG, SMALL_TAG  we need to write again string.
   string str;
   GetString(&str);
-  CHECK_LT(idx, str.size());
   if (idx >= str.size()) {
     LOG(INFO) << "Offset out of bounds for string: " << idx << " >= " << str.size();
     return {false, false};

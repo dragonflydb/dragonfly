@@ -913,7 +913,7 @@ TEST_F(CompactObjectTest, SetByteAtOffset) {
     // Verify all bytes
     for (size_t i = 0; i < s.size(); ++i) {
       uint8_t res = 0;
-      cobj_.SetByteAtIndex(i, res);
+      cobj_.GetByteAtIndex(i, &res);
       EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "long ascii set offset " << i;
     }
   }
@@ -978,6 +978,20 @@ TEST_F(CompactObjectTest, SetByteAtOffset) {
     // Middle bytes unchanged
     cobj_.GetByteAtIndex(1, &res);
     EXPECT_EQ('M', res);
+  }
+
+  // Out-of-bounds access should be handled gracefully.
+  {
+    string s = "abc";
+    cobj_.SetString(s);
+    // SetByteAtIndex: index equal to size() is out-of-bounds.
+    auto res_pair = cobj_.SetByteAtIndex(s.size(), 'X');
+    EXPECT_FALSE(res_pair.first);
+    EXPECT_FALSE(res_pair.second);
+    // GetByteAtIndex: out-of-bounds should set result to 0.
+    uint8_t res = 123;  // sentinel non-zero value
+    cobj_.GetByteAtIndex(s.size(), &res);
+    EXPECT_EQ(0u, res);
   }
 
   cobj_.Reset();
