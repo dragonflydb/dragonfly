@@ -1440,6 +1440,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args,
   if (cmnd_cntx->conn()) {  // no owner in replica context.
     auto* conn = cmnd_cntx->conn();
 
+    if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
+      cmnd_cntx->conn()->FlushReplies();
+    }
+
     if (VLOG_IS_ON(2)) {
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
                 << cid->name() << " " << tail_args << " in dbid=" << dfly_cntx->conn_state.db_index;

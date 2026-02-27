@@ -175,6 +175,8 @@ class Connection : public util::Connection {
   // Register hook that is executen when the connection breaks.
   void RegisterBreakHook(BreakerCb breaker_cb);
 
+  void FlushReplies();
+
   // Manually shutdown self.
   void ShutdownSelfBlocking();
 

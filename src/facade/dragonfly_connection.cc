@@ -823,6 +823,11 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = std::move(breaker_cb);
 }
 
+void Connection::FlushReplies() {  // NOLINT must not be const due to flush side effect
+  DCHECK(reply_builder_);
+  reply_builder_->Flush();
+}
+
 pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   if (!socket_) {
     LOG(DFATAL) << "unexpected null socket_ "
