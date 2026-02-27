@@ -80,18 +80,27 @@ struct HnswlibAdapter {
   // Adds a point to the index. If the write lock cannot be acquired (e.g.
   // serialization holds a read lock), the operation is deferred and will be
   // replayed by a subsequent write or TryProcessDeferred() call.
+  // When copy_vector_ is false the index stores a raw pointer to external data,
+  // so we must add the point synchronously before the caller's pointer goes out
+  // of scope — use a blocking write lock in that case.
   void Add(const void* data, GlobalDocId id) {
-    {
-      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
-      if (lock.locked()) {
-        ProcessDeferred();
-        DoAdd(data, id);
-        return;
+    if (copy_vector_) {
+      {
+        MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
+        if (lock.locked()) {
+          ProcessDeferred();
+          DoAdd(data, id);
+          return;
+        }
       }
+      // Could not acquire write lock — defer the operation.
+      AddDeferredOp(id, DeferredOp(true, data, data_size_, /*copy=*/true));
+      TryProcessDeferred();
+    } else {
+      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+      ProcessDeferred();
+      DoAdd(data, id);
     }
-    // Could not acquire write lock — defer the operation.
-    AddDeferredOp(id, DeferredOp(true, data, data_size_, copy_vector_));
-    TryProcessDeferred();
   }
 
   // Removes a point from the index. If the write lock cannot be acquired, the
@@ -290,7 +299,8 @@ struct HnswlibAdapter {
   }
 
   // Drain the deferred operations queue. Must be called while holding the mrmw
-  // write lock.
+  // write lock.  Only copy_vector_=true adds and removes can be deferred, so
+  // ordering within the queue does not matter.
   void ProcessDeferred() {
     auto ops = TakeDeferredOps();
     for (auto& [id, op] : ops) {

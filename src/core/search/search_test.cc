@@ -1214,35 +1214,19 @@ TEST_F(HnswDeferredOpsTest, DuplicateDeferredOpsAddOverridesRemove) {
   EXPECT_TRUE(ids.contains(1));
 }
 
-// Verify deferred Add works correctly with copy_vector=false (borrowed vector pointers).
-TEST_F(HnswDeferredOpsTest, AddWhileReadLockedBorrowedVectors) {
-  // Recreate the index with copy_vector=false.
-  SchemaField::VectorParams params;
-  params.use_hnsw = true;
-  params.dim = kDim;
-  params.sim = VectorSimilarity::L2;
-  params.capacity = kCapacity;
-  params.hnsw_m = 16;
-  params.hnsw_ef_construction = 200;
-  index_ = std::make_unique<HnswVectorIndex>(params, /*copy_vector=*/false);
-
+// Verify that Remove without a read lock also works correctly.
+TEST_F(HnswDeferredOpsTest, RemoveWithoutReadLock) {
   auto doc0 = MakeDoc({1, 0, 0, 0});
   auto doc1 = MakeDoc({0, 1, 0, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
 
-  {
-    auto lock = index_->GetReadLock();
-
-    index_->Add(0, doc0, "vec");
-    index_->Add(1, doc1, "vec");
-
-    auto ids = KnnIds(10);
-    EXPECT_TRUE(ids.empty());
-  }
+  index_->Remove(1, doc1, "vec");
 
   auto ids = KnnIds(10);
-  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_EQ(ids.size(), 1u);
   EXPECT_TRUE(ids.contains(0));
-  EXPECT_TRUE(ids.contains(1));
+  EXPECT_FALSE(ids.contains(1));
 }
 
 TEST_F(SearchTest, GeoSearch) {
