@@ -482,9 +482,9 @@ struct HnswlibAdapter {
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
 
-  bool copy_vector_;            // Whether vectors are copied into hnswlib.
-  size_t data_size_;            // Byte size of a single vector.
-  base::SpinLock deferred_mu_;  // Protects deferred_ops_.
+  bool copy_vector_;                    // Whether vectors are copied into hnswlib.
+  size_t data_size_;                    // Byte size of a single vector.
+  mutable base::SpinLock deferred_mu_;  // Protects deferred_ops_.
   absl::flat_hash_map<GlobalDocId, DeferredOp> deferred_ops_;  // GUARDED_BY(deferred_mu_)
 };
 

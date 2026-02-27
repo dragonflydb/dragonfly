@@ -971,7 +971,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   auto metadata = original.GetMetadata();
   ASSERT_EQ(metadata.cur_element_count, num_elements);
 
-  auto nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  std::vector<HnswNodeData> nodes;
+  {
+    auto lock = original.GetReadLock();
+    nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  }
   ASSERT_EQ(nodes.size(), num_elements);
 
   // Verify node data integrity
@@ -1003,7 +1007,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
 
   // Graph links must be identical
-  auto restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  std::vector<HnswNodeData> restored_nodes;
+  {
+    auto lock = restored.GetReadLock();
+    restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  }
   ASSERT_EQ(restored_nodes.size(), nodes.size());
   for (size_t i = 0; i < nodes.size(); i++) {
     EXPECT_EQ(restored_nodes[i].internal_id, nodes[i].internal_id);
