@@ -1520,6 +1520,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     tail_args = args_no_cmd.ToSlice(&cmd_cntx->arg_slice_backing);
   }
 
+  if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
+    cmd_cntx->conn()->FlushReplies();
+  }
+
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
