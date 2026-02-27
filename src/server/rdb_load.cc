@@ -2255,9 +2255,7 @@ error_code RdbLoader::Load(io::Source* src) {
         } else {
           // Different shard count: load nodes and defer restoration.
           // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
-          PendingHnswNodes pending;
-          pending.index_name = index_name;
-          pending.field_name = field_name;
+          PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
           RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
           LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with "
                     << pending.nodes.size() << " nodes (shard count mismatch: " << shard_count_

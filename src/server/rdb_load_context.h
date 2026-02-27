@@ -70,15 +70,15 @@ class RdbLoadContext {
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> TakePendingIndexMappings();
   std::vector<PendingHnswNodes> TakePendingHnswNodes();
 
-  // Compact remap: index_name -> master_shard_id -> new_global_ids indexed by old doc_id.
-  using HnswRemapTable =
-      absl::flat_hash_map<std::string,
-                          absl::flat_hash_map<uint32_t, std::vector<search::GlobalDocId>>>;
+  // Pre-distributed key mappings: target_shard_id -> index_name -> [(key, new_doc_id)].
+  using PerShardMappings = absl::flat_hash_map<
+      uint32_t,
+      absl::flat_hash_map<std::string, std::vector<std::pair<std::string, search::DocId>>>>;
 
-  // Builds compact remap table, remaps HNSW node global_ids, and restores HNSW graphs.
-  // Failed indices are erased from the returned table so their key mappings are not applied,
-  // causing a full index rebuild instead.
-  HnswRemapTable RemapHnswForDifferentShardCount(
+  // Remaps HNSW node global_ids, restores HNSW graphs, and pre-distributes key mappings by
+  // target shard. The internal remap table is local and freed when this function returns.
+  // Failed indices are excluded from the returned mappings so they fall back to a full rebuild.
+  PerShardMappings RemapHnswForDifferentShardCount(
       const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
       std::vector<PendingHnswNodes>& pending_nodes,
       const std::vector<PendingHnswMetadata>& hnsw_metadata);
