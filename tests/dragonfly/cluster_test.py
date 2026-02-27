@@ -3834,6 +3834,10 @@ async def test_cluster_snapshot_load_replication(df_factory: DflyInstanceFactory
 
     assert await m1_node.client.dbsize() == 1000
 
+    # After DFLY LOAD, the master cancels all replicas to force a full resync.
+    # Wait for the replica to detect disconnection and complete the new full sync.
+    await asyncio.sleep(0.5)
+    await wait_for_replicas_state(r1_node.client)
     await check_all_replicas_finished([r1_node.client], m1_node.client)
     assert await r1_node.client.dbsize() == 1000
 

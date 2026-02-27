@@ -88,6 +88,10 @@ size_t LsnBufferBytes() {
   return journal_slice.GetRingBufferBytes();
 }
 
+void ResetBuffer() {
+  journal_slice.ResetRingBuffer();
+}
+
 size_t thread_local DisableFlushGuard::counter_ = 0;
 
 }  // namespace journal

@@ -667,6 +667,25 @@ void DflyCmd::Load(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
+  // After loading, cancel all active replicas and reset the partial sync buffers
+  // to force them to reconnect with a full sync. This is necessary because the
+  // loaded data bypasses the journal, so replicas would not receive the new keys
+  // through partial replication.
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (shard->journal())
+      journal::ResetBuffer();
+  });
+
+  ReplicaInfoMap pending;
+  {
+    util::fb2::LockGuard lk(mu_);
+    pending = std::move(replica_infos_);
+  }
+
+  for (auto& [_, replica_ptr] : pending) {
+    replica_ptr->Cancel();
+  }
+
   cmd_cntx->SendOk();
 }
 
