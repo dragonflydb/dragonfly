@@ -708,4 +708,11 @@ TEST_F(ServerFamilyTest, InfoMultipleSectionsInvalid) {
   EXPECT_EQ(info.find("# invalidsection"), std::string::npos);
 }
 
+// DEBUG POPULATE with val_size=0 caused SIGFPE (division by zero) in DoPopulateBatch.
+TEST_F(ServerFamilyTest, DebugPopulateZeroValSize) {
+  // val_size=0 with the default element count (1) must not crash the server.
+  auto resp = Run({"DEBUG", "POPULATE", "1", "key", "0"});
+  EXPECT_THAT(resp, ErrArg("val_size must be positive"));
+}
+
 }  // namespace dfly
