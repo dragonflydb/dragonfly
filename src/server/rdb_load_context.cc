@@ -117,11 +117,6 @@ void RdbLoadContext::SetMasterShardCount(uint32_t count) {
   master_shard_count_ = count;
 }
 
-void RdbLoadContext::MarkHnswRestoreFailed(std::string index_name) {
-  util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-  failed_hnsw_indices_.push_back(std::move(index_name));
-}
-
 std::optional<search::HnswIndexMetadata> RdbLoadContext::FindHnswMetadata(
     std::string_view index_name, std::string_view field_name) const {
   util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
@@ -256,11 +251,9 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   auto pending_nodes = TakePendingHnswNodes();
 
   // Extract remaining shared state under lock. After this, no member access is needed.
-  std::vector<std::string> failed_indices;
   std::vector<PendingHnswMetadata> hnsw_metadata;
   {
     util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
-    failed_indices.swap(failed_hnsw_indices_);
     hnsw_metadata.swap(pending_hnsw_metadata_);
   }
   uint32_t master_shards = master_shard_count_;
@@ -269,20 +262,6 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
 
   if (is_error)
     return;
-
-  // If specific indices failed HNSW restoration during loading (same-shard path), remove only
-  // their key mappings so they fall back to full rebuild. Done here (after all loaders finish)
-  // to avoid racing with concurrent AddPendingIndexMapping calls from other loader threads.
-  if (!failed_indices.empty()) {
-    for (auto& [shard_id, pim_vec] : index_mappings) {
-      pim_vec.erase(std::remove_if(pim_vec.begin(), pim_vec.end(),
-                                   [&](const PendingIndexMapping& m) {
-                                     return std::find(failed_indices.begin(), failed_indices.end(),
-                                                      m.index_name) != failed_indices.end();
-                                   }),
-                    pim_vec.end());
-    }
-  }
 
   // When shard counts differ, remap HNSW global_ids and redistribute key mappings on-the-fly.
   bool shard_count_differs = master_shards != 0 && master_shards != shard_set->size();
