@@ -71,17 +71,25 @@ jobs:
             -L
           pwd
           cd build && pwd
-      - name: Build & Test Coverage
+      - name: Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          ninja
+          ninja dragonfly
 
-          # Be permissive with errors, we hit compiler bugs from time to time.
-          ninja test || true
+      - name: Run C++ Unit Tests
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          ctest -V -L DFLY
 
+      - name: Run Python Integration Tests
+        run: |
+          cd $GITHUB_WORKSPACE/build
           export DRAGONFLY_PATH=`pwd`/dragonfly
-          pytest ../tests/dragonfly/ || true
+          pytest ../tests/dragonfly/ --durations=10 --timeout=300 --color=yes --log-cli-level=INFO
 
+      - name: Generate Coverage Report
+        run: |
+          cd $GITHUB_WORKSPACE/build
           lcov -c -d . -o main_coverage.info
           lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*'
           genhtml main_coverage.info --ignore-errors source --output-directory covout -p $GITHUB_WORKSPACE
