@@ -352,8 +352,7 @@ TEST_F(CompactObjectTest, AsciiPackByte) {
 
     // Verify initial pack/unpack round-trip at byte level.
     for (size_t i = 0; i < len; ++i) {
-      uint8_t got = 0;
-      detail::ascii_unpack_byte(packed.data(), len, i, &got);
+      uint8_t got = detail::ascii_unpack_byte(packed.data(), len, i);
       ASSERT_EQ(static_cast<uint8_t>(original[i]), got) << "len=" << len << " offset=" << i;
     }
 
@@ -366,16 +365,14 @@ TEST_F(CompactObjectTest, AsciiPackByte) {
       detail::ascii_pack_byte(modified.data(), len, i, new_val);
 
       // The modified byte should read back correctly.
-      uint8_t got = 0;
-      detail::ascii_unpack_byte(modified.data(), len, i, &got);
+      uint8_t got = detail::ascii_unpack_byte(modified.data(), len, i);
       EXPECT_EQ(new_val, got) << "len=" << len << " set offset=" << i;
 
       // All other bytes should be unchanged.
       for (size_t j = 0; j < len; ++j) {
         if (j == i)
           continue;
-        uint8_t other = 0;
-        detail::ascii_unpack_byte(modified.data(), len, j, &other);
+        uint8_t other = detail::ascii_unpack_byte(modified.data(), len, j);
         EXPECT_EQ(static_cast<uint8_t>(original[j]), other)
             << "len=" << len << " set offset=" << i << " check offset=" << j;
       }
@@ -390,8 +387,7 @@ TEST_F(CompactObjectTest, AsciiPackByte) {
         expected[i] = '\0';
       }
       for (size_t i = 0; i < len; ++i) {
-        uint8_t got = 0;
-        detail::ascii_unpack_byte(zeroed.data(), len, i, &got);
+        uint8_t got = detail::ascii_unpack_byte(zeroed.data(), len, i);
         EXPECT_EQ(0, got) << "len=" << len << " zero check offset=" << i;
       }
     }
@@ -403,8 +399,7 @@ TEST_F(CompactObjectTest, AsciiPackByte) {
         detail::ascii_pack_byte(maxed.data(), len, i, 0x7F);
       }
       for (size_t i = 0; i < len; ++i) {
-        uint8_t got = 0;
-        detail::ascii_unpack_byte(maxed.data(), len, i, &got);
+        uint8_t got = detail::ascii_unpack_byte(maxed.data(), len, i);
         EXPECT_EQ(0x7F, got) << "len=" << len << " max check offset=" << i;
       }
     }

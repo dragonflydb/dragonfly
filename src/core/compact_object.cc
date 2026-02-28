@@ -1750,8 +1750,8 @@ bool CompactObj::StrEncoding::DecodeByte(std::string_view blob, size_t idx, uint
       break;
     case ASCII1_ENC:
     case ASCII2_ENC:
-      detail::ascii_unpack_byte(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, idx,
-                                dest);
+      *dest = detail::ascii_unpack_byte(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len,
+                                        idx);
       break;
     case HUFFMAN_ENC: {
       std::string decoded_huff_string(decoded_len, 0);
