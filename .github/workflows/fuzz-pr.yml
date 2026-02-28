@@ -10,6 +10,10 @@
 # The fuzzer then runs for 15 minutes in "smoke" mode (stop on first crash).
 # When ANTHROPIC_API_KEY is unavailable (e.g. fork PRs), seed generation is skipped
 # and the fuzzer uses the existing seed corpus as-is.
+#
+# Additionally, if the PR touches memcache-related code (memcache_parser, mc_family,
+# fuzz/memcache_mutator.py, or fuzz/seeds/memcache/), a focused memcache fuzzing step
+# runs automatically after RESP fuzzing passes, reusing the already-built binary.
 name: AFL++ PR Fuzzing
 
 on:
@@ -29,6 +33,11 @@ on:
         description: 'Fuzzing duration in minutes'
         required: false
         default: '15'
+        type: string
+      memcache-duration:
+        description: 'Memcache fuzzing duration in minutes'
+        required: false
+        default: '10'
         type: string
 
 concurrency:
@@ -135,3 +144,34 @@ jobs:
           run-number: ${{ github.run_number }}
           extra-seeds-dir: ${{ steps.seeds.outputs.seeds_dir }}
           focus-commands: ${{ steps.seeds.outputs.focus_commands }}
+
+      # Reuses the binary built by the RESP step above (build: false).
+      # Only runs when RESP fuzzing passed (default success() condition) and memcache
+      # code was actually touched in this PR.
+      - name: Check if memcache-related files changed
+        id: memcache-check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CHANGED=$(grep -E '^diff --git a/(src/(facade/memcache|server/mc_family)|fuzz/(memcache_mutator|seeds/memcache))' /tmp/pr_diff.txt || true)
+            if [ -n "$CHANGED" ]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              echo "Memcache-related files changed — will run memcache fuzzing:"
+              echo "$CHANGED" | sed 's|diff --git a/.* b/|  |'
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              echo "No memcache-related files changed — skipping memcache fuzzing"
+            fi
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual trigger — running memcache fuzzing"
+          fi
+
+      - name: Run AFL++ memcache fuzzing
+        if: success() && steps.memcache-check.outputs.run == 'true'
+        uses: ./.github/actions/fuzzing
+        with:
+          mode: smoke
+          target: memcache
+          build: 'false'
+          duration-minutes: ${{ github.event.inputs['memcache-duration'] || '10' }}
+          run-number: ${{ github.run_number }}
