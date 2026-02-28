@@ -1864,9 +1864,13 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_name = "QUIT";
       break;
     case MemcacheParser::STATS:
+      if (apref == AsyncPreference::ONLY_ASYNC)
+        return DispatchResult::WOULD_BLOCK;
       server_family_.StatsMC(cmd.key(), cmd_ctx);
       return DispatchResult::OK;
     case MemcacheParser::VERSION:
+      if (apref == AsyncPreference::ONLY_ASYNC)
+        return DispatchResult::WOULD_BLOCK;
       cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
       return DispatchResult::OK;
     default:
