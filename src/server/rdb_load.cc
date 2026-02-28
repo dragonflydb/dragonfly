@@ -74,6 +74,49 @@ using namespace tiering::literals;
 
 namespace {
 
+int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
+  int64_t v = 0;
+  *valid = lpGetInteger(ele, &v);
+  return v;
+}
+
+// Returns 1 if the stream listpack entries structure is valid, 0 otherwise.
+int StreamValidateListpackIntegrity(unsigned char* lp, size_t size) {
+  int valid_record;
+  unsigned char *p, *next;
+
+  if (!lpValidateIntegrity(lp, size, 0, NULL, NULL))
+    return 0;
+
+  next = p = lpValidateFirst(lp);
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+  if (!p)
+    return 0;
+
+  LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+  return 1;
+}
+
 // Maximum length of each LoadTrace segment.
 //
 // Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
@@ -662,20 +705,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
     uint8_t* lp = (uint8_t*)data.data();
 
-    if (!streamValidateListpackIntegrity(lp, data.size(), 0)) {
+    if (!StreamValidateListpackIntegrity(lp, data.size())) {
       LOG(ERROR) << "Stream listpack integrity check failed.";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
     }
-    unsigned char* first = lpFirst(lp);
-    if (first == NULL) {
-      /* Serialized listpacks should never be empty, since on
-       * deletion we should remove the radix tree key if the
-       * resulting listpack is empty. */
-      LOG(ERROR) << "Empty listpack inside stream";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
+    CHECK(lpFirst(lp) != NULL);
     uint8_t* copy_lp = (uint8_t*)zmalloc(data.size());
     ::memcpy(copy_lp, lp, data.size());
     /* Insert the key in the radix tree. */
