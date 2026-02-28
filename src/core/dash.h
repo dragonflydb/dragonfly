@@ -226,6 +226,13 @@ class DashTable : public detail::DashTableBase {
     assert(keep != buddy);
     assert(keep_id < buddy_id);  // Callers must iterate low to high to ensure correct orientation
 
+    // Don't merge below initial_depth to maintain Clear() invariant
+    // After merge, keep will have depth-1, which determines unique_segments
+    uint8_t depth_after_merge = keep->local_depth() - 1;
+    if (depth_after_merge < initial_depth_) {
+      return false;
+    }
+
     bool should_rollback = false;
 
     // Decrease depth (merge back to parent)
