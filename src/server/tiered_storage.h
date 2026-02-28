@@ -43,7 +43,7 @@ struct TieredStorageBase {
 struct TieredDelayedEntry {
   DbIndex dbid;
   PrimeKey key;
-  util::fb2::Future<io::Result<std::string>> value;
+  TieredStorageBase::TResult<std::string> value;
   time_t expire;
   uint32_t mc_flags;
 };
