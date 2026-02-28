@@ -9,6 +9,7 @@
 #include <absl/strings/str_cat.h>
 
 extern "C" {
+#include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/zmalloc.h"
 }
@@ -45,6 +46,454 @@ void StreamMemTracker::UpdateStreamSize(PrimeValue& pv) const {
 }
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Stream helper functions (only used within stream_family)
+// ---------------------------------------------------------------------------
+
+/* Set 'id' to be its successor stream ID.
+ * If 'id' is the maximal possible id, it is wrapped around to 0-0 and C_ERR
+ * is returned. */
+int StreamIncrID(streamID* id) {
+  int ret = C_OK;
+  if (id->seq == UINT64_MAX) {
+    if (id->ms == UINT64_MAX) {
+      id->ms = id->seq = 0;
+      ret = C_ERR;
+    } else {
+      id->ms++;
+      id->seq = 0;
+    }
+  } else {
+    id->seq++;
+  }
+  return ret;
+}
+
+/* Set 'id' to be its predecessor stream ID.
+ * If 'id' is the minimal possible id, it remains 0-0 and C_ERR is returned. */
+int StreamDecrID(streamID* id) {
+  int ret = C_OK;
+  if (id->seq == 0) {
+    if (id->ms == 0) {
+      id->ms = id->seq = UINT64_MAX;
+      ret = C_ERR;
+    } else {
+      id->ms--;
+      id->seq = UINT64_MAX;
+    }
+  } else {
+    id->seq--;
+  }
+  return ret;
+}
+
+/* Returns non-zero if the ID is 0-0. */
+int StreamIDEqZero(streamID* id) {
+  return !(id->ms || id->seq);
+}
+
+/* Returns non-zero if the range from 'start' to 'end' contains a tombstone. */
+int StreamRangeHasTombstones(stream* s, streamID* start, streamID* end) {
+  streamID start_id, end_id;
+
+  if (!s->length || StreamIDEqZero(&s->max_deleted_entry_id)) {
+    return 0;
+  }
+
+  if (start) {
+    start_id = *start;
+  } else {
+    start_id.ms = 0;
+    start_id.seq = 0;
+  }
+
+  if (end) {
+    end_id = *end;
+  } else {
+    end_id.ms = UINT64_MAX;
+    end_id.seq = UINT64_MAX;
+  }
+
+  if (streamCompareID(&start_id, &s->max_deleted_entry_id) <= 0 &&
+      streamCompareID(&s->max_deleted_entry_id, &end_id) <= 0) {
+    return 1;
+  }
+  return 0;
+}
+
+int64_t StreamTrim(stream* s, streamAddTrimArgs* args);  // defined below
+
+/* Trims a stream by length. Returns the number of deleted items. */
+int64_t StreamTrimByLength(stream* s, long long maxlen, int approx) {
+  streamAddTrimArgs args = {};
+  args.trim_strategy = TRIM_STRATEGY_MAXLEN;
+  args.approx_trim = approx;
+  args.limit = approx ? 100 * server.stream_node_max_entries : 0;
+  args.maxlen = maxlen;
+  return StreamTrim(s, &args);
+}
+
+/* Trims a stream by minimum ID. Returns the number of deleted items. */
+int64_t StreamTrimByID(stream* s, streamID minid, int approx) {
+  streamAddTrimArgs args = {};
+  args.trim_strategy = TRIM_STRATEGY_MINID;
+  args.approx_trim = approx;
+  args.limit = approx ? 100 * server.stream_node_max_entries : 0;
+  args.minid = minid;
+  return StreamTrim(s, &args);
+}
+
+/* Return 1 if 'id' exists in 's' (and not marked as deleted). */
+int StreamEntryExists(stream* s, streamID* id) {
+  streamIterator si;
+  streamIteratorStart(&si, s, id, id, 0);
+  streamID myid;
+  int64_t numfields;
+  int found = streamIteratorGetID(&si, &myid, &numfields);
+  streamIteratorStop(&si);
+  if (!found)
+    return 0;
+  serverAssert(streamCompareID(id, &myid) == 0);
+  return 1;
+}
+
+int64_t LpGetInteger(uint8_t* ele) {
+  int64_t v = 0;
+  int res = lpGetInteger(ele, &v);
+  DCHECK(res != 0);
+  return v;
+}
+
+void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
+  uint8_t* lp = static_cast<uint8_t*>(si->lp);
+  int64_t aux;
+
+  int64_t flags = LpGetInteger(si->lp_flags);
+  flags |= STREAM_ITEM_FLAG_DELETED;
+  lp = lpReplaceInteger(lp, &si->lp_flags, flags);
+
+  uint8_t* p = lpFirst(lp);
+  aux = LpGetInteger(p);
+
+  if (aux == 1) {
+    lpFree(lp);
+    checkedRaxRemove(si->stream->rax, si->ri.key, si->ri.key_len, NULL);
+  } else {
+    lp = lpReplaceInteger(lp, &p, aux - 1);
+    p = lpNext(lp, p);
+    aux = LpGetInteger(p);
+    lp = lpReplaceInteger(lp, &p, aux + 1);
+    if (si->lp != lp)
+      raxInsert(si->stream->rax, si->ri.key, si->ri.key_len, lp, NULL);
+    CHECK_GT(lpBytes(lp), 0u);
+  }
+
+  si->stream->length--;
+
+  streamID start, end;
+  if (si->rev) {
+    streamDecodeID(si->start_key, &start);
+    end = *current;
+  } else {
+    start = *current;
+    streamDecodeID(si->end_key, &end);
+  }
+  streamIteratorStop(si);
+  streamIteratorStart(si, si->stream, &start, &end, si->rev);
+}
+
+/* Delete the specified item ID from the stream, returning 1 if deleted. */
+int StreamDeleteItem(stream* s, streamID* id) {
+  int deleted = 0;
+  streamIterator si;
+  streamIteratorStart(&si, s, id, id, 0);
+  streamID myid;
+  int64_t numfields;
+  if (streamIteratorGetID(&si, &myid, &numfields)) {
+    StreamIteratorRemoveEntry(&si, &myid);
+    deleted = 1;
+  }
+  streamIteratorStop(&si);
+  return deleted;
+}
+
+/* Get the last valid (non-tombstone) streamID of 's'. */
+void StreamLastValidID(stream* s, streamID* maxid) {
+  streamIterator si;
+  streamIteratorStart(&si, s, NULL, NULL, 1);
+  int64_t numfields;
+  if (!streamIteratorGetID(&si, maxid, &numfields) && s->length)
+    serverPanic("Corrupt stream, length is %llu, but no max id", (unsigned long long)s->length);
+  streamIteratorStop(&si);
+}
+
+/* Calculate the lag for a consumer group. */
+long long StreamCGLag(stream* s, streamCG* cg) {
+  int valid = 0;
+  long long lag = 0;
+
+  if (!s->entries_added) {
+    lag = 0;
+    valid = 1;
+  } else if (cg->entries_read != SCG_INVALID_ENTRIES_READ &&
+             !StreamRangeHasTombstones(s, &cg->last_id, NULL)) {
+    lag = (long long)s->entries_added - cg->entries_read;
+    valid = 1;
+  } else {
+    long long entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg->last_id);
+    if (entries_read != SCG_INVALID_ENTRIES_READ) {
+      lag = (long long)s->entries_added - entries_read;
+      valid = 1;
+    }
+  }
+
+  if (valid) {
+    return lag;
+  }
+  return SCG_INVALID_LAG;
+}
+
+/* Lookup the consumer group in the specified stream. */
+streamCG* StreamLookupCG(stream* s, sds groupname) {
+  if (s->cgroups == NULL)
+    return NULL;
+  void* cg = NULL;
+  raxFind(s->cgroups, (unsigned char*)groupname, sdslen(groupname), &cg);
+  return static_cast<streamCG*>(cg);
+}
+
+/* Lookup a consumer by name in the group 'cg'. */
+streamConsumer* StreamLookupConsumer(streamCG* cg, sds name) {
+  if (cg == NULL)
+    return NULL;
+  void* consumer = NULL;
+  raxFind(cg->consumers, (unsigned char*)name, sdslen(name), &consumer);
+  return static_cast<streamConsumer*>(consumer);
+}
+
+/* Delete the specified consumer from consumer group 'cg'. */
+void StreamDelConsumer(streamCG* cg, streamConsumer* consumer) {
+  raxIterator ri;
+  raxStart(&ri, consumer->pel);
+  raxSeek(&ri, "^", NULL, 0);
+  while (raxNext(&ri)) {
+    streamNACK* nack = static_cast<streamNACK*>(ri.data);
+    raxRemove(cg->pel, ri.key, ri.key_len, NULL);
+    streamFreeNACK(nack);
+  }
+  raxStop(&ri);
+
+  raxRemove(cg->consumers, (unsigned char*)consumer->name, sdslen(consumer->name), NULL);
+  raxFree(consumer->pel);
+  sdsfree(consumer->name);
+  zfree(consumer);
+}
+
+/* Get the stream ID of the edge (first or last) entry in a listpack node.
+ * Returns 1 if found, 0 if the listpack is empty or invalid. */
+int LpGetEdgeStreamID(uint8_t* lp, int first, streamID* master_id, streamID* edge_id) {
+  if (lp == NULL)
+    return 0;
+
+  uint8_t* lp_ele;
+  if (first) {
+    lp_ele = lpFirst(lp);
+    lp_ele = lpNext(lp, lp_ele);  // skip entry count
+    lp_ele = lpNext(lp, lp_ele);  // skip deleted count
+    int64_t master_fields_count = LpGetInteger(lp_ele);
+    lp_ele = lpNext(lp, lp_ele);  // seek first field
+    for (int64_t i = 0; i < master_fields_count; i++)
+      lp_ele = lpNext(lp, lp_ele);
+    lp_ele = lpNext(lp, lp_ele);
+    if (lp_ele == NULL)
+      return 0;
+  } else {
+    lp_ele = lpLast(lp);
+    int64_t lp_count = LpGetInteger(lp_ele);
+    if (lp_count == 0)
+      return 0;
+    while (lp_count--)
+      lp_ele = lpPrev(lp, lp_ele);
+  }
+
+  lp_ele = lpNext(lp, lp_ele);  // seek ID (lp_ele points to 'flags')
+  streamID id = *master_id;
+  id.ms += LpGetInteger(lp_ele);
+  lp_ele = lpNext(lp, lp_ele);
+  id.seq += LpGetInteger(lp_ele);
+  *edge_id = id;
+  return 1;
+}
+
+/* Trim the stream 's' according to args->trim_strategy, and return the
+ * number of elements removed from the stream. The 'approx' option, if non-zero,
+ * specifies that the trimming must be performed in a approximated way in
+ * order to maximize performances. This means that the stream may contain
+ * entries with IDs < 'id' in case of MINID (or more elements than 'maxlen'
+ * in case of MAXLEN), and elements are only removed if we can remove
+ * a *whole* node of the radix tree. The elements are removed from the head
+ * of the stream (older elements).
+ *
+ * The function may return zero if:
+ *
+ * 1) The minimal entry ID of the stream is already < 'id' (MINID); or
+ * 2) The stream is already shorter or equal to the specified max length (MAXLEN); or
+ * 3) The 'approx' option is true and the head node did not have enough elements
+ *    to be deleted.
+ *
+ * args->limit is the maximum number of entries to delete. The purpose is to
+ * prevent this function from taking to long.
+ * If 'limit' is 0 then we do not limit the number of deleted entries.
+ * Much like the 'approx', if 'limit' is smaller than the number of entries
+ * that should be trimmed, there is a chance we will still have entries with
+ * IDs < 'id' (or number of elements >= maxlen in case of MAXLEN).
+ */
+int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
+  size_t maxlen = args->maxlen;
+  streamID* id = &args->minid;
+  int approx = args->approx_trim;
+  int64_t limit = args->limit;
+  int trim_strategy = args->trim_strategy;
+
+  if (trim_strategy == TRIM_STRATEGY_NONE)
+    return 0;
+
+  raxIterator ri;
+  raxStart(&ri, s->rax);
+  raxSeek(&ri, "^", NULL, 0);
+
+  int64_t deleted = 0;
+  while (raxNext(&ri)) {
+    if (trim_strategy == TRIM_STRATEGY_MAXLEN && s->length <= maxlen)
+      break;
+
+    uint8_t* lp = static_cast<uint8_t*>(ri.data);
+    CHECK_GT(lpBytes(lp), 0u);
+    uint8_t* p = lpFirst(lp);
+    int64_t entries = LpGetInteger(p);
+
+    if (limit && (deleted + entries) > limit)
+      break;
+
+    int remove_node;
+    streamID master_id = {0, 0};
+    if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
+      remove_node = s->length - entries >= maxlen;
+    } else {
+      streamDecodeID(ri.key, &master_id);
+      streamID last_id = {0, 0};
+      LpGetEdgeStreamID(lp, 0, &master_id, &last_id);
+      remove_node = streamCompareID(&last_id, id) < 0;
+    }
+
+    if (remove_node) {
+      lpFree(lp);
+      checkedRaxRemove(s->rax, ri.key, ri.key_len, NULL);
+      raxSeek(&ri, ">=", ri.key, ri.key_len);
+      s->length -= entries;
+      deleted += entries;
+      continue;
+    }
+
+    if (approx)
+      break;
+
+    int64_t deleted_from_lp = 0;
+    p = lpNext(lp, p);  // skip deleted field
+    p = lpNext(lp, p);  // skip num-of-fields
+
+    int64_t master_fields_count = LpGetInteger(p);
+    p = lpNext(lp, p);
+    for (int64_t j = 0; j < master_fields_count; j++)
+      p = lpNext(lp, p);
+    p = lpNext(lp, p);  // skip zero master entry terminator
+
+    while (p) {
+      uint8_t* pcopy = p;
+      int64_t flags = LpGetInteger(p);
+      p = lpNext(lp, p);
+      int64_t to_skip;
+
+      int64_t ms_delta = LpGetInteger(p);
+      p = lpNext(lp, p);
+      int64_t seq_delta = LpGetInteger(p);
+      p = lpNext(lp, p);
+
+      streamID currid = {0, 0};
+      if (trim_strategy == TRIM_STRATEGY_MINID) {
+        currid.ms = master_id.ms + ms_delta;
+        currid.seq = master_id.seq + seq_delta;
+      }
+
+      int stop;
+      if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
+        stop = s->length <= maxlen;
+      } else {
+        stop = streamCompareID(&currid, id) >= 0;
+      }
+      if (stop)
+        break;
+
+      if (flags & STREAM_ITEM_FLAG_SAMEFIELDS) {
+        to_skip = master_fields_count;
+      } else {
+        to_skip = LpGetInteger(p);
+        p = lpNext(lp, p);
+        to_skip *= 2;
+      }
+
+      while (to_skip--)
+        p = lpNext(lp, p);
+      p = lpNext(lp, p);
+
+      if (!(flags & STREAM_ITEM_FLAG_DELETED)) {
+        intptr_t delta = p - lp;
+        flags |= STREAM_ITEM_FLAG_DELETED;
+        lp = lpReplaceInteger(lp, &pcopy, flags);
+        deleted_from_lp++;
+        s->length--;
+        p = lp + delta;
+      }
+    }
+    deleted += deleted_from_lp;
+
+    p = lpFirst(lp);
+    lp = lpReplaceInteger(lp, &p, entries - deleted_from_lp);
+    p = lpNext(lp, p);
+    int64_t marked_deleted = LpGetInteger(p);
+    lp = lpReplaceInteger(lp, &p, marked_deleted + deleted_from_lp);
+
+    raxInsert(s->rax, ri.key, ri.key_len, lp, NULL);
+    CHECK_GT(lpBytes(lp), 0u);
+    break;
+  }
+  raxStop(&ri);
+
+  if (s->length == 0) {
+    s->first_id.ms = 0;
+    s->first_id.seq = 0;
+  } else if (deleted) {
+    streamGetEdgeID(s, 1, 1, &s->first_id);
+  }
+
+  return deleted;
+}
+
+void FreeConsumerVoid(void* sc_) {
+  streamConsumer* sc = static_cast<streamConsumer*>(sc_);
+  raxFree(sc->pel);
+  sdsfree(sc->name);
+  zfree(sc);
+}
+
+void StreamFreeCG(streamCG* cg) {
+  raxFreeWithCallback(cg->pel, zfree);
+  raxFreeWithCallback(cg->consumers, FreeConsumerVoid);
+  zfree(cg);
+}
+
+// ---------------------------------------------------------------------------
 
 struct Record {
   streamID id;
@@ -219,12 +668,6 @@ const uint32_t kStreamNodeMaxBytes = 4096;
 const uint32_t kStreamNodeMaxEntries = 100;
 const uint32_t STREAM_LISTPACK_MAX_PRE_ALLOCATE = 4096;
 
-/* Every stream item inside the listpack, has a flags field that is used to
- * mark the entry as deleted, or having the same field as the "master"
- * entry at the start of the listpack. */
-// const uint32_t STREAM_ITEM_FLAG_DELETED = (1 << 0);    /* Entry is deleted. Skip it. */
-const uint32_t STREAM_ITEM_FLAG_SAMEFIELDS = (1 << 1); /* Same fields as master entry. */
-
 string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
@@ -354,7 +797,7 @@ void StreamNextID(uint64_t now_ms, const streamID* last_id, streamID* new_id) {
     new_id->seq = 0;
   } else {
     *new_id = *last_id;
-    streamIncrID(new_id);
+    StreamIncrID(new_id);
   }
 }
 
@@ -667,10 +1110,10 @@ std::string StreamsIdToString(streamID id) {
 int64_t TrimStream(const TrimOpts& opts, stream* s) {
   if (!opts.HasLimit()) {
     if (opts.IsMaxLen()) {
-      return streamTrimByLength(s, opts.AsMaxLen(), opts.approx);
+      return StreamTrimByLength(s, opts.AsMaxLen(), opts.approx);
     } else {
       const auto& min_id = opts.AsMinId().val;
-      return streamTrimByID(s, min_id, opts.approx);
+      return StreamTrimByID(s, min_id, opts.approx);
     }
   }
 
@@ -686,7 +1129,7 @@ int64_t TrimStream(const TrimOpts& opts, stream* s) {
     trim_args.minid = opts.AsMinId().val;
   }
 
-  return streamTrim(s, &trim_args);
+  return StreamTrim(s, &trim_args);
 }
 
 bool JournalAsMinId(const TrimOpts& opts) {
@@ -832,7 +1275,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     if (opts.group && streamCompareID(&id, &opts.group->last_id) > 0) {
       if (opts.group->entries_read != SCG_INVALID_ENTRIES_READ &&
           streamCompareID(&opts.group->last_id, &s->first_id) >= 0 &&
-          !streamRangeHasTombstones(s, &opts.group->last_id, NULL)) {
+          !StreamRangeHasTombstones(s, &opts.group->last_id, NULL)) {
         /* A valid counter and no tombstones in the group's last-delivered-id and the stream's
          * last-generated-id, we can increment the read counter to keep tracking the group's
          * progress. */
@@ -973,7 +1416,6 @@ void ReassignNACKToConsumer(streamNACK* nack, streamConsumer* consumer, uint8_t*
 }
 
 }  // namespace
-
 // Returns the range response for each stream on this shard in order of
 // GetShardArgs.
 vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, const ReadOpts& opts) {
@@ -1049,7 +1491,7 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
       ginfo.pending_size = raxSize(cg->pel);
       ginfo.last_id = cg->last_id;
       ginfo.entries_read = cg->entries_read;
-      ginfo.lag = streamCGLag(s, cg);
+      ginfo.lag = StreamCGLag(s, cg);
       result.push_back(std::move(ginfo));
     }
     raxStop(&ri);
@@ -1196,7 +1638,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
         ginfo.consumer_size = raxSize(cg->consumers);
         ginfo.pending_size = raxSize(cg->pel);
         ginfo.entries_read = cg->entries_read;
-        ginfo.lag = streamCGLag(s, cg);
+        ginfo.lag = StreamCGLag(s, cg);
         GetGroupPEL(s, cg, count, &ginfo);
         GetConsumers(s, cg, count, &ginfo);
 
@@ -1229,7 +1671,7 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
   vector<ConsumerInfo> result;
   const CompactObj& cobj = (*res_it)->second;
   stream* s = GetReadOnlyStream(cobj);
-  streamCG* cg = streamLookupCG(s, WrapSds(group_name));
+  streamCG* cg = StreamLookupCG(s, WrapSds(group_name));
   if (cg == NULL) {
     return OpStatus::INVALID_VALUE;
   }
@@ -1322,7 +1764,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
 
   CompactObj& cobj = res_it->it->second;
   auto* s = static_cast<stream*>(cobj.RObjPtr());
-  auto* cg = streamLookupCG(s, WrapSds(gname));
+  auto* cg = StreamLookupCG(s, WrapSds(gname));
   if (skip_group && !cg)
     return OpStatus::SKIPPED;
 
@@ -1334,7 +1776,7 @@ streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_m
                                   bool* is_consumer_new) {
   // Try to get the consumer. If not found, create a new one.
   auto cname = WrapSds(name);
-  streamConsumer* consumer = streamLookupConsumer(cg, cname);
+  streamConsumer* consumer = StreamLookupConsumer(cg, cname);
   if (consumer) {
     consumer->seen_time = now_ms;
   } else {
@@ -1428,7 +1870,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 
     streamNACK* nack = nullptr;
     int fres = raxFind(cgr_res->cg->pel, buf.begin(), sizeof(buf), (void**)&nack);
-    if (!streamEntryExists(cgr_res->s, &id)) {
+    if (!StreamEntryExists(cgr_res->s, &id)) {
       if (fres) {
         /* Release the NACK */
         raxRemove(cgr_res->cg->pel, buf.begin(), sizeof(buf), nullptr);
@@ -1485,7 +1927,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   StreamMemTracker mem_tracker;
 
   raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
-  streamFreeCG(cgr_res->cg);
+  StreamFreeCG(cgr_res->cg);
 
   mem_tracker.UpdateStreamSize(cgr_res->it.it->second);
 
@@ -1531,10 +1973,10 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
   StreamMemTracker mem_tracker;
 
   long long pending = 0;
-  streamConsumer* consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(consumer_name));
+  streamConsumer* consumer = StreamLookupConsumer(cgroup_res->cg, WrapSds(consumer_name));
   if (consumer) {
     pending = raxSize(consumer->pel);
-    streamDelConsumer(cgroup_res->cg, consumer);
+    StreamDelConsumer(cgroup_res->cg, consumer);
   }
 
   mem_tracker.UpdateStreamSize(cgroup_res->it.it->second);
@@ -1588,7 +2030,7 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
    * item, otherwise the fundamental ID monotonicity assumption is violated. */
   if (stream_inst->length > 0) {
     streamID maxid;
-    streamLastValidID(stream_inst, &maxid);
+    StreamLastValidID(stream_inst, &maxid);
 
     if (streamCompareID(&id, &maxid) < 0) {
       return OpStatus::STREAM_ID_SMALL;
@@ -1608,7 +2050,7 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
   }
   raxStop(&ri);
 
-  if (!streamIDEqZero(&max_xdel_id))
+  if (!StreamIDEqZero(&max_xdel_id))
     stream_inst->max_deleted_entry_id = max_xdel_id;
 
   mem_tracker.UpdateStreamSize(pv);
@@ -1631,7 +2073,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
 
   for (size_t j = 0; j < ids.size(); j++) {
     streamID id = ids[j];
-    if (!streamDeleteItem(stream_inst, &id))
+    if (!StreamDeleteItem(stream_inst, &id))
       continue;
 
     /* We want to know if the first entry in the stream was deleted
@@ -1735,7 +2177,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
     streamID id;
     streamDecodeID(ri.key, &id);
 
-    if (!streamEntryExists(stream, &id)) {
+    if (!StreamEntryExists(stream, &id)) {
       // TODO: to propagate this change to replica as XCLAIM command
       // - since we delete it from NACK. See streamPropagateXCLAIM call.
       raxRemove(group->pel, ri.key, ri.key_len, nullptr);
@@ -1897,7 +2339,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
 
   streamConsumer* consumer = nullptr;
   if (!opts.consumer_name.empty()) {
-    consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
+    consumer = StreamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
   }
 
   PendingResult result;
@@ -2355,7 +2797,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 
     // We only include messages with IDs greater than start so increment the
     // starting ID.
-    streamIncrID(&id.val);
+    StreamIncrID(&id.val);
     sitem.id = id;
     auto [_, is_inserted] = opts.stream_ids.emplace(key, sitem);
     if (!is_inserted) {
@@ -2376,11 +2818,11 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
     return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
-  if (rs.exclude && streamIncrID(&rs.parsed_id.val) != C_OK) {
+  if (rs.exclude && StreamIncrID(&rs.parsed_id.val) != C_OK) {
     return cmd_cntx->SendError("invalid start ID for the interval", kSyntaxErrType);
   }
 
-  if (re.exclude && streamDecrID(&re.parsed_id.val) != C_OK) {
+  if (re.exclude && StreamDecrID(&re.parsed_id.val) != C_OK) {
     return cmd_cntx->SendError("invalid end ID for the interval", kSyntaxErrType);
   }
 
@@ -2521,12 +2963,12 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     stream* s = GetReadOnlyStream(cobj);
     streamID last_id = s->last_id;
     if (s->length) {
-      streamLastValidID(s, &last_id);
+      StreamLastValidID(s, &last_id);
     }
 
     // Update group pointer and check it's validity
     if (opts->read_group) {
-      sitem.group = streamLookupCG(s, WrapSds(opts->group_name));
+      sitem.group = StreamLookupCG(s, WrapSds(opts->group_name));
       if (!sitem.group)
         return true;  // abort
     }
@@ -2562,7 +3004,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
       if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
         range_opts.start.val = sitem.group->last_id;  // only for '>'
-        streamIncrID(&range_opts.start.val);
+        StreamIncrID(&range_opts.start.val);
       }
 
       range_opts.group = sitem.group;
@@ -2801,12 +3243,12 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
     return false;
   }
 
-  if (rs.exclude && streamIncrID(&rs.parsed_id.val) != C_OK) {
+  if (rs.exclude && StreamIncrID(&rs.parsed_id.val) != C_OK) {
     builder->SendError("invalid start ID for the interval", kSyntaxErrType);
     return false;
   }
 
-  if (re.exclude && streamDecrID(&re.parsed_id.val) != C_OK) {
+  if (re.exclude && StreamDecrID(&re.parsed_id.val) != C_OK) {
     builder->SendError("invalid end ID for the interval", kSyntaxErrType);
     return false;
   }
@@ -3417,7 +3859,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   // Fetch last id
   streamID last_id = s->last_id;
   if (s->length)
-    streamLastValidID(s, &last_id);
+    StreamLastValidID(s, &last_id);
 
   // Check requested
   auto& requested_sitem = opts->stream_ids.at(skey);
@@ -3426,7 +3868,7 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
   if (is_write_command) {
-    group = streamLookupCG(s, WrapSds(opts->group_name));
+    group = StreamLookupCG(s, WrapSds(opts->group_name));
     if (!group)
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
@@ -3449,13 +3891,13 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     // we know the requested last_id only when we already have it
     if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
       requested_sitem.id.val = requested_sitem.group->last_id;
-      streamIncrID(&requested_sitem.id.val);
+      StreamIncrID(&requested_sitem.id.val);
     }
   } else {
     // Resolve $ to the last ID in the stream.
     if (requested_sitem.id.resolve_last_id) {
       requested_sitem.id.val = last_id;
-      streamIncrID(&requested_sitem.id.val);  // include id's strictly greater
+      StreamIncrID(&requested_sitem.id.val);  // include id's strictly greater
       requested_sitem.id.resolve_last_id = false;
       return false;
     }
@@ -3578,7 +4020,7 @@ void CmdXAutoClaim(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(kSyntaxErr);
   }
 
-  if (rs.exclude && streamDecrID(&rs.parsed_id.val) != C_OK) {
+  if (rs.exclude && StreamDecrID(&rs.parsed_id.val) != C_OK) {
     return rb->SendError("invalid start ID for the interval", kSyntaxErrType);
   }
   opts.start = rs.parsed_id.val;

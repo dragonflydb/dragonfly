@@ -137,6 +137,13 @@ typedef struct {
 #define TRIM_STRATEGY_MAXLEN 1
 #define TRIM_STRATEGY_MINID 2
 
+/* Every stream item inside the listpack, has a flags field that is used to
+ * mark the entry as deleted, or having the same field as the "master"
+ * entry at the start of the listpack. */
+#define STREAM_ITEM_FLAG_NONE 0              /* No special flags. */
+#define STREAM_ITEM_FLAG_DELETED (1 << 0)    /* Entry is deleted. Skip it. */
+#define STREAM_ITEM_FLAG_SAMEFIELDS (1 << 1) /* Same fields as primary entry. */
+
 stream *streamNew(void);
 void freeStream(stream *s);
 void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev);
@@ -146,34 +153,13 @@ void streamIteratorGetField(streamIterator *si,
                             unsigned char **valueptr,
                             int64_t *fieldlen,
                             int64_t *valuelen);
-void streamIteratorRemoveEntry(streamIterator *si, streamID *current);
 void streamIteratorStop(streamIterator *si);
-streamCG *streamLookupCG(stream *s, sds groupname);
-streamConsumer *streamLookupConsumer(streamCG *cg, sds name);
 streamCG *streamCreateCG(stream *s, const char *name, size_t namelen, streamID *id, long long entries_read);
-void streamEncodeID(void *buf, streamID *id);
 void streamDecodeID(void *buf, streamID *id);
 int streamCompareID(streamID *a, streamID *b);
-int streamEntryExists(stream *s, streamID *id);
 void streamFreeNACK(streamNACK *na);
-int streamIncrID(streamID *id);
-int streamDecrID(streamID *id);
 
-int streamValidateListpackIntegrity(unsigned char *lp, size_t size, int deep);
-int streamParseID(const robj *o, streamID *id);
-robj *createObjectFromStreamID(streamID *id);
-int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_id, streamID *use_id, int seq_given);
-int streamDeleteItem(stream *s, streamID *id);
 void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_id);
 long long streamEstimateDistanceFromFirstEverEntry(stream *s, streamID *id);
-int64_t streamTrim(stream *s, streamAddTrimArgs *args);
-int64_t streamTrimByLength(stream *s, long long maxlen, int approx);
-int64_t streamTrimByID(stream *s, streamID minid, int approx);
-void streamFreeCG(streamCG *cg);
-void streamDelConsumer(streamCG *cg, streamConsumer *consumer);
-void streamLastValidID(stream *s, streamID *maxid);
-int streamIDEqZero(streamID *id);
-int streamRangeHasTombstones(stream *s, streamID *start, streamID *end);
-long long streamCGLag(stream *s, streamCG *cg);
 
 #endif
