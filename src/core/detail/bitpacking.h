@@ -24,9 +24,11 @@ void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii);
 // Access a single byte in a 7-bit ASCII-packed string without unpacking the entire buffer.
 // These helpers read/write the ASCII byte at logical position `idx` in the unpacked string
 // directly from/into the packed `bin` representation.
-// Validate that `idx` is within bounds of the unpacked string length.
-bool ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx, uint8_t* ascii);
-bool ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t ascii);
+// It's up to caller to verify:
+// `1. idx` must be less that `ascii_len` to avoid out-of-bounds access.
+// `2. `val` must be less than 128 (7-bit ASCII) for packing.
+void ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx, uint8_t* ascii);
+void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t ascii);
 
 // packs ascii string (does not verify) into binary form saving 1 bit per byte on average (12.5%).
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
