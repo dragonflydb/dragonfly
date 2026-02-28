@@ -26,7 +26,7 @@ void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii);
 // directly from/into the packed `bin` representation.
 // It's up to caller to verify:
 // `1. idx` must be less that `ascii_len` to avoid out-of-bounds access.
-// `2. `val` must be less than 128 (7-bit ASCII) for packing.
+// 2. `ascii` must be less than 128 (7-bit ASCII) for packing.
 void ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx, uint8_t* ascii);
 void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t ascii);
 
