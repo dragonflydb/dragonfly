@@ -159,6 +159,8 @@ runs:
           fi
         fi
 
+        echo "hang_count=${HANG_COUNT}" >> "$GITHUB_OUTPUT"
+
         # Fail the job only if crashes were found
         if [ "$CRASH_COUNT" -gt 0 ]; then
           echo "::error::Found $CRASH_COUNT crash(es)!"
@@ -169,7 +171,11 @@ runs:
         fi
 
         if [ "$HANG_COUNT" -gt 0 ]; then
-          echo "::warning::Found $HANG_COUNT hang(s) (not failing the build)"
+          echo "::error::Found $HANG_COUNT hang(s)!"
+          echo ""
+          echo "Hang files:"
+          ls -lh "$HANGS_DIR" || true
+          exit 1
         fi
 
         if [ "$CORPUS_SIZE" -gt 0 ]; then
@@ -215,6 +221,17 @@ runs:
         name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-crashes-${{ inputs.run-number }}
         path: |
           fuzz/packaged/*.tar.gz
+          fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
+        retention-days: 10
+        if-no-files-found: ignore
+
+    - name: Upload hang artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-hangs-${{ inputs.run-number }}
+        path: |
+          fuzz/artifacts/${{ inputs.target }}/default/hangs/
           fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
         retention-days: 10
         if-no-files-found: ignore

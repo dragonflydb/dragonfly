@@ -783,6 +783,56 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   }
 }
 
+// Checks that the server can still process commands after a fuzz input.
+// Sends a SET command (in the appropriate protocol) and waits for a response with NO recv timeout.
+//
+// This is the liveness criterion: a "hang" is only real if the server can no longer
+// respond to basic SET/GET operations, not merely because a fuzz input took a long time.
+//
+// If the server is alive (even if slow from the previous input), SET responds quickly
+// and the iteration completes normally — AFL++ does not record a hang.
+// If the server is truly deadlocked, recv() blocks indefinitely until AFL++ kills the
+// process at the -t timeout, which is the signal we actually want to report.
+void CheckServerLiveness(uint16_t port, bool is_memcache) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0)
+    return;
+
+  // Allow a generous send timeout for connect/send but NO recv timeout.
+  // Blocking forever on recv is the intentional hang signal.
+  struct timeval send_tv = {.tv_sec = 2, .tv_usec = 0};
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &send_tv, sizeof(send_tv));
+
+  struct sockaddr_in a = {};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+
+  if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
+    // SET goes through the full pipeline: parse → shard dispatch → storage → response.
+    // Using a dedicated key to avoid interfering with fuzzed data.
+    // Protocol format differs between RESP and Memcache text protocol.
+    const char* cmd;
+    size_t cmd_len;
+    if (is_memcache) {
+      // Memcache text protocol: "set <key> <flags> <exptime> <bytes>\r\n<value>\r\n"
+      static const char kMemcacheSetCmd[] = "set __afl_hc 0 0 2\r\nok\r\n";
+      cmd = kMemcacheSetCmd;
+      cmd_len = sizeof(kMemcacheSetCmd) - 1;
+    } else {
+      // RESP protocol: *3\r\n$3\r\nSET\r\n$8\r\n<key>\r\n$2\r\n<value>\r\n
+      static const char kRespSetCmd[] = "*3\r\n$3\r\nSET\r\n$8\r\n__afl_hc\r\n$2\r\nok\r\n";
+      cmd = kRespSetCmd;
+      cmd_len = sizeof(kRespSetCmd) - 1;
+    }
+    if (send(s, cmd, cmd_len, MSG_NOSIGNAL) > 0) {
+      char r[64];
+      recv(s, r, sizeof(r), 0);  // No timeout: blocks if server is deadlocked.
+    }
+  }
+  close(s);
+}
+
 // Initializes AFL++ fuzzing by starting the server in a separate thread,
 // waiting for it to become ready, and preparing stdin for fuzzing input.
 // Returns the server thread handle. The caller is responsible for the fuzzing loop.
@@ -814,7 +864,7 @@ std::thread InitAflFuzzing(ProactorPool* pool, AcceptServer* acceptor) {
 
 // Executes one AFL++ fuzzing iteration: reads input from stdin and sends it to the server.
 // Returns true if the iteration was successful, false if stdin EOF or error occurred.
-bool RunAflFuzzingIteration(uint16_t port) {
+bool RunAflFuzzingIteration(uint16_t port, bool is_memcache) {
   char buf[64 * 1024];
 
   // Read fuzzing input from stdin
@@ -825,6 +875,12 @@ bool RunAflFuzzingIteration(uint16_t port) {
 
   // Send fuzzed input to the server
   SendFuzzInputToServer(port, buf, len);
+
+  // Verify the server is still responsive after processing the fuzz input.
+  // This is the real hang criterion: can the server still handle SET/GET?
+  // If not, the recv inside blocks indefinitely and AFL++ records a hang.
+  CheckServerLiveness(port, is_memcache);
+
   return true;
 }
 #endif  // USE_AFL
@@ -1066,13 +1122,14 @@ Usage: dragonfly [FLAGS]
 
     uint16_t target_port = GetFlag(FLAGS_afl_target_port);
     uint16_t port = target_port ? target_port : GetFlag(FLAGS_port);
+    bool is_memcache = target_port != 0;
     uint32_t afl_loop_limit = GetFlag(FLAGS_afl_loop_limit);
     unsigned int loop_iteration = 0;
 
     // AFL++ persistent mode loop - this macro MUST stay in main() for proper instrumentation
     while (__AFL_LOOP(afl_loop_limit)) {
       loop_iteration++;
-      if (!dfly::RunAflFuzzingIteration(port))
+      if (!dfly::RunAflFuzzingIteration(port, is_memcache))
         break;  // stdin EOF or error
     }
 
