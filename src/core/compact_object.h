@@ -16,6 +16,8 @@
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 
+typedef struct stream stream;
+
 namespace dfly {
 
 constexpr unsigned kEncodingIntSet = 0;
@@ -586,5 +588,8 @@ struct TieredColdRecord : public ::boost::intrusive::list_base_hook<
 static_assert(sizeof(TieredColdRecord) == 48);
 
 };  // namespace detail
+
+stream* streamNew();
+void freeStream(stream* s);
 
 }  // namespace dfly

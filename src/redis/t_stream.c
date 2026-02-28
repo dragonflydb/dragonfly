@@ -52,39 +52,9 @@
  * will return NULL. */
 #define STREAM_LISTPACK_MAX_SIZE (1 << 30)
 
-static void streamFreeCGVoid(void *cg);
-
 /* -----------------------------------------------------------------------
  * Low level stream encoding: a radix tree of listpacks.
  * ----------------------------------------------------------------------- */
-
-/* Create a new stream data structure. */
-stream *streamNew(void) {
-    stream *s = zmalloc(sizeof(*s));
-    s->rax = raxNew();
-    s->length = 0;
-    s->first_id.ms = 0;
-    s->first_id.seq = 0;
-    s->last_id.ms = 0;
-    s->last_id.seq = 0;
-    s->max_deleted_entry_id.seq = 0;
-    s->max_deleted_entry_id.ms = 0;
-    s->entries_added = 0;
-    s->cgroups = NULL; /* Created on demand to save memory when not used. */
-    return s;
-}
-
-static void lpFreeVoid(void *lp) {
-    lpFree(lp);
-}
-
-/* Free a stream, including the listpacks stored inside the radix tree. */
-void freeStream(stream *s) {
-    raxFreeWithCallback(s->rax, lpFreeVoid);
-    if (s->cgroups) raxFreeWithCallback(s->cgroups, streamFreeCGVoid);
-    zfree(s);
-}
-
 static inline int64_t lpGetIntegerIfValid(unsigned char *ele, int *valid) {
     int64_t v;
     unsigned char *e = lpGet(ele, &v, NULL);
@@ -530,23 +500,6 @@ void streamFreeNACK(streamNACK *na) {
     zfree(na);
 }
 
-/* Free a consumer and associated data structures. Note that this function
- * will not reassign the pending messages associated with this consumer
- * nor will delete them from the stream, so when this function is called
- * to delete a consumer, and not when the whole stream is destroyed, the caller
- * should do some work before. */
-static void streamFreeConsumer(streamConsumer *sc) {
-    raxFree(sc->pel); /* No value free callback: the PEL entries are shared
-                         between the consumer and the main stream PEL. */
-    sdsfree(sc->name);
-    zfree(sc);
-}
-
-/* Used for generic free functions. */
-static void streamFreeConsumerVoid(void *sc) {
-    streamFreeConsumer((streamConsumer *)sc);
-}
-
 /* Create a new consumer group in the context of the stream 's', having the
  * specified name, last server ID and reads counter. If a consumer group with
  * the same name already exists NULL is returned, otherwise the pointer to the
@@ -563,12 +516,3 @@ streamCG *streamCreateCG(stream *s, const char *name, size_t namelen, streamID *
     raxInsert(s->cgroups, (unsigned char *)name, namelen, cg, NULL);
     return cg;
 }
-
-/* Used for generic free functions. */
-static void streamFreeCGVoid(void *cg_) {
-    streamCG *cg = (streamCG *)cg_;
-    raxFreeWithCallback(cg->pel, zfree);
-    raxFreeWithCallback(cg->consumers, streamFreeConsumerVoid);
-    zfree(cg);
-}
-

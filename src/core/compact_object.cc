@@ -1662,4 +1662,57 @@ StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
   return {};
 }
 
+/* Create a new stream data structure. */
+stream* streamNew() {
+  stream* s = (stream*)zmalloc(sizeof(stream));
+  s->rax = raxNew();
+  s->length = 0;
+  s->first_id.ms = 0;
+  s->first_id.seq = 0;
+  s->last_id.ms = 0;
+  s->last_id.seq = 0;
+  s->max_deleted_entry_id.seq = 0;
+  s->max_deleted_entry_id.ms = 0;
+  s->entries_added = 0;
+  s->cgroups = NULL; /* Created on demand to save memory when not used. */
+  return s;
+}
+
+/* Free a consumer and associated data structures. Note that this function
+ * will not reassign the pending messages associated with this consumer
+ * nor will delete them from the stream, so when this function is called
+ * to delete a consumer, and not when the whole stream is destroyed, the caller
+ * should do some work before. */
+static void streamFreeConsumer(streamConsumer* sc) {
+  raxFree(sc->pel); /* No value free callback: the PEL entries are shared
+                       between the consumer and the main stream PEL. */
+  sdsfree(sc->name);
+  zfree(sc);
+}
+
+/* Used for generic free functions. */
+static void streamFreeConsumerVoid(void* sc) {
+  streamFreeConsumer((streamConsumer*)sc);
+}
+
+/* Used for generic free functions. */
+static void streamFreeCGVoid(void* cg_) {
+  streamCG* cg = (streamCG*)cg_;
+  raxFreeWithCallback(cg->pel, zfree);
+  raxFreeWithCallback(cg->consumers, streamFreeConsumerVoid);
+  zfree(cg);
+}
+
+static void lpFreeVoid(void* lp) {
+  lpFree((uint8_t*)lp);
+}
+
+/* Free a stream, including the listpacks stored inside the radix tree. */
+void freeStream(stream* s) {
+  raxFreeWithCallback(s->rax, lpFreeVoid);
+  if (s->cgroups)
+    raxFreeWithCallback(s->cgroups, streamFreeCGVoid);
+  zfree(s);
+}
+
 }  // namespace dfly
