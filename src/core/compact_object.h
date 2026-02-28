@@ -142,6 +142,9 @@ class CompactObj {
     size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
     size_t Decode(std::string_view blob, char* dest) const;  // Decode into dest, return size
     StringOrView Decode(std::string_view blob) const;
+    // Decode a byte at offset into dest. Return true if decoded successfully,
+    // false if idx is out of bounds.
+    bool DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const;
 
    private:
     friend class CompactObj;
@@ -366,6 +369,11 @@ class CompactObj {
   }
 
   uint8_t GetFirstByte() const;
+  // Returns true if the byte was decoded successfully, false if idx is out of bounds.
+  bool GetByteAtIndex(size_t idx, uint8_t* res) const;
+  // Returns a pair of booleans: {success, in_place}. success is false if offset is out of bounds
+  // in_place is true if the byte was set without needing to rewrite the string.
+  std::pair<bool, bool> SetByteAtIndex(size_t idx, uint8_t val);
 
   struct Stats {
     size_t small_string_bytes = 0;
