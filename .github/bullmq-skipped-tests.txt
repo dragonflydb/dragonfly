@@ -1,0 +1,36 @@
+# BullMQ tests excluded from CI runs against Dragonfly
+#
+# Format: one pattern per line (used as JS regex in mocha --grep --invert)
+# Categories:
+#   DRAGONFLY_BUG  - Dragonfly does not support this behaviour yet
+#   FLAKY          - Test has race conditions / timing issues unrelated to Dragonfly
+
+# ── DRAGONFLY BUG ────────────────────────────────────────────────────────────
+# BullMQ Lua scripts access keys that are not declared in KEYS[].
+# Dragonfly enforces strict Lua key declaration; allow-undeclared-keys causes
+# global transaction mode and breaks other tests.
+handle errors.*for flows
+Flows - addBulk.*handle errors
+
+# Job.finished: job hash persists after removeOnComplete instead of being deleted.
+rejects with missing key for job message
+
+# ── FLAKY ─────────────────────────────────────────────────────────────────────
+# deduplication key removal races with the 'deduplicated' QueueEvents listener.
+# XREAD from '$' is noted as unstable in upstream BullMQ code.
+removes deduplication key
+
+# QueueEvents 'waiting' event: XREAD from '$' is unstable on CI.
+# Upstream comment: "additional delay since XREAD from '$' is unstable"
+emits waiting when a job has been added
+
+# getWorkers: race between worker 'ready' event and assertion.
+gets all workers for this queue only
+
+# getWorkers (shared connection): upstream test file has comment
+# "Test is very flaky on CI, so we skip it for now."
+gets all workers for a given queue
+
+# Job Scheduler monthly repeat: sinon fake-timer races with real Redis async ops.
+# The worker loop does not advance in time before the 200 s timeout expires.
+should repeat 7:th day every month at 9:25
