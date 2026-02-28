@@ -270,7 +270,7 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
   }
 }
 
-void ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx, uint8_t* dest) {
+uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx) {
   DCHECK(idx < ascii_len) << "Index oob for ascii byte unpacking: " << idx << " >= " << ascii_len;
   const size_t packed_groups = ascii_len / 8;
   const size_t group = idx / 8;
@@ -278,14 +278,13 @@ void ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx, uint8_t
 
   // Tail bytes (after the last full 8-char group) are stored unpacked.
   if (group >= packed_groups) {
-    *dest = bin[packed_groups * 7 + idx_in_group];
-    return;
+    return bin[packed_groups * 7 + idx_in_group];
   }
 
   // Unpack ascii group and return byte at idx.
   char buf[8];
   ascii_unpack(bin + group * 7, 8, buf);
-  *dest = buf[idx_in_group];
+  return buf[idx_in_group];
 }
 
 void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t val) {
