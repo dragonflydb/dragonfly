@@ -16,8 +16,6 @@ The suite acts as a central **Orchestrator**.
 2. **The Execution:** Based on your `bench.conf`, the script will either run commands locally or SSH into remote machines to start the databases and the load generators.
 3. **The Data (Important):** **All results are saved locally.** Even when running a benchmark on a remote machine, the output of the database and `memtier_benchmark` is piped in real-time over SSH directly back to the `results/` folder on the machine where you typed `./df_bench_runner.sh run`. You will not find result files on the remote servers.
 
-
-
 ### Supported Topologies
 By configuring the `SERVER_CONNECTION` and `CLIENT_CONNECTION` variables, the suite can operate in three distinct modes:
 
@@ -39,13 +37,37 @@ The orchestrator relies heavily on SSH to trigger remote databases and clients.
 * **Passwordless Authentication:** You must configure key-based SSH access (e.g., `~/.ssh/id_rsa` or `id_ed25519`) from your local orchestrator machine to your remote Server and Client machines. The script cannot handle interactive password prompts.
 * **First-Time Connection (Known Hosts):** Even with SSH keys, Linux will prompt you to accept the host key fingerprint the *very first time* you connect to a new IP. **You must manually SSH into the Server and the Client at least once** from your terminal and type `yes` to add them to your `~/.ssh/known_hosts` file. If you skip this, the script will hang indefinitely waiting for user input.
 
-### 2. Binary Placement (`raw` environments)
-The script **does not** compile, upload, or transfer database binaries for you.
-* If you define a target using the `raw` environment, the compiled executable (e.g., `valkey-server`, `dragonfly`) must already exist on the target machine at the exact path you specify in the `bench.conf` file.
+### 2. Passwordless Sudo & Docker Permissions
+When running remote targets, the orchestrator executes setup and cleanup commands (like `fuser` to kill stuck ports and `docker rm`) using `sudo -n`.
+* **Requirement:** The SSH user on the `SERVER_CONNECTION` machine must have passwordless `sudo` privileges configured in `/etc/sudoers`.
+* Alternatively, if strictly using Docker environments for your target databases, ensure the SSH user is part of the `docker` group so it can interact with the daemon without elevated privileges.
 
-### 3. Docker Images (`docker` environments)
-* **Official/Public Images:** If you specify a standard image (e.g., `redis:7.2`), the Docker daemon on the target machine will automatically download it if it is not already present.
-* **Custom/Private Images:** If you are benchmarking a custom build or a private image (e.g., `my-custom-dragonfly:latest`), you must ensure the image is already pulled or built on the target machine before running the suite.
+### 3. Binary Placement (`raw` environments)
+The script **does not** compile, upload, or transfer database binaries for you.
+* If you define a target using the `raw` environment, the compiled executable (e.g., `valkey-server`, `dragonfly`) must already exist on the Server machine at the exact path you specify in the `bench.conf` file.
+
+### 4. Docker Images (`docker` environments)
+* **Official/Public Images:** If you specify a standard image (e.g., `redis:7.2`), the Docker daemon on the Server machine will automatically download it if it is not already present.
+* **Custom/Private Images:** If you are benchmarking a custom build or a private image (e.g., `my-custom-dragonfly:latest`), you must ensure the image is already pulled or built on the target Server before running the suite.
+
+### 5. Client Load Generator (`memtier_benchmark`)
+The client machine must have `memtier_benchmark` installed as a native binary in the system `$PATH`. **Docker is not supported for the client load generator** due to ARM/AMD architecture conflicts and virtual network performance overhead. The script will check for the binary's existence and immediately abort if it is missing.
+
+**To install natively on Ubuntu/Debian (including AWS ARM64/Graviton instances):**
+Run the following on your client machine to pull the official package directly from Redis Labs:
+```bash
+# 1. Download the official Redis security key
+curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+
+# 2. Add the official Redis repository
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
+
+# 3. Update apt and install
+sudo apt-get update
+sudo apt-get install -y memtier-benchmark
+```
+
+---
 
 ## Configuration (`bench.conf`)
 
@@ -91,8 +113,6 @@ The `TARGETS` array uses a strict pipe-separated (`|`) format:
 ## Networking & Cloud Security Groups
 
 When running in **Remote Multi-Node** mode, the orchestrator handles the SSH logic, but you must manually configure the cloud firewall (e.g., AWS Security Groups) to allow the database traffic.
-
-
 
 ### 1. Required Inbound Rules
 On your **Server Instance**, you must add an Inbound Rule to its Security Group allowing the client to connect:
@@ -248,5 +268,3 @@ RESP       dragonfly-v2   1:0    30        3200500.00  268000.00  0.590        0
 
 Report saved: results/benchmark_20260301_220000/summary.csv (144 runs)
 ```
-
-Now you have a clean `summary.csv` ready to be imported directly into Excel, Google Sheets, or Jupyter Notebooks to generate your graphs. No copy-pasting required.

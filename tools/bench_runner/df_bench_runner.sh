@@ -172,7 +172,7 @@ cmd_run() {
 
                     if [[ "$t_env" == "raw" ]]; then
                         echo "Verifying remote binary: $t_path"
-                        if ! ssh "$SERVER_CONNECTION" "[ -f $t_path ] && [ -x $t_path ]"; then
+                        if ! ssh "$SERVER_CONNECTION" "[ -f \"$t_path\" ] && [ -x \"$t_path\" ]"; then
                             echo -e "${RED}ERROR: Binary not found or not executable on remote: $t_path${NC}"
                             exit 1
                         fi
@@ -202,6 +202,21 @@ cmd_run() {
                     fi
                 fi
 
+                # --- CLIENT DEPENDENCY CHECK ---
+                if [[ "$CLIENT_CONNECTION" == "local" ]]; then
+                    if ! command -v memtier_benchmark >/dev/null 2>&1; then
+                        echo -e "${RED}ERROR: memtier_benchmark is not installed locally or not in PATH.${NC}"
+                        cleanup_server
+                        exit 1
+                    fi
+                else
+                    if ! ssh "$CLIENT_CONNECTION" "command -v memtier_benchmark >/dev/null 2>&1"; then
+                        echo -e "${RED}ERROR: memtier_benchmark is not installed on remote client ($CLIENT_CONNECTION).${NC}"
+                        cleanup_server
+                        exit 1
+                    fi
+                fi
+
                 # --- CONNECTIVITY CHECK ---
                 echo "Verifying connectivity from Client to Server ($connect_ip:$t_port)..."
                 # -z: scan mode, -v: verbose, -w 3: 3 second timeout
@@ -224,20 +239,37 @@ cmd_run() {
                 echo -e "${GREEN}Connectivity verified!${NC}"
 
                 # --- CLIENT EXECUTION ---
-                local client_cmd="memtier_benchmark -s $connect_ip -p $t_port -P $t_proto --ratio=$ratio --pipeline=$pipe -c $CLIENT_CONNS -t $CLIENT_THREADS --test-time=$TEST_TIME --key-maximum=$KEY_MAX"
+                local client_cmd="memtier_benchmark -s $connect_ip -p $t_port -P $t_proto --ratio=$ratio --pipeline=$pipe \
+                  -c $CLIENT_CONNS -t $CLIENT_THREADS --test-time=$TEST_TIME --key-maximum=$KEY_MAX"
 
+                local memtier_status=0
                 if [[ "$CLIENT_CONNECTION" == "local" ]]; then
                     if [[ -n "${CLIENT_TASKSET:-}" ]]; then
                         client_cmd="taskset -c $CLIENT_TASKSET $client_cmd"
                     fi
                     echo "Running load generator locally..."
-                    # tee saves the full log, grep filters the screen output to only show progress
-                    set +e; bash -c "$client_cmd" 2>&1 | tee "$out_dir/memtier.log" | grep --line-buffered "^\[RUN"; set -e
+                    set +e; set -o pipefail
+                    stdbuf -o0 bash -c "$client_cmd" 2>&1 | stdbuf -o0 tee "$out_dir/memtier.log" | stdbuf -o0 tr '\r' '\n' | grep --line-buffered "^\[" | stdbuf -o0 tr '\n' '\r'
+                    memtier_status=${PIPESTATUS[0]}
+                    echo "" # Print a final newline
+                    set +o pipefail; set -e
                 else
                     echo "Executing load generator remotely on $CLIENT_CONNECTION..."
-                    # tee saves the full log, grep filters the screen output to only show progress
-                    set +e; ssh "$CLIENT_CONNECTION" "$client_cmd" 2>&1 | tee "$out_dir/memtier.log" | grep --line-buffered "^\[RUN"; set -e
+                    set +e; set -o pipefail
+                    ssh -t "$CLIENT_CONNECTION" "$client_cmd" 2>&1 | stdbuf -o0 tee "$out_dir/memtier.log" | stdbuf -o0 tr '\r' '\n' | grep --line-buffered "^\[" | stdbuf -o0 tr '\n' '\r'
+                    memtier_status=${PIPESTATUS[0]}
+                    echo "" # Print a final newline
+                    set +o pipefail; set -e
                 fi
+
+                # Abort if the benchmark failed
+                if [[ $memtier_status -ne 0 ]]; then
+                    echo -e "${RED}ERROR: memtier_benchmark failed with exit code $memtier_status.${NC}"
+                    echo "memtier_status=$memtier_status" > "$out_dir/FAILED"
+                    cleanup_server
+                    exit 1
+                fi
+
 
                 # --- METADATA & CLEANUP ---
                 echo "PROTO=\"$t_proto\"" > "$out_dir/meta.env"
@@ -262,6 +294,11 @@ cmd_report() {
 
     if [ -z "$target_dir" ]; then
         target_dir=$(ls -td ${BASE_RESULTS_DIR}/*/ 2>/dev/null | head -1)
+    fi
+    # Handle empty directory
+    if [[ -z "$target_dir" ]]; then
+        echo -e "${RED}ERROR: No results directory found. Run benchmarks first.${NC}"
+        exit 1
     fi
     if [[ "${target_dir}" != */ ]]; then
         target_dir="${target_dir}/"
