@@ -318,7 +318,7 @@ void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
   DCHECK(!IsNewEntry());
   DCHECK(idx < updater_.it->second.Size());
   auto [success, _] = updater_.it->second.SetByteAtIndex(idx, val);
-  if (!success) {
+  if (success) {
     updater_.post_updater.Run();
   }
 }
