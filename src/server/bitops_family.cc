@@ -308,15 +308,12 @@ string ElementAccess::Value() const {
 
 bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
   DCHECK(!IsNewEntry());
-  if (!updater_.it->second.GetByteAtIndex(idx, res)) {
-    return false;
-  }
-  return true;
+  return updater_.it->second.GetByteAtIndex(idx, res);
 }
 
 void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
   DCHECK(!IsNewEntry());
-  DCHECK(idx < updater_.it->second.Size());
+  DCHECK_LT(idx, updater_.it->second.Size());
   auto [success, _] = updater_.it->second.SetByteAtIndex(idx, val);
   if (success) {
     updater_.post_updater.Run();
