@@ -2084,6 +2084,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     AppendMetricValue("tiered_list_events", m.qlist_stats.onload_requests, {"type"}, {"onload"},
                       &resp->body());
   }
+
+  // Stream access pattern metrics
+  if (m.shard_stats.stream_sequential_accesses || m.shard_stats.stream_random_accesses ||
+      m.shard_stats.stream_fetch_all_accesses) {
+    AppendMetricHeader("stream_accesses_total", "Total stream accesses by type",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_sequential_accesses,
+                      {"access_type"}, {"sequential"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_random_accesses,
+                      {"access_type"}, {"random"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_fetch_all_accesses,
+                      {"access_type"}, {"fetch_all"}, &resp->body());
+  }
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
