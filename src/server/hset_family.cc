@@ -786,6 +786,10 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidFloatErr);
   }
 
+  if (isnan(dval) || isinf(dval)) {
+    return cmd_cntx->SendError(kNanOrInfDuringIncr);
+  }
+
   IncrByParam param{dval};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
