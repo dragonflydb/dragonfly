@@ -597,11 +597,13 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
 }
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
-                                   search::SearchAlgorithm* search_algo) const {
+                                   search::SearchAlgorithm* search_algo,
+                                   bool is_knn_prefilter) const {
   size_t limit = params.limit_offset + params.limit_total;
 
   // If we don't sort the documents, we don't need to copy more ids than are requested
-  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption();
+  // Also for HNSW KNN search we don't cut results at the search stage.
+  bool can_cut = !params.sort_option && !search_algo->GetKnnScoreSortOption() && !is_knn_prefilter;
   size_t id_cutoff_limit = can_cut ? limit : numeric_limits<size_t>::max();
 
   auto result = search_algo->Search(&*indices_, id_cutoff_limit);
@@ -617,6 +619,11 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
     if (!skip_sort)
       limit = max(limit, ko->limit);
+  }
+
+  // We don't apply limit if this is prefilter HNSW KNN search
+  if (is_knn_prefilter) {
+    limit = std::numeric_limits<size_t>::max();
   }
 
   auto return_fields = params.return_fields.value_or(vector<FieldReference>{});
