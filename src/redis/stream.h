@@ -144,8 +144,6 @@ typedef struct {
 #define STREAM_ITEM_FLAG_DELETED (1 << 0)    /* Entry is deleted. Skip it. */
 #define STREAM_ITEM_FLAG_SAMEFIELDS (1 << 1) /* Same fields as primary entry. */
 
-stream *streamNew(void);
-void freeStream(stream *s);
 void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev);
 int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields);
 void streamIteratorGetField(streamIterator *si,

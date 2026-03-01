@@ -71,7 +71,7 @@ int StreamIncrID(streamID* id) {
 }
 
 /* Set 'id' to be its predecessor stream ID.
- * If 'id' is the minimal possible id, it remains 0-0 and C_ERR is returned. */
+ * If 'id' is the minimal possible id, it resets to UINT64_MAX and C_ERR is returned. */
 int StreamDecrID(streamID* id) {
   int ret = C_OK;
   if (id->seq == 0) {
