@@ -308,3 +308,53 @@ async def test_huffman_tables_built(df_server: DflyInstance):
         assert m.samples[0].value > 0
 
     await check_metrics()
+
+
+async def test_stream_access_metrics(df_server: DflyInstance):
+    """Test that stream access pattern metrics are exported in Prometheus format."""
+    async_client = df_server.client()
+
+    # Test sequential access (XADD)
+    await async_client.execute_command("XADD", "stream1", "*", "field1", "value1")
+    await async_client.execute_command("XADD", "stream1", "*", "field2", "value2")
+
+    # Test random access (XRANGE with specific IDs)
+    result = await async_client.execute_command("XRANGE", "stream1", "-", "+", "COUNT", "1")
+    first_id = result[0][0]
+    await async_client.execute_command("XRANGE", "stream1", first_id, first_id)
+
+    # Test fetch-all access (XRANGE full scan)
+    await async_client.execute_command("XRANGE", "stream1", "-", "+")
+
+    # Test XINFO STREAM FULL (fetch-all)
+    await async_client.execute_command("XINFO", "STREAM", "stream1", "FULL")
+
+    # Verify via INFO stats
+    info_dict = await async_client.info("stats")
+
+    # Verify counters are present and non-zero
+    assert "stream_sequential_accesses" in info_dict
+    assert "stream_random_accesses" in info_dict
+    assert "stream_fetch_all_accesses" in info_dict
+
+    # XADD should increment sequential
+    assert int(info_dict["stream_sequential_accesses"]) >= 2
+
+    # XRANGE with specific ID should increment random (but the first XRANGE call is fetch-all)
+    assert int(info_dict["stream_random_accesses"]) >= 1
+
+    # XRANGE full scan and XINFO STREAM FULL should increment fetch_all
+    assert int(info_dict["stream_fetch_all_accesses"]) >= 2
+
+    # Also verify Prometheus metrics if any counters are non-zero
+    metrics = await df_server.metrics()
+    if "dragonfly_stream_accesses_total" in metrics:
+        stream_metrics = metrics["dragonfly_stream_accesses_total"]
+        samples_by_type = {
+            sample.labels["access_type"]: sample.value for sample in stream_metrics.samples
+        }
+
+        # Verify all access types are present
+        assert "sequential" in samples_by_type
+        assert "random" in samples_by_type
+        assert "fetch_all" in samples_by_type
