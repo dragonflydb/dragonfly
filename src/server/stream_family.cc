@@ -1383,11 +1383,12 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
 OpResult<RecordVec> OpRangeFromConsumerPEL(const OpArgs& op_args, string_view key,
                                            const RangeOpts& opts) {
-  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
   RecordVec result;
 
   if (opts.count == 0)
     return result;
+
+  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
 
   unsigned char start_key[sizeof(streamID)];
   unsigned char end_key[sizeof(streamID)];
@@ -1891,9 +1892,9 @@ void AppendClaimResultItem(ClaimInfo& result, stream* s, streamID id) {
 // XCLAIM key group consumer min-idle-time id
 OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts,
                             absl::Span<streamID> ids) {
-  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
   auto cgr_res = FindGroup(op_args, key, opts.group);
   RETURN_ON_BAD_STATUS(cgr_res);
+  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
 
   uint64_t now_ms = op_args.db_cntx.time_now_ms;
   ClaimInfo result;
@@ -2201,9 +2202,9 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
 }
 
 OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts) {
-  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
   auto cgr_res = FindGroup(op_args, key, opts.group, false);
   RETURN_ON_BAD_STATUS(cgr_res);
+  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
 
   stream* stream = cgr_res->s;
   streamCG* group = cgr_res->cg;
