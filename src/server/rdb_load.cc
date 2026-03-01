@@ -694,7 +694,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   auto cleanup = absl::Cleanup([&] {
-    if (config_.append) {
+    if (!config_.append) {
       freeStream(s);
     }
   });

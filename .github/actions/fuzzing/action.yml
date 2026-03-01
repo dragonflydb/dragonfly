@@ -27,6 +27,10 @@ inputs:
     description: "JSON list of command names for the mutator to prefer (~70% selection weight)"
     required: false
     default: ''
+  build:
+    description: "Build the binary before fuzzing. Set to 'false' when reusing a binary built by a previous action call in the same job — fails if the binary is missing."
+    required: false
+    default: 'true'
 
 runs:
   using: "composite"
@@ -53,11 +57,20 @@ runs:
     - name: Build Dragonfly with AFL++
       shell: bash
       run: |
-        echo "Building Dragonfly with AFL++ instrumentation..."
-        ./helio/blaze.sh -DUSE_AFL:BOOL=ON
-        cd ./build-dbg && ninja dragonfly && cd ..
-        echo "Build complete"
-        ls -lh ./build-dbg/dragonfly
+        if [ "${{ inputs.build }}" = "false" ]; then
+          if [ ! -f "./build-dbg/dragonfly" ]; then
+            echo "::error::build=false but binary not found at ./build-dbg/dragonfly"
+            exit 1
+          fi
+          echo "Skipping build, reusing existing binary"
+          ls -lh ./build-dbg/dragonfly
+        else
+          echo "Building Dragonfly with AFL++ instrumentation..."
+          ./helio/blaze.sh -DUSE_AFL:BOOL=ON
+          cd ./build-dbg && ninja dragonfly && cd ..
+          echo "Build complete"
+          ls -lh ./build-dbg/dragonfly
+        fi
 
     - name: Merge targeted seeds
       shell: bash
