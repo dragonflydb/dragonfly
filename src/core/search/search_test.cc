@@ -971,7 +971,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   auto metadata = original.GetMetadata();
   ASSERT_EQ(metadata.cur_element_count, num_elements);
 
-  auto nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  std::vector<HnswNodeData> nodes;
+  {
+    auto lock = original.GetReadLock();
+    nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  }
   ASSERT_EQ(nodes.size(), num_elements);
 
   // Verify node data integrity
@@ -1003,7 +1007,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
 
   // Graph links must be identical
-  auto restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  std::vector<HnswNodeData> restored_nodes;
+  {
+    auto lock = restored.GetReadLock();
+    restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  }
   ASSERT_EQ(restored_nodes.size(), nodes.size());
   for (size_t i = 0; i < nodes.size(); i++) {
     EXPECT_EQ(restored_nodes[i].internal_id, nodes[i].internal_id);
@@ -1062,6 +1070,164 @@ INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
                            name << info.param;
                            return name.str();
                          });
+
+// Test fixture for HNSW deferred operations.
+// Verifies that Add/Remove called while a read lock is held are properly
+// deferred and replayed once the lock is released.
+class HnswDeferredOpsTest : public ::testing::Test {
+ protected:
+  static constexpr size_t kDim = 4;
+  static constexpr size_t kCapacity = 100;
+
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = kDim;
+    params.sim = VectorSimilarity::L2;
+    params.capacity = kCapacity;
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+    index_ = std::make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+  }
+
+  void TearDown() override {
+    index_.reset();
+    InitTLSearchMR(nullptr);
+  }
+
+  MockedDocument MakeDoc(std::initializer_list<float> coords) {
+    return MockedDocument::Map{{"vec", ToBytes(coords)}};
+  }
+
+  // Helper: run KNN for the zero vector and return the set of found GlobalDocIds.
+  absl::flat_hash_set<GlobalDocId> KnnIds(size_t k) {
+    vector<float> q(kDim, 0.0f);
+    auto results = index_->Knn(q.data(), k, std::nullopt);
+    absl::flat_hash_set<GlobalDocId> ids;
+    for (auto& [dist, id] : results)
+      ids.insert(id);
+    return ids;
+  }
+
+  std::unique_ptr<HnswVectorIndex> index_;
+};
+
+TEST_F(HnswDeferredOpsTest, AddWhileReadLocked) {
+  // Hold a read lock (simulating serialization), then add elements.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // These Adds cannot acquire the write lock and must be deferred.
+    index_->Add(0, doc0, "vec");
+    index_->Add(1, doc1, "vec");
+
+    // While the read lock is still held, KNN should not find the deferred docs.
+    auto ids = KnnIds(10);
+    EXPECT_TRUE(ids.empty());
+  }
+
+  // After the read lock is released, deferred ops should replay.
+  // The next operation that touches the index triggers ProcessDeferred.
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(1));
+}
+
+TEST_F(HnswDeferredOpsTest, RemoveWhileReadLocked) {
+  // Pre-populate the index.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+  auto doc2 = MakeDoc({0, 0, 1, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
+  index_->Add(2, doc2, "vec");
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // Remove doc1 while read-locked — should be deferred.
+    index_->Remove(1, doc1, "vec");
+
+    // doc1 is still visible because the remove is deferred.
+    auto ids = KnnIds(10);
+    EXPECT_EQ(ids.size(), 3u);
+  }
+
+  // After releasing the lock, removal should take effect.
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(2));
+  EXPECT_FALSE(ids.contains(1));
+}
+
+TEST_F(HnswDeferredOpsTest, DuplicateDeferredOpsKeepLatest) {
+  // Pre-populate with doc0.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  index_->Add(0, doc0, "vec");
+
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // Add doc1, then remove doc1 — both deferred for the same id.
+    // Only the last operation (remove) should survive.
+    index_->Add(1, doc1, "vec");
+    index_->Remove(1, doc1, "vec");
+  }
+
+  // After lock release, doc1 should not exist (remove was last).
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 1u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_FALSE(ids.contains(1));
+}
+
+TEST_F(HnswDeferredOpsTest, DuplicateDeferredOpsAddOverridesRemove) {
+  // Pre-populate with doc0 and doc1.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
+
+  auto doc1_new = MakeDoc({0, 0, 1, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // Remove doc1, then re-add it with new data — the add should win.
+    index_->Remove(1, doc1, "vec");
+    index_->Add(1, doc1_new, "vec");
+  }
+
+  // After lock release, doc1 should still be present with updated data.
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(1));
+}
+
+// Verify that Remove without a read lock also works correctly.
+TEST_F(HnswDeferredOpsTest, RemoveWithoutReadLock) {
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
+
+  index_->Remove(1, doc1, "vec");
+
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 1u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_FALSE(ids.contains(1));
+}
 
 TEST_F(SearchTest, GeoSearch) {
   auto schema = MakeSimpleSchema({{"name", SchemaField::TEXT}, {"location", SchemaField::GEO}});

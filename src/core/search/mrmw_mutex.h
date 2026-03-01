@@ -2,7 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
+#pragma once
+
 #include <condition_variable>
+#include <mutex>
 
 #include "base/logging.h"
 #include "base/spinlock.h"
@@ -37,7 +40,7 @@ class MRMWMutex {
   }
 
   void Unlock(LockMode mode) {
-    std::unique_lock lk(mutex_);
+    std::lock_guard lk(mutex_);
     LockMode inverse_mode = GetInverseMode(mode);
     active_runners_--;
     // If this was last runner and there are waiters on inverse mode
@@ -45,6 +48,29 @@ class MRMWMutex {
       lock_mode_ = inverse_mode;
       GetCondVar(inverse_mode).notify_all();
     }
+  }
+
+  // Check if the mutex is currently held in read mode with at least one active runner.
+  // For use in DCHECKs only - not thread-safe without external synchronization.
+  bool IsReadLocked() const {
+    return active_runners_ > 0 && lock_mode_ == LockMode::kReadLock;
+  }
+
+  // Non-blocking lock attempt. Returns true if the lock was acquired.
+  bool TryLock(LockMode mode) {
+    if (!mutex_.try_lock()) {
+      return false;
+    }
+    if (active_runners_ && lock_mode_ != mode) {
+      mutex_.unlock();
+      return false;
+    }
+    if (!active_runners_) {
+      lock_mode_ = mode;
+    }
+    active_runners_++;
+    mutex_.unlock();
+    return true;
   }
 
  private:
@@ -71,13 +97,24 @@ class MRMWMutex {
 
 class MRMWMutexLock {
  public:
+  // Blocking lock.
   explicit MRMWMutexLock(MRMWMutex* mutex, MRMWMutex::LockMode mode)
-      : mutex_(mutex), lock_mode_(mode) {
+      : mutex_(mutex), lock_mode_(mode), locked_(true) {
     mutex->Lock(lock_mode_);
   }
 
+  // Non-blocking try-lock. Check locked() to see if the lock was acquired.
+  MRMWMutexLock(MRMWMutex* mutex, MRMWMutex::LockMode mode, std::try_to_lock_t)
+      : mutex_(mutex), lock_mode_(mode), locked_(mutex->TryLock(mode)) {
+  }
+
+  bool locked() const {
+    return locked_;
+  }
+
   ~MRMWMutexLock() {
-    mutex_->Unlock(lock_mode_);
+    if (locked_)
+      mutex_->Unlock(lock_mode_);
   }
 
   MRMWMutexLock(const MRMWMutexLock&) = delete;
@@ -88,6 +125,7 @@ class MRMWMutexLock {
  private:
   MRMWMutex* const mutex_;
   MRMWMutex::LockMode lock_mode_;
+  bool locked_;
 };
 
 }  // namespace dfly::search
