@@ -769,4 +769,14 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
   EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }
 
+// HINCRBYFLOAT with NaN on a non-existing key must not create a zombie empty hash.
+// Before the fix, the key was left in the DB with an empty listpack, causing HRANDFIELD
+// to crash with CHECK(lplen > 0 && lplen % 2 == 0).
+TEST_F(HSetFamilyTest, HIncrByFloatNaNDoesNotCreateKey) {
+  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "nan"}),
+              ErrArg("increment would produce NaN or Infinity"));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
+  EXPECT_THAT(Run({"HRANDFIELD", "key"}), ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly

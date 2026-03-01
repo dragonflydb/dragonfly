@@ -303,6 +303,13 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   auto& add_res = *op_res;
   PrimeValue& pv = add_res.it->second;
   if (add_res.is_new) {
+    if (holds_alternative<double>(*param)) {
+      double incr = get<double>(*param);
+      if (isnan(incr) || isinf(incr)) {
+        db_slice.DelMutable(op_args.db_cntx, std::move(add_res));
+        return OpStatus::NAN_OR_INF_DURING_INCR;
+      }
+    }
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, add_res.it->second);
