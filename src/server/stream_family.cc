@@ -1291,8 +1291,8 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
   // Classify access pattern: fetch-all if start <= first_id and end is MAX.
   StreamAccessKind effective_kind = opts.access_kind;
-  if (s->length == 0 || (streamCompareID(&sstart, &s->first_id) <= 0 && send.ms == UINT64_MAX &&
-                         send.seq == UINT64_MAX)) {
+  if (s->length > 0 && streamCompareID(&sstart, &s->first_id) <= 0 && send.ms == UINT64_MAX &&
+      send.seq == UINT64_MAX) {
     effective_kind = StreamAccessKind::kFetchAll;
   }
   if (opts.record_access) {
