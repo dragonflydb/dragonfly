@@ -769,4 +769,149 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
   EXPECT_EQ(Run({"SAVE", "RDB", kRdbFile}), "OK");
 }
 
+TEST_F(HSetFamilyTest, HPExpireTime) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Test with non-existing key
+  auto resp = Run({"HPEXPIRETIME", "nokey", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+
+  // Test with existing hash but non-existing fields
+  EXPECT_EQ(CheckedInt({"HSET", "key", "f1", "v1"}), 1);
+  resp = Run({"HPEXPIRETIME", "key", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(-1), IntArg(-3))));
+
+  // Test with fields that have expiration
+  EXPECT_EQ(CheckedInt({"HSETEX", "key2", "10", "f1", "v1", "f2", "v2"}), 2);
+  resp = Run({"HPEXPIRETIME", "key2", "FIELDS", "2", "f1", "f2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  auto vec = resp.GetVec();
+  
+  // Expected expiry time in milliseconds
+  int64_t expected_expire_ms = (kMemberExpiryBase + 10) * 1000;
+  EXPECT_EQ(vec[0].GetInt(), expected_expire_ms);
+  EXPECT_EQ(vec[1].GetInt(), expected_expire_ms);
+
+  // Test with mix of expired and non-expired fields
+  EXPECT_EQ(CheckedInt({"HSET", "key2", "f3", "v3"}), 1);
+  resp = Run({"HPEXPIRETIME", "key2", "FIELDS", "3", "f1", "f2", "f3"});
+  ASSERT_THAT(resp, ArrLen(3));
+  vec = resp.GetVec();
+  EXPECT_EQ(vec[0].GetInt(), expected_expire_ms);
+  EXPECT_EQ(vec[1].GetInt(), expected_expire_ms);
+  EXPECT_EQ(vec[2].GetInt(), -1);  // f3 has no expiration
+
+  // Test after expiration
+  AdvanceTime(10'000);
+  resp = Run({"HPEXPIRETIME", "key2", "FIELDS", "3", "f1", "f2", "f3"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(-3), IntArg(-3), IntArg(-1))));
+
+  // Test with wrong number of fields
+  resp = Run({"HPEXPIRETIME", "key", "FIELDS", "2", "f1"});
+  EXPECT_THAT(resp, ErrArg("numfields"));
+
+  // Test with missing FIELDS keyword
+  resp = Run({"HPEXPIRETIME", "key", "2", "f1", "f2"});
+  EXPECT_THAT(resp, ErrArg("FIELDS"));
+}
+
+TEST_F(HSetFamilyTest, HGetEx) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Test basic HGETEX without expiration options (should work like HMGET)
+  EXPECT_EQ(CheckedInt({"HSET", "key", "f1", "v1", "f2", "v2", "f3", "v3"}), 3);
+  auto resp = Run({"HGETEX", "key", "FIELDS", "3", "f1", "f2", "f3"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2", "v3")));
+
+  // Test HGETEX with non-existing fields
+  resp = Run({"HGETEX", "key", "FIELDS", "2", "f1", "f4"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", ArgType(RespExpr::NIL))));
+
+  // Test HGETEX with non-existing key
+  resp = Run({"HGETEX", "nokey", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL))));
+
+  // Test HGETEX with EX option (set expiration in seconds)
+  resp = Run({"HGETEX", "key", "EX", "10", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  // Verify expiration was set
+  int64_t ttl_f1 = CheckedInt({"FIELDTTL", "key", "f1"});
+  int64_t ttl_f2 = CheckedInt({"FIELDTTL", "key", "f2"});
+  int64_t ttl_f3 = CheckedInt({"FIELDTTL", "key", "f3"});
+  EXPECT_EQ(ttl_f1, 10);
+  EXPECT_EQ(ttl_f2, 10);
+  EXPECT_EQ(ttl_f3, -1);  // f3 should still have no expiration
+
+  // Test HGETEX with PX option (set expiration in milliseconds)
+  EXPECT_EQ(CheckedInt({"HSET", "key2", "f1", "v1", "f2", "v2"}), 2);
+  resp = Run({"HGETEX", "key2", "PX", "5000", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  ttl_f1 = CheckedInt({"FIELDTTL", "key2", "f1"});
+  EXPECT_EQ(ttl_f1, 5);  // 5000ms = 5 seconds
+
+  // Test HGETEX with EXAT option (set expiration at Unix timestamp in seconds)
+  EXPECT_EQ(CheckedInt({"HSET", "key3", "f1", "v1", "f2", "v2"}), 2);
+  int64_t future_time_sec = kMemberExpiryBase + 20;
+  resp = Run({"HGETEX", "key3", "EXAT", to_string(future_time_sec), "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  ttl_f1 = CheckedInt({"FIELDTTL", "key3", "f1"});
+  EXPECT_EQ(ttl_f1, 20);
+
+  // Test HGETEX with PXAT option (set expiration at Unix timestamp in milliseconds)
+  EXPECT_EQ(CheckedInt({"HSET", "key4", "f1", "v1", "f2", "v2"}), 2);
+  int64_t future_time_ms = (kMemberExpiryBase + 15) * 1000;
+  resp = Run({"HGETEX", "key4", "PXAT", to_string(future_time_ms), "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  ttl_f1 = CheckedInt({"FIELDTTL", "key4", "f1"});
+  EXPECT_EQ(ttl_f1, 15);
+
+  // Test HGETEX with expiration in the past (should expire immediately)
+  EXPECT_EQ(CheckedInt({"HSET", "key6", "f1", "v1", "f2", "v2"}), 2);
+  int64_t past_time_sec = kMemberExpiryBase - 10;
+  resp = Run({"HGETEX", "key6", "EXAT", to_string(past_time_sec), "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  // Fields should expire immediately (TTL of 0)
+  AdvanceTime(100);
+  resp = Run({"HGET", "key6", "f1"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Test that HGETEX preserves values during expiration update
+  EXPECT_EQ(CheckedInt({"HSET", "key7", "f1", "value1", "f2", "value2"}), 2);
+  resp = Run({"HGETEX", "key7", "EX", "5", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("value1", "value2")));
+  EXPECT_EQ(Run({"HGET", "key7", "f1"}), "value1");  // Value should still be there
+  EXPECT_EQ(Run({"HGET", "key7", "f2"}), "value2");  // Value should still be there
+
+  // Test wrong number of fields
+  resp = Run({"HGETEX", "key", "FIELDS", "2", "f1"});
+  EXPECT_THAT(resp, ErrArg("numfields"));
+
+  // Test missing FIELDS keyword
+  resp = Run({"HGETEX", "key", "EX", "10", "2", "f1", "f2"});
+  EXPECT_THAT(resp, ErrArg("FIELDS"));
+}
+
+TEST_F(HSetFamilyTest, HGetExListpack) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Test HGETEX on listpack encoding (small hash)
+  EXPECT_EQ(CheckedInt({"HSET", "small", "f1", "v1", "f2", "v2"}), 2);
+  
+  // HGETEX without expiration should work on listpack
+  auto resp = Run({"HGETEX", "small", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  // HGETEX with expiration should convert listpack to StringMap
+  resp = Run({"HGETEX", "small", "EX", "10", "FIELDS", "2", "f1", "f2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("v1", "v2")));
+  
+  int64_t ttl_f1 = CheckedInt({"FIELDTTL", "small", "f1"});
+  EXPECT_EQ(ttl_f1, 10);
+}
+
 }  // namespace dfly
