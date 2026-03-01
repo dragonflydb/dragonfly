@@ -53,6 +53,11 @@ class EngineShard {
     // how many huffman tables were built successfully in the background
     uint32_t huffman_tables_built = 0;
 
+    // Stream access pattern metrics (per-command, not per-entry).
+    uint64_t stream_sequential_accesses = 0;  // head/tail: XADD, XREAD recent, XTRIM, etc.
+    uint64_t stream_random_accesses = 0;      // arbitrary-ID lookups: XRANGE partial, XDEL, XCLAIM
+    uint64_t stream_fetch_all_accesses = 0;   // full stream scan from beginning
+
     Stats& operator+=(const Stats&);
   };
 
