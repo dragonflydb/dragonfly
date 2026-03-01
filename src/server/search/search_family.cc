@@ -48,6 +48,10 @@ ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.
 ABSL_FLAG(size_t, search_query_string_bytes, 10240,
           "Maximum number of bytes in search query string");
 
+ABSL_FLAG(size_t, subset_knn_search_threshold, 8192,
+          "If prefilter results are below this threshold, we will do exact subset search "
+          "instead of HNSW graph search");
+
 namespace dfly {
 
 using namespace std;
@@ -1092,8 +1096,12 @@ vector<SearchResult> SearchGlobalHnswIndex(
 
   if (prefilter_global_docs_ids) {
     VLOG(1) << "Searching HNSW index with prefilter size: " << prefilter_global_docs_ids->size();
-    knn_results =
-        index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
+    if (prefilter_global_docs_ids->size() < absl::GetFlag(FLAGS_subset_knn_search_threshold)) {
+      knn_results = index->SubsetKnn(knn->vec.first.get(), knn->limit, *prefilter_global_docs_ids);
+    } else {
+      knn_results =
+          index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
+    }
   } else {
     knn_results = index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
   }
