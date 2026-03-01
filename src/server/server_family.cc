@@ -2086,7 +2086,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   }
 
   // Stream access pattern metrics
-  if (m.shard_stats.stream_sequential_accesses | m.shard_stats.stream_random_accesses |
+  if (m.shard_stats.stream_sequential_accesses || m.shard_stats.stream_random_accesses ||
       m.shard_stats.stream_fetch_all_accesses) {
     AppendMetricHeader("stream_accesses_total", "Total stream accesses by type",
                        MetricType::COUNTER, &resp->body());
