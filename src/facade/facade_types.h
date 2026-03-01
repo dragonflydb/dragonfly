@@ -108,8 +108,12 @@ class ParsedArgs {
       return *scratch;
     }
 
-    void ToVec(CmdArgVec* vec) const {
-      vec->assign(args_->begin() + index_, args_->end());
+    void ToVec(CmdArgVec* scratch) const {
+      auto sub_view = args_->view() | std::views::drop(index_);
+      static_assert(std::ranges::sized_range<decltype(sub_view)>);
+
+      scratch->reserve(std::ranges::distance(sub_view));
+      std::ranges::copy(sub_view, std::back_inserter(*scratch));
     }
   };
 

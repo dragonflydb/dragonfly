@@ -1057,7 +1057,7 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
     const facade::ArgRange& args, bool hashed, bool has_all_keys, bool has_all_channels) const {
   User::UpdateRequest req;
 
-  for (std::string_view arg : args) {
+  for (std::string_view arg : args.view()) {
     if (auto pass = MaybeParsePassword(facade::ToSV(arg), hashed); pass) {
       req.passwords.push_back(std::move(*pass));
 

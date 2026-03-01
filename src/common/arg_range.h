@@ -6,10 +6,9 @@
 
 #include <absl/types/span.h>
 
+#include <ranges>
 #include <string_view>
 #include <variant>
-
-#include "base/iterator.h"
 
 namespace cmn {
 
@@ -31,27 +30,19 @@ constexpr auto kToSV = [](auto&& v) { return ToSV(std::forward<decltype(v)>(v));
 struct ArgRange {
   ArgRange(ArgRange&&) = default;
   ArgRange(const ArgRange&) = default;
-  ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
-  }
 
-  template <typename T, std::enable_if_t<!std::is_same_v<ArgRange, T>, bool> = true>
-  ArgRange(T&& span) : span(std::forward<T>(span)) {  // NOLINT google-explicit-constructor)
+  template <typename T>
+  requires(!std::is_same_v<std::remove_cvref_t<T>, ArgRange>) explicit(false) ArgRange(T&& span)
+      : span(std::forward<T>(span)) {
   }
 
   size_t Size() const {
     return std::visit([](const auto& span) { return span.size(); }, span);
   }
 
-  auto Range() const {
-    return base::it::Wrap(kToSV, span);
-  }
-
-  auto begin() const {
-    return Range().first;
-  }
-
-  auto end() const {
-    return Range().second;
+  auto view() const {
+    return std::views::iota(size_t{0}, Size()) |
+           std::views::transform([this](size_t i) { return (*this)[i]; });
   }
 
   std::string_view operator[](size_t idx) const {

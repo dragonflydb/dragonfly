@@ -65,7 +65,7 @@ class MemcacheParser {
     CmdType type = INVALID;
 
     std::string_view key() const {
-      return backed_args->empty() ? std::string_view{} : backed_args->Front();
+      return backed_args->empty() ? std::string_view{} : backed_args->front();
     }
 
     // For STORE commands, value is at index 1.

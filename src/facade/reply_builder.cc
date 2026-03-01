@@ -395,14 +395,14 @@ std::string RedisReplyBuilderBase::SerializeCommand(std::string_view command) {
 void RedisReplyBuilder::SendSimpleStrArr(const facade::ArgRange& strs) {
   ReplyScope scope(this);
   StartArray(strs.Size());
-  for (std::string_view str : strs)
+  for (std::string_view str : strs.view())
     SendSimpleString(str);
 }
 
 void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct) {
   ReplyScope scope(this);
   StartCollection(ct == CollectionType::MAP ? strs.Size() / 2 : strs.Size(), ct);
-  for (std::string_view str : strs)
+  for (std::string_view str : strs.view())
     SendBulkString(str);
 }
 
