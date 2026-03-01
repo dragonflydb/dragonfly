@@ -230,10 +230,6 @@ bool GetBitValue(const string& entry, uint32_t offset) {
   return CheckBitStatus(byte_val, index);
 }
 
-bool GetBitValueSafe(const string& entry, uint32_t offset) {
-  return ((entry.size() * OFFSET_FACTOR) > offset) ? GetBitValue(entry, offset) : false;
-}
-
 constexpr uint8_t TurnBitOn(uint8_t on, uint32_t offset) {
   return on |= 1 << offset;
 }
@@ -1238,12 +1234,22 @@ string GetString(const PrimeValue& pv) {
 }
 
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
-  OpResult<string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
-  if (result) {
-    return GetBitValueSafe(result.value(), offset);
-  } else {
-    return result.status();
+  DbSlice& db_slice = op_args.GetDbSlice();
+  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+
+  if (!it_res.ok()) {
+    return it_res.status();
   }
+
+  const PrimeValue& pv = it_res.value()->second;
+
+  uint8_t byte_value = 0;
+  if (!pv.GetByteAtIndex(GetByteIndex(offset), &byte_value)) {
+    return false;
+  }
+
+  const auto bit_index = GetNormalizedBitIndex(offset);
+  return CheckBitStatus(byte_value, bit_index);
 }
 
 OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard) {
