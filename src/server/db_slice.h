@@ -82,6 +82,11 @@ struct SliceEvents {
 
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
+  // Stream access pattern metrics (per-command, not per-entry).
+  size_t stream_sequential_accesses = 0;  // head/tail: XADD, XREAD recent, XTRIM, etc.
+  size_t stream_random_accesses = 0;      // arbitrary-ID lookups: XRANGE partial, XDEL, XCLAIM
+  size_t stream_fetch_all_accesses = 0;   // full stream scan from beginning
+
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
@@ -237,6 +242,11 @@ class DbSlice {
 
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
+
+  // Provides mutable access to slice events for external instrumentation.
+  SliceEvents& MutableEvents() {
+    return events_;
+  }
 
   // Returns slot statistics for db 0.
   SlotStats GetSlotStats(SlotId sid) const;
