@@ -616,6 +616,8 @@ struct StreamInfo {
   GroupInfoVec cgroups;
 };
 
+enum class StreamAccessKind { kNone, kSequential, kRandom, kFetchAll };
+
 struct RangeOpts {
   ParsedStreamId start;
   ParsedStreamId end;
@@ -626,7 +628,27 @@ struct RangeOpts {
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
   bool noack = false;
+
+  StreamAccessKind access_kind = StreamAccessKind::kRandom;
 };
+
+void RecordStreamAccess(const OpArgs& op_args, StreamAccessKind kind) {
+  auto& stats = op_args.shard->stats();
+  switch (kind) {
+    case StreamAccessKind::kNone:
+      // No-op: skip metrics recording for internal calls
+      break;
+    case StreamAccessKind::kSequential:
+      stats.stream_sequential_accesses++;
+      break;
+    case StreamAccessKind::kRandom:
+      stats.stream_random_accesses++;
+      break;
+    case StreamAccessKind::kFetchAll:
+      stats.stream_fetch_all_accesses++;
+      break;
+  }
+}
 
 struct StreamIDsItem {
   ParsedStreamId id;
@@ -1229,6 +1251,8 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     }
   }
 
+  RecordStreamAccess(op_args, StreamAccessKind::kSequential);
+
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
     blocking_controller->Awaken(op_args.db_cntx.db_index, key);
@@ -1266,6 +1290,15 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
   streamID id;
   stream* s = (stream*)cobj->RObjPtr();
   streamID sstart = opts.start.val, send = opts.end.val;
+
+  // Classify access pattern: fetch-all if start <= first_id and end is MAX.
+  StreamAccessKind effective_kind = opts.access_kind;
+  if (effective_kind != StreamAccessKind::kNone && s->length > 0 &&
+      streamCompareID(&sstart, &s->first_id) <= 0 && send.ms == UINT64_MAX &&
+      send.seq == UINT64_MAX) {
+    effective_kind = StreamAccessKind::kFetchAll;
+  }
+  RecordStreamAccess(op_args, effective_kind);
 
   streamIteratorStart(&si, s, &sstart, &send, opts.is_rev);
   while (streamIteratorGetID(&si, &id, &numfields)) {
@@ -1355,6 +1388,8 @@ OpResult<RecordVec> OpRangeFromConsumerPEL(const OpArgs& op_args, string_view ke
   if (opts.count == 0)
     return result;
 
+  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
+
   unsigned char start_key[sizeof(streamID)];
   unsigned char end_key[sizeof(streamID)];
   auto sstart = opts.start.val;
@@ -1376,6 +1411,8 @@ OpResult<RecordVec> OpRangeFromConsumerPEL(const OpArgs& op_args, string_view ke
     RangeOpts ropts;
     ropts.start.val = id;
     ropts.end.val = id;
+    ropts.access_kind =
+        StreamAccessKind::kNone;  // Prevent per-entry counting; already recorded above
     auto op_result = OpRange(op_args, key, ropts);
     if (!op_result || !op_result.value().size()) {
       Record rec;
@@ -1443,6 +1480,8 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
     range_opts.group = sitem.group;
     range_opts.consumer = sitem.consumer;
     range_opts.noack = opts.noack;
+    // XREAD/XREADGROUP new deliveries are sequential (fetch-all detected in OpRange).
+    range_opts.access_kind = StreamAccessKind::kSequential;
 
     OpResult<RecordVec> range_res;
 
@@ -1606,6 +1645,13 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   RETURN_ON_BAD_STATUS(res_it);
+
+  // Record access only after successful key validation
+  if (full) {
+    shard->stats().stream_fetch_all_accesses++;
+  } else {
+    shard->stats().stream_sequential_accesses++;
+  }
 
   vector<StreamInfo> result;
   const CompactObj& cobj = (*res_it)->second;
@@ -1848,6 +1894,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
                             absl::Span<streamID> ids) {
   auto cgr_res = FindGroup(op_args, key, opts.group);
   RETURN_ON_BAD_STATUS(cgr_res);
+  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
 
   uint64_t now_ms = op_args.db_cntx.time_now_ms;
   ClaimInfo result;
@@ -2053,6 +2100,8 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
   if (!StreamIDEqZero(&max_xdel_id))
     stream_inst->max_deleted_entry_id = max_xdel_id;
 
+  RecordStreamAccess(op_args, StreamAccessKind::kSequential);
+
   mem_tracker.UpdateStreamSize(pv);
 
   return OpStatus::OK;
@@ -2070,6 +2119,9 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
   bool first_entry = false;
 
   StreamMemTracker tracker;
+
+  // Capture last_id before deletion loop for heuristic (deletion can change it)
+  streamID original_last_id = stream_inst->last_id;
 
   for (size_t j = 0; j < ids.size(); j++) {
     streamID id = ids[j];
@@ -2101,6 +2153,18 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
     // in the same thread.
     tracker.UpdateStreamSize(pv);
   }
+
+  // Heuristic: if any deleted ID shares ms with original last_id, it's a tail delete (sequential).
+  bool is_sequential = false;
+  for (size_t j = 0; j < ids.size(); j++) {
+    if (ids[j].ms == original_last_id.ms) {
+      is_sequential = true;
+      break;
+    }
+  }
+  RecordStreamAccess(op_args,
+                     is_sequential ? StreamAccessKind::kSequential : StreamAccessKind::kRandom);
+
   return deleted;
 }
 
@@ -2140,6 +2204,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
 OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts) {
   auto cgr_res = FindGroup(op_args, key, opts.group, false);
   RETURN_ON_BAD_STATUS(cgr_res);
+  RecordStreamAccess(op_args, StreamAccessKind::kRandom);
 
   stream* stream = cgr_res->s;
   streamCG* group = cgr_res->cg;
@@ -2527,6 +2592,8 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const Trim
   StreamMemTracker mem_tracker;
 
   int64_t deleted_items_number = TrimStream(opts, s);
+
+  RecordStreamAccess(op_args, StreamAccessKind::kSequential);
 
   mem_tracker.UpdateStreamSize(pv);
 
@@ -3042,6 +3109,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       }
 
       range_opts.noack = opts->noack;
+      range_opts.access_kind = StreamAccessKind::kSequential;
 
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
       if (result) {
