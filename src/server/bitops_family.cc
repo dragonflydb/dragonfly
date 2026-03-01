@@ -274,10 +274,10 @@ class ElementAccess {
 
   string Value() const;
 
-  uint8_t GetByteAtIndex(size_t idx) const;
+  bool GetByteAtIndex(size_t idx, uint8_t* res) const;
+  void SetByteAtIndex(size_t idx, uint8_t value) const;
 
   void Commit(string_view new_value) const;
-  void SetByteAtIndex(size_t idx, uint8_t value) const;
 
   // return nullopt when key exists but it's not encoded as string
   // return true if key exists and false if it doesn't
@@ -310,13 +310,21 @@ string ElementAccess::Value() const {
   return IsNewEntry() ? string{} : GetString(updater_.it->second);
 }
 
-uint8_t ElementAccess::GetByteAtIndex(size_t idx) const {
-  if (IsNewEntry()) {
-    return 0;
+bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
+  DCHECK(!IsNewEntry());
+  if (!updater_.it->second.GetByteAtIndex(idx, res)) {
+    return false;
   }
-  uint8_t res = 0;
-  updater_.it->second.GetByteAtIndex(idx, &res);
-  return res;
+  return true;
+}
+
+void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
+  DCHECK(!IsNewEntry());
+  DCHECK(idx < updater_.it->second.Size());
+  auto [success, _] = updater_.it->second.SetByteAtIndex(idx, val);
+  if (!success) {
+    updater_.post_updater.Run();
+  }
 }
 
 void ElementAccess::Commit(string_view new_value) const {
@@ -337,15 +345,6 @@ void ElementAccess::Commit(string_view new_value) const {
   }
 }
 
-void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
-  DCHECK(!IsNewEntry());
-  auto [success, in_place] = updater_.it->second.SetByteAtIndex(idx, val);
-  // If in_place is false, it means that we had to rewrite the string.
-  if (success) {
-    updater_.post_updater.Run();
-  }
-}
-
 // =============================================
 // Set a new value to a given bit
 
@@ -358,27 +357,26 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
   auto find_res = element_access.Find(false);
 
   if (find_res != OpStatus::OK) {
+    VLOG(1) << "Find failed for key: " << key << " with error: " << find_res;
     return find_res;
   }
 
-  size_t entry_size = element_access.Size();
+  const size_t byte_index = GetByteIndex(offset);
 
+  // Create a new entry
   if (element_access.IsNewEntry()) {
-    // We create a new entry
-    string new_entry(GetByteIndex(offset) + 1, 0);
+    VLOG(2) << "Creating new key: " << key << " with size: " << (byte_index + 1) << " bytes";
+    string new_entry(byte_index + 1, 0);
     old_value = SetBitValue(offset, bit_value, &new_entry);
     element_access.Commit(new_entry);
-  } else if ((entry_size * OFFSET_FACTOR) <= offset) {
-    // We extend entry with new bytes
-    string existing_entry{element_access.Value()};
-    existing_entry.resize(GetByteIndex(offset) + 1, 0);
-    SetBitValue(offset, bit_value, &existing_entry);
-    // We always need to commit the extended key
-    element_access.Commit(existing_entry);
-  } else {
-    // Update single byte in place
-    uint32_t byte_index = GetByteIndex(offset);
-    uint8_t existing_byte = element_access.GetByteAtIndex(byte_index);
+    return old_value;
+  }
+
+  // Get byte where bit offset is located. If offset is out of bound it means
+  // that we need to extend the string otherwise we just update.
+  uint8_t existing_byte;
+  if (element_access.GetByteAtIndex(byte_index, &existing_byte)) {
+    VLOG(2) << "Updating key: " << key << " at byte index: " << byte_index;
     uint32_t bit_index = GetNormalizedBitIndex(offset);
     old_value = CheckBitStatus(existing_byte, bit_index);
     if (old_value != bit_value) {
@@ -386,7 +384,15 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
           bit_value ? TurnBitOn(existing_byte, bit_index) : TurnBitOff(existing_byte, bit_index);
       element_access.SetByteAtIndex(byte_index, existing_byte);
     }
+  } else {
+    VLOG(2) << "Extending key: " << key << " to " << (byte_index + 1) << " bytes";
+    string existing_entry{element_access.Value()};
+    existing_entry.resize(byte_index + 1, 0);
+    SetBitValue(offset, bit_value, &existing_entry);
+    // We always need to commit the extended key
+    element_access.Commit(existing_entry);
   }
+
   return old_value;
 }
 
