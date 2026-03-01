@@ -268,10 +268,6 @@ class ElementAccess {
     return updater_.is_new;
   }
 
-  size_t Size() const {
-    return IsNewEntry() ? 0 : updater_.it->second.Size();
-  }
-
   string Value() const;
 
   bool GetByteAtIndex(size_t idx, uint8_t* res) const;
