@@ -248,6 +248,42 @@ TEST_F(BitOpsFamilyTest, SetBitIncorrectValues) {
   EXPECT_EQ(0, CheckedInt({"getbit", "foo", "4"}));
 }
 
+TEST_F(BitOpsFamilyTest, SetBitExtendExistingKey) {
+  // This test verifies SETBIT correctly extends an existing key beyond its current length.
+  // It sets up a small 3-byte key ("abc") and then sets a bit far beyond byte index 2,
+  // ensuring the string is extended with zeros and the bit is set correctly.
+  auto resp = Run({"set", "foo", "abc"});
+  EXPECT_EQ(resp, "OK");
+
+  // Verify initial string length is 3 bytes (24 bits)
+  EXPECT_EQ(3, CheckedInt({"strlen", "foo"}));
+
+  // Set bit at offset 100 (byte index 12, bit 4 within that byte)
+  // This should extend the string from 3 bytes to 13 bytes
+  // The old value should be 0 since the string didn't extend that far
+  EXPECT_EQ(0, CheckedInt({"setbit", "foo", "100", "1"}));
+
+  // Verify the string was extended to 13 bytes (100 bits / 8 = 12.5, rounded up to 13)
+  EXPECT_EQ(13, CheckedInt({"strlen", "foo"}));
+
+  // Verify the bit at offset 100 is now set to 1
+  EXPECT_EQ(1, CheckedInt({"getbit", "foo", "100"}));
+
+  // Verify bits in the extended region (between original end and new bit) are 0
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "24"}));  // First bit after "abc"
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "50"}));  // Middle of extended region
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "99"}));  // Just before the set bit
+
+  // Verify original bits are unchanged
+  EXPECT_EQ(EXPECTED_VALUE_SETBIT[0], CheckedInt({"getbit", "foo", "0"}));
+  EXPECT_EQ(EXPECTED_VALUE_SETBIT[1], CheckedInt({"getbit", "foo", "1"}));
+  EXPECT_EQ(EXPECTED_VALUE_SETBIT[2], CheckedInt({"getbit", "foo", "2"}));
+
+  // Set the same bit to 0 and verify we get back 1 (the current value)
+  EXPECT_EQ(1, CheckedInt({"setbit", "foo", "100", "0"}));
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "100"}));
+}
+
 const int32_t EXPECTED_VALUES_BYTES_BIT_COUNT[] = {  // got this from redis 0 as start index
     4, 7, 11, 14, 17, 21, 21, 21, 21};
 
