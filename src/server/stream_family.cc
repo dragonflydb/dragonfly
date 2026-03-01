@@ -616,7 +616,7 @@ struct StreamInfo {
   GroupInfoVec cgroups;
 };
 
-enum class StreamAccessKind { kSequential, kRandom, kFetchAll };
+enum class StreamAccessKind { kNone, kSequential, kRandom, kFetchAll };
 
 struct RangeOpts {
   ParsedStreamId start;
@@ -630,12 +630,14 @@ struct RangeOpts {
   bool noack = false;
 
   StreamAccessKind access_kind = StreamAccessKind::kRandom;
-  bool record_access = true;  // Set to false to skip metrics recording (e.g., internal calls)
 };
 
 void RecordStreamAccess(const OpArgs& op_args, StreamAccessKind kind) {
   auto& stats = op_args.shard->stats();
   switch (kind) {
+    case StreamAccessKind::kNone:
+      // No-op: skip metrics recording for internal calls
+      break;
     case StreamAccessKind::kSequential:
       stats.stream_sequential_accesses++;
       break;
@@ -1291,13 +1293,12 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
   // Classify access pattern: fetch-all if start <= first_id and end is MAX.
   StreamAccessKind effective_kind = opts.access_kind;
-  if (s->length > 0 && streamCompareID(&sstart, &s->first_id) <= 0 && send.ms == UINT64_MAX &&
+  if (effective_kind != StreamAccessKind::kNone && s->length > 0 &&
+      streamCompareID(&sstart, &s->first_id) <= 0 && send.ms == UINT64_MAX &&
       send.seq == UINT64_MAX) {
     effective_kind = StreamAccessKind::kFetchAll;
   }
-  if (opts.record_access) {
-    RecordStreamAccess(op_args, effective_kind);
-  }
+  RecordStreamAccess(op_args, effective_kind);
 
   streamIteratorStart(&si, s, &sstart, &send, opts.is_rev);
   while (streamIteratorGetID(&si, &id, &numfields)) {
@@ -1409,7 +1410,8 @@ OpResult<RecordVec> OpRangeFromConsumerPEL(const OpArgs& op_args, string_view ke
     RangeOpts ropts;
     ropts.start.val = id;
     ropts.end.val = id;
-    ropts.record_access = false;  // Prevent per-entry counting; already recorded above
+    ropts.access_kind =
+        StreamAccessKind::kNone;  // Prevent per-entry counting; already recorded above
     auto op_result = OpRange(op_args, key, ropts);
     if (!op_result || !op_result.value().size()) {
       Record rec;
