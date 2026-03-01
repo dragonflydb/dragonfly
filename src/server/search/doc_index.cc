@@ -882,8 +882,8 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {
   for (auto& [index_name, ptr] : indices_) {
     // Only use the restore path for indices that have populated key mappings.
-    // Key mappings are only serialized for HNSW indices and only when shard counts match,
-    // so non-HNSW indices or mismatched-shard restores correctly fall back to full rebuild.
+    // When shard counts differ, PerformPostLoad remaps the mappings; if remapping fails,
+    // the mappings are removed so the index falls back to full rebuild here.
     bool index_restored = is_restored && ptr->key_index_.Size() > 0;
     ptr->Rebuild(op_args, &local_mr_, index_restored);
   }

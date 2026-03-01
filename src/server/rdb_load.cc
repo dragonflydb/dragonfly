@@ -2123,21 +2123,31 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      // We can keep the same internal ids if shards count is the same and we can reuse the
-      // data-structures as is, otherwise we must rebuild from scratch
-      // TODO add ability to restore index with different shard count by remapping internal ids
-      const bool should_restore = deserialize_hnsw_index_ && shard_count_ == shard_set->size();
-
-      if (should_restore) {
+      if (!deserialize_hnsw_index_) {
+        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
+      } else {
+        DCHECK_GT(shard_count_, 0u);
+        // Parse "index_name:field_name" from the composite key.
         size_t colon_pos = index_key.rfind(':');
         string_view index_name{index_key.data(),
                                colon_pos != string::npos ? colon_pos : index_key.size()};
         string_view field_name = colon_pos != string::npos
                                      ? string_view{index_key.data() + colon_pos + 1}
                                      : string_view{};
-        RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
-      } else {
-        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
+
+        if (shard_count_ == shard_set->size()) {
+          // Same shard count: restore directly.
+          RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
+        } else {
+          // Different shard count: load nodes and defer restoration.
+          // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
+          PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
+          RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
+          LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with "
+                    << pending.nodes.size() << " nodes (shard count mismatch: " << shard_count_
+                    << " vs " << shard_set->size() << ")";
+          load_context_->AddPendingHnswNodes(std::move(pending));
+        }
       }
       continue;
     }
@@ -2163,16 +2173,16 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      // Only store mappings if deserialization is enabled AND shard count matches.
-      // With different shard counts, keys are distributed differently so the mappings are invalid.
-      if (!deserialize_hnsw_index_ || shard_count_ != shard_set->size()) {
+      if (!deserialize_hnsw_index_) {
         continue;
       }
+      DCHECK_GT(shard_count_, 0u);
 
       VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
               << " entries";
 
-      // Store the mapping to be applied after index creation (thread-safe)
+      // Always store mappings. When shard counts differ, PerformPostLoad will redistribute
+      // keys to replica shards and remap global_ids accordingly.
       load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
       continue;
     }
@@ -2504,6 +2514,7 @@ error_code RdbLoader::HandleAux() {
     uint32_t shard_count;
     if (absl::SimpleAtoi(auxval, &shard_count)) {
       shard_count_ = shard_count;
+      load_context_->SetMasterShardCount(shard_count);
     }
   } else if (auxkey == "shard-id") {
     uint32_t shard_id;
@@ -2853,19 +2864,9 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
   }
 }
 
-error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
-                                         string_view field_name, uint64_t elements_number) {
-  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
-  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
-  if (!hnsw_index) {
-    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
-               << ". Skipping serialized graph data.";
-    return SkipVectorIndex(index_key, elements_number);
-  }
-
-  std::vector<search::HnswNodeData> nodes;
-  nodes.reserve(elements_number);
-
+error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
+                                           std::vector<search::HnswNodeData>* nodes) {
+  nodes->reserve(elements_number);
   for (uint64_t elem = 0; elem < elements_number; ++elem) {
     search::HnswNodeData node;
     SET_OR_RETURN(FetchInt<uint32_t>(), node.internal_id);
@@ -2883,14 +2884,27 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
         SET_OR_RETURN(FetchInt<uint32_t>(), node.levels_links[lvl][i]);
       }
     }
-    nodes.push_back(std::move(node));
+    nodes->push_back(std::move(node));
+  }
+  return {};
+}
+
+error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
+                                         string_view field_name, uint64_t elements_number) {
+  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
+  if (!hnsw_index) {
+    LOG(ERROR) << "HNSW index not found for restoration: " << index_key;
+    return SkipVectorIndex(index_key, elements_number);
   }
 
-  if (!nodes.empty()) {
-    // Look up metadata from pending_hnsw_metadata (loaded from AUX field)
-    auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
+  std::vector<search::HnswNodeData> nodes;
+  RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &nodes));
 
-    CHECK(metadata);
+  if (!nodes.empty()) {
+    auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
+    DCHECK(metadata) << "HNSW metadata missing for " << index_key;
+
     hnsw_index->RestoreFromNodes(nodes, *metadata);
     LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   }

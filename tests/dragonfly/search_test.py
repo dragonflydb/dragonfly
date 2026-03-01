@@ -721,7 +721,9 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     from .instance import DflyInstanceFactory
 
     master = df_factory.create(proactor_threads=master_threads)
-    replica = df_factory.create(proactor_threads=replica_threads)
+    # logbuflevel=-1 forces glog to flush every log line immediately, so INFO messages
+    # are visible in the log file when we read it (before the process exits).
+    replica = df_factory.create(proactor_threads=replica_threads, logbuflevel=-1)
 
     df_factory.start_all([master, replica])
 
@@ -814,7 +816,7 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
         "vec",
         query_vec,
     )
-    assert knn_result[0] >= 1  # At least one result
+    assert knn_result[0] == 10  # Exactly 10 results for KNN 10
 
     # Start replication
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
@@ -842,9 +844,9 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
 
     # Geo search
     replica_geo = await replica_idx.search("@location:[-122.0 37.0 10 km]")
-    assert replica_geo.total > 0
+    assert replica_geo.total == geo_result.total
 
-    # Vector search (KNN)
+    # Vector search (KNN) - verify same results as master
     replica_knn = await c_replica.execute_command(
         "FT.SEARCH",
         "all_types_idx",
@@ -854,7 +856,40 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
         "vec",
         query_vec,
     )
-    assert replica_knn[0] >= 1
+    assert replica_knn[0] == 10
+
+    # Extract and compare document keys from KNN results (sorted because order may vary
+    # slightly due to floating-point distance ties).
+    # Format: [count, key1, fields1, key2, fields2, ...]
+    master_knn_keys = sorted([knn_result[i] for i in range(1, len(knn_result), 2)])
+    replica_knn_keys = sorted([replica_knn[i] for i in range(1, len(replica_knn), 2)])
+    assert master_knn_keys == replica_knn_keys, (
+        f"KNN results differ between master and replica: "
+        f"master={master_knn_keys}, replica={replica_knn_keys}"
+    )
+
+    # Verify the HNSW index was actually restored from the serialized graph (not rebuilt
+    # from scratch). Check replica's INFO log for the restoration message.
+    info_logs = [f for f in replica.log_files if "INFO" in f]
+    assert info_logs, "Could not find replica INFO log file"
+    with open(info_logs[0], "r") as f:
+        log_content = f.read()
+    if master_threads == replica_threads:
+        assert (
+            "Restored HNSW index" in log_content
+        ), "Expected HNSW index to be restored from serialized graph (same shard count)"
+    else:
+        assert (
+            "global_ids remapped" in log_content
+        ), "Expected HNSW index to be restored with global_id remapping (different shard count)"
+    rebuild_lines = [
+        l.strip()
+        for l in log_content.splitlines()
+        if "Will rebuild from scratch" in l and "HNSW" in l
+    ]
+    assert (
+        not rebuild_lines
+    ), "HNSW index fell back to rebuild from scratch unexpectedly:\n" + "\n".join(rebuild_lines)
 
 
 @dfly_args({"proactor_threads": 4})

@@ -343,6 +343,10 @@ class RdbLoader : protected RdbLoaderBase {
   std::error_code RestoreVectorIndex(std::string_view index_key, std::string_view index_name,
                                      std::string_view field_name, uint64_t elements_number);
 
+  // Load HNSW vector index nodes into a vector for deferred restoration.
+  std::error_code LoadVectorIndexNodes(uint64_t elements_number,
+                                       std::vector<search::HnswNodeData>* nodes);
+
   // Skip over serialized HNSW vector index node data without restoring.
   std::error_code SkipVectorIndex(std::string_view index_key, uint64_t elements_number);
 
