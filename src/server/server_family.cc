@@ -2086,16 +2086,16 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   }
 
   // Stream access pattern metrics
-  if (m.events.stream_sequential_accesses | m.events.stream_random_accesses |
-      m.events.stream_fetch_all_accesses) {
+  if (m.shard_stats.stream_sequential_accesses | m.shard_stats.stream_random_accesses |
+      m.shard_stats.stream_fetch_all_accesses) {
     AppendMetricHeader("stream_accesses_total", "Total stream accesses by type",
                        MetricType::COUNTER, &resp->body());
-    AppendMetricValue("stream_accesses_total", m.events.stream_sequential_accesses, {"access_type"},
-                      {"sequential"}, &resp->body());
-    AppendMetricValue("stream_accesses_total", m.events.stream_random_accesses, {"access_type"},
-                      {"random"}, &resp->body());
-    AppendMetricValue("stream_accesses_total", m.events.stream_fetch_all_accesses, {"access_type"},
-                      {"fetch_all"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_sequential_accesses,
+                      {"access_type"}, {"sequential"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_random_accesses,
+                      {"access_type"}, {"random"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_fetch_all_accesses,
+                      {"access_type"}, {"fetch_all"}, &resp->body());
   }
 }
 
@@ -3228,9 +3228,9 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("stream_sequential_accesses", m.events.stream_sequential_accesses);
-    append("stream_random_accesses", m.events.stream_random_accesses);
-    append("stream_fetch_all_accesses", m.events.stream_fetch_all_accesses);
+    append("stream_sequential_accesses", m.shard_stats.stream_sequential_accesses);
+    append("stream_random_accesses", m.shard_stats.stream_random_accesses);
+    append("stream_fetch_all_accesses", m.shard_stats.stream_fetch_all_accesses);
 
     // Number of connections that are currently blocked on grabbing interpreter.
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);

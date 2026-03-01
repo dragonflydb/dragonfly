@@ -633,16 +633,16 @@ struct RangeOpts {
 };
 
 void RecordStreamAccess(const OpArgs& op_args, StreamAccessKind kind) {
-  auto& events = op_args.GetDbSlice().MutableEvents();
+  auto& stats = op_args.shard->stats();
   switch (kind) {
     case StreamAccessKind::kSequential:
-      events.stream_sequential_accesses++;
+      stats.stream_sequential_accesses++;
       break;
     case StreamAccessKind::kRandom:
-      events.stream_random_accesses++;
+      stats.stream_random_accesses++;
       break;
     case StreamAccessKind::kFetchAll:
-      events.stream_fetch_all_accesses++;
+      stats.stream_fetch_all_accesses++;
       break;
   }
 }
@@ -1637,9 +1637,9 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
                                int full, size_t count) {
   auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   if (full) {
-    db_slice.MutableEvents().stream_fetch_all_accesses++;
+    shard->stats().stream_fetch_all_accesses++;
   } else {
-    db_slice.MutableEvents().stream_sequential_accesses++;
+    shard->stats().stream_sequential_accesses++;
   }
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   RETURN_ON_BAD_STATUS(res_it);
