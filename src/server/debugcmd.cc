@@ -767,7 +767,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
     return Segments(args.subspan(1), cmd_cntx);
   }
 
-  if (subcmd == "DASH_GC") {
+  if (subcmd == "COMPACT-TABLE") {
     return DashGC(args.subspan(1), cmd_cntx);
   }
 
