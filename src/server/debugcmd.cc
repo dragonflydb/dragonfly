@@ -1618,7 +1618,7 @@ void DebugCmd::DashGC(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
-  const size_t db_idx = cmd_cntx->server_conn_cntx()->db_index();
+  const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
   std::vector<size_t> results(shard_set->size());
   shard_set->RunBlockingInParallel(
       [&](EngineShard* shard) { results[shard->shard_id()] = shard->DashGC(threshold, db_idx); });

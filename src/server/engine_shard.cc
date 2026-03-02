@@ -1123,13 +1123,12 @@ size_t EngineShard::DashGC(double threshold, DbIndex db_idx) {
   size_t total_seg_merged = 0;
 
   while (true) {
-    if (SliceSnapshot::IsSnaphotInProgress()) {
-      return total_seg_merged;
-    }
     bool merged_any = false;
-
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
     for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
+      if (SliceSnapshot::IsSnaphotInProgress()) {
+        return total_seg_merged;
+      }
       // Fetch segment pointer fresh each iteration
       auto* seg = prime.GetSegment(seg_id);
 
