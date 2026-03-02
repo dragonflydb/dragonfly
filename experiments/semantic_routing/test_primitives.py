@@ -65,14 +65,18 @@ def main():
         "TAG",
         "reference",
         "TEXT",
+        # the vector field simulates by hand embeddings like those produced by models, but only with 4 dimensions
         "vector",
         "VECTOR",
         "FLAT",
         "6",
+        # each element is float
         "TYPE",
         "FLOAT32",
+        # dim = 4
         "DIM",
         str(DIMS),
+        # will be used by knn later
         "DISTANCE_METRIC",
         "COSINE",
     )
@@ -101,9 +105,12 @@ def main():
             # Create a vector close to the cluster center with a little noise
             noise = np.random.randn(DIMS).astype(np.float32) * 0.1
             vec = center + noise
+            # this makes sure the vector reaches from 0000 to a point on the unit sphere, but with the direction
+            # intact. this way all vectors ultimately stored in hsets have the same magnitude
             vec = vec / np.linalg.norm(vec)  # normalize for cosine
 
             key = f"{prefix}{ref_id}"
+            # one hset per reference, 3 for greet, 3 for farewell
             r.hset(
                 key,
                 mapping={
@@ -126,6 +133,7 @@ def main():
     results = r.execute_command(
         "FT.SEARCH",
         index_name,
+        # search with no prefilter, find closest 3 by cosine distance
         "*=>[KNN 3 @vector $query_vec AS dist]",
         "PARAMS",
         "2",
@@ -163,6 +171,7 @@ def main():
     results = r.execute_command(
         "FT.SEARCH",
         index_name,
+        # search with prefilter, the query is closer to the greet center, but we search farewell items
         "@route_name:{farewell}=>[KNN 2 @vector $query_vec AS dist]",
         "PARAMS",
         "2",
@@ -199,6 +208,7 @@ def main():
     all_results = r.execute_command(
         "FT.SEARCH",
         index_name,
+        # find everything now - total. the greeting ones will be closer to the query
         f"*=>[KNN {total} @vector $query_vec AS dist]",
         "PARAMS",
         "2",
@@ -219,6 +229,8 @@ def main():
     # Aggregate average distance per route
     from collections import defaultdict
 
+    # create dict such that: "greeting": [...], "farewell": [...] where the values are distance lists.
+    # the greeting ones have shorter distance to the query point
     route_dists: dict[str, list[float]] = defaultdict(list)
     for i in range(1, len(all_results), 2):
         fields = all_results[i + 1]
@@ -228,6 +240,7 @@ def main():
         route_dists[field_map["route_name"]].append(float(field_map["dist"]))
 
     print("   Route classification results:")
+    # average the values, the greeting cluster is closer to the query
     for route, dists in sorted(route_dists.items(), key=lambda x: np.mean(x[1])):
         avg = np.mean(dists)
         print(f"     {route:12s}  avg_dist={avg:.4f}  (individual: {[f'{d:.4f}' for d in dists]})")
