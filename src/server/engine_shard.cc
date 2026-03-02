@@ -1133,10 +1133,6 @@ size_t EngineShard::DashGC(double threshold, DbIndex db_idx) {
       // Fetch segment pointer fresh each iteration
       auto* seg = prime.GetSegment(seg_id);
 
-      size_t local_depth = seg->local_depth();
-      if (local_depth == 1)
-        continue;
-
       unsigned buddy_id = prime.FindBuddyId(seg_id);
       if (buddy_id == seg_id)
         continue;

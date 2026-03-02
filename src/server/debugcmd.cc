@@ -680,7 +680,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    per second.",
         "SEGMENTS",
         "    Prints segment info for the current database.",
-        "DASH_GC threshold",
+        "COMPACT-TABLE threshold",
         "    Attempts to merge underutilized segments in dash table",
         "HELP",
         "    Prints this help.",

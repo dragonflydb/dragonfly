@@ -31,7 +31,7 @@ async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Re
         await async_client.delete(*keys_to_delete[batch_start : batch_start + 1000])
 
     # Run GC with aggressive threshold to trigger merges
-    segments_merged = await async_client.execute_command("DEBUG", "DASH_GC", "0.5")
+    segments_merged = await async_client.execute_command("DEBUG", "COMPACT-TABLE", "0.5")
 
     stats_after = await async_client.info("MEMORY")
     assert segments_merged > 0
@@ -42,7 +42,7 @@ async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Re
     )
 
     logging.info(
-        f"DASH_GC merged {segments_merged} segments, "
+        f"COMPACT-TABLE merged {segments_merged} segments, "
         f"capacity {stats_before['prime_capacity']} -> {stats_after['prime_capacity']}"
     )
 
@@ -54,11 +54,11 @@ async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Re
 @dfly_args({"proactor_threads": 1, "maxmemory": "2G"})
 async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
     """
-    Verify DASH_GC running concurrently with data insertion doesn't corrupt seeded data.
+    Verify COMPACT-TABLE running concurrently with data insertion doesn't corrupt seeded data.
 
     a) Grow the dash table via DEBUG POPULATE with a prefix
     b) Delete all populated keys to create sparse segments
-    c) Run DEBUG DASH_GC concurrently with Seeder
+    c) Run DEBUG COMPACT-TABLE concurrently with Seeder
     d) Assert all data seeded by Seeder exists in the dash table
     """
     # a) Grow the dash table by seeding a large number of keys with a prefix
@@ -76,14 +76,14 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
 
     assert await async_client.dbsize() == 0
 
-    # c) Run DASH_GC concurrently with Seeder so GC reclaims sparse segments
+    # c) Run COMPACT-TABLE concurrently with Seeder so GC reclaims sparse segments
     #    while new data is being written
     key_target = 5_000
     seeder = Seeder(key_target=key_target, data_size=100)
 
     async def run_gc():
         for _ in range(10):
-            await async_client.execute_command("DEBUG", "DASH_GC", "0.5")
+            await async_client.execute_command("DEBUG", "COMPACT-TABLE", "0.5")
             await asyncio.sleep(0.05)
 
     await asyncio.gather(
@@ -97,7 +97,7 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
     assert all(h != 0 for h in capture_before), "Seeder should have written data for all types"
 
     for _ in range(5):
-        await async_client.execute_command("DEBUG", "DASH_GC", "0.5")
+        await async_client.execute_command("DEBUG", "COMPACT-TABLE", "0.5")
         await asyncio.sleep(0.05)
 
     capture_after = await Seeder.capture(async_client)
