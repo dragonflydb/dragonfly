@@ -122,6 +122,31 @@ class TestMemcached:
 
             client.close()
 
+    def test_pipeline_get_then_stats_version(self, df_server: DflyInstance):
+        """
+        Verify GET pipelined before STATS or VERSION doesn't crash the server.
+        """
+        port = int(df_server["memcached_port"])
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(5)
+        client.connect(("127.0.0.1", port))
+        client.sendall(b"get nokey\r\nversion\r\n")
+        response = read_response(client, len(b"END\r\nVERSION 1.6.0 DF\r\n"))
+        client.close()
+        assert response == b"END\r\nVERSION 1.6.0 DF\r\n"
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(5)
+        client.connect(("127.0.0.1", port))
+        client.sendall(b"get nokey\r\nstats\r\n")
+        # Read until both GET's END and STATS' END are received before closing.
+        response = b""
+        while response.count(b"END\r\n") < 2:
+            response += client.recv(4096)
+        client.close()
+        assert response.startswith(b"END\r\nSTAT ")
+
     def test_error_in_pipeline(self, df_server: DflyInstance, memcached_client: MCClient):
         """
         Verify correct responses to  "get x\r\ngetaa\r\nget y z\r\n"

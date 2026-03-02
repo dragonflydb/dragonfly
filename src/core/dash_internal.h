@@ -574,6 +574,10 @@ class Segment {
     return kBucketNum + kStashBucketNum;
   }
 
+  uint32_t segment_id() const {
+    return segment_id_;
+  }
+
   // needed only when DashTable grows its segment table.
   void set_segment_id(uint32_t new_id) {
     segment_id_ = new_id;

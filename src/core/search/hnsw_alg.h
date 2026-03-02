@@ -1041,12 +1041,15 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
   }
 
-  void updatePoint(const void* dataPoint, tableint internalId, float updateNeighborProbability) {
+  void updatePoint(const void* dataPointIn, tableint internalId, float updateNeighborProbability) {
     if (copy_vector_) {
-      memcpy(getDataByInternalId(internalId), dataPoint, data_size_);
+      memcpy(getDataByInternalId(internalId), dataPointIn, data_size_);
     } else {
-      memcpy(getDataPtrByInternalId(internalId), &dataPoint, sizeof(void*));
+      memcpy(getDataPtrByInternalId(internalId), &dataPointIn, sizeof(void*));
     }
+
+    const void* dataPoint = getDataByInternalId(internalId);
+    assert(dataPoint != nullptr);
 
     int maxLevelCopy = maxlevel_;
     tableint entryPointCopy = enterpoint_node_;
@@ -1209,7 +1212,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     return result;
   }
 
-  tableint addPoint(const void* data_point, labeltype label, int level) {
+  tableint addPoint(const void* data_point_in, labeltype label, int level) {
     tableint cur_c = 0;
     {
       // Checking if the element with the same label already exists
@@ -1230,7 +1233,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         if (isMarkedDeleted(existingInternalId)) {
           unmarkDeletedInternal(existingInternalId);
         }
-        updatePoint(data_point, existingInternalId, 1.0);
+        updatePoint(data_point_in, existingInternalId, 1.0);
 
         return existingInternalId;
       }
@@ -1269,10 +1272,13 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
 
     if (copy_vector_) {
-      memcpy(getDataByInternalId(cur_c), data_point, data_size_);
+      memcpy(getDataByInternalId(cur_c), data_point_in, data_size_);
     } else {
-      memcpy(getDataPtrByInternalId(cur_c), &data_point, sizeof(void*));
+      memcpy(getDataPtrByInternalId(cur_c), &data_point_in, sizeof(void*));
     }
+
+    const void* data_point = getDataByInternalId(cur_c);
+    assert(data_point != nullptr);
 
     if (curlevel) {
       linkLists_[cur_c] = (char*)mi_malloc(size_links_per_element_ * curlevel + 1);
@@ -1395,6 +1401,40 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
       top_candidates.pop();
     }
+    return result;
+  }
+
+  // Brute-force KNN search over a pre-filtered set of label IDs.
+  // Computes distances for all provided IDs and returns the top-k closest, ordered by distance.
+  std::priority_queue<std::pair<dist_t, labeltype>> subsetKnnSearch(
+      const void* query_data, size_t k, const std::vector<labeltype>& ids) const {
+    std::priority_queue<std::pair<dist_t, labeltype>> result;
+
+    if (cur_element_count == 0 || ids.empty() || k == 0)
+      return result;
+
+    for (const auto& label : ids) {
+      auto it = label_lookup_.find(label);
+
+      if (it == label_lookup_.end()) {
+        continue;
+      }
+
+      tableint internal_id = it->second;
+
+      if (isMarkedDeleted(internal_id)) {
+        continue;
+      }
+
+      dist_t dist = fstdistfunc_(query_data, getDataByInternalId(internal_id), dist_func_param_);
+      if (result.size() < k) {
+        result.emplace(dist, label);
+      } else if (dist < result.top().first) {
+        result.pop();
+        result.emplace(dist, label);
+      }
+    }
+
     return result;
   }
 

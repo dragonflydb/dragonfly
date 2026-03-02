@@ -14,6 +14,8 @@
 #include "facade/connection_ref.h"
 #include "facade/op_status.h"
 #include "server/common.h"
+#include "server/common_types.h"
+#include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tx_base.h"
 #include "util/fibers/fibers.h"

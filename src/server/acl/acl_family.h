@@ -15,7 +15,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
 #include "server/command_registry.h"
-#include "server/common.h"
+#include "server/execution_state.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -23,6 +23,8 @@ class Listener;
 }  // namespace facade
 
 namespace dfly {
+
+using facade::CmdArgList;
 
 class ConnectionContext;
 namespace acl {

@@ -4,12 +4,12 @@
 
 #pragma once
 
-#include "server/common.h"
+#include <cstddef>
 
 namespace dfly {
 
 class CommandRegistry;
-class CompactValue;
+struct CompactValue;
 
 class StreamMemTracker {
  public:

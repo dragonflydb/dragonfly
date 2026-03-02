@@ -5,7 +5,6 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 
-#include <bitset>
 #include <nonstd/expected.hpp>
 
 #include "base/logging.h"
@@ -16,9 +15,10 @@
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/tiered_storage.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"
@@ -230,10 +230,6 @@ bool GetBitValue(const string& entry, uint32_t offset) {
   return CheckBitStatus(byte_val, index);
 }
 
-bool GetBitValueSafe(const string& entry, uint32_t offset) {
-  return ((entry.size() * OFFSET_FACTOR) > offset) ? GetBitValue(entry, offset) : false;
-}
-
 constexpr uint8_t TurnBitOn(uint8_t on, uint32_t offset) {
   return on |= 1 << offset;
 }
@@ -256,14 +252,9 @@ bool SetBitValue(uint32_t offset, bool bit_value, string* entry) {
 
 class ElementAccess {
  private:
-  bool added_ = false;
-  DbSlice::Iterator element_iter_;
   string_view key_;
   DbContext context_;
-  EngineShard* shard_ = nullptr;
-  mutable DbSlice::AutoUpdater post_updater_;
-
-  void SetFields(EngineShard* shard, DbSlice::ItAndUpdater res);
+  mutable DbSlice::ItAndUpdater updater_;
 
  public:
   ElementAccess(string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
@@ -271,77 +262,79 @@ class ElementAccess {
 
   /* If allow_wrong_type = true - it still finds the element even if it's WRONG_TYPE. This is used
      for blind updates. See BITOP operation. */
-  OpStatus Find(EngineShard* shard, bool allow_wrong_type);
+  OpStatus Find(bool allow_wrong_type);
 
   bool IsNewEntry() const {
-    CHECK_NOTNULL(shard_);
-    return added_;
-  }
-
-  constexpr DbIndex Index() const {
-    return context_.db_index;
+    return updater_.is_new;
   }
 
   string Value() const;
+
+  bool GetByteAtIndex(size_t idx, uint8_t* res) const;
+  void SetByteAtIndex(size_t idx, uint8_t value) const;
 
   void Commit(string_view new_value) const;
 
   // return nullopt when key exists but it's not encoded as string
   // return true if key exists and false if it doesn't
-  std::optional<bool> Exists(EngineShard* shard);
+  std::optional<bool> Exists();
 };
 
-std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
-  auto res = context_.GetDbSlice(shard->shard_id()).FindReadOnly(context_, key_, OBJ_STRING);
+std::optional<bool> ElementAccess::Exists() {
+  auto& db_slice = context_.ns->GetCurrentDbSlice();
+  auto res = db_slice.FindReadOnly(context_, key_, OBJ_STRING);
   if (res.status() == OpStatus::WRONG_TYPE) {
     return {};
   }
   return res.status() != OpStatus::KEY_NOTFOUND;
 }
 
-void ElementAccess::SetFields(EngineShard* shard, DbSlice::ItAndUpdater res) {
-  element_iter_ = res.it;
-  added_ = res.is_new;
-  shard_ = shard;
-  post_updater_ = std::move(res.post_updater);
-}
-
-OpStatus ElementAccess::Find(EngineShard* shard, bool allow_wrong_type) {
+OpStatus ElementAccess::Find(bool allow_wrong_type) {
+  auto& db_slice = context_.ns->GetCurrentDbSlice();
   // If we allow wrong type, we use nullopt to indicate that we don't care about the type.
-  auto op_res =
-      context_.GetDbSlice(shard->shard_id())
-          .AddOrFind(context_, key_,
-                     allow_wrong_type ? std::nullopt : std::optional<unsigned>{OBJ_STRING});
+  auto op_res = db_slice.AddOrFind(
+      context_, key_, allow_wrong_type ? std::nullopt : std::optional<unsigned>{OBJ_STRING});
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  SetFields(shard, std::move(add_res));
+  updater_ = std::move(add_res);
+
   return OpStatus::OK;
 }
 
 string ElementAccess::Value() const {
-  CHECK_NOTNULL(shard_);
-  if (!added_) {  // Exist entry - return it
-    return GetString(element_iter_->second);
-  } else {  // we only have reference to the new entry but no value
-    return string{};
+  return IsNewEntry() ? string{} : GetString(updater_.it->second);
+}
+
+bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
+  DCHECK(!IsNewEntry());
+  return updater_.it->second.GetByteAtIndex(idx, res);
+}
+
+void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
+  DCHECK(!IsNewEntry());
+  DCHECK_LT(idx, updater_.it->second.Size());
+  auto [success, _] = updater_.it->second.SetByteAtIndex(idx, val);
+  if (success) {
+    updater_.post_updater.Run();
   }
 }
 
 void ElementAccess::Commit(string_view new_value) const {
-  if (shard_) {
-    if (new_value.empty()) {
-      if (!IsNewEntry()) {
-        post_updater_.Run();
-      } else {
-        // No need to run, it was a new entry and it got removed
-        post_updater_.Cancel();
-      }
-      context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
+  if (new_value.empty()) {
+    if (!IsNewEntry()) {
+      updater_.post_updater.Run();
     } else {
-      element_iter_->second.SetString(new_value);
-      post_updater_.Run();
+      // No need to run, it was a new entry and it got removed
+      updater_.post_updater.Cancel();
     }
+    context_.ns->GetCurrentDbSlice().Del(context_, updater_.it);
+  } else {
+    if (!IsNewEntry() && updater_.it->second.ObjType() != OBJ_STRING) {
+      updater_.post_updater.ReduceHeapUsage();
+    }
+    updater_.it->second.SetString(new_value);
+    updater_.post_updater.Run();
   }
 }
 
@@ -349,34 +342,50 @@ void ElementAccess::Commit(string_view new_value) const {
 // Set a new value to a given bit
 
 OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset, bool bit_value) {
-  EngineShard* shard = args.shard;
   ElementAccess element_access{key, args};
   auto& db_slice = args.GetDbSlice();
-  DCHECK(db_slice.IsDbValid(element_access.Index()));
+  DCHECK(db_slice.IsDbValid(args.db_cntx.db_index));
   bool old_value = false;
 
-  auto find_res = element_access.Find(shard, false);
+  auto find_res = element_access.Find(false);
 
   if (find_res != OpStatus::OK) {
+    VLOG(1) << "Find failed for key: " << key << " with error: " << find_res;
     return find_res;
   }
 
+  const size_t byte_index = GetByteIndex(offset);
+
+  // Create a new entry
   if (element_access.IsNewEntry()) {
-    string new_entry(GetByteIndex(offset) + 1, 0);
+    VLOG(2) << "Creating new key: " << key << " with size: " << (byte_index + 1) << " bytes";
+    string new_entry(byte_index + 1, 0);
     old_value = SetBitValue(offset, bit_value, &new_entry);
     element_access.Commit(new_entry);
-  } else {
-    bool reset = false;
-    string existing_entry{element_access.Value()};
-    if ((existing_entry.size() * OFFSET_FACTOR) <= offset) {
-      existing_entry.resize(GetByteIndex(offset) + 1, 0);
-      reset = true;
-    }
-    old_value = SetBitValue(offset, bit_value, &existing_entry);
-    if (reset || old_value != bit_value) {  // we made a "real" change to the entry, save it
-      element_access.Commit(existing_entry);
-    }
+    return old_value;
   }
+
+  // Get byte where bit offset is located. If offset is out of bound it means
+  // that we need to extend the string otherwise we just update.
+  uint8_t existing_byte;
+  if (element_access.GetByteAtIndex(byte_index, &existing_byte)) {
+    VLOG(2) << "Updating key: " << key << " at byte index: " << byte_index;
+    uint32_t bit_index = GetNormalizedBitIndex(offset);
+    old_value = CheckBitStatus(existing_byte, bit_index);
+    if (old_value != bit_value) {
+      existing_byte =
+          bit_value ? TurnBitOn(existing_byte, bit_index) : TurnBitOff(existing_byte, bit_index);
+      element_access.SetByteAtIndex(byte_index, existing_byte);
+    }
+  } else {
+    VLOG(2) << "Extending key: " << key << " to " << (byte_index + 1) << " bytes";
+    string existing_entry{element_access.Value()};
+    existing_entry.resize(byte_index + 1, 0);
+    SetBitValue(offset, bit_value, &existing_entry);
+    // We always need to commit the extended key
+    element_access.Commit(existing_entry);
+  }
+
   return old_value;
 }
 
@@ -919,8 +928,7 @@ using CommandList = vector<Command>;
 // Helper class used in the shard cb that abstracts away the iteration and execution of subcommands
 class StateExecutor {
  public:
-  StateExecutor(ElementAccess access, EngineShard* shard)
-      : access_{std::move(access)}, shard_(shard) {
+  explicit StateExecutor(ElementAccess access) : access_{std::move(access)} {
   }
 
   //  Iterates over all of the parsed subcommands and executes them one by one. At the end,
@@ -930,17 +938,16 @@ class StateExecutor {
 
  private:
   ElementAccess access_;
-  EngineShard* shard_;
 };
 
 OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands) {
-  auto res = access_.Exists(shard_);
+  auto res = access_.Exists();
   if (!res) {
     return {OpStatus::WRONG_TYPE};
   }
   string value;
   if (*res) {
-    access_.Find(shard_, false);
+    access_.Find(false);
     value = access_.Value();
   }
 
@@ -954,7 +961,7 @@ OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands)
   }
 
   if (visitor.ShouldCommit()) {
-    access_.Find(shard_, false);
+    access_.Find(false);
     access_.Commit(visitor.Bitfield());
   }
 
@@ -1116,7 +1123,7 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
   CommandList cmd_list = std::move(maybe_ops_list.value());
 
   auto cb = [&cmd_list, &key](Transaction* t, EngineShard* shard) -> OpResult<vector<ResultType>> {
-    StateExecutor executor(ElementAccess(key, t->GetOpArgs(shard)), shard);
+    StateExecutor executor(ElementAccess(key, t->GetOpArgs(shard)));
     return executor.Execute(cmd_list);
   };
 
@@ -1188,7 +1195,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
     auto store_cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == dest_shard) {
         ElementAccess operation{dest_key, t->GetOpArgs(shard)};
-        auto find_res = operation.Find(shard, true);
+        auto find_res = operation.Find(true);
 
         // BITOP command acts as a blind update. If the key existed and its type
         // was not a string we still want to Commit with the new value.
@@ -1261,12 +1268,22 @@ string GetString(const PrimeValue& pv) {
 }
 
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
-  OpResult<string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
-  if (result) {
-    return GetBitValueSafe(result.value(), offset);
-  } else {
-    return result.status();
+  DbSlice& db_slice = op_args.GetDbSlice();
+  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+
+  if (!it_res.ok()) {
+    return it_res.status();
   }
+
+  const PrimeValue& pv = it_res.value()->second;
+
+  uint8_t byte_value = 0;
+  if (!pv.GetByteAtIndex(GetByteIndex(offset), &byte_value)) {
+    return false;
+  }
+
+  const auto bit_index = GetNormalizedBitIndex(offset);
+  return CheckBitStatus(byte_value, bit_index);
 }
 
 OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard) {

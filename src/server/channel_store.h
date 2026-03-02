@@ -8,10 +8,12 @@
 #include <string_view>
 
 #include "facade/connection_ref.h"
-#include "server/conn_context.h"
+#include "facade/facade_types.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
+class ConnectionContext;
 class ChannelStoreUpdater;
 
 namespace cluster {

@@ -109,9 +109,8 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx,
-                                 JournalStreamer::Config config)
-    : cntx_(cntx), journal_(journal), config_(config) {
+JournalStreamer::JournalStreamer(ExecutionState* cntx, JournalStreamer::Config config)
+    : cntx_(cntx), config_(config) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
@@ -150,7 +149,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest) {
   dest_ = dest;
   // For partial sync we first catch up from journal replication buffer and only then register.
   if (config_.start_partial_sync_at == 0) {
-    journal_cb_id_ = journal_->RegisterOnChange(this);
+    journal_cb_id_ = journal::RegisterConsumer(this);
   }
   StartStalledDataWriterFiber();
 }
@@ -162,11 +161,11 @@ bool JournalStreamer::Cancel() {
   if (journal_cb_id_) {
     auto cb_id = journal_cb_id_;
     journal_cb_id_ = 0;  // Reset to prevent double unregistration in another fiber
-    journal_->UnregisterOnChange(cb_id);
+    journal::UnregisterConsumer(cb_id);
     res = true;
   }
   StopStalledDataWriterFiber();
-  WaitForInflightToComplete();
+  WaitForInflightToComplete(false);
   return res;
 }
 
@@ -207,13 +206,13 @@ bool JournalStreamer::MaybePartialStreamLSNs() {
   // the old LSN"s via a snapshot but rather as journal changes.
   if (config_.start_partial_sync_at > 0) {
     LSN lsn = config_.start_partial_sync_at;
-    DCHECK_LE(lsn, journal_->GetLsn()) << "The replica tried to sync from the future.";
+    DCHECK_LE(lsn, journal::GetLsn()) << "The replica tried to sync from the future.";
 
     LOG(INFO) << "Starting partial sync from lsn: " << lsn;
     // The replica sends the LSN of the next entry is wants to receive.
-    while (cntx_->IsRunning() && journal_->IsLSNInBuffer(lsn)) {
+    while (cntx_->IsRunning() && journal::IsLSNInBuffer(lsn)) {
       JournalChangeItem item;
-      item.journal_item.data = journal_->GetEntry(lsn);
+      item.journal_item.data = journal::GetEntry(lsn);
       item.journal_item.lsn = lsn;
       ConsumeJournalChange(item);
       lsn++;
@@ -223,17 +222,17 @@ bool JournalStreamer::MaybePartialStreamLSNs() {
       return false;
     }
 
-    if (journal_->GetLsn() != lsn) {
+    if (journal::GetLsn() != lsn) {
       // We stopped but we didn't manage to send the whole stream.
       cntx_->ReportError(
           std::make_error_code(errc::state_not_recoverable),
           absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
-                       " was dropped from the buffer. Current lsn=", journal_->GetLsn()));
+                       " was dropped from the buffer. Current lsn=", journal::GetLsn()));
       return false;
     }
 
     // We are done, register back to the journal so we don't miss any changes
-    journal_cb_id_ = journal_->RegisterOnChange(this);
+    journal_cb_id_ = journal::RegisterConsumer(this);
 
     LOG(INFO) << "Last LSN sent in partial sync was " << (lsn - 1);
     // flush pending
@@ -378,13 +377,25 @@ void JournalStreamer::ThrottleIfNeeded() {
   }
 }
 
-void JournalStreamer::WaitForInflightToComplete() {
+void JournalStreamer::WaitForInflightToComplete(bool with_timeout) {
+  const auto start = chrono::steady_clock::now();
+  const auto max_timeout = start + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
   while (in_flight_bytes_) {
     auto next = chrono::steady_clock::now() + 1s;
     std::cv_status status =
         waker_.await_until([this] { return this->in_flight_bytes_ == 0; }, next);
     LOG_IF(WARNING, status == std::cv_status::timeout)
         << "Waiting for inflight bytes " << in_flight_bytes_;
+
+    if (next >= max_timeout) {
+      if (with_timeout) {
+        cntx_->ReportError("JournalStreamer write operation timeout");
+        break;
+      } else {
+        LOG(WARNING) << "WaitForInflightToComplete timed out with " << in_flight_bytes_
+                     << " inflight bytes remaining";
+      }
+    }
   }
 }
 
@@ -401,15 +412,15 @@ bool JournalStreamer::IsStalled() const {
   return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                                 ExecutionState* cntx)
-    : JournalStreamer(journal, cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
+RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx)
+    : JournalStreamer(cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
+      db_slice_,
       [&](std::string s) {
         Write(std::move(s));
         ThrottleIfNeeded();
@@ -438,6 +449,7 @@ void RestoreStreamer::Run() {
   boost::intrusive_ptr<DbTable> table = db_array_.front();
   PrimeTable* pt = &table->prime;
   ExpireTable& expire_table = table->expire;
+
   do {
     if (!cntx_->IsRunning())
       return;
@@ -480,11 +492,16 @@ void RestoreStreamer::Run() {
 
       std::lock_guard guard(big_value_mu_);
 
-      // Locking this never preempts. See snapshot.cc for why we need it.
-      auto* blocking_counter = db_slice_->GetLatch();
-      lock_guard blocking_counter_guard(*blocking_counter);
+      {
+        // Locking this never preempts. See snapshot.cc for why we need it.
+        auto* blocking_counter = db_slice_->GetLatch();
+        lock_guard blocking_counter_guard(*blocking_counter);
 
-      stats_.buckets_loop += WriteBucket(it, expire_table);
+        stats_.buckets_loop += WriteBucket(it, expire_table, false);
+      }
+
+      // We could have delayed entries that are watiting so we want to flush them
+      cmd_serializer_->SerializeDelayedEntries(false, nullptr);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
@@ -496,6 +513,12 @@ void RestoreStreamer::Run() {
       last_yield = 0;
     }
   } while (cursor);
+
+  // Force serialize of all delayed entries.
+  {
+    std::lock_guard guard(big_value_mu_);
+    cmd_serializer_->SerializeDelayedEntries(true, nullptr);
+  }
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
@@ -512,6 +535,10 @@ void RestoreStreamer::SendFinalize(long attempt) {
           << ", throttle on db update: " << stats_.throttle_on_db_update
           << ", throttle usec on db update: " << stats_.throttle_usec_on_db_update
           << ", iter_skips: " << stats_.iter_skips;
+
+  // Drain all pending journal data before sending the finalize marker.
+  // At this point client pause is active, so no new entries can arrive.
+  WaitForInflightToComplete(true);
 
   journal::Entry entry(journal::Op::LSN, attempt);
 
@@ -565,17 +592,28 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table,
+                                  bool on_db_change_cb) {
   auto& shard_stats = EngineShard::tlocal()->stats();
   bool written = false;
+  absl::flat_hash_set<string> tiered_keys;
+  string key_buffer;  // we can reuse it
+
+  // Only track tiered keys when needed and flush delayed entries
+  // 1. When we have tiered storage
+  // 2. We're called from a OnDbChange callback
+  //
+  // We need to track all keys in bucket with tiering. Even if they are not set as external. There
+  // is situation when we request externalization of key and key is read - marking it as not
+  // external but not yet flushed. When OnDbChange callback is called we need to flush it and than
+  // write journal changes - so we cannot realy on IsExternal flag and need to track all keys.
+  const bool track_tiered_keys =
+      on_db_change_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
 
   if (!it.is_done() && it.GetVersion() < snapshot_version_) {
     base::CpuTimeGuard guard(&cpu_aggregator_);
-
     stats_.buckets_written++;
-
     it.SetVersion(snapshot_version_);
-    string key_buffer;  // we can reuse it
     for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
@@ -588,7 +626,10 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
           CHECK(IsValid(eit)) << " " << expire_table.size();
           expire = db_slice_->ExpireTime(eit->second);
         }
-
+        // Track tiered keys that will need delayed entry flushing
+        if (track_tiered_keys) {
+          tiered_keys.emplace(key);
+        }
         WriteEntry(key, it->first, pv, expire);
         written = true;
       } else {
@@ -596,8 +637,27 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
       }
     }
   } else {
+    // Bucket already serialized, but we may still need to track tiered keys
+    // for force-flushing their delayed entries
+    if (track_tiered_keys) {
+      for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+        string_view key = it->first.GetSlice(&key_buffer);
+        if (ShouldWrite(key)) {
+          tiered_keys.emplace(key);
+        }
+      }
+    }
     stats_.buckets_skipped++;
   }
+
+  // Force serialized entries for keys that are tiered and were updated during migration.
+  // Unfortunately we cannot be selective here and need to flush all delayed entreis that we
+  // collected while traversing bucket.
+  // TODO: change interface so we forcefully flush only single entry.
+  if (tiered_keys.size()) {
+    cmd_serializer_->SerializeDelayedEntries(true, &tiered_keys);
+  }
+
   // we don't need throttle here, because we throttle after every entry written
 
   return written;
@@ -616,14 +676,14 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
       // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
       return;
     }
-    stats_.buckets_on_db_update += WriteBucket(*bit, *expire_table);
+    stats_.buckets_on_db_update += WriteBucket(*bit, *expire_table, true);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator it) {
       if (snapshot_version_ != 0) {  // we need this check because lambda can be called several
                                      // times and we can preempt in WriteBucket
         DCHECK_LT(it.GetVersion(), snapshot_version_);
-        stats_.buckets_on_db_update += WriteBucket(it, *expire_table);
+        stats_.buckets_on_db_update += WriteBucket(it, *expire_table, true);
       }
     });
   }

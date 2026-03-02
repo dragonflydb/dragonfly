@@ -488,11 +488,6 @@ async def test_index_persistence(df_server):
     i1 = client.ft("i1")
     i2 = client.ft("i2")
 
-    while (await i1.info())["indexing"] == 1:
-        await asyncio.sleep(0.05)
-    while (await i2.info())["indexing"] == 1:
-        await asyncio.sleep(0.05)
-
     info_1_new = await i1.info()
     info_2_new = await i2.info()
 
@@ -545,7 +540,7 @@ def test_redis_om(df_server):
         skip_if_not_in_github("redis-om python library not installed")
         raise
 
-    client = redis.Redis(port=df_server.port)
+    client = redis.Redis(port=df_server.port, decode_responses=True)
 
     class TestCar(redis_om.HashModel):
         producer: str = redis_om.Field(index=True)
@@ -575,6 +570,14 @@ def test_redis_om(df_server):
         car.save()
 
     redis_om.Migrator().run()
+
+    # Wait for async indexing of existing documents to complete
+    for index_name in client.execute_command("FT._LIST"):
+        timeout = time.time() + 10
+        while int(client.ft(index_name).info()["indexing"]) == 1:
+            if time.time() > timeout:
+                raise TimeoutError(f"Indexing {index_name} did not complete within 10 seconds")
+            time.sleep(0.05)
 
     # Get all cars
     assert extract_producers(TestCar.find().all()) == extract_producers(CARS)
@@ -613,8 +616,8 @@ def test_redis_om(df_server):
     # What's the fastest car
     assert extract_producers([TestCar.find().sort_by("-speed").first()]) == ["BMW"]
 
-    for index in client.execute_command("FT._LIST"):
-        client.ft(index.decode()).dropindex()
+    for index_name in client.execute_command("FT._LIST"):
+        client.ft(index_name).dropindex()
 
 
 @dfly_args({"proactor_threads": 4, "dbfilename": "synonym-persistence"})
@@ -639,8 +642,6 @@ async def test_synonym_persistence(df_server):
     await wait_available_async(client)
 
     idx = client.ft("idx")
-    while (await idx.info())["indexing"] == 1:
-        await asyncio.sleep(0.05)
 
     # Verify synonyms still work after restart
     assert (await idx.search(Query("car"))).total == 2
@@ -824,13 +825,6 @@ async def test_replicate_all_index_types(df_factory, master_threads, replica_thr
     assert b"all_types_idx" in indices or "all_types_idx" in indices
 
     replica_idx = c_replica.ft("all_types_idx")
-
-    # Wait for replication and async indexing (especially HNSW vectors) to complete
-    timeout = time.time() + 30  # 30 second timeout
-    while (await replica_idx.info())["indexing"] == 1:
-        if time.time() > timeout:
-            raise TimeoutError("Indexing did not complete within 30 seconds")
-        await asyncio.sleep(0.05)
 
     # Verify all search types work on replica
 

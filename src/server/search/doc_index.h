@@ -19,12 +19,14 @@
 #include "core/search/hnsw_index.h"
 #include "core/search/search.h"
 #include "core/search/synonyms.h"
-#include "server/common.h"
 #include "server/search/aggregator.h"
 #include "server/search/index_join.h"
+#include "server/stats.h"
 #include "server/table.h"
 
 namespace dfly {
+
+using StringVec = std::vector<std::string>;
 
 namespace search {
 struct IndexBuilder;
@@ -252,6 +254,9 @@ class ShardDocIndex {
     // Serialization: returns pairs of (key, doc_id) for all active mappings
     std::vector<std::pair<std::string, DocId>> Serialize() const;
 
+    // Restore key-to-docId mappings from serialized data (RDB load)
+    void Restore(const std::vector<std::pair<std::string, search::DocId>>& mappings);
+
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
     std::vector<std::string> keys_;
@@ -323,6 +328,10 @@ class ShardDocIndex {
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       const PrimeValue& pv);
 
+  // Rebuild global vector indices from restored key index, updating vector data
+  // for nodes whose graph structure was already restored from RDB.
+  void RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
+
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
   SerializedEntryWithKey SerializeDocWithKey(
@@ -340,9 +349,14 @@ class ShardDocIndex {
     return key_index_.Serialize();
   }
 
+  // Restore key-to-docId mappings from serialized data (RDB load)
+  void RestoreKeyIndex(const std::vector<std::pair<std::string, search::DocId>>& mappings) {
+    key_index_.Restore(mappings);
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
 
   // Cancel builder if in progress
   void CancelBuilder();
@@ -384,7 +398,10 @@ class ShardDocIndices {
   void DropAllIndices();
 
   // Rebuild all indices
-  void RebuildAllIndices(const OpArgs& op_args);
+  void RebuildAllIndices(const OpArgs& op_args, bool is_restored);
+
+  // Block until construction of all indices finishes
+  void BlockUntilConstructionEnd();
 
   std::vector<std::string> GetIndexNames() const;
 

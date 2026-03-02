@@ -28,6 +28,8 @@ class RESPObj {
     REPLY_STATUS = REDIS_REPLY_STATUS,
     DOUBLE = REDIS_REPLY_DOUBLE,
     ERROR = REDIS_REPLY_ERROR,
+    MAP = REDIS_REPLY_MAP,
+    SET = REDIS_REPLY_SET,
   };
   RESPObj() = default;
   RESPObj(redisReply* reply, bool needs_to_free) : reply_(reply), needs_to_free_(needs_to_free) {
@@ -81,8 +83,7 @@ class RESPArray {
 
 class RESPParser {
  public:
-  RESPParser() : reader_(redisReaderCreate()) {
-  }
+  RESPParser();
   ~RESPParser() {
     redisReaderFree(reader_);
   }
@@ -189,7 +190,9 @@ template <class T> std::optional<T> RESPObj::As() const {
       return static_cast<T>(reply_->dval);
     }
   } else if constexpr (std::is_same_v<T, RESPArray>) {
-    if (reply_->type == REDIS_REPLY_ARRAY) {
+    // MAP and SET use the same elements/element structure as ARRAY in hiredis
+    if (reply_->type == REDIS_REPLY_ARRAY || reply_->type == REDIS_REPLY_MAP ||
+        reply_->type == REDIS_REPLY_SET) {
       return RESPArray(reply_);
     }
   } else if constexpr (std::is_same_v<T, RESPObj>) {

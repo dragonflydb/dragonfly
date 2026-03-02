@@ -23,9 +23,11 @@
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/db_slice.h"
 #include "server/detail/wrapped_json_path.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
 #include "server/sharding.h"
@@ -498,6 +500,18 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   } else if (type != OBJ_STRING) {
     // The object is not a JSON object and not a string, so we cannot set a full JSON value
     return OpStatus::WRONG_TYPE;
+  }
+
+  // For non-JSON types (i.e., strings), validate JSON and free the old value before
+  // constructing JsonAutoUpdater. This ensures start_size_ doesn't include the old
+  // string's memory, which would cause a negative diff in SetJsonSize() and crash
+  // in UpdateSize().
+  if (type != OBJ_JSON) {
+    if (!ShardJsonFromString(json_str)) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      return OpStatus::INVALID_JSON;
+    }
+    it_res->it->second.Reset();
   }
 
   JsonAutoUpdater updater(op_args, key, *std::move(it_res),

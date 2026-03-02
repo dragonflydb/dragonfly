@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 
 #include "base/logging.h"
+#include "server/execution_state.h"
 #include "server/journal/serializer.h"
 
 using namespace std;

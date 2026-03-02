@@ -5,6 +5,7 @@
 #include "server/slowlog.h"
 
 #include "base/logging.h"
+#include "facade/facade_types.h"
 
 namespace dfly {
 

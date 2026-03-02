@@ -226,7 +226,13 @@ void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
       absl::StrAppend(&flags, " t", ttl_sec);
 
     if (cmd_flags.return_value) {
-      WritePieces("VA ", value.size(), flags, kCRLF, value, kCRLF);
+      WritePieces("VA ", value.size(), flags, kCRLF);
+      if (value.size() <= kMaxInlineSize) {
+        WritePieces(value, kCRLF);
+      } else {
+        WriteRef(value);
+        WritePieces(kCRLF);
+      }
     } else {
       WritePieces("HD ", flags, kCRLF);
     }

@@ -1,0 +1,14 @@
+*3
+$3
+SET
+$5
+mykey
+$9
+somevalue
+*3
+$6
+MEMORY
+$5
+USAGE
+$5
+mykey

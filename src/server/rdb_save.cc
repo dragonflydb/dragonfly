@@ -211,9 +211,11 @@ SerializerBase::SerializerBase(CompressionMode compression_mode)
     : compression_mode_(compression_mode), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
 
-RdbSerializer::RdbSerializer(CompressionMode compression_mode,
-                             std::function<void(size_t, SerializerBase::FlushState)> flush_fun)
-    : SerializerBase(compression_mode), flush_fun_(std::move(flush_fun)) {
+RdbSerializer::RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun,
+                             size_t flush_threshold)
+    : SerializerBase(compression_mode),
+      consume_fun_(std::move(consume_fun)),
+      flush_threshold_(flush_threshold) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -317,7 +319,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   // We flush here because if the next element in the bucket we are serializing is a container,
   // it will first serialize the first entry and then flush the internal buffer, even if
   // crossed the limit.
-  FlushIfNeeded(FlushState::kFlushEndEntry);
+  PushToConsumerIfNeeded(FlushState::kFlushEndEntry);
   return rdb_type;
 }
 
@@ -369,7 +371,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     size_t lp_bytes = lpBytes(lp);
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    FlushIfNeeded(FlushState::kFlushEndEntry);
+    PushToConsumerIfNeeded(FlushState::kFlushEndEntry);
     return error_code{};
   }
 
@@ -397,7 +399,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (node->next == nullptr)
         flush_state = FlushState::kFlushEndEntry;
-      FlushIfNeeded(flush_state);
+      PushToConsumerIfNeeded(flush_state);
     }
     node = node->next;
   }
@@ -425,7 +427,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (it == set->end())
         flush_state = FlushState::kFlushEndEntry;
-      FlushIfNeeded(flush_state);
+      PushToConsumerIfNeeded(flush_state);
     }
     set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
   } else {
@@ -465,7 +467,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (it == string_map->end())
         flush_state = FlushState::kFlushEndEntry;
-      FlushIfNeeded(flush_state);
+      PushToConsumerIfNeeded(flush_state);
     }
 
     string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
@@ -506,7 +508,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
       if (count == total)
         flush_state = FlushState::kFlushEndEntry;
 
-      FlushIfNeeded(flush_state);
+      PushToConsumerIfNeeded(flush_state);
       return true;
     });
   } else {
@@ -543,7 +545,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    FlushIfNeeded(FlushState::kFlushMidEntry);
+    PushToConsumerIfNeeded(FlushState::kFlushMidEntry);
   }
 
   std::move(stop_listpacks_rax).Invoke();
@@ -612,7 +614,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     }
   }
 
-  FlushIfNeeded(FlushState::kFlushEndEntry);
+  PushToConsumerIfNeeded(FlushState::kFlushEndEntry);
 
   return error_code{};
 }
@@ -652,7 +654,7 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
     FlushState flush_state = FlushState::kFlushMidEntry;
     if ((i + 1) == sbf->num_filters())
       flush_state = FlushState::kFlushEndEntry;
-    FlushIfNeeded(flush_state);
+    PushToConsumerIfNeeded(flush_state);
   }
 
   return {};
@@ -843,10 +845,10 @@ error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code SerializerBase::FlushToSink(io::Sink* sink, SerializerBase::FlushState flush_state) {
+string SerializerBase::Flush(SerializerBase::FlushState flush_state) {
   auto bytes = PrepareFlush(flush_state);
   if (bytes.empty())
-    return error_code{};
+    return {};
 
   if (bytes.size() > serialization_peak_bytes_) {
     serialization_peak_bytes_ = bytes.size();
@@ -854,22 +856,22 @@ error_code SerializerBase::FlushToSink(io::Sink* sink, SerializerBase::FlushStat
 
   DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
 
-  // interrupt point.
-  RETURN_ON_ERR(sink->Write(bytes));
+  string result(io::View(bytes));
+
   mem_buf_.ConsumeInput(bytes.size());
 
-  return error_code{};
+  return result;
 }
 
-error_code RdbSerializer::FlushToSink(io::Sink* s, SerializerBase::FlushState flush_state) {
-  RETURN_ON_ERR(SerializerBase::FlushToSink(s, flush_state));
+string RdbSerializer::Flush(FlushState flush_state) {
+  string res = SerializerBase::Flush(flush_state);
 
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
   // snapshot)
   last_entry_db_index_ = kInvalidDbId;
 
-  return {};
+  return res;
 }
 
 namespace {
@@ -891,10 +893,8 @@ CrcBuffer MakeCheckSum(std::string_view dump_res, bool ignore_crc) {
   return buf;
 }
 
-void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
-  auto to_bytes = [](const auto& buf) {
-    return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
-  };
+void AppendFooter(bool ignore_crc, string* dest) {
+  auto to_bytes = [dest](const auto& buf) { dest->append(buf.data(), buf.size()); };
 
   /* Write the footer, this is how it looks like:
    * ----------------+---------------------+---------------+
@@ -903,14 +903,14 @@ void AppendFooter(io::StringSink* dump_res, bool ignore_crc) {
    * RDB version and CRC are both in little endian.
    */
   const auto ver = MakeRdbVersion();
-  dump_res->Write(to_bytes(ver));
-  const auto crc = MakeCheckSum(dump_res->str(), ignore_crc);
-  dump_res->Write(to_bytes(crc));
+  to_bytes(ver);
+  const auto crc = MakeCheckSum(*dest, ignore_crc);
+  to_bytes(crc);
 }
 }  // namespace
 
-void SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
-                               io::StringSink* out, bool ignore_crc) {
+string SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
+                                 bool ignore_crc) {
   CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
   if (serializer_used_compression_mode != CompressionMode::NONE) {
     serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
@@ -926,17 +926,18 @@ void SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
   CHECK(!ec);
   ec = serializer->SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer->FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
-  CHECK(!ec);                     // make sure that fully was successful
-  AppendFooter(out, ignore_crc);  // version and crc
-  CHECK_GT(out->str().size(), 10u);
+  string res = serializer->Flush(SerializerBase::FlushState::kFlushMidEntry);
+  CHECK(!res.empty());             // make sure that fully was successful
+  AppendFooter(ignore_crc, &res);  // version and crc
+  CHECK_GT(res.size(), 10u);
 
   serializer->SetCompressionMode(serializer_used_compression_mode);
+  return res;
 }
 
-void SerializerBase::DumpValue(const PrimeValue& obj, io::StringSink* out, bool ignore_crc) {
+string SerializerBase::DumpValue(const PrimeValue& obj, bool ignore_crc) {
   RdbSerializer serializer(GetDefaultCompressionMode());
-  DumpValue(&serializer, obj, out, ignore_crc);
+  return DumpValue(&serializer, obj, ignore_crc);
 }
 
 size_t SerializerBase::SerializedLen() const {
@@ -1116,7 +1117,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
   Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
-       SaveMode save_mode, io::Sink* sink);
+       SaveMode save_mode, io::Sink* sink, DflyVersion replica_dfly_version);
 
   ~Impl();
 
@@ -1169,6 +1170,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   io::Sink* sink_;
   int64_t last_write_time_ns_ = -1;  // last write call.
   vector<SnapshotPtr> shard_snapshots_;
+
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
   using RecordChannel = SizeTrackingChannel<string, base::mpmc_bounded_queue<string>>;
@@ -1180,12 +1182,13 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
   SaveMode save_mode_;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
-                     SaveMode sm, io::Sink* sink)
+                     SaveMode sm, io::Sink* sink, DflyVersion replica_dfly_version)
     : sink_(sink),
       shard_snapshots_(producers_len),
       meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
@@ -1199,6 +1202,7 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
     channel_.emplace(kChannelLen, producers_len);
   }
   save_mode_ = sm;
+  replica_dfly_version_ = replica_dfly_version;
 }
 
 void RdbSaver::Impl::CleanShardSnapshots() {
@@ -1300,8 +1304,9 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx
 
 SnapshotPtr RdbSaver::Impl::CreateSliceSnapshot(EngineShard* shard, DbSlice* db_slice,
                                                 ExecutionState* cntx) {
-  return SnapshotPtr(new SliceSnapshot(compression_mode_, db_slice, this, cntx),
-                     OwnerThreadDeleter::FromShard(shard));
+  return SnapshotPtr(
+      new SliceSnapshot(compression_mode_, db_slice, this, cntx, replica_dfly_version_),
+      OwnerThreadDeleter::FromShard(shard));
 }
 
 // called on save flow
@@ -1401,7 +1406,11 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
 
 error_code RdbSaver::Impl::FlushSerializer() {
   last_write_time_ns_ = absl::GetCurrentTimeNanos();
-  auto ec = serializer()->FlushToSink(sink_, SerializerBase::FlushState::kFlushMidEntry);
+  string blob = serializer()->Flush(SerializerBase::FlushState::kFlushMidEntry);
+  error_code ec;
+  if (!blob.empty()) {
+    ec = sink_->Write(io::Buffer(blob));
+  }
   last_write_time_ns_ = -1;
   return ec;
 }
@@ -1412,13 +1421,13 @@ namespace {
 // search_indices always gets simple "index_name cmd" restore commands.
 // For summary shards, hnsw_index_metadata gets JSON with HNSW graph metadata,
 // and search_synonyms gets synonym group restore commands.
-void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
+void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
                           [[maybe_unused]] StringVec* search_indices,
                           [[maybe_unused]] StringVec* search_synonyms,
                           [[maybe_unused]] StringVec* hnsw_index_metadata,
                           [[maybe_unused]] bool is_summary) {
 #ifdef WITH_SEARCH
-  auto* indices = shard->search_indices();
+  auto* indices = shard.search_indices();
   for (const auto& index_name : indices->GetIndexNames()) {
     auto* index = indices->GetIndex(index_name);
     auto index_info = index->GetInfo();
@@ -1430,7 +1439,8 @@ void CollectSearchIndices([[maybe_unused]] EngineShard* shard,
     if (!is_summary)
       continue;
 
-    // Collect HNSW metadata for vector field (first one found)
+    // Collect HNSW metadata for vector field (first one found), for now we don't support multiple
+    // vector fields per index serialization
     for (const auto& [fident, finfo] : index_info.base_index.schema.fields) {
       if (finfo.type == search::SchemaField::VECTOR &&
           !(finfo.flags & search::SchemaField::NOINDEX)) {
@@ -1472,7 +1482,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   if (!is_summary) {
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (shard->shard_id() == 0)
-        CollectSearchIndices(shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
+        CollectSearchIndices(*shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
                              is_summary);
     });
     return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
@@ -1490,7 +1500,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (shard->shard_id() == 0)
-      CollectSearchIndices(shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
+      CollectSearchIndices(*shard, &search_indices, &search_synonyms, &hnsw_index_metadata,
                            is_summary);
 
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
@@ -1525,8 +1535,9 @@ SnapshotPtr& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
   return shard_snapshots_[sid];
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std::string snapshot_id)
-    : snapshot_id_(std::move(snapshot_id)) {
+RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std::string snapshot_id,
+                   DflyVersion replica_dfly_version)
+    : replica_dfly_version_(replica_dfly_version), snapshot_id_(std::move(snapshot_id)) {
   CHECK_NOTNULL(sink);
   CompressionMode compression_mode = GetDefaultCompressionMode();
   int producer_count = 0;
@@ -1554,7 +1565,8 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes, std:
       break;
   }
   VLOG(1) << "Rdb save using compression mode:" << uint32_t(compression_mode_);
-  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, save_mode, sink));
+  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, save_mode, sink,
+                       replica_dfly_version_));
   save_mode_ = save_mode;
 }
 
@@ -1642,13 +1654,20 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     if (!glob_state.search_indices.empty())
       LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
   } else {
-    // Search index definitions (simple "index_name cmd" restore commands)
-    for (const string& s : glob_state.search_indices)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+    // Search index definitions - for non-summary shards only sent to replicas >= VER6,
+    // since older replicas only expect search-index from the summary shard.
+    bool send_search_index =
+        (save_mode_ != SaveMode::SINGLE_SHARD) || (replica_dfly_version_ >= DflyVersion::VER6);
+    if (send_search_index) {
+      for (const string& s : glob_state.search_indices)
+        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+    }
 
-    // HNSW index metadata (JSON, summary only)
-    for (const string& s : glob_state.hnsw_index_metadata)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("hnsw-index-metadata", s));
+    // HNSW index metadata (JSON, summary only) - only for replicas >= VER6
+    if (replica_dfly_version_ >= DflyVersion::VER6) {
+      for (const string& s : glob_state.hnsw_index_metadata)
+        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("hnsw-index-metadata", s));
+    }
 
     // Save synonyms only in summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());
@@ -1775,9 +1794,11 @@ size_t RdbSerializer::GetTempBufferSize() const {
   return SerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
-void RdbSerializer::FlushIfNeeded(SerializerBase::FlushState flush_state) {
-  if (flush_fun_) {
-    flush_fun_(SerializedLen(), flush_state);
+void RdbSerializer::PushToConsumerIfNeeded(SerializerBase::FlushState flush_state) {
+  if (consume_fun_ && SerializedLen() > flush_threshold_) {
+    string blob = Flush(flush_state);
+    DCHECK(!blob.empty());  // SerializedLen() > 0.
+    consume_fun_(std::move(blob));
   }
 }
 

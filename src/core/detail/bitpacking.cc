@@ -270,6 +270,45 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
   }
 }
 
+uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx) {
+  DCHECK(idx < ascii_len) << "Index oob for ascii byte unpacking: " << idx << " >= " << ascii_len;
+  const size_t packed_groups = ascii_len / 8;
+  const size_t group = idx / 8;
+  const size_t idx_in_group = idx % 8;
+
+  // Tail bytes (after the last full 8-char group) are stored unpacked.
+  if (group >= packed_groups) {
+    return bin[packed_groups * 7 + idx_in_group];
+  }
+
+  // Unpack ascii group and return byte at idx.
+  char buf[8];
+  ascii_unpack(bin + group * 7, 8, buf);
+  return buf[idx_in_group];
+}
+
+void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t val) {
+  DCHECK(idx < ascii_len) << "Index oob for ascii byte packing: " << idx << " >= " << ascii_len;
+  DCHECK_LT(val, 128u) << "Only 7-bit ASCII values can be packed";
+
+  const size_t packed_groups = ascii_len / 8;
+  const size_t group = idx / 8;
+  const size_t idx_in_group = idx % 8;
+
+  // Tail bytes (after the last full 8-char group) are stored unpacked.
+  if (group >= packed_groups) {
+    bin[packed_groups * 7 + idx_in_group] = val;
+    return;
+  }
+
+  // Unpack ascii group and return, modify byte at idx and pack back.
+  uint8_t* group_bin = bin + group * 7;
+  char buf[8];
+  ascii_unpack(group_bin, 8, buf);
+  buf[idx_in_group] = val;
+  ascii_pack(buf, 8, group_bin);
+}
+
 // See CompactObjectTest.AsanTriggerReadOverflow for more details.
 void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
 #if defined(__SSE3__) || defined(__aarch64__)

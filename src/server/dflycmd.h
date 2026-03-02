@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "server/conn_context.h"
+#include "server/execution_state.h"
 #include "util/fibers/synchronization.h"
 
 namespace facade {

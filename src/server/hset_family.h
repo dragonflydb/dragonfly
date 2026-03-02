@@ -12,7 +12,6 @@
 namespace dfly {
 
 class StringMap;
-class CommandRegistry;
 
 using facade::OpResult;
 using facade::OpStatus;
@@ -20,6 +19,9 @@ using facade::OpStatus;
 class HSetFamily {
  public:
   static void Register(CommandRegistry* registry);
+
+  static LoadBlobResult LoadZiplistBlob(std::string_view blob, PrimeValue* pv);
+  static LoadBlobResult LoadListpackBlob(std::string_view blob, PrimeValue* pv);
 
   // Does not free lp.
   static StringMap* ConvertToStrMap(uint8_t* lp);

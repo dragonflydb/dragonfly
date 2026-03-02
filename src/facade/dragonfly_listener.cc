@@ -213,6 +213,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
 }
 
 bool Listener::ReconfigureTLS() {
+#ifdef DFLY_USE_SSL
   SSL_CTX* prev_ctx = ctx_;
   const bool tls_on_privileged_port = !GetFlag(FLAGS_no_tls_on_admin_port);
 
@@ -231,7 +232,7 @@ bool Listener::ReconfigureTLS() {
     // to the context it won't be freed yet.
     SSL_CTX_free(prev_ctx);
   }
-
+#endif
   return true;
 }
 

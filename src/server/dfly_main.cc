@@ -103,6 +103,9 @@ ABSL_FLAG(uint32_t, afl_loop_limit, UINT_MAX,
           "AFL++ persistent mode loop limit. Specifies how many fuzzing iterations "
           "to run before restarting the process. Higher values improve performance but "
           "may accumulate state.");
+ABSL_FLAG(uint16_t, afl_target_port, 0,
+          "Port to send fuzz input to. Defaults to --port (RESP). "
+          "Set to --memcached_port to fuzz the memcache protocol.");
 #endif
 
 using namespace util;
@@ -116,21 +119,29 @@ namespace dfly {
 
 namespace {
 
+#if ABSL_HAVE_ADDRESS_SANITIZER
+// Increase stack size for all debug builds; tools like ASAN can require more than 50 KB.
+constexpr size_t kAsanFactor = 2;
+#else
+constexpr size_t kAsanFactor = 1;
+#endif
+
+#ifdef NDEBUG
+constexpr size_t kFiberStackBase = 32_KB;
+#else
+constexpr size_t kFiberStackBase = 48_KB;
+#endif
+
 // Default stack size for fibers. We decrease it by 16 bytes because some allocators
 // need additional 8-16 bytes for their internal structures, thus over reserving additional
 // memory pages if using round sizes.
-#ifdef NDEBUG
-constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
-#else
-// Increase stack size for debug builds, because some compilers can create exec, that consumes much
-// mores stack.
-constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
-#endif
+constexpr size_t kFiberDefaultStackSize = kFiberStackBase * kAsanFactor - 16;
 
-enum class TermColor { kDefault, kRed, kGreen, kYellow };
+enum class TermColor : uint8_t { kDefault, kRed, kGreen, kYellow };
+
 // Returns the ANSI color code for the given color. TermColor::kDefault is
 // an invalid input.
-static const char* GetAnsiColorCode(TermColor color) {
+const char* GetAnsiColorCode(TermColor color) {
   switch (color) {
     case TermColor::kRed:
       return "1";
@@ -675,6 +686,23 @@ void RegisterBufRings(ProactorPool* pool) {
 #endif
 }
 
+class MiMallocResource : public PMR_NS::memory_resource {
+ private:
+  void* do_allocate(std::size_t size, std::size_t align) final {
+    return mi_malloc_aligned(size, align);
+  }
+
+  void do_deallocate(void* ptr, std::size_t size, std::size_t align) final {
+    mi_free_size_aligned(ptr, size, align);
+  }
+
+  bool do_is_equal(const PMR_NS::memory_resource& o) const noexcept final {
+    return this == &o;
+  }
+};
+
+MiMallocResource g_mi_resource;
+
 #ifdef USE_AFL
 // AFL++ fuzzing helper functions
 // These functions support AFL++ persistent mode fuzzing by handling server readiness checks,
@@ -738,8 +766,7 @@ ssize_t ReadFuzzInput(char* buffer, size_t buffer_size) {
 void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s >= 0) {
-    // Set timeout for command processing (2 seconds for complex commands)
-    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};  // 2s
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 200000};
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -748,10 +775,9 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
     a.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
     if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
-      send(s, data, len, 0);
-      // Just read once - don't wait for full response
+      send(s, data, len, MSG_NOSIGNAL);
       char r[4096];
-      recv(s, r, sizeof(r), 0);  // Single read, timeout after 100ms
+      recv(s, r, sizeof(r), 0);
     }
     close(s);
   }
@@ -767,7 +793,8 @@ std::thread InitAflFuzzing(ProactorPool* pool, AcceptServer* acceptor) {
     pool->Stop();
   });
 
-  uint16_t port = GetFlag(FLAGS_port);
+  uint16_t target_port = GetFlag(FLAGS_afl_target_port);
+  uint16_t port = target_port ? target_port : GetFlag(FLAGS_port);
 
   // Wait for server to become ready
   if (!WaitForServerReady(port)) {
@@ -988,7 +1015,7 @@ Usage: dragonfly [FLAGS]
   // To see the options after the override, use:
   // mi_options_print();
 
-  fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
+  fb2::SetDefaultStackResource(&g_mi_resource, kFiberDefaultStackSize);
 
   {
     unique_ptr<util::ProactorPool> pool;
@@ -1016,7 +1043,7 @@ Usage: dragonfly [FLAGS]
     SetupAllocationTracker(pool.get());
     RegisterBufRings(pool.get());
 
-    AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
+    AcceptServer acceptor(pool.get(), &g_mi_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
 #ifdef USE_AFL
@@ -1037,7 +1064,8 @@ Usage: dragonfly [FLAGS]
 
     std::thread server_thread = dfly::InitAflFuzzing(pool.get(), &acceptor);
 
-    uint16_t port = GetFlag(FLAGS_port);
+    uint16_t target_port = GetFlag(FLAGS_afl_target_port);
+    uint16_t port = target_port ? target_port : GetFlag(FLAGS_port);
     uint32_t afl_loop_limit = GetFlag(FLAGS_afl_loop_limit);
     unsigned int loop_iteration = 0;
 

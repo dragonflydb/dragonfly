@@ -248,6 +248,42 @@ TEST_F(BitOpsFamilyTest, SetBitIncorrectValues) {
   EXPECT_EQ(0, CheckedInt({"getbit", "foo", "4"}));
 }
 
+TEST_F(BitOpsFamilyTest, SetBitExtendExistingKey) {
+  // This test verifies SETBIT correctly extends an existing key beyond its current length.
+  // It sets up a small 3-byte key ("abc") and then sets a bit far beyond byte index 2,
+  // ensuring the string is extended with zeros and the bit is set correctly.
+  auto resp = Run({"set", "foo", "abc"});
+  EXPECT_EQ(resp, "OK");
+
+  // Verify initial string length is 3 bytes (24 bits)
+  EXPECT_EQ(3, CheckedInt({"strlen", "foo"}));
+
+  // Set bit at offset 100 (byte index 12, bit 4 within that byte)
+  // This should extend the string from 3 bytes to 13 bytes
+  // The old value should be 0 since the string didn't extend that far
+  EXPECT_EQ(0, CheckedInt({"setbit", "foo", "100", "1"}));
+
+  // Verify the string was extended to 13 bytes (100 bits / 8 = 12.5, rounded up to 13)
+  EXPECT_EQ(13, CheckedInt({"strlen", "foo"}));
+
+  // Verify the bit at offset 100 is now set to 1
+  EXPECT_EQ(1, CheckedInt({"getbit", "foo", "100"}));
+
+  // Verify bits in the extended region (between original end and new bit) are 0
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "24"}));  // First bit after "abc"
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "50"}));  // Middle of extended region
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "99"}));  // Just before the set bit
+
+  // Verify original bits are unchanged
+  EXPECT_EQ(EXPECTED_VALUE_SETBIT[0], CheckedInt({"getbit", "foo", "0"}));
+  EXPECT_EQ(EXPECTED_VALUE_SETBIT[1], CheckedInt({"getbit", "foo", "1"}));
+  EXPECT_EQ(EXPECTED_VALUE_SETBIT[2], CheckedInt({"getbit", "foo", "2"}));
+
+  // Set the same bit to 0 and verify we get back 1 (the current value)
+  EXPECT_EQ(1, CheckedInt({"setbit", "foo", "100", "0"}));
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "100"}));
+}
+
 const int32_t EXPECTED_VALUES_BYTES_BIT_COUNT[] = {  // got this from redis 0 as start index
     4, 7, 11, 14, 17, 21, 21, 21, 21};
 
@@ -445,6 +481,32 @@ TEST_F(BitOpsFamilyTest, BitOpsNot) {
   EXPECT_EQ(res, NOT_RESULTS);
 }
 
+TEST_F(BitOpsFamilyTest, BitOpOverwritesNonStringKeyAccounting) {
+  string long_value(128, 'a');
+  auto resp = Run({"set", "src", long_value});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"rpush", "dest", "a", "b", "c"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  Metrics before = GetMetrics();
+  ASSERT_FALSE(before.db_stats.empty());
+  const size_t list_before = before.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  const size_t str_before = before.db_stats[0].memory_usage_by_type[OBJ_STRING];
+  ASSERT_GT(list_before, 0u);
+
+  resp = Run({"bitop", "or", "dest", "src"});
+  EXPECT_THAT(resp, IntArg(128));
+  EXPECT_EQ(Run({"type", "dest"}), "string");
+  EXPECT_EQ(Run({"get", "dest"}), long_value);
+
+  Metrics after = GetMetrics();
+  const size_t list_after = after.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  const size_t str_after = after.db_stats[0].memory_usage_by_type[OBJ_STRING];
+  EXPECT_EQ(0, list_after);
+  EXPECT_GT(str_after, str_before);
+}
+
 TEST_F(BitOpsFamilyTest, BitPos) {
   ASSERT_EQ(Run({"set", "a", "\x00\x00\x06\xff\xf0"_b}), "OK");
 
@@ -612,7 +674,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 
   // unsigned 63bit
   int64_t max = std::numeric_limits<int64_t>::max();
-  Run({"bitfield", "foo", "set", "i64", "0", absl::StrCat(max)});
+  Run({"bitfield", "foo", "set", "i64", "0", StrCat(max)});
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "1"}), IntArg(-max - 1));
 
   // signed 1 bit
@@ -623,11 +685,11 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-3"}), IntArg(-1));
 
   int64_t min = std::numeric_limits<int64_t>::min();
-  Run({"bitfield", "foo", "set", "i8", "0", absl::StrCat(min)});
+  Run({"bitfield", "foo", "set", "i8", "0", StrCat(min)});
   ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), IntArg(0));
 
   // signed 64 bit
-  Run({"bitfield", "foo", "set", "i64", "0", absl::StrCat(min)});
+  Run({"bitfield", "foo", "set", "i64", "0", StrCat(min)});
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "-1"}), IntArg(max));
 
   // overflow sat
@@ -639,7 +701,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 
   // unsigned 63 bit
   Run({"bitfield", "foo", "set", "u63", "0", "0"});
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "u63", "0", absl::StrCat(max)}),
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "u63", "0", StrCat(max)}),
               IntArg(0));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "u63", "0", "10"}), IntArg(max));
 
@@ -652,12 +714,12 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 
   // signed 64 bit
   Run({"bitfield", "foo", "set", "i64", "0", "0"});
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", absl::StrCat(max)}),
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", StrCat(max)}),
               IntArg(0));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i64", "0", "100"}),
               IntArg(max));
   ASSERT_THAT(Run({"bitfield", "foo", "get", "i64", "0"}), IntArg(max));
-  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", absl::StrCat(min)}),
+  ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "set", "i64", "0", StrCat(min)}),
               IntArg(max));
   ASSERT_THAT(Run({"bitfield", "foo", "overflow", "sat", "incrby", "i64", "0", "-100"}),
               IntArg(min));

@@ -1,0 +1,14 @@
+*3
+$3
+SET
+$3
+foo
+$5
+hello
+*3
+$6
+RENAME
+$3
+foo
+$3
+bar

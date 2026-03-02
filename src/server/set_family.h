@@ -14,12 +14,14 @@ namespace dfly {
 
 using facade::OpResult;
 
-class CommandRegistry;
 class StringSet;
 
 class SetFamily {
  public:
   static void Register(CommandRegistry* registry);
+
+  static LoadBlobResult LoadIntSetBlob(std::string_view blob, PrimeValue* pv);
+  static LoadBlobResult LoadLPSetBlob(std::string_view blob, PrimeValue* pv);
 
   static uint32_t MaxIntsetEntries();
 

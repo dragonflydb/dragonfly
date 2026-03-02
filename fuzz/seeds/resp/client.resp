@@ -1,0 +1,17 @@
+*3
+$6
+CLIENT
+$7
+SETNAME
+$10
+testclient
+*2
+$6
+CLIENT
+$7
+GETNAME
+*2
+$6
+CLIENT
+$4
+LIST

@@ -4,14 +4,17 @@
 
 #include "server/snapshot.h"
 
-#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+
+#include <mutex>
 
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/search/base.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
@@ -43,10 +46,12 @@ constexpr size_t kMinBlobSize = 8_KB;
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                             SnapshotDataConsumerInterface* consumer, ExecutionState* cntx)
+                             SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
+                             DflyVersion replica_dfly_version)
     : db_slice_(slice),
       db_array_(slice->databases()),
       compression_mode_(compression_mode),
+      replica_dfly_version_(replica_dfly_version),
       consumer_(consumer),
       cntx_(cntx) {
   tl_slice_snapshots.insert(this);
@@ -81,9 +86,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 
   if (stream_journal) {
     use_snapshot_version_ = absl::GetFlag(FLAGS_point_in_time_snapshot);
-    auto* journal = db_slice_->shard_owner()->journal();
-    DCHECK(journal);
-    journal_cb_id_ = journal->RegisterOnChange(this);
+    journal_cb_id_ = journal::RegisterConsumer(this);
     if (!use_snapshot_version_) {
       auto moved_cb = [this](DbIndex db_index, const DbSlice::MovedItemsVec& items) {
         OnMoved(db_index, items);
@@ -92,20 +95,20 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
   }
 
-  const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
-  std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
-  if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
-    flush_fun = [this, flush_threshold](size_t bytes_serialized,
-                                        RdbSerializer::FlushState flush_state) {
-      if (bytes_serialized > flush_threshold) {
-        size_t serialized = FlushSerialized(flush_state);
-        VLOG(2) << "FlushSerialized " << serialized << " bytes";
-        auto& stats = ServerState::tlocal()->stats;
-        ++stats.big_value_preemptions;
-      }
-    };
+  size_t flush_threshold = 0;
+  RdbSerializer::ConsumeFun consume_fun;
+  if (allow_flush == SnapshotFlush::kAllow) {
+    flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
+    if (flush_threshold != 0) {
+      // The callback receives data directly from the serializer, no need to call back into it.
+      consume_fun = [this](std::string data) {
+        HandleFlushData(std::move(data));
+        VLOG(2) << "HandleFlushData via callback";
+        ++ServerState::tlocal()->stats.big_value_preemptions;
+      };
+    }
   }
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -142,13 +145,11 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   // Wait for serialization to finish in any case.
   snapshot_fb_.JoinIfNeeded();
 
-  auto* journal = db_slice_->shard_owner()->journal();
-
-  journal->UnregisterOnChange(cb_id);
+  journal::UnregisterConsumer(cb_id);
   if (!cancel) {
     // always succeeds because serializer_ flushes to string.
-    VLOG(1) << "FinalizeJournalStream lsn: " << journal->GetLsn();
-    std::ignore = serializer_->SendJournalOffset(journal->GetLsn());
+    VLOG(1) << "FinalizeJournalStream lsn: " << journal::GetLsn();
+    std::ignore = serializer_->SendJournalOffset(journal::GetLsn());
     PushSerialized(true);
   }
 }
@@ -189,7 +190,8 @@ void SliceSnapshot::SerializeIndexMapping(
 
 void SliceSnapshot::SerializeIndexMappings() {
 #ifdef WITH_SEARCH
-  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index) ||
+      replica_dfly_version_ < DflyVersion::VER6) {
     return;
   }
 
@@ -220,7 +222,7 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
 #ifdef WITH_SEARCH
   // Serialize HNSW global indices for shard 0 only
   if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB ||
-      !absl::GetFlag(FLAGS_serialize_hnsw_index)) {
+      !absl::GetFlag(FLAGS_serialize_hnsw_index) || replica_dfly_version_ < DflyVersion::VER6) {
     return;
   }
 
@@ -230,27 +232,38 @@ void SliceSnapshot::SerializeGlobalHnswIndices() {
   std::vector<uint8_t> tmp_buf;
 
   for (const auto& [index_key, index] : all_indices) {
-    // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
-    //          then for each node: binary encoded entry via SaveHNSWEntry]
-    if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec)
-      continue;
-    if (auto ec = serializer_->SaveString(index_key); ec)
-      continue;
+    {
+      // Acquire a read lock to ensure a consistent snapshot of the graph.
+      // While held, Add/Remove calls will defer into the adapter's internal list
+      // and will be replayed automatically on the next write operation.
+      auto read_lock = index->GetReadLock();
 
-    size_t node_count = index->GetNodeCount();
-    if (auto ec = serializer_->SaveLen(node_count); ec)
-      continue;
-
-    constexpr size_t kBatchSize = 1000;
-    for (size_t i = 0; i < node_count; i += kBatchSize) {
-      size_t batch_end = std::min(i + kBatchSize, node_count);
-      auto nodes = index->GetNodesRange(i, batch_end);
-      for (const auto& node : nodes) {
-        tmp_buf.resize(node.TotalSize());
-        if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
-          break;
+      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
+      //          then for each node: binary encoded entry via SaveHNSWEntry]
+      if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec) {
+        continue;
       }
-    }
+      if (auto ec = serializer_->SaveString(index_key); ec) {
+        continue;
+      }
+
+      size_t node_count = index->GetNodeCount();
+      if (auto ec = serializer_->SaveLen(node_count); ec) {
+        continue;
+      }
+
+      constexpr size_t kBatchSize = 1000;
+      for (size_t i = 0; i < node_count; i += kBatchSize) {
+        size_t batch_end = std::min(i + kBatchSize, node_count);
+        auto nodes = index->GetNodesRange(i, batch_end);
+        for (const auto& node : nodes) {
+          tmp_buf.resize(node.TotalSize());
+          if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
+            break;
+        }
+      }
+    }  // read_lock released here
+
     // Flush after completing entire index to avoid splitting HNSW data across compressed blobs.
     // The HNSW loader expects all nodes for an index to be readable in one pass.
     PushSerialized(false);
@@ -396,15 +409,11 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
-  io::StringFile sfile;
-  error_code ec = serializer_->FlushToSink(&sfile, flush_state);
-  CHECK(!ec);  // always succeeds
+void SliceSnapshot::HandleFlushData(std::string data) {
+  if (data.empty())
+    return;
 
-  size_t serialized = sfile.val.size();
-  if (serialized == 0)
-    return 0;
-
+  size_t serialized = data.size();
   uint64_t id = rec_id_++;
 
   if (use_background_mode_) {
@@ -427,21 +436,32 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  consumer_->ConsumeData(std::move(sfile.val), cntx_);
+  consumer_->ConsumeData(std::move(data), cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;
   seq_cond_.notify_all();
 
   if (!use_background_mode_) {
-    // FlushToSink can be quite slow for large values or due compression, therefore
-    // we counter-balance CPU over-usage by forcing sleep.
+    // serializer_->Flush can be quite slow for large values or due to compression, therefore
+    // we counter-balance CPU over-usage by sleeping.
     // We measure running_cycles before the preemption points, because they reset the counter.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
     ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
   }
 
   VLOG(2) << "Pushed with Serialize() " << serialized;
+}
+
+size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
+  if (serializer == nullptr) {
+    CHECK(delayed_entries_.empty());
+    serializer = serializer_.get();
+  }
+  std::string blob = serializer->Flush(SerializerBase::FlushState::kFlushEndEntry);
+
+  size_t serialized = blob.size();
+  HandleFlushData(std::move(blob));
   return serialized;
 }
 
@@ -449,17 +469,21 @@ bool SliceSnapshot::PushSerialized(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
     return false;
 
-  // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushSerialized(FlushState::kFlushEndEntry);
+  size_t serialized = 0;
 
-  if (!delayed_entries_.empty()) {
-    // Async bucket serialization might have accumulated some delayed values.
-    // Because we can finally block in this function, we'll await and serialize them
+  // Atomic bucket serialization might have accumulated some delayed values.
+  // Because we can finally block in this function, we'll await and serialize them
+  thread_local LocalLatch delayed_flush_latch_;
+  while (!delayed_entries_.empty()) {
+    // After pop_front there is no indication of the operation ongoing, so we need a latch
+    std::unique_lock lk{delayed_flush_latch_};
+
+    RdbSerializer delayed_serializer{compression_mode_};
     do {
-      // We may call PushSerialized from multiple fibers concurrently, so we need to
-      // ensure that we are not serializing the same entry concurrently.
-      DelayedEntry entry = std::move(delayed_entries_.back());
-      delayed_entries_.pop_back();
+      // This code can run concurrently, so pop the entries one by one.
+      // Because the keys never repeat (bucket visited once) order is not important.
+      TieredDelayedEntry entry = std::move(delayed_entries_.front());
+      delayed_entries_.pop_front();
 
       // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
       // there are a few problems with how we serialize external values.
@@ -475,12 +499,17 @@ bool SliceSnapshot::PushSerialized(bool force) {
 
       // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
       PrimeValue pv{*res};
-      serializer_->SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
+      delayed_serializer.SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
     } while (!delayed_entries_.empty());
 
-    // blocking point.
-    serialized += FlushSerialized(FlushState::kFlushEndEntry);
+    lk.unlock();
+    serialized += FlushSerialized(&delayed_serializer);
   }
+
+  // Flush any of the leftovers to avoid interleavings
+  delayed_flush_latch_.Wait();
+  serialized += FlushSerialized();
+
   return serialized > 0;
 }
 
@@ -545,9 +574,8 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 }
 
 // For any key any journal entry must arrive at the replica strictly after its first original rdb
-// value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
-// no database switch can be performed between those two calls, because they are part of one
-// transaction.
+// value. This is guaranteed because journal change callbacks run after OnDbChange, and no
+// database switch can be performed between those two calls, as they are part of one transaction.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
   // barrier here for atomic serialization.

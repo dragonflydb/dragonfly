@@ -9,7 +9,6 @@
 
 #include "io/io.h"
 #include "io/io_buf.h"
-#include "server/common.h"
 #include "server/journal/types.h"
 
 namespace dfly {

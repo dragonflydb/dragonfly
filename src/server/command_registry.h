@@ -7,7 +7,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
-#include <hdr/hdr_histogram.h>
 
 #include <functional>
 #include <optional>
@@ -15,6 +14,8 @@
 #include "base/function2.hpp"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
+
+struct hdr_histogram;
 
 namespace dfly {
 

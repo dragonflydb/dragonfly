@@ -28,11 +28,13 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -228,7 +230,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
       config.append = true;
     }
     if (pending_read_.remaining > 0) {
-      config.streamed = true;
+      config.chunked = true;
     }
     config.reserve = pending_read_.reserve;
 
@@ -319,7 +321,8 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
 }
 
 OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArgs& op_args) {
-  io::StringSink sink;
+  string str_res;
+
   if (pv.IsExternal() && !pv.IsCool()) {
     // TODO: consider moving blocking point to coordinator to avoid stalling shard queue
     auto res =
@@ -328,12 +331,12 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
       return OpStatus::IO_ERROR;
 
     // TODO: allow saving string directly without proxy object
-    SerializerBase::DumpValue(PrimeValue{*res}, &sink);
+    str_res = SerializerBase::DumpValue(PrimeValue{*res});
   } else {
-    SerializerBase::DumpValue(pv, &sink);
+    str_res = SerializerBase::DumpValue(pv);
   }
 
-  return std::move(sink).str();
+  return {std::move(str_res)};
 }
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
@@ -681,7 +684,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   db_slice.GetLatch()->Wait();
 
   // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
+  journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
@@ -691,9 +694,10 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
 
   const auto start_cycles = base::CycleClock::Now();
+
   // Don't allow it to monopolize cpu time.
-  // Approximately 15 microseconds.
-  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 16;
+  // Approximately 30 microseconds.
+  const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 15;
 
   do {
     cur = prime_table->Traverse(
@@ -711,7 +715,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
-  constexpr uint64_t kMaxScanTimeMs = 25;
+  constexpr uint64_t kMaxScanTimeMs = 50;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -750,6 +754,84 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
       break;
     }
   } while (keys->size() < scan_opts.limit);
+
+  if (sid < shard_count) {
+    cursor = (cursor << 10) | sid;
+  } else {
+    DCHECK_EQ(0u, cursor);
+  }
+
+  return cursor;
+}
+
+void RecordDelete(DbIndex dbid, string_view key) {
+  journal::RecordEntry(0, journal::Op::COMMAND, dbid, 1, KeySlot(key),
+                       journal::Entry::Payload("DEL", ArgSlice{key}));
+}
+
+void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
+                     uint32_t* deleted) {
+  StringVec keys;
+  OpScan(op_args, scan_opts, cursor, &keys);
+
+  auto& db_slice = op_args.GetDbSlice();
+  uint32_t count = 0;
+  for (const auto& key : keys) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+    if (!IsValid(it))
+      continue;
+    db_slice.Del(op_args.db_cntx, it);
+    if (op_args.shard->journal()) {
+      RecordDelete(op_args.db_cntx.db_index, key);
+    }
+    ++count;
+  }
+  *deleted += count;
+}
+
+uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted,
+                   ConnectionContext* cntx) {
+  ShardId sid = cursor % 1024;
+
+  EngineShardSet* ess = shard_set;
+  unsigned shard_count = ess->size();
+  constexpr uint64_t kMaxRmTimeMs = 100;
+
+  CHECK_LT(shard_count, 1024u);
+
+  if (sid >= shard_count) {
+    return 0;
+  }
+
+  cursor >>= 10;
+  DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
+
+  *deleted = 0;
+
+  do {
+    auto cb = [&] {
+      OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
+      OpScanAndDelete(op_args, scan_opts, &cursor, deleted);
+    };
+
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
+      cb();
+      util::ThisFiber::Yield();
+    } else {
+      ess->Await(sid, cb);
+    }
+
+    if (cursor == 0) {
+      ++sid;
+      if (unsigned(sid) == shard_count)
+        break;
+    }
+
+    uint64_t time_now_ms = GetCurrentTimeMs();
+    if (time_now_ms > db_cntx.time_now_ms + kMaxRmTimeMs) {
+      break;
+    }
+  } while (*deleted < scan_opts.limit);
 
   if (sid < shard_count) {
     cursor = (cursor << 10) | sid;
@@ -2434,6 +2516,41 @@ void GenericFamily::Scan(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
+void GenericFamily::Rm(CmdArgList args, CommandContext* cmd_cntx) {
+  string_view token = ArgS(args, 0);
+  uint64_t cursor = 0;
+  if (!absl::SimpleAtoi(token, &cursor)) {
+    if (absl::EqualsIgnoreCase(token, "HELP")) {
+      auto replier = [](RedisReplyBuilder* rb) {
+        string_view help_arr[] = {
+            "RM cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>]",
+            "    MATCH <glob> - pattern to match keys against",
+            "    TYPE <type> - type of values to match (string, list, set, zset, hash, stream)",
+            "    COUNT <count> - number of keys to delete per call",
+        };
+        rb->SendSimpleStrArr(help_arr);
+      };
+      return cmd_cntx->ReplyWith(std::move(replier));
+    }
+    return cmd_cntx->SendError("invalid cursor", kSyntaxErrType);
+  }
+
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
+  if (!ops) {
+    return cmd_cntx->SendError(ops.status());
+  }
+
+  uint32_t deleted = 0;
+  cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->server_conn_cntx());
+
+  auto replier = [cursor, deleted](RedisReplyBuilder* rb) {
+    RedisReplyBuilder::ArrayScope scope{rb, 2};
+    rb->SendBulkString(absl::StrCat(cursor));
+    rb->SendLong(deleted);
+  };
+  cmd_cntx->ReplyWith(std::move(replier));
+}
+
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Exists: " << keys.Front();
   auto& db_slice = op_args.GetDbSlice();
@@ -2520,6 +2637,7 @@ constexpr uint32_t kCopy = KEYSPACE | WRITE | SLOW;
 constexpr uint32_t kRenamNX = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSelect = FAST | CONNECTION;
 constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
+constexpr uint32_t kRm = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kTTL = KEYSPACE | READ | FAST;
 constexpr uint32_t kPTTL = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldTtl = KEYSPACE | READ | FAST;
@@ -2568,6 +2686,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
+      << CI{"RM", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 0, 0, acl::kRm}.HFUNC(Rm)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)

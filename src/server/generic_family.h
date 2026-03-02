@@ -15,9 +15,6 @@ namespace dfly {
 using facade::CmdArgList;
 using facade::OpResult;
 
-class CommandRegistry;
-class CommandContext;
-
 class GenericFamily {
  public:
   static void Register(CommandRegistry* registry);
@@ -52,6 +49,7 @@ class GenericFamily {
   static void Echo(CmdArgList args, CommandContext* cmd_cntx);
   static void Select(CmdArgList args, CommandContext* cmd_cntx);
   static void Scan(CmdArgList args, CommandContext* cmd_cntx);
+  static void Rm(CmdArgList args, CommandContext* cmd_cntx);
   static void Time(CmdArgList args, CommandContext* cmd_cntx);
   static void Type(CmdArgList args, CommandContext* cmd_cntx);
   static void Dump(CmdArgList args, CommandContext* cmd_cntx);
