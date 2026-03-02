@@ -149,6 +149,8 @@ struct Metrics {
   LoadingStats loading_stats;
 
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
+
+  InternedStringStats interned_string_stats;
 };
 
 // Contains the state of the last save operation.
