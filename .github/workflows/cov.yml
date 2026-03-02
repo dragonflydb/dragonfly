@@ -104,6 +104,7 @@ jobs:
         with:
           files: build/main_coverage.info
           fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage
         uses: actions/upload-artifact@v6
         with:
