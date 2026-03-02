@@ -22,11 +22,13 @@ jobs:
     timeout-minutes: 60
     container:
       image: ghcr.io/romange/${{ matrix.container }}
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /:/hostroot
 
     steps:
       - uses: actions/checkout@v6
@@ -74,7 +76,8 @@ jobs:
       - name: Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          ninja
+          echo "-----------------------------"
+          ninja src/all
 
       - name: Run C++ Unit Tests
         run: |
