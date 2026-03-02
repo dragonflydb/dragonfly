@@ -901,6 +901,10 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
     cmd_cntx->SendError(parser.TakeError().MakeReply());
     return nullopt;
   }
+  if (options.val_size == 0) {
+    cmd_cntx->SendError("val_size must be positive");
+    return nullopt;
+  }
   return options;
 }
 

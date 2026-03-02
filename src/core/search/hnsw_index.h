@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <memory>
+
+#include "core/search/mrmw_mutex.h"
 #include "core/search/search.h"
 
 namespace dfly::search {
@@ -78,10 +81,13 @@ class HnswVectorIndex {
   // This populates the vector data for a node that already has graph links
   bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field);
 
+  // Acquire a read lock on the internal MRMW mutex.
+  // Use this during serialization to block concurrent Add/Remove (write) operations.
+  std::unique_ptr<MRMWMutexLock> GetReadLock() const;
+
  private:
   bool copy_vector_;
   size_t dim_;
-  VectorSimilarity sim_;
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 

@@ -17,7 +17,7 @@ from .search_benchmark_utils import (
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.opt_only
-@pytest.mark.slow
+@pytest.mark.large
 class TestSearchBenchmark:
     random_seed = 42
     num_documents = 3000

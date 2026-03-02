@@ -182,6 +182,104 @@ class DashTable : public detail::DashTableBase {
     return segment_[segment_id];
   }
 
+  // - If there is no buddy for segment_id return segment_id.
+  //   Otherwise, return buddy_id.
+  // - A buddy is a sibling segment that was created from the
+  //   same parent during split and can be merged back together.
+  //   It's the adjacent subtree of the same depth.
+  unsigned FindBuddyId(unsigned segment_id) {
+    auto* seg = GetSegment(segment_id);
+    uint8_t depth = seg->local_depth();
+
+    if (depth <= 1) {
+      return segment_id;
+    }
+
+    const size_t bit_pos = global_depth_ - depth;
+    const size_t buddy_idx = segment_id ^ (1u << bit_pos);
+    assert(buddy_idx < segment_.size());
+
+    auto* buddy = GetSegment(buddy_idx);
+    // There is no adjacent subtree of the same depth
+    if (buddy->local_depth() != depth) {
+      return segment_id;
+    }
+
+    return buddy_idx;
+  }
+
+  // - Moves all items from `buddy_id` to `keep_id` (merges the two segments).
+  //   After merge completes, `buddy_id` segment is deleted.
+  // - Return true if the two segments merged successfully.
+  // - If an insertion fails we rollback and abort the merge (return false).
+  // - Merge can run only if there are no active snapshots.
+  // - Prefer calling this function only when the combined size of both segments
+  //   than x * segment_capacity. With x: 0 < x < 0.25 as statistically this won't
+  //   trigger rollbacks.
+  bool Merge(unsigned keep_id, unsigned buddy_id) {
+    auto* keep = GetSegment(keep_id);
+    auto* buddy = GetSegment(buddy_id);
+
+    assert((keep->local_depth() == buddy->local_depth()));
+    // assert((keep->SlowSize() + buddy->SlowSize() < (0.25 * buddy->capacity())));
+    assert(keep->local_depth() != 1);
+    assert(keep != buddy);
+    assert(keep_id < buddy_id);  // Callers must iterate low to high to ensure correct orientation
+
+    bool should_rollback = false;
+
+    // Decrease depth (merge back to parent)
+    keep->set_local_depth(keep->local_depth() - 1);
+
+    // Move all items from buddy to keep
+    buddy->TraverseAll([&](const auto& it) {
+      if (should_rollback) {
+        return;
+      }
+
+      uint64_t hash = DoHash(buddy->Key(it.index, it.slot));
+
+      auto& src_bucket = buddy->GetBucket(it.index);
+      auto res =
+          keep->InsertUniq(std::move(src_bucket.key[it.slot]), std::move(src_bucket.value[it.slot]),
+                           hash, false, [](auto&&...) {});
+
+      if (!res.found()) {
+        should_rollback = true;
+        return;
+      }
+
+      // Clear the slot in buddy so rollback can reuse the space
+      src_bucket.Delete(it.slot);
+    });
+
+    if (should_rollback) {
+      auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
+      keep->Split(hash_fn, buddy, [](auto&&...) {});
+
+      return false;
+    }
+
+    // Same as Split()
+    uint32_t buddy_chunk_size = 1u << (global_depth_ - buddy->local_depth());
+    uint32_t buddy_start = buddy_id & ~(buddy_chunk_size - 1u);
+    for (size_t i = buddy_start; i < buddy_start + buddy_chunk_size; ++i) {
+      segment_[i] = keep;
+    }
+
+    // Free buddy segment
+    PMR_NS::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
+    using alloc_traits = std::allocator_traits<decltype(pa)>;
+    alloc_traits::destroy(pa, buddy);
+    alloc_traits::deallocate(pa, buddy, 1);
+
+    // Decrement unique segment counter
+    --unique_segments_;
+    bucket_count_ -= keep->num_buckets();
+
+    return true;
+  }
+
   size_t GetSegmentCount() const {
     return segment_.size();
   }

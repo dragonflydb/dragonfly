@@ -37,6 +37,7 @@ ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json objec
 
 namespace dfly {
 using namespace std;
+using detail::ascii_len;
 using detail::binpacked_len;
 using MemoryResource = detail::RobjWrapper::MemoryResource;
 
@@ -344,13 +345,6 @@ pair<void*, bool> DefragList(unsigned encoding, void* ptr, PageUsage* page_usage
 
 inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
-}
-
-// converts 7-bit packed length back to ascii length. Note that this conversion
-// is not accurate since it maps 7 bytes to 8 bytes (rounds up), while we may have
-// 7 byte strings converted to 7 byte as well.
-inline constexpr size_t ascii_len(size_t bin_len) {
-  return (bin_len * 8) / 7;
 }
 
 inline const uint8_t* to_byte(const void* s) {
@@ -1236,6 +1230,100 @@ uint8_t CompactObj::GetFirstByte() const {
   return 0;
 }
 
+bool CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
+  CHECK(!IsExternal());
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  if (encoding_) {
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view decode_blob;
+    if (taglen_ == ROBJ_TAG) {
+      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+      decode_blob = {reinterpret_cast<const char*>(u_.r_obj.inner_obj()), u_.r_obj.Size()};
+    } else if (taglen_ == SMALL_TAG) {
+      auto& ss = u_.small_str;
+      tl.tmp_buf.resize(ss.size());
+      char* copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+      ss.Get(copy_dest);
+      decode_blob = {copy_dest, ss.size()};
+    } else if (IsInline()) {
+      decode_blob = {u_.inline_str, taglen_};
+    } else {
+      LOG(FATAL) << "Bad encoding tag " << int(taglen_);
+    }
+    if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
+      VLOG(1) << "Offset out of bounds for encoded string: " << idx
+              << " >= " << str_encoding.DecodedSize(decode_blob.size(), decode_blob[0]);
+      *res = 0;
+      return false;
+    }
+    return true;
+  }
+
+  // No encoding, we can directly access the byte at index.
+  string_view sv = GetSlice(&tl.tmp_str);
+  if (idx >= sv.size()) {
+    VLOG(1) << "Offset out of bounds: " << idx << " >= " << sv.size();
+    *res = 0;
+    return false;
+  }
+  *res = sv[idx];
+  return true;
+}
+
+std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
+  CHECK(!IsExternal());
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  // Inline string without encoding: modify directly.
+  if (IsInline() && !encoding_) {
+    if (idx >= taglen_) {
+      VLOG(1) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
+      return {false, false};
+    }
+    u_.inline_str[idx] = val;
+    return {true, true};
+  }
+
+  // ROBJ_TAG raw string without encoding: modify the underlying buffer directly.
+  if (taglen_ == ROBJ_TAG && !encoding_) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    if (idx >= u_.r_obj.Size()) {
+      VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
+      return {false, false};
+    }
+    reinterpret_cast<char*>(u_.r_obj.inner_obj())[idx] = val;
+    return {true, true};
+  }
+
+  // For ASCII encoded ROBJ strings we can modify the underlying buffer directly.
+  if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) && taglen_ == ROBJ_TAG &&
+      absl::ascii_isascii(val)) {
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    auto* buf = reinterpret_cast<uint8_t*>(u_.r_obj.inner_obj());
+    size_t decoded_len = GetStrEncoding().DecodedSize(u_.r_obj.Size(), buf[0]);
+    if (idx >= decoded_len) {
+      VLOG(1) << "Offset out of bounds for ASCII encoded string: " << idx << " >= " << decoded_len;
+      return {false, false};
+    }
+    detail::ascii_pack_byte(buf, decoded_len, idx, val);
+    return {true, true};
+  }
+
+  // For other encoded strings, INT_TAG, SMALL_TAG we need to decode, modify, and re-encode.
+  string str;
+  GetString(&str);
+  if (idx >= str.size()) {
+    VLOG(1) << "Offset out of bounds: " << idx << " >= " << str.size();
+    return {false, false};
+  }
+  str[idx] = val;
+  SetString(str);
+  return {true, false};
+}
+
 // Frees all resources if owns.
 void CompactObj::Free() {
   DCHECK(HasAllocated());
@@ -1648,6 +1736,35 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
   return decoded_len;
 }
 
+bool CompactObj::StrEncoding::DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const {
+  if (blob.empty()) {
+    return false;
+  }
+  size_t decoded_len = DecodedSize(blob);
+  if (idx >= decoded_len) {
+    return false;
+  }
+  switch (enc_) {
+    case NONE_ENC:
+      *dest = blob[idx];
+      break;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      *dest = detail::ascii_unpack_byte(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len,
+                                        idx);
+      break;
+    case HUFFMAN_ENC: {
+      std::string decoded_huff_string(decoded_len, 0);
+      auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
+      const auto& decoder = tl.GetHuffmanDecoder(domain);
+      decoder.Decode(blob.substr(1), decoded_len, decoded_huff_string.data());
+      *dest = decoded_huff_string[idx];
+      break;
+    }
+  };
+  return true;
+}
+
 StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
   switch (enc_) {
     case NONE_ENC:
@@ -1660,6 +1777,59 @@ StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
     }
   }
   return {};
+}
+
+/* Create a new stream data structure. */
+stream* streamNew() {
+  stream* s = (stream*)zmalloc(sizeof(stream));
+  s->rax = raxNew();
+  s->length = 0;
+  s->first_id.ms = 0;
+  s->first_id.seq = 0;
+  s->last_id.ms = 0;
+  s->last_id.seq = 0;
+  s->max_deleted_entry_id.seq = 0;
+  s->max_deleted_entry_id.ms = 0;
+  s->entries_added = 0;
+  s->cgroups = NULL; /* Created on demand to save memory when not used. */
+  return s;
+}
+
+/* Free a consumer and associated data structures. Note that this function
+ * will not reassign the pending messages associated with this consumer
+ * nor will delete them from the stream, so when this function is called
+ * to delete a consumer, and not when the whole stream is destroyed, the caller
+ * should do some work before. */
+static void streamFreeConsumer(streamConsumer* sc) {
+  raxFree(sc->pel); /* No value free callback: the PEL entries are shared
+                       between the consumer and the main stream PEL. */
+  sdsfree(sc->name);
+  zfree(sc);
+}
+
+/* Used for generic free functions. */
+static void streamFreeConsumerVoid(void* sc) {
+  streamFreeConsumer((streamConsumer*)sc);
+}
+
+/* Used for generic free functions. */
+static void streamFreeCGVoid(void* cg_) {
+  streamCG* cg = (streamCG*)cg_;
+  raxFreeWithCallback(cg->pel, zfree);
+  raxFreeWithCallback(cg->consumers, streamFreeConsumerVoid);
+  zfree(cg);
+}
+
+static void lpFreeVoid(void* lp) {
+  lpFree((uint8_t*)lp);
+}
+
+/* Free a stream, including the listpacks stored inside the radix tree. */
+void freeStream(stream* s) {
+  raxFreeWithCallback(s->rax, lpFreeVoid);
+  if (s->cgroups)
+    raxFreeWithCallback(s->cgroups, streamFreeCGVoid);
+  zfree(s);
 }
 
 }  // namespace dfly

@@ -1628,6 +1628,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
                             conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipeline_blocking_commands_total", "",
+                            m.coordinator_stats.blocking_commands_in_pipelines, MetricType::COUNTER,
+                            &resp->body());
 
   // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
   // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
@@ -1868,6 +1871,27 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("memory_by_class_bytes", m.search_stats.used_memory, {"class"}, {"search_used"},
                     &memory_by_class_bytes);
 
+  AppendMetricValue("memory_by_class_bytes", m.interned_string_stats.pool_bytes, {"class"},
+                    {"interned_string_pool"}, &memory_by_class_bytes);
+
+  AppendMetricValue("memory_by_class_bytes", m.interned_string_stats.pool_table_bytes, {"class"},
+                    {"interned_string_table"}, &memory_by_class_bytes);
+
+  // Interned string stats
+  AppendMetricWithoutLabels("interned_string_entries", "Number of unique interned strings",
+                            m.interned_string_stats.pool_entries, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("interned_string_hits_total", "Interned string pool hits",
+                            m.interned_string_stats.hits, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("interned_string_misses_total", "Interned string pool misses",
+                            m.interned_string_stats.misses, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("interned_string_entries_dedup_factor",
+                            "Deduplication achieved by interned strings",
+                            m.interned_string_stats.pool_entries == 0
+                                ? 0.0
+                                : static_cast<double>(m.interned_string_stats.live_references) /
+                                      static_cast<double>(m.interned_string_stats.pool_entries),
+                            MetricType::GAUGE, &resp->body());
+
   // Command stats
   if (!m.cmd_stats_map.empty()) {
     string command_metrics;
@@ -2080,6 +2104,19 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
     AppendMetricValue("tiered_list_events", m.qlist_stats.onload_requests, {"type"}, {"onload"},
                       &resp->body());
+  }
+
+  // Stream access pattern metrics
+  if (m.shard_stats.stream_sequential_accesses || m.shard_stats.stream_random_accesses ||
+      m.shard_stats.stream_fetch_all_accesses) {
+    AppendMetricHeader("stream_accesses_total", "Total stream accesses by type",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_sequential_accesses,
+                      {"access_type"}, {"sequential"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_random_accesses,
+                      {"access_type"}, {"random"}, &resp->body());
+    AppendMetricValue("stream_accesses_total", m.shard_stats.stream_fetch_all_accesses,
+                      {"access_type"}, {"fetch_all"}, &resp->body());
   }
 }
 
@@ -2962,6 +2999,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
           min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
     }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
+    result.interned_string_stats += GetInternedStringStats();
   };  // cb
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));

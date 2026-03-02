@@ -131,3 +131,20 @@ template <std::contiguous_iterator It> InternedString::InternedString(It begin, 
 }
 
 }  // namespace dfly::detail
+
+namespace dfly {
+
+struct InternedStringStats {
+  size_t pool_entries = 0;
+  size_t pool_bytes = 0;
+  size_t hits = 0;
+  size_t misses = 0;
+  size_t pool_table_bytes = 0;
+  size_t live_references = 0;
+
+  InternedStringStats& operator+=(const InternedStringStats& other);
+};
+
+InternedStringStats GetInternedStringStats();
+
+}  // namespace dfly

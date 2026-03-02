@@ -1549,7 +1549,7 @@ async def test_network_disconnect_during_migration(df_factory):
         pytest.param(3, 16, 20_000, 1_000_000, "true"),
         pytest.param(3, 16, 20_000, 1_000_000, "false"),
         pytest.param(
-            5, 20, 30_000, 1_000_000, "false", marks=[pytest.mark.slow, pytest.mark.opt_only]
+            5, 20, 30_000, 1_000_000, "false", marks=[pytest.mark.large, pytest.mark.opt_only]
         ),
     ],
 )
@@ -2887,7 +2887,7 @@ For each migration we start migration, wait for it to finish and once it is fini
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})

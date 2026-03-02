@@ -6,10 +6,15 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
-      duration_minutes:
-        description: 'Fuzzing duration in minutes'
+      resp_duration:
+        description: 'RESP fuzzing duration in minutes'
         required: false
         default: '60'
+        type: string
+      memcache_duration:
+        description: 'Memcache fuzzing duration in minutes'
+        required: false
+        default: '30'
         type: string
 
 concurrency:
@@ -20,6 +25,15 @@ jobs:
   fuzz-long:
     runs-on: CI-LARGE-86
     timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: resp
+            duration: '60'
+          - target: memcache
+            duration: '30'
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24-afl
@@ -34,18 +48,19 @@ jobs:
         with:
           submodules: true
 
-      - name: Run AFL++ long fuzzing campaign
+      - name: Run AFL++ long fuzzing campaign (${{ matrix.target }})
         uses: ./.github/actions/fuzzing
         with:
           mode: long
-          duration-minutes: ${{ github.event.inputs.duration_minutes || '30' }}
+          target: ${{ matrix.target }}
+          duration-minutes: ${{ matrix.target == 'resp' && (github.event.inputs.resp_duration || matrix.duration) || (github.event.inputs.memcache_duration || matrix.duration) }}
           run-number: ${{ github.run_number }}
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="AFL++ fuzzing found crashes.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+          message="AFL++ ${{ matrix.target }} fuzzing found crashes.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \

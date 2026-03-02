@@ -64,7 +64,6 @@ jobs:
           build-folder-name: build
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only and not tls' || 'not opt_only and not tls' }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
-          df-arg: "experimental_io_loop_v2"
 
       - name: Upload logs on failure
         if: failure()

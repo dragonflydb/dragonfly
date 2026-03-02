@@ -118,7 +118,7 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
           " events to come for the connection in case there is only one command in the pipeline. ");
 
-ABSL_FLAG(bool, experimental_io_loop_v2, false, "new io loop");
+ABSL_FLAG(bool, experimental_io_loop_v2, true, "new io loop");
 
 using namespace util;
 using namespace std;
@@ -836,6 +836,11 @@ unsigned Connection::GetSendWaitTimeSec() const {
 
 void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = std::move(breaker_cb);
+}
+
+void Connection::FlushReplies() {  // NOLINT must not be const due to flush side effect
+  DCHECK(reply_builder_);
+  reply_builder_->Flush();
 }
 
 pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {

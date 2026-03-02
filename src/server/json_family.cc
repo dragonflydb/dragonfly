@@ -502,6 +502,18 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
     return OpStatus::WRONG_TYPE;
   }
 
+  // For non-JSON types (i.e., strings), validate JSON and free the old value before
+  // constructing JsonAutoUpdater. This ensures start_size_ doesn't include the old
+  // string's memory, which would cause a negative diff in SetJsonSize() and crash
+  // in UpdateSize().
+  if (type != OBJ_JSON) {
+    if (!ShardJsonFromString(json_str)) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      return OpStatus::INVALID_JSON;
+    }
+    it_res->it->second.Reset();
+  }
+
   JsonAutoUpdater updater(op_args, key, *std::move(it_res),
                           {.disable_indexing = true, .update_on_delete = false});
 

@@ -1512,6 +1512,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
 
+  if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
+    ++ServerState::tlocal()->stats.blocking_commands_in_pipelines;
+    cmd_cntx->conn()->FlushReplies();
+  }
+
   ArgSlice tail_args;
   if (cmd_cntx->IsDeferredReply()) {
     args_no_cmd.ToVec(&cmd_cntx->arg_slice_backing);  // Ensure lifetime
@@ -1859,9 +1864,13 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_name = "QUIT";
       break;
     case MemcacheParser::STATS:
+      if (apref == AsyncPreference::ONLY_ASYNC)
+        return DispatchResult::WOULD_BLOCK;
       server_family_.StatsMC(cmd.key(), cmd_ctx);
       return DispatchResult::OK;
     case MemcacheParser::VERSION:
+      if (apref == AsyncPreference::ONLY_ASYNC)
+        return DispatchResult::WOULD_BLOCK;
       cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
       return DispatchResult::OK;
     default:

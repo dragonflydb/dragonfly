@@ -6,6 +6,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/str_cat.h>
 
 #include <memory>
 #include <mutex>
@@ -1144,21 +1145,29 @@ void ClusterFamily::ReconcileMasterSlots(std::string_view repl_id) {
   }
 
   for (auto& info : config->GetMutableConfig()) {
+    // we are updating the old config
     if (info.master.id == id_) {
       if (!info.replicas.empty()) {
         auto target = std::find_if(info.replicas.begin(), info.replicas.end(),
                                    [repl_id](const auto& e) { return e.id == repl_id; });
 
         if (target == info.replicas.end()) {
-          LOG(ERROR) << "Could not find repl_id: " << repl_id
-                     << " in cluster topology. Slot redirection after takeover corrupted";
+          auto topology =
+              absl::StrCat("[",
+                           absl::StrJoin(info.replicas, ",",
+                                         [](std::string* out, const auto& r) { *out = r.id; }),
+                           "]");
+          LOG(ERROR) << "info.master.id=" << id_ << ". Missing repl_id=" << repl_id
+                     << " from cluster topology " << topology
+                     << ". Slot redirection after takeover corrupted.";
+
           return;
         }
 
         info.master = *target;
         info.replicas.clear();
       }
-      break;
+      return;
     }
   }
 }
