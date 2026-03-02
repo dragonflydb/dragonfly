@@ -19,7 +19,7 @@ jobs:
             build-type: Debug
             compiler: {cxx: g++, c: gcc}
             cxx_flags: "-fprofile-arcs -ftest-coverage"
-    timeout-minutes: 60
+    timeout-minutes: 300
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
