@@ -23,6 +23,9 @@ void InternedString::ResetPool() {
     InternedBlobHandle::Destroy(handle);
   }
   pool.clear();
+
+  // Pool hits and misses are not reset, they are monotonically increasing counters
+  // TODO reset these two fields in config resetstats
   tl_stats.pool_bytes = 0;
   tl_stats.pool_entries = 0;
   tl_stats.pool_table_bytes = 0;
@@ -109,7 +112,7 @@ InternedStringStats& InternedStringStats::operator+=(const InternedStringStats& 
 
 InternedStringStats GetInternedStringStats() {
   tl_stats.pool_table_bytes =
-      detail::InternedString::GetPoolRef().capacity() * sizeof(detail::InternedBlobHandle);
+      detail::InternedString::GetPoolRef().capacity() * (sizeof(detail::InternedBlobHandle) + 1);
   return tl_stats;
 }
 
