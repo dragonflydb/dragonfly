@@ -1094,24 +1094,6 @@ class SubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
 
     return index;
   }
-
-  // Helper to verify that SubsetKnn returns the expected top-k from a subset
-  void VerifySubsetKnnCorrectness(HnswVectorIndex& index, vector<float>& query, size_t k,
-                                  const vector<GlobalDocId>& subset,
-                                  const vector<GlobalDocId>& expected_ids) {
-    auto results = index.SubsetKnn(query.data(), k, subset);
-
-    ASSERT_EQ(results.size(), expected_ids.size())
-        << "Expected " << expected_ids.size() << " results, got " << results.size();
-
-    // Extract IDs from results (they come as vector of pairs)
-    vector<GlobalDocId> result_ids;
-    for (const auto& [dist, id] : results) {
-      result_ids.push_back(id);
-    }
-
-    EXPECT_THAT(result_ids, testing::UnorderedElementsAreArray(expected_ids));
-  }
 };
 
 TEST_P(SubsetKnnTest, CorrectResults) {
@@ -1297,6 +1279,8 @@ TEST_P(SubsetKnnTest, CompareWithFilteredKnn) {
   // Integration test: verify SubsetKnn produces similar results to filtered Knn
   // SubsetKnn uses brute-force exact search, while Knn uses HNSW approximate search
   // So results may differ slightly, but should have significant overlap
+  constexpr double kMinOverlapRatio = 0.7;  // 70% minimum overlap threshold
+
   auto sim = GetParam();
   auto index = CreateSimple1DIndex(100, sim);
 
@@ -1339,8 +1323,9 @@ TEST_P(SubsetKnnTest, CompareWithFilteredKnn) {
     }
   }
 
-  // Expect at least 70% overlap (HNSW is approximate, so some difference is expected)
-  size_t min_overlap = std::min(subset_ids.size(), knn_ids.size()) * 7 / 10;
+  // Expect at least kMinOverlapRatio overlap (HNSW is approximate, so some difference is expected)
+  size_t min_overlap =
+      static_cast<size_t>(std::min(subset_ids.size(), knn_ids.size()) * kMinOverlapRatio);
   EXPECT_GE(overlap, min_overlap) << "Expected at least " << min_overlap
                                   << " overlapping results, got " << overlap;
 }
