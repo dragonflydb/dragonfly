@@ -784,12 +784,17 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
 }
 
 // Checks that the server can still process commands after a fuzz input.
-// Sends a SET command (in the appropriate protocol) and waits for a response with NO recv timeout.
+// Sends a read-only command (GET/get) and waits for a response with NO recv timeout.
 //
 // This is the liveness criterion: a "hang" is only real if the server can no longer
-// respond to basic SET/GET operations, not merely because a fuzz input took a long time.
+// respond to basic commands, not merely because a fuzz input took a long time.
 //
-// If the server is alive (even if slow from the previous input), SET responds quickly
+// GET is used instead of SET deliberately: it exercises the full pipeline
+// (parse → shard dispatch → storage lookup → response) without modifying server state.
+// State must stay unmodified so that RECORD-based crash replay is exact — any write
+// here would create a key that exists during fuzzing but not during replay.
+//
+// If the server is alive (even if slow from the previous input), GET responds quickly
 // and the iteration completes normally — AFL++ does not record a hang.
 // If the server is truly deadlocked, recv() blocks indefinitely until AFL++ kills the
 // process at the -t timeout, which is the signal we actually want to report.
@@ -809,21 +814,20 @@ void CheckServerLiveness(uint16_t port, bool is_memcache) {
   inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
 
   if (connect(s, (struct sockaddr*)&a, sizeof(a)) == 0) {
-    // SET goes through the full pipeline: parse → shard dispatch → storage → response.
-    // Using a dedicated key to avoid interfering with fuzzed data.
+    // GET/get goes through the full pipeline without modifying state.
     // Protocol format differs between RESP and Memcache text protocol.
     const char* cmd;
     size_t cmd_len;
     if (is_memcache) {
-      // Memcache text protocol: "set <key> <flags> <exptime> <bytes>\r\n<value>\r\n"
-      static const char kMemcacheSetCmd[] = "set __afl_hc 0 0 2\r\nok\r\n";
-      cmd = kMemcacheSetCmd;
-      cmd_len = sizeof(kMemcacheSetCmd) - 1;
+      // Memcache text protocol: "get <key>\r\n" → "END\r\n"
+      static const char kMemcacheGetCmd[] = "get __afl_hc\r\n";
+      cmd = kMemcacheGetCmd;
+      cmd_len = sizeof(kMemcacheGetCmd) - 1;
     } else {
-      // RESP protocol: *3\r\n$3\r\nSET\r\n$8\r\n<key>\r\n$2\r\n<value>\r\n
-      static const char kRespSetCmd[] = "*3\r\n$3\r\nSET\r\n$8\r\n__afl_hc\r\n$2\r\nok\r\n";
-      cmd = kRespSetCmd;
-      cmd_len = sizeof(kRespSetCmd) - 1;
+      // RESP protocol: *2\r\n$3\r\nGET\r\n$8\r\n<key>\r\n → $-1\r\n (nil)
+      static const char kRespGetCmd[] = "*2\r\n$3\r\nGET\r\n$8\r\n__afl_hc\r\n";
+      cmd = kRespGetCmd;
+      cmd_len = sizeof(kRespGetCmd) - 1;
     }
     if (send(s, cmd, cmd_len, MSG_NOSIGNAL) > 0) {
       char r[64];

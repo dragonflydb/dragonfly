@@ -63,7 +63,7 @@ def send_input(host, port, data, timeout=0.2):
 
 
 def check_liveness(host, port, is_memcache, timeout):
-    """Send a SET command and wait for response. Returns True if server is alive."""
+    """Send a read-only GET command and wait for response. Returns True if server is alive."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -73,11 +73,11 @@ def check_liveness(host, port, is_memcache, timeout):
 
     try:
         if is_memcache:
-            cmd = b"set __afl_hc 0 0 2\r\nok\r\n"
-            expected = b"STORED"
+            cmd = b"get __afl_hc\r\n"
+            expected = b"END"
         else:
-            cmd = b"*3\r\n$3\r\nSET\r\n$8\r\n__afl_hc\r\n$2\r\nok\r\n"
-            expected = b"+OK"
+            cmd = b"*2\r\n$3\r\nGET\r\n$8\r\n__afl_hc\r\n"
+            expected = b"$-1"  # nil — key doesn't exist
 
         s.sendall(cmd)
         resp = s.recv(64)
