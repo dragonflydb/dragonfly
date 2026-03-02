@@ -1229,8 +1229,7 @@ TEST_F(HnswDeferredOpsTest, RemoveWithoutReadLock) {
   EXPECT_FALSE(ids.contains(1));
 }
 
-// Test fixture for SubsetKnn functionality
-class SubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
+class HnswSubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
  protected:
   void SetUp() override {
     InitTLSearchMR(PMR_NS::get_default_resource());
@@ -1262,7 +1261,7 @@ class SubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
   }
 };
 
-TEST_P(SubsetKnnTest, CorrectResults) {
+TEST_P(HnswSubsetKnnTest, CorrectResults) {
   // Test that SubsetKnn returns correct top-k from a subset
   auto sim = GetParam();
   auto index = CreateSimple1DIndex(100, sim);
@@ -1300,7 +1299,7 @@ TEST_P(SubsetKnnTest, CorrectResults) {
   }
 }
 
-TEST_P(SubsetKnnTest, EmptySubset) {
+TEST_P(HnswSubsetKnnTest, EmptySubset) {
   // Test edge case: empty subset
   auto sim = GetParam();
   auto index = CreateSimple1DIndex(10, sim);
@@ -1312,7 +1311,7 @@ TEST_P(SubsetKnnTest, EmptySubset) {
   EXPECT_TRUE(results.empty()) << "SubsetKnn with empty subset should return empty results";
 }
 
-TEST_P(SubsetKnnTest, KEqualsZero) {
+TEST_P(HnswSubsetKnnTest, KEqualsZero) {
   // Test edge case: k = 0
   auto sim = GetParam();
   auto index = CreateSimple1DIndex(10, sim);
@@ -1324,7 +1323,7 @@ TEST_P(SubsetKnnTest, KEqualsZero) {
   EXPECT_TRUE(results.empty()) << "SubsetKnn with k=0 should return empty results";
 }
 
-TEST_P(SubsetKnnTest, KGreaterThanSubsetSize) {
+TEST_P(HnswSubsetKnnTest, KGreaterThanSubsetSize) {
   // Test edge case: k > number of valid documents in subset
   auto sim = GetParam();
   auto index = CreateSimple1DIndex(10, sim);
@@ -1343,7 +1342,7 @@ TEST_P(SubsetKnnTest, KGreaterThanSubsetSize) {
   EXPECT_THAT(result_ids, testing::UnorderedElementsAre(1, 3, 5));
 }
 
-TEST_P(SubsetKnnTest, NonExistentIds) {
+TEST_P(HnswSubsetKnnTest, NonExistentIds) {
   // Test that non-existent IDs in subset are gracefully ignored
   auto sim = GetParam();
   auto index = CreateSimple1DIndex(10, sim);
@@ -1363,7 +1362,7 @@ TEST_P(SubsetKnnTest, NonExistentIds) {
   EXPECT_THAT(result_ids, testing::UnorderedElementsAre(4, 5, 6));
 }
 
-TEST_P(SubsetKnnTest, AllDeletedDocuments) {
+TEST_P(HnswSubsetKnnTest, AllDeletedDocuments) {
   // Test edge case: all documents in subset are marked deleted
   auto sim = GetParam();
 
@@ -1398,7 +1397,7 @@ TEST_P(SubsetKnnTest, AllDeletedDocuments) {
   EXPECT_TRUE(results.empty()) << "SubsetKnn should return empty when all docs are deleted";
 }
 
-TEST_P(SubsetKnnTest, MixedDeletedAndValidDocs) {
+TEST_P(HnswSubsetKnnTest, MixedDeletedAndValidDocs) {
   // Test with a mix of deleted and valid documents
   auto sim = GetParam();
 
@@ -1441,7 +1440,7 @@ TEST_P(SubsetKnnTest, MixedDeletedAndValidDocs) {
   EXPECT_THAT(result_ids, testing::UnorderedElementsAre(3, 5, 7));
 }
 
-TEST_P(SubsetKnnTest, CompareWithFilteredKnn) {
+TEST_P(HnswSubsetKnnTest, CompareWithFilteredKnn) {
   // Integration test: verify SubsetKnn produces similar results to filtered Knn
   // SubsetKnn uses brute-force exact search, while Knn uses HNSW approximate search
   // So results may differ slightly, but should have significant overlap
@@ -1496,7 +1495,7 @@ TEST_P(SubsetKnnTest, CompareWithFilteredKnn) {
                                   << " overlapping results, got " << overlap;
 }
 
-INSTANTIATE_TEST_SUITE_P(SubsetKnnSimilarities, SubsetKnnTest,
+INSTANTIATE_TEST_SUITE_P(SubsetKnnSimilarities, HnswSubsetKnnTest,
                          testing::Values(VectorSimilarity::L2, VectorSimilarity::COSINE,
                                          VectorSimilarity::IP),
                          [](const testing::TestParamInfo<VectorSimilarity>& info) {

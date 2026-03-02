@@ -144,6 +144,8 @@ struct HnswlibAdapter {
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
+  // Brute-force KNN search over a specific subset of documents.
+  // Computes distances for all provided document IDs and returns the k nearest neighbors.
   vector<pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
                                              const vector<GlobalDocId>& docs) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
