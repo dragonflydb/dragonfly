@@ -33,6 +33,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
+#include "server/search/aggregate_expr.h"
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
@@ -657,6 +658,17 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       continue;
     }
 
+    // FILTER
+    if (parser->Check("FILTER")) {
+      auto expr_str = parser->Next<string>();
+      auto expr = aggregate::ParseExpression(expr_str);
+      if (!expr) {
+        return CreateSyntaxError(absl::StrCat("Invalid FILTER expression: ", expr_str));
+      }
+      params.steps.push_back(aggregate::MakeFilterStep(std::move(expr)));
+      continue;
+    }
+
     // PARAMS
     if (parser->Check("PARAMS")) {
       params.params = ParseQueryParams(parser);
@@ -671,6 +683,10 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
     }
 
+    if (parser->Check("SCORER") || parser->Check("DIALECT")) {
+      parser->Next();
+      continue;
+    }
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
 
