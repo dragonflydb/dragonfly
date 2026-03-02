@@ -247,4 +247,23 @@ TEST_F(JsonFamilyMemoryTest, ShortKeyAccounting) {
   EXPECT_LE(std::llabs(actual - expected), 64);
 }
 
+TEST_F(JsonFamilyMemoryTest, MergeMemoryTrackingCrash) {
+  Run("JSON.SET key $ {\"x\":1}");
+
+  // Perform many merges that grow the JSON slightly each time.
+  // The fuzzer needed ~121 merges to trigger the crash, followed by a delete operation.
+  // We'll do 150 merges to ensure we hit the accounting drift.
+  for (int i = 0; i < 150; i++) {
+    auto resp = Run("JSON.MERGE key $ {\"y\":2}");
+    ASSERT_THAT(resp, "OK");
+  }
+
+  auto resp = Run("JSON.MERGE key $ null");
+  ASSERT_THAT(resp, "OK");
+
+  // Verify the key still exists and has correct value
+  resp = Run("JSON.GET key");
+  ASSERT_THAT(resp, "null");
+}
+
 }  // namespace dfly

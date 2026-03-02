@@ -3514,4 +3514,14 @@ TEST_F(JsonFamilyTest, SetOverLargeStringKey) {
   EXPECT_EQ(resp, "1");
 }
 
+TEST_F(JsonFamilyTest, SetFullJsonInvalidOnNewKey) {
+  // Try to set invalid JSON on a non-existent key
+  auto resp = Run("JSON.SET newkey $ {invalid}");
+  EXPECT_THAT(resp, ErrArg("failed to parse JSON"));
+
+  // Verify the key was NOT created (proper cleanup)
+  resp = Run("EXISTS newkey");
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 }  // namespace dfly

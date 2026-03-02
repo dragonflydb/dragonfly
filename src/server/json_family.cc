@@ -104,6 +104,10 @@ class JsonAutoUpdater {
   }
 
   ~JsonAutoUpdater() {
+    if (was_released_) {
+      return;  // Skip all cleanup if iterator was released
+    }
+
     if (options_.update_on_delete && !set_size_was_called_) {
       SetJsonSize();
     } else if (!set_size_was_called_) {
@@ -133,6 +137,13 @@ class JsonAutoUpdater {
     return it_.it;
   }
 
+  // Releases ownership of the iterator. After calling this, the destructor becomes a noop.
+  // Used when we need to delete the entry manually (e.g., on error paths for newly created keys).
+  DbSlice::ItAndUpdater Release() {
+    was_released_ = true;
+    return std::move(it_);
+  }
+
  private:
   size_t GetMemoryUsage() const {
     return static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
@@ -156,6 +167,7 @@ class JsonAutoUpdater {
   // Used to track the memory usage of the json object
   size_t start_size_{0};
   bool set_size_was_called_{false};
+  bool was_released_{false};
 };
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
@@ -502,12 +514,19 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
     return OpStatus::WRONG_TYPE;
   }
 
-  // For non-JSON types (i.e., strings), validate JSON and free the old value before
-  // constructing JsonAutoUpdater. This ensures start_size_ doesn't include the old
-  // string's memory, which would cause a negative diff in SetJsonSize() and crash
-  // in UpdateSize().
+  const bool is_new_key = it_res->is_new;
+
   if (type != OBJ_JSON) {
+    // TODO -- this is a performance regression. If json_str is large, we parse it here
+    // then again  later after we set up the JsonAutoUpdater. The issue here is that we
+    // need to deallocate before we create the updater but after we parse the string. Yet,
+    // parsing requires the updater to be created first(see its comments).
     if (!ShardJsonFromString(json_str)) {
+      if (is_new_key) {
+        // Delete the key if it's new
+        auto& db_slice = op_args.GetDbSlice();
+        db_slice.DelMutable(op_args.db_cntx, std::move(*it_res));
+      }
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       return OpStatus::INVALID_JSON;
     }
@@ -524,6 +543,10 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
       if (type == OBJ_JSON) {
         // We need to add the document to the indexes, because we removed it before
         op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
+      }
+      if (is_new_key) {
+        auto& db_slice = op_args.GetDbSlice();
+        db_slice.DelMutable(op_args.db_cntx, updater.Release());
       }
       return OpStatus::INVALID_JSON;
     }
@@ -1634,16 +1657,24 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-  if (!parsed_json) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_JSON;
-  }
+  // To avoid double parsing we delegate it for later inside the callback.
+  // Had we parsed the json_str here we would not be able to store it,
+  // because the JsonAutoUpdater must be called before.
+  OpStatus parse_error = OpStatus::OK;
 
   auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
     string_view strpath = cur_path ? *cur_path : string_view{};
 
     DVLOG(2) << "Handling " << strpath << " " << val->to_string();
+
+    // Parse JSON inside the callback, after JsonAutoUpdater has measured start_size_.
+    // This avoids memory tracking bugs and double parsing.
+    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+    if (!parsed_json) {
+      parse_error = OpStatus::INVALID_JSON;
+      return {};
+    }
+
     // https://datatracker.ietf.org/doc/html/rfc7386#section-2
     try {
       mergepatch::apply_merge_patch(*val, *parsed_json);
@@ -1656,6 +1687,12 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
   };
 
   auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
+
+  // Check for parse errors from callback
+  if (parse_error != OpStatus::OK) {
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    return parse_error;
+  }
 
   if (res.status() != OpStatus::KEY_NOTFOUND)
     return res.status();
