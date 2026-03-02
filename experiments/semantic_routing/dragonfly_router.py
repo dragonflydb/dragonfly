@@ -32,7 +32,10 @@ from redisvl.extensions.router.schema import DistanceAggregationMethod, RouteMat
 
 
 class DragonflySemanticRouter(SemanticRouter):
-    """SemanticRouter that uses KNN search instead of VECTOR_RANGE + FT.AGGREGATE."""
+    """SemanticRouter that uses KNN search instead of VECTOR_RANGE + FT.AGGREGATE.
+    Whereas VECTOR_RANGE returns everything within threshold, eg 0.8, knn search returns K closest results.
+    So there are cases where VECTOR_RANGE may return nothing, but knn will return k entries (if there are k in the dataset).
+    """
 
     def _get_route_matches(
         self,
@@ -100,6 +103,9 @@ class DragonflySemanticRouter(SemanticRouter):
             dist = float(field_map.get("vector_distance", "inf"))
 
             # Apply per-route distance threshold (mirrors the FILTER clause)
+            # because KNN unlike vector range returns stuff outside threshold, we now have to filter client side.
+            # additionally, there are filters in the redisvl syntax that applied per route, also server side.
+            # here both are collapsed into one client side cut off
             if rname in thresholds and dist < thresholds[rname]:
                 route_distances[rname].append(dist)
 

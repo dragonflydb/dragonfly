@@ -23,7 +23,10 @@ def main():
 
     # ── Define routes ───────────────────────────────────────────────────
     technology = Route(
+        # in the hash, name is stored as route_name
         name="technology",
+        # these are each converted into 768 dim. vectors by the vectorizer in semantic router.
+        # each ref. becomes an hset with its own key
         references=[
             "what are the latest advancements in AI?",
             "tell me about the newest gadgets",
@@ -31,6 +34,7 @@ def main():
             "how does machine learning work?",
         ],
         metadata={"category": "tech"},
+        # a match will only count within this cosine distance thresold.
         distance_threshold=0.8,
     )
 
@@ -61,6 +65,7 @@ def main():
     # ── Create the router ───────────────────────────────────────────────
     print("1. Creating DragonflySemanticRouter (downloads model on first run)...")
     try:
+        # searches using knn instead of vector_range, and fliters by distance client side
         router = DragonflySemanticRouter(
             name="dragonfly-test-router",
             routes=[technology, sports, cooking],
