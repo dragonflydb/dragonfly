@@ -182,10 +182,12 @@ jobs:
 
       - name: C++ Unit Tests - IoUring with cluster mode
         run: |
+          cd ${GITHUB_WORKSPACE}/build
           FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
         run: |
+          cd ${GITHUB_WORKSPACE}/build
           FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
       - name: Upload unit logs on failure
