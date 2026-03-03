@@ -15,6 +15,7 @@
 #include <mimalloc.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory_resource>
 #include <random>
 
@@ -1259,6 +1260,30 @@ class HnswSubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
 
     return index;
   }
+
+  // Helper to create a 2D index with unit-circle vectors, for COSINE similarity testing.
+  // Vector i is placed at angle i * (2π / num_elements), giving meaningful cosine distances.
+  unique_ptr<HnswVectorIndex> CreateCircle2DIndex(size_t num_elements, VectorSimilarity sim) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 2;
+    params.sim = sim;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+
+    const float step = 2.0f * static_cast<float>(acos(-1.0)) / static_cast<float>(num_elements);
+    for (size_t i = 0; i < num_elements; i++) {
+      float angle = step * static_cast<float>(i);
+      vector<float> coords = {cosf(angle), sinf(angle)};
+      auto doc = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+      index->Add(i, MockedDocument(doc), "vec");
+    }
+
+    return index;
+  }
 };
 
 TEST_P(HnswSubsetKnnTest, CorrectResults) {
@@ -1447,9 +1472,23 @@ TEST_P(HnswSubsetKnnTest, CompareWithFilteredKnn) {
   constexpr double kMinOverlapRatio = 0.7;  // 70% minimum overlap threshold
 
   auto sim = GetParam();
-  auto index = CreateSimple1DIndex(100, sim);
 
-  vector<float> query = {50.0f};
+  // COSINE similarity is undefined for 1D positive vectors (all share the same direction,
+  // so all cosine distances equal 0). Use 2D unit-circle vectors instead, where element i
+  // is at angle i * 2π/100, giving each pair a distinct, meaningful cosine distance.
+  unique_ptr<HnswVectorIndex> index;
+  vector<float> query;
+  if (sim == VectorSimilarity::COSINE) {
+    constexpr size_t kNumElements = 100;
+    index = CreateCircle2DIndex(kNumElements, sim);
+    const float step = 2.0f * static_cast<float>(acos(-1.0)) / static_cast<float>(kNumElements);
+    float angle = step * 50.0f;
+    query = {cosf(angle), sinf(angle)};
+  } else {
+    index = CreateSimple1DIndex(100, sim);
+    query = {50.0f};
+  }
+
   vector<GlobalDocId> subset;
 
   // Create a small subset (well below typical 8192 threshold)
