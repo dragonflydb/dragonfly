@@ -114,8 +114,9 @@ ABSL_FLAG(bool, always_flush_pipeline, false,
           "if true will flush pipeline response after each pipeline squashing");
 
 ABSL_FLAG(uint32_t, async_dispatch_quota, 100,
-          "Number of consecutive dispatch messages to process before forcibly "
-          "processing a pipelined command to prevent starvation.");
+          "Maximum number of consecutive async dispatch messages to process before either "
+          "yielding to I/O when the pipeline appears empty or forcibly processing a queued "
+          "pipelined command to prevent starvation. Set to 0 to disable this mechanism.");
 
 ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
@@ -1801,7 +1802,9 @@ void Connection::AsyncFiber() {
       // (producer). This allows the discovery and parsing of commands potentially sitting in the
       // TCP buffer. Without this yield, AsyncFiber would monopolize the CPU, starving the IoLoop
       // and remaining blind to pending pipeline data.
-      if ((dispatch_q_cmd_processed >= async_dispatch_quota) && (parsed_head_ == nullptr)) {
+      bool quota_reached =
+          (async_dispatch_quota > 0) && (dispatch_q_cmd_processed >= async_dispatch_quota);
+      if (quota_reached && (parsed_head_ == nullptr)) {
         ThisFiber::Yield();
 
         // If it is STILL empty after IoLoop got a chance to run, the client hasn't sent anything.
@@ -1813,8 +1816,7 @@ void Connection::AsyncFiber() {
 
       // Evaluate if we need to force a pipeline command due to quota limits (to prevent
       // starvation).
-      bool force_pipeline =
-          (dispatch_q_cmd_processed >= async_dispatch_quota) && (parsed_head_ != nullptr);
+      bool force_pipeline = quota_reached && (parsed_head_ != nullptr);
 
       if (dispatch_q_.empty() || is_blocked || force_pipeline) {  // 2. Process pipeline Queue
         VLOG_IF(1, force_pipeline)
