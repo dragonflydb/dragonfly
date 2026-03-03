@@ -32,6 +32,14 @@ inputs:
     required: false
     default: 'true'
 
+outputs:
+  hang_count:
+    description: "Number of unique hangs found during fuzzing"
+    value: ${{ steps.analyze.outputs.hang_count }}
+  crash_count:
+    description: "Number of unique crashes found during fuzzing"
+    value: ${{ steps.analyze.outputs.crash_count }}
+
 runs:
   using: "composite"
   steps:
@@ -172,7 +180,10 @@ runs:
           fi
         fi
 
-        # Fail the job only if crashes were found
+        echo "hang_count=${HANG_COUNT}" >> "$GITHUB_OUTPUT"
+        echo "crash_count=${CRASH_COUNT}" >> "$GITHUB_OUTPUT"
+
+        # Fail the job if crashes or hangs were found
         if [ "$CRASH_COUNT" -gt 0 ]; then
           echo "::error::Found $CRASH_COUNT crash(es)!"
           echo ""
@@ -182,7 +193,11 @@ runs:
         fi
 
         if [ "$HANG_COUNT" -gt 0 ]; then
-          echo "::warning::Found $HANG_COUNT hang(s) (not failing the build)"
+          echo "::error::Found $HANG_COUNT hang(s)!"
+          echo ""
+          echo "Hang files:"
+          ls -lh "$HANGS_DIR" || true
+          exit 1
         fi
 
         if [ "$CORPUS_SIZE" -gt 0 ]; then
@@ -193,7 +208,7 @@ runs:
 
     - name: Package crash artifacts
       shell: bash
-      if: failure()
+      if: failure() && steps.analyze.outputs.crash_count > 0
       run: |
         CRASHES_DIR="$(pwd)/fuzz/artifacts/${{ inputs.target }}/default/crashes"
 
@@ -222,12 +237,23 @@ runs:
         ls -lh fuzz/packaged/ 2>/dev/null || echo "  (none)"
 
     - name: Upload crash artifacts
-      if: failure()
+      if: failure() && steps.analyze.outputs.crash_count > 0
       uses: actions/upload-artifact@v4
       with:
         name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-crashes-${{ inputs.run-number }}
         path: |
           fuzz/packaged/*.tar.gz
+          fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
+        retention-days: 10
+        if-no-files-found: ignore
+
+    - name: Upload hang artifacts
+      if: failure() && steps.analyze.outputs.hang_count > 0
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-hangs-${{ inputs.run-number }}
+        path: |
+          fuzz/artifacts/${{ inputs.target }}/default/hangs/
           fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
         retention-days: 10
         if-no-files-found: ignore
