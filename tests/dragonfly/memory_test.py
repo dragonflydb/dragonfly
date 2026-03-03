@@ -152,6 +152,7 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     await client.execute_command("set x y")
 
 
+@pytest.mark.large
 @pytest.mark.asyncio
 @dfly_args(
     {

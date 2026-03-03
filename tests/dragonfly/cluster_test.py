@@ -2162,6 +2162,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 @dfly_args(
     {"proactor_threads": 2, "cluster_mode": "yes", "migration_buckets_serialization_threshold": 1}
 )
+@pytest.mark.large
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
 @pytest.mark.exclude_epoll
@@ -2728,6 +2729,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
@@ -3129,6 +3131,7 @@ async def test_cluster_sharded_pubsub_shard_commands(df_factory: DflyInstanceFac
     assert message == []
 
 
+@pytest.mark.large
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     # create cluster with several nodes and create migrations from one node to others
