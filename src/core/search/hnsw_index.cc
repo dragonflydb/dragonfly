@@ -144,6 +144,14 @@ struct HnswlibAdapter {
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
+  // Brute-force KNN search over a specific subset of documents.
+  // Computes distances for all provided document IDs and returns the k nearest neighbors.
+  vector<pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+                                             const vector<GlobalDocId>& docs) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return QueueToVec(world_.subsetKnnSearch(target, k, docs));
+  }
+
   HnswIndexMetadata GetMetadata() const {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     HnswIndexMetadata metadata;
@@ -541,6 +549,11 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
     float* target, size_t k, std::optional<size_t> ef,
     const std::vector<GlobalDocId>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
+}
+
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::SubsetKnn(
+    float* target, size_t k, const std::vector<GlobalDocId>& docs) const {
+  return adapter_->SubsetKnn(target, k, docs);
 }
 
 void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {

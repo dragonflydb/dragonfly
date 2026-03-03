@@ -16,17 +16,19 @@ jobs:
       matrix:
         include:
           - container: "ubuntu-dev:20-gcc14"
-            build-type: Release
+            build-type: Debug
             compiler: {cxx: g++, c: gcc}
             cxx_flags: "-fprofile-arcs -ftest-coverage"
-    timeout-minutes: 60
+    timeout-minutes: 300
     container:
       image: ghcr.io/romange/${{ matrix.container }}
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /:/hostroot
 
     steps:
       - uses: actions/checkout@v6
@@ -71,23 +73,38 @@ jobs:
             -L
           pwd
           cd build && pwd
-      - name: Build & Test Coverage
+      - name: Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          ninja
+          echo "-----------------------------"
+          ninja src/all
 
-          # Be permissive with errors, we hit compiler bugs from time to time.
-          ninja test || true
+      - name: Run C++ Unit Tests
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          ctest -V -L DFLY
 
+      - name: Run Python Integration Tests
+        run: |
+          cd $GITHUB_WORKSPACE/build
           export DRAGONFLY_PATH=`pwd`/dragonfly
-          pytest ../tests/dragonfly/ || true
+          pytest ../tests/dragonfly/ --durations=10 --timeout=300 --color=yes --log-cli-level=INFO
 
+      - name: Generate Coverage Report
+        run: |
+          cd $GITHUB_WORKSPACE/build
           lcov -c -d . -o main_coverage.info
           lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*'
           genhtml main_coverage.info --ignore-errors source --output-directory covout -p $GITHUB_WORKSPACE
           ls ./
           echo ls covout
           ls covout/
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: build/main_coverage.info
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage
         uses: actions/upload-artifact@v6
         with:

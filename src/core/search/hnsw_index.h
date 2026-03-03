@@ -58,6 +58,8 @@ class HnswVectorIndex {
                                                  std::optional<size_t> ef) const;
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                                  const std::vector<GlobalDocId>& allowed) const;
+  std::vector<std::pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+                                                       const std::vector<GlobalDocId>& docs) const;
 
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
