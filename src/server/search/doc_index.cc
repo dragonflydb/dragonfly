@@ -293,6 +293,16 @@ void ShardDocIndex::DocKeyIndex::Restore(
   }
 }
 
+void ShardDocIndex::DocKeyIndex::Restore(const std::vector<std::string>& keys) {
+  DCHECK(ids_.empty()) << "Restore should only be called on an empty DocKeyIndex";
+  keys_.resize(keys.size());
+  for (DocId id = 0; id < static_cast<DocId>(keys.size()); ++id) {
+    keys_[id] = keys[id];
+    ids_[keys[id]] = id;
+  }
+  last_id_ = static_cast<DocId>(keys.size());
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }

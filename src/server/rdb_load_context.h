@@ -70,10 +70,9 @@ class RdbLoadContext {
   absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>> TakePendingIndexMappings();
   std::vector<PendingHnswNodes> TakePendingHnswNodes();
 
-  // Pre-distributed key mappings: target_shard_id -> index_name -> [(key, new_doc_id)].
-  using PerShardMappings = absl::flat_hash_map<
-      uint32_t,
-      absl::flat_hash_map<std::string, std::vector<std::pair<std::string, search::DocId>>>>;
+  // Pre-distributed key mappings indexed by target shard_id.
+  // Per-shard: index_name -> keys in doc_id order (vector index = doc_id).
+  using PerShardMappings = std::vector<absl::flat_hash_map<std::string, std::vector<std::string>>>;
 
   // Remaps HNSW node global_ids, restores HNSW graphs, and pre-distributes key mappings by
   // target shard. The internal remap table is local and freed when this function returns.
