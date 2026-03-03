@@ -1721,7 +1721,7 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
     for _ in range(6):
         await reader.readline()
 
-    # Continuous Flood Task with batches of 500 comamnds (publisher)
+    # Continuous Flood Task with batches of 500 commands (publisher)
     keep_flooding = True
 
     async def flood():

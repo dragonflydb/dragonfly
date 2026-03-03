@@ -1793,11 +1793,6 @@ void Connection::AsyncFiber() {
           !dispatch_q_.empty() &&
           std::holds_alternative<MigrationRequestMessage>(dispatch_q_.front().handle);
 
-      // Check if we are blocked:
-      // Blocked = It IS a migration AND we have pipeline work AND we are in Redis mode.
-      bool is_blocked =
-          is_migration_req && (parsed_head_ != nullptr) && (protocol_ == Protocol::REDIS);
-
       // If the quota is reached but the pipeline appears empty, we must yield to the IoLoop
       // (producer). This allows the discovery and parsing of commands potentially sitting in the
       // TCP buffer. Without this yield, AsyncFiber would monopolize the CPU, starving the IoLoop
@@ -1814,11 +1809,19 @@ void Connection::AsyncFiber() {
         }
       }
 
-      // Evaluate if we need to force a pipeline command due to quota limits (to prevent
-      // starvation).
-      bool force_pipeline = quota_reached && (parsed_head_ != nullptr);
-
-      if (dispatch_q_.empty() || is_blocked || force_pipeline) {  // 2. Process pipeline Queue
+      // We prioritize pipeline execution over the admin queue in two distinct cases:
+      // 1. defer_migration: A migration is requested (Redis only), but we must drain the existing
+      // pipeline first.
+      // 2. force_pipeline: The dispatch quota was reached, forcing a pipeline execution to prevent
+      // starvation.
+      bool defer_migration = false;
+      bool force_pipeline = false;
+      if (parsed_head_ != nullptr) {
+        defer_migration = is_migration_req && (protocol_ == Protocol::REDIS);
+        force_pipeline = quota_reached;
+      }
+      bool prefer_pipeline_execution = defer_migration || force_pipeline;
+      if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
         VLOG_IF(1, force_pipeline)
             << "[" << id_ << "] AsyncFiber quota reached (" << async_dispatch_quota
             << "). Forcing pipeline execution to prevent starvation.";
