@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   benchmark:
+    if: github.repository == 'dragonflydb/dragonfly'
     strategy:
       matrix:
         config:

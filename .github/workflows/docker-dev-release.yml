@@ -15,6 +15,7 @@ env:
 
 jobs:
   build_and_tag:
+    if: github.repository == 'dragonflydb/dragonfly'
     name: Build and Push ${{matrix.flavor}} ${{ matrix.os.arch }} image
     strategy:
       matrix:
@@ -160,6 +161,7 @@ jobs:
       sha: ${{ steps.build_info.outputs.short_sha }}
 
   merge_manifest:
+    if: github.repository == 'dragonflydb/dragonfly'
     needs: [build_and_tag]
     runs-on: ubuntu-latest
     strategy:
