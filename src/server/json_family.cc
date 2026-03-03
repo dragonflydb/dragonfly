@@ -1657,21 +1657,27 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  // To avoid double parsing we delegate it for later inside the callback.
-  // Had we parsed the json_str here we would not be able to store it,
-  // because the JsonAutoUpdater must be called before.
-  OpStatus parse_error = OpStatus::OK;
+  // TODO: This is wasteful - we parse twice (validation + actual use) to avoid memory tracking
+  // bugs. The alternative is parsing once inside the callback, but that causes N parses for
+  // multi-match paths (e.g., $..field matching N elements). Better solution would be to parse
+  // once after JsonAutoUpdater construction, use in callback N times, then Reset() before
+  // SetJsonSize(), but that requires refactoring JsonMutateOperation to expose the updater.
+
+  // Validate JSON is parseable before mutation
+  if (!ShardJsonFromString(json_str)) {
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    return OpStatus::INVALID_JSON;
+  }
 
   auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
     string_view strpath = cur_path ? *cur_path : string_view{};
-
     DVLOG(2) << "Handling " << strpath << " " << val->to_string();
 
     // Parse JSON inside the callback, after JsonAutoUpdater has measured start_size_.
-    // This avoids memory tracking bugs and double parsing.
+    // This avoids memory tracking bugs from having parsed_json alive during measurements.
+    // We already validated above, so this should succeed.
     std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
     if (!parsed_json) {
-      parse_error = OpStatus::INVALID_JSON;
       return {};
     }
 
@@ -1687,12 +1693,6 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
   };
 
   auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
-
-  // Check for parse errors from callback
-  if (parse_error != OpStatus::OK) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return parse_error;
-  }
 
   if (res.status() != OpStatus::KEY_NOTFOUND)
     return res.status();
