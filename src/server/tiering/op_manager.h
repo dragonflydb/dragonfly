@@ -29,12 +29,9 @@ class OpManager {
     size_t pending_stash_cnt = 0;
   };
 
-  using KeyRef = std::pair<DbIndex, std::string_view>;
+  using KeyRef = ::dfly::tiering::KeyRef;
 
-  // Two separate keyspaces are provided - one for strings, one for numeric identifiers.
-  // Ids can be used to track auxiliary values that don't map to real keys (like a page index).
-  // Specifically, we track page indexes when serializing small-bin pages with multiple items.
-  using PendingId = std::variant<unsigned, KeyRef>;
+  using PendingId = ::dfly::tiering::PendingId;
 
   explicit OpManager(size_t max_size);
   virtual ~OpManager();
@@ -75,7 +72,7 @@ class OpManager {
   Stats GetStats() const;
 
  protected:
-  using OwnedEntryId = std::variant<unsigned, DbKeyId>;
+  using OwnedEntryId = std::variant<uintptr_t, DbKeyId>;
 
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error

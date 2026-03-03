@@ -16,16 +16,16 @@ namespace dfly::tiering {
 
 using namespace std;
 
-OpManager::OwnedEntryId OpManager::ToOwned(OpManager::PendingId id) {
-  Overloaded convert{[](unsigned i) -> OpManager::OwnedEntryId { return i; },
-                     [](std::pair<DbIndex, std::string_view> p) -> OwnedEntryId {
-                       return std::make_pair(p.first, std::string{p.second});
-                     }};
-  return std::visit(convert, id);
+OpManager::OwnedEntryId OpManager::ToOwned(PendingId id) {
+  return std::visit(Overloaded{[](uintptr_t i) -> OpManager::OwnedEntryId { return i; },
+                               [](std::pair<DbIndex, std::string_view> p) -> OwnedEntryId {
+                                 return std::make_pair(p.first, std::string{p.second});
+                               }},
+                    id);
 }
 
 string OpManager::ToString(const OwnedEntryId& id) {
-  if (const auto* i = std::get_if<unsigned>(&id); i) {
+  if (const auto* i = std::get_if<uintptr_t>(&id); i) {
     return absl::StrCat(*i);
   }
   const auto& key = std::get<DbKeyId>(id);
