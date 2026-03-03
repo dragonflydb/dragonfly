@@ -212,7 +212,7 @@ class EngineShard {
   }
 
   // Return total segments merged.
-  size_t DashGC(double threshold, DbIndex db_idx);
+  size_t CompactTable(double threshold, DbIndex db_idx);
 
  private:
   struct DefragTaskState {

@@ -807,6 +807,204 @@ TEST_F(DashTest, MergeWithAliasedEntries) {
   }
 }
 
+// Test that FindBuddyId resolves to the same buddy *instance* for all alias ids in a stripe.
+//
+// When global_depth > local_depth a segment is referenced by a contiguous "stripe" of
+// stripe_size = 2^(global_depth - local_depth) directory entries that all point to the
+// same segment object.
+// The canonical id is the stripe's first entry (lowest index).
+//
+// FindBuddyId(alias) computes:
+//   depth    = GetSegment(alias)->local_depth()    // reads from the instance, same for all
+//   bit_pos  = global_depth - depth                // same for every alias in the stripe
+//   buddy_ix = alias ^ (1 << bit_pos)              // XOR differs per alias
+//
+// For a stripe starting at canonical id C (i.e. C is a multiple of stripe_size):
+//   alias k = C + k  (0 <= k < stripe_size)
+//   buddy_ix(k) = (C + k) ^ (1 << bit_pos)
+//              = C ^ (1 << bit_pos) + k    (because k < stripe_size = 1<<bit_pos, so k
+//                                           does not interfere with bit bit_pos)
+//
+// buddy_ix(k) and buddy_ix(0) differ by k, which is still within the buddy stripe
+// (a stripe of the same size starting at C ^ (1<<bit_pos)).  Therefore
+// GetSegment(buddy_ix(k)) returns the same buddy instance for all k.
+//
+// In other words: FindBuddyId returns *different id values* for different alias ids,
+// but all those ids are aliases of the *same buddy segment instance*.
+TEST_F(DashTest, FindBuddyIdCanonicalForStripe) {
+  // Fill enough to force global_depth >= 3, giving segments at local_depth 3.
+  for (uint64_t i = 0; i < 8000; ++i) {
+    dt_.Insert(i, i);
+  }
+  ASSERT_GE(dt_.depth(), 3u);
+
+  // Erase most items so segments are sparse enough to merge.
+  for (uint64_t i = 100; i < 8000; ++i) {
+    dt_.Erase(i);
+  }
+
+  // To get a real buddy we must merge TWO adjacent pairs at the same depth.
+  // After merging pair A (keep_a, buddy_a) the kept segment drops to depth d-1,
+  // but its buddy stripe still has the old depth d, so FindBuddyId returns self.
+  // Only after merging the adjacent pair B (keep_b, buddy_b) to d-1 as well do
+  // the two resulting stripes become buddies of each other.
+  //
+  // We find four consecutive canonical segments at the same depth d > 2 and merge
+  // pairs (0,1) and (2,3) within that group.
+  unsigned keep_a = UINT_MAX, bud_a = UINT_MAX, keep_b = UINT_MAX, bud_b = UINT_MAX;
+  for (size_t i = 0; i < dt_.GetSegmentCount();) {
+    auto* s0 = dt_.GetSegment(i);
+    uint8_t d = s0->local_depth();
+    if (d <= 2) {
+      i = dt_.NextSeg(i);
+      continue;
+    }
+    size_t i1 = dt_.NextSeg(i);
+    if (i1 >= dt_.GetSegmentCount())
+      break;
+    size_t i2 = dt_.NextSeg(i1);
+    if (i2 >= dt_.GetSegmentCount())
+      break;
+    size_t i3 = dt_.NextSeg(i2);
+    if (i3 >= dt_.GetSegmentCount())
+      break;
+
+    auto* s1 = dt_.GetSegment(i1);
+    auto* s2 = dt_.GetSegment(i2);
+    auto* s3 = dt_.GetSegment(i3);
+    size_t cap = s0->capacity();
+    if (s1->local_depth() == d && s2->local_depth() == d && s3->local_depth() == d &&
+        s0->SlowSize() + s1->SlowSize() <= static_cast<size_t>(0.25 * cap) &&
+        s2->SlowSize() + s3->SlowSize() <= static_cast<size_t>(0.25 * cap)) {
+      keep_a = static_cast<unsigned>(i);
+      bud_a = static_cast<unsigned>(i1);
+      keep_b = static_cast<unsigned>(i2);
+      bud_b = static_cast<unsigned>(i3);
+      break;
+    }
+    i = dt_.NextSeg(i);
+  }
+
+  ASSERT_NE(keep_a, UINT_MAX);
+  ASSERT_TRUE(dt_.Merge(keep_a, bud_a));
+  ASSERT_TRUE(dt_.Merge(keep_b, bud_b));
+
+  // After both merges:
+  //   - segment at keep_a has local_depth = d-1, aliased by stripe {keep_a, keep_a+1}
+  //   - segment at keep_b has local_depth = d-1, aliased by stripe {keep_b, keep_b+1}
+  //   - The two stripes are buddies of each other (same depth, adjacent subtrees).
+  auto* seg_a = dt_.GetSegment(keep_a);
+  uint8_t new_depth = seg_a->local_depth();
+  ASSERT_GE(new_depth, 2u);  // depth<=1 guard in FindBuddyId must not fire
+
+  size_t stripe_size = 1u << (dt_.depth() - new_depth);
+  size_t stripe_start = keep_a & ~(stripe_size - 1);
+
+  // FindBuddyId from the canonical id of stripe A must resolve to seg_b.
+  auto* seg_b = dt_.GetSegment(keep_b);
+  unsigned canonical_bid = dt_.FindBuddyId(static_cast<unsigned>(stripe_start));
+  ASSERT_EQ(dt_.GetSegment(canonical_bid), seg_b)
+      << "FindBuddyId from canonical id must resolve to the buddy segment";
+
+  EXPECT_EQ(stripe_size, 2);
+  for (size_t k = 0; k < stripe_size; ++k) {
+    size_t alias = stripe_start + k;
+    EXPECT_EQ(dt_.GetSegment(alias), seg_a) << "Directory entry " << alias << " must alias seg_a";
+
+    unsigned bid = dt_.FindBuddyId(static_cast<unsigned>(alias));
+    // Different alias -> different buddy id value, but same buddy instance.
+    EXPECT_EQ(bid, canonical_bid + k)
+        << "FindBuddyId(" << alias << ") should equal canonical_bid + " << k;
+    EXPECT_EQ(dt_.GetSegment(bid), seg_b)
+        << "FindBuddyId(" << alias << ") must resolve to seg_b for all aliases";
+    // Stripe B is at higher indices than stripe A (Merge requires keep_id < buddy_id).
+    EXPECT_GT(bid, alias);
+  }
+}
+
+// Test that NextSeg is correct when called with the canonical (first) id of a stripe,
+// and documents the expected behavior for non-canonical (middle-of-stripe) ids.
+//
+// NextSeg(sid) computes:
+//   delta = 1 << (global_depth - segment_[sid]->local_depth())
+//   return sid + delta
+//
+// For the canonical (first) id of a stripe, sid is already aligned to a multiple of
+// delta, so sid + delta is exactly the first id of the next stripe — correct.
+//
+// For a non-canonical id sid = canonical + k  (0 < k < delta), the result is
+//   (canonical + k) + delta
+// which lands k positions into the next stripe, not at its start.
+TEST_F(DashTest, NextSegCanonicalBehavior) {
+  // Build a table large enough for global_depth >= 2.
+  for (uint64_t i = 0; i < 2000; ++i) {
+    dt_.Insert(i, i);
+  }
+  ASSERT_GE(dt_.depth(), 2u);
+
+  // NextSeg from id 0 always uses canonical ids (0 is always canonical).
+  // Verify it visits every distinct segment exactly once by comparing against
+  // unique_segments() which is maintained as a counter by Insert/Merge.
+  size_t visited = 0;
+  for (size_t i = 0; i < dt_.GetSegmentCount(); i = dt_.NextSeg(i)) {
+    ++visited;
+  }
+  EXPECT_EQ(visited, dt_.unique_segments())
+      << "NextSeg traversal from id 0 (canonical) must visit each unique segment once";
+
+  // Erase most entries and merge to create a stripe (local_depth < global_depth).
+  for (uint64_t i = 100; i < 2000; ++i) {
+    dt_.Erase(i);
+  }
+
+  // Find and perform a merge to produce a stripe.
+  for (size_t i = 0; i < dt_.GetSegmentCount(); i = dt_.NextSeg(i)) {
+    auto* seg = dt_.GetSegment(i);
+    if (seg->local_depth() <= 1)
+      continue;
+    size_t next = dt_.NextSeg(i);
+    if (next >= dt_.GetSegmentCount())
+      break;
+    auto* buddy = dt_.GetSegment(next);
+    if (buddy->local_depth() == seg->local_depth() &&
+        seg->SlowSize() + buddy->SlowSize() <= static_cast<size_t>(0.25 * seg->capacity())) {
+      bool ok = dt_.Merge(static_cast<unsigned>(i), static_cast<unsigned>(next));
+      if (ok)
+        break;
+    }
+  }
+
+  // After a potential merge, re-verify that canonical traversal is consistent.
+  size_t manual2 = 0;
+  for (size_t i = 0; i < dt_.GetSegmentCount(); i = dt_.NextSeg(i)) {
+    ++manual2;
+  }
+  EXPECT_EQ(manual2, dt_.unique_segments())
+      << "After merge, canonical NextSeg traversal must still match unique_segments()";
+
+  // Show the non-canonical case: for any stripe of size > 1, NextSeg from a non-first
+  // alias does NOT land on the start of the next stripe.
+  for (size_t i = 0; i < dt_.GetSegmentCount(); i = dt_.NextSeg(i)) {
+    auto* seg = dt_.GetSegment(i);
+    size_t delta = 1u << (dt_.depth() - seg->local_depth());
+    if (delta <= 1)
+      continue;  // no stripe aliases for this segment
+
+    // i is canonical; i+1 is a non-canonical alias of the same segment.
+    size_t non_canonical = i + 1;
+    ASSERT_LT(non_canonical, i + delta) << "non_canonical must still be within the stripe";
+
+    // NextSeg from the non-canonical id lands at (non_canonical + delta), which is
+    // one position past the start of the next stripe — demonstrating the offset.
+    size_t next_from_canonical = dt_.NextSeg(i);          // i + delta  (correct)
+    size_t next_from_alias = dt_.NextSeg(non_canonical);  // i+1+delta  (offset by 1)
+    EXPECT_EQ(next_from_alias, next_from_canonical + 1)
+        << "NextSeg from a non-canonical alias is offset by the same amount as the alias "
+           "itself; callers must always use canonical (stripe-start) ids";
+    break;  // one example is sufficient to document the behavior
+  }
+}
+
 TEST_F(DashTest, BumpUp) {
   set<Segment::Key_t> keys = FillSegment(0);
   constexpr unsigned kFirstStashId = Segment::kBucketNum;

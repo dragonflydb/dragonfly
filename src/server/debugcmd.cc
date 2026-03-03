@@ -768,7 +768,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (subcmd == "COMPACT-TABLE") {
-    return DashGC(args.subspan(1), cmd_cntx);
+    return CompactTable(args.subspan(1), cmd_cntx);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -1605,7 +1605,7 @@ void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendVerbatimString(result);
 }
 
-void DebugCmd::DashGC(CmdArgList args, CommandContext* cmd_cntx) {
+void DebugCmd::CompactTable(CmdArgList args, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   double threshold = 0.25;
@@ -1620,8 +1620,9 @@ void DebugCmd::DashGC(CmdArgList args, CommandContext* cmd_cntx) {
 
   const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
   std::vector<size_t> results(shard_set->size());
-  shard_set->RunBlockingInParallel(
-      [&](EngineShard* shard) { results[shard->shard_id()] = shard->DashGC(threshold, db_idx); });
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    results[shard->shard_id()] = shard->CompactTable(threshold, db_idx);
+  });
 
   rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
 }
