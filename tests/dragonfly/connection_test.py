@@ -1709,3 +1709,69 @@ async def test_blocking_command_pipeline_flush(df_server: DflyInstance):
         await push_task
         await pusher.delete(src_key, src_key + ":dummy")
         await pusher.aclose()
+
+
+@dfly_args({"proactor_threads": 2, "async_dispatch_quota": 50})
+async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    # Send subscribe and consume the standard 6-line RESP array reply
+    # to completely clean the socket buffer before the flood begins.
+    writer.write(b"SUBSCRIBE starvation_chan\r\n")
+    await writer.drain()
+    for _ in range(6):
+        await reader.readline()
+
+    # Continuous Flood Task with batches of 500 commands (publisher)
+    keep_flooding = True
+
+    async def flood():
+        pub = aioredis.Redis(port=df_server.port)
+        while keep_flooding:
+            pipe = pub.pipeline(transaction=False)
+            for _ in range(500):
+                pipe.publish("starvation_chan", "hello")
+            await pipe.execute()
+            # short sleep to yield the event loop but maintain constant pressure
+            await asyncio.sleep(0.001)
+        await pub.aclose()
+
+    flood_task = asyncio.create_task(flood())
+
+    try:
+        # Wait just 10ms for the first wave to hit the server's queue
+        await asyncio.sleep(0.01)
+
+        # Inject UNSUBSCRIBE + PING into the active flood.
+        # This triggers our quota logic, forcing the server to yield and read the commands from the TCP buffer, preventing input starvation.
+        writer.write(b"UNSUBSCRIBE starvation_chan\r\nPING starvation_survived\r\n")
+        await writer.drain()
+
+        # Count the PubSub messages that arrive before the PING
+        pubsub_messages_before_ping = 0
+        ping_found = False
+        async with async_timeout.timeout(2.0):
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+
+                if b"starvation_survived" in line:
+                    ping_found = True
+                    break
+
+                if b"message" in line:
+                    pubsub_messages_before_ping += 1
+
+        # Assert 1: The PING must arrive before the flood is fully drained.
+        assert ping_found, "PING was starved and timed out!"
+
+        # Assert 2: the quota logic prioritized the pipeline.
+        # If it was truly starving, this would timeout or hit tens of thousands.
+        assert (
+            pubsub_messages_before_ping <= 1000
+        ), f"Starvation detected! Pipeline queued behind {pubsub_messages_before_ping} messages."
+    finally:
+        keep_flooding = False
+        await flood_task
+        writer.close()
+        await writer.wait_closed()

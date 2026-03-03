@@ -113,6 +113,11 @@ ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
 ABSL_FLAG(bool, always_flush_pipeline, false,
           "if true will flush pipeline response after each pipeline squashing");
 
+ABSL_FLAG(uint32_t, async_dispatch_quota, 100,
+          "Maximum number of consecutive async dispatch messages to process before either "
+          "yielding to I/O when the pipeline appears empty or forcibly processing a queued "
+          "pipelined command to prevent starvation. Set to 0 to disable this mechanism.");
+
 ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
@@ -1713,6 +1718,9 @@ void Connection::AsyncFiber() {
   fb2::NoOpLock noop_lk;
   QueueBackpressure& qbp = GetQueueBackpressure();
   auto& conn_stats = tl_facade_stats->conn_stats;
+  uint32_t dispatch_q_cmd_processed = 0;
+  uint32_t async_dispatch_quota = GetFlag(FLAGS_async_dispatch_quota);
+
   while (!reply_builder_->GetError()) {
     DCHECK_EQ(socket()->proactor(), ProactorBase::me());
     cnd_.wait(noop_lk, [this] {
@@ -1761,6 +1769,11 @@ void Connection::AsyncFiber() {
     bool subscriber_over_limit =
         conn_stats.dispatch_queue_subscriber_bytes >= qbp.publish_buffer_limit;
 
+    // The below if/else conditionally choose between 3 message processing policies:
+    // 1. Pipeline squashing
+    // 2. Process pipeline queue
+    // 3. Process admin queue
+    //
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
     // It is only enabled if the threshold is reached and the whole dispatch queue
@@ -1768,8 +1781,9 @@ void Connection::AsyncFiber() {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = parsed_cmd_q_len_ > squashing_threshold;
     if (squashing_enabled && threshold_reached && dispatch_q_.empty() && !skip_next_squashing_ &&
-        !IsReplySizeOverLimit()) {
+        !IsReplySizeOverLimit()) {  // 1. Pipeline squashing
       SquashPipeline();
+      dispatch_q_cmd_processed = 0;
     } else {
       MessageHandle msg;
 
@@ -1779,23 +1793,49 @@ void Connection::AsyncFiber() {
           !dispatch_q_.empty() &&
           std::holds_alternative<MigrationRequestMessage>(dispatch_q_.front().handle);
 
-      // Check if we are blocked:
-      // Blocked = It IS a migration AND we have pipeline work AND we are in Redis mode.
-      bool is_blocked =
-          is_migration_req && (parsed_head_ != nullptr) && (protocol_ == Protocol::REDIS);
+      // If the quota is reached but the pipeline appears empty, we must yield to the IoLoop
+      // (producer). This allows the discovery and parsing of commands potentially sitting in the
+      // TCP buffer. Without this yield, AsyncFiber would monopolize the CPU, starving the IoLoop
+      // and remaining blind to pending pipeline data.
+      bool quota_reached =
+          (async_dispatch_quota > 0) && (dispatch_q_cmd_processed >= async_dispatch_quota);
+      if (quota_reached && (parsed_head_ == nullptr)) {
+        ThisFiber::Yield();
 
-      // Process Admin Queue
-      // Run if: Queue is not empty and we are not blocked.
-      if (!dispatch_q_.empty() && !is_blocked) {
+        // If it is STILL empty after IoLoop got a chance to run, the client hasn't sent anything.
+        // Reset the counter so we don't yield on every single loop.
+        if (parsed_head_ == nullptr) {
+          dispatch_q_cmd_processed = 0;
+        }
+      }
+
+      // We prioritize pipeline execution over the admin queue in two distinct cases:
+      // 1. defer_migration: A migration is requested (Redis only), but we must drain the existing
+      // pipeline first.
+      // 2. force_pipeline: The dispatch quota was reached, forcing a pipeline execution to prevent
+      // starvation.
+      bool defer_migration = false;
+      bool force_pipeline = false;
+      if (parsed_head_ != nullptr) {
+        defer_migration = is_migration_req && (protocol_ == Protocol::REDIS);
+        force_pipeline = quota_reached;
+      }
+      bool prefer_pipeline_execution = defer_migration || force_pipeline;
+      if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
+        VLOG_IF(1, force_pipeline)
+            << "[" << id_ << "] AsyncFiber quota reached (" << async_dispatch_quota
+            << "). Forcing pipeline execution to prevent starvation.";
+        ProcessPipelineCommand();
+        dispatch_q_cmd_processed = 0;
+      } else {  // 3. Process admin Queue
         msg = std::move(dispatch_q_.front());
         dispatch_q_.pop_front();
+        dispatch_q_cmd_processed++;
 
         // Execute and check if we need to terminate the fiber
         if (ProcessAdminMessage(&msg, &async_op)) {
           return;  // don't set conn closing flag
         }
-      } else {  // Process Pipeline Queue
-        ProcessPipelineCommand();
       }
     }
 
