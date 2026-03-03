@@ -216,6 +216,9 @@ class EngineShard {
     return defrag_state_.cursor;
   }
 
+  // Return total segments merged.
+  size_t CompactTable(double threshold, DbIndex db_idx);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
