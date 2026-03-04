@@ -264,7 +264,7 @@ jobs:
 
   lint-test-chart:
     runs-on: ubuntu-latest
-    needs: [build-unit, regression-tests]
+    needs: [build-unit]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/lint-test-chart
