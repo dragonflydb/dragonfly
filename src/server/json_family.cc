@@ -517,8 +517,8 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   const bool is_new_key = it_res->is_new;
 
   if (type != OBJ_JSON) {
-    // TODO -- this is a performance regression. If json_str is large, we parse it here
-    // then again  later after we set up the JsonAutoUpdater. The issue here is that we
+    // TODO -- This is a performance regression. If json_str is large, we parse it here
+    // then again later after we set up the JsonAutoUpdater. The issue is that we
     // need to deallocate before we create the updater but after we parse the string. Yet,
     // parsing requires the updater to be created first(see its comments).
     if (!ShardJsonFromString(json_str)) {
@@ -1657,11 +1657,9 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  // TODO: This is wasteful - we parse twice (validation + actual use) to avoid memory tracking
-  // bugs. The alternative is parsing once inside the callback, but that causes N parses for
-  // multi-match paths (e.g., $..field matching N elements). Better solution would be to parse
-  // once after JsonAutoUpdater construction, use in callback N times, then Reset() before
-  // SetJsonSize(), but that requires refactoring JsonMutateOperation to expose the updater.
+  // TODO: This is a performance reegression on large json strings- we might parse many times as cb
+  // gets called multiple times. We can't store the result here because we have not yet setup the
+  // JsonAutoUpdater
 
   // Validate JSON is parseable before mutation
   if (!ShardJsonFromString(json_str)) {
