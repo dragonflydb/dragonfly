@@ -224,5 +224,102 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
   });
 }
 
+TEST_F(DiskBackedQueueTest, AsyncReadWrite) {
+  pp_->at(0)->Await([]() {
+    DiskBackedQueue backing(5 /* id */);
+    EXPECT_FALSE(backing.Init());
+
+    std::string commands;
+    for (size_t i = 0; i < 100; ++i) {
+      auto cmd = absl::StrCat("SET FOO", i, " BAR");
+      commands += cmd;
+    }
+
+    // Async write all commands
+    util::fb2::Fiber write_fiber = util::fb2::Fiber("writer", [&]() {
+      for (size_t i = 0; i < 100; ++i) {
+        auto cmd = absl::StrCat("SET FOO", i, " BAR");
+        auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(cmd.data()), cmd.size());
+
+        util::fb2::Done done;
+        backing.WriteAsync(bytes, [&done](std::error_code ec) {
+          EXPECT_FALSE(ec);
+          done.Notify();
+        });
+        done.Wait();
+      }
+    });
+
+    write_fiber.Join();
+
+    // Async read all results
+    std::string results;
+    util::fb2::Fiber read_fiber = util::fb2::Fiber("reader", [&]() {
+      while (!backing.Empty()) {
+        std::string buf(1024, 'c');
+        auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+
+        util::fb2::Done done;
+        backing.ReadToAsync(bytes, [&done, &results, &buf](io::Result<size_t> res) {
+          EXPECT_TRUE(res);
+          results.append(buf.data(), *res);
+          done.Notify();
+        });
+        done.Wait();
+      }
+    });
+
+    read_fiber.Join();
+
+    EXPECT_EQ(results.size(), commands.size());
+    EXPECT_EQ(results, commands);
+
+    EXPECT_FALSE(backing.Close());
+  });
+}
+
+TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
+  pp_->at(0)->Await([]() {
+    DiskBackedQueue backing(6);
+    ASSERT_FALSE(backing.Init());
+
+    // Write 3 pages (12288 bytes) asynchronously
+    std::string data(12288, 'x');
+
+    util::fb2::Done write_done;
+    backing.WriteAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
+                       [&write_done](std::error_code ec) {
+                         ASSERT_FALSE(ec);
+                         write_done.Notify();
+                       });
+    write_done.Wait();
+
+    // Async read all data back in 4096-byte chunks
+    std::string results;
+    while (!backing.Empty()) {
+      std::string buf(4096, '\0');
+      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+
+      util::fb2::Done read_done;
+      backing.ReadToAsync(out, [&read_done, &results, &buf](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        results.append(buf.data(), *res);
+        read_done.Notify();
+      });
+      read_done.Wait();
+    }
+    EXPECT_EQ(results, data);
+
+    // Verify punch hole freed space
+    int check_fd = open("/tmp/6", O_RDONLY);
+    ASSERT_GE(check_fd, 0);
+    off_t hole_start = lseek(check_fd, 0, SEEK_HOLE);
+    close(check_fd);
+    EXPECT_EQ(hole_start, 0) << "Expected hole at start of file - async punch did not free space";
+
+    ASSERT_FALSE(backing.Close());
+  });
+}
+
 }  // namespace
 }  // namespace dfly

@@ -115,13 +115,18 @@ io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
   VLOG(2) << "Loaded item with offset " << next_read_offset_ - *result << " of size " << *result
           << " for connection " << this;
 
+  MaybePunchHole();
+
+  return {*result};
+}
+
+void DiskBackedQueue::MaybePunchHole() {
   // Punch holes over the aligned region we have fully read past so the OS can reclaim pages.
   // Both offset and length must be multiples of the filesystem block size: XFS returns EINVAL
   // otherwise, and ext4/tmpfs only zero partial blocks rather than freeing them.
   // We assume 4096-byte blocks (correct for virtually all deployments); a fully robust
   // implementation would query the actual block size via fstatfs(file_->GetFd(), &fsst) and
   // align to fsst.f_bsize instead.
-  // TODO: do this via io_uring (FallocateAsync on LinuxFile).
   const size_t aligned_end = (next_read_offset_ / 4096) * 4096;
   if (aligned_end > punch_offset_) {
     int res = fallocate(file_->GetFd(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, punch_offset_,
@@ -129,8 +134,55 @@ io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
     DCHECK_EQ(res, 0) << "fallocate punch failed: " << strerror(errno);
     punch_offset_ = aligned_end;
   }
+}
 
-  return {*result};
+void DiskBackedQueue::WriteAsync(io::Bytes bytes, AsyncWriteCallback cb) {
+  const size_t offset = write_offset_;
+  const size_t size = bytes.size();
+
+  file_->WriteAsync(bytes, offset, [this, size, cb = std::move(cb)](int res) {
+    if (res < 0) {
+      std::error_code ec{-res, std::system_category()};
+      VLOG(2) << "Failed to offload blob of size " << size << " to backing with error: " << ec;
+      cb(ec);
+      return;
+    }
+
+    write_offset_ += size;
+    total_backing_bytes_ += size;
+    VLOG(2) << "Offload connection " << this << " backpressure of " << size;
+    cb({});
+  });
+}
+
+void DiskBackedQueue::ReadToAsync(io::MutableBytes out, AsyncReadCallback cb) {
+  const size_t k_read_size = 4096;
+  const size_t to_read = std::min({k_read_size, total_backing_bytes_, out.size()});
+  const size_t offset = next_read_offset_;
+
+  // Capture a subset of out for the actual read size
+  io::MutableBytes read_buf = out.subspan(0, to_read);
+
+  file_->ReadAsync(read_buf, offset, [this, to_read, offset, cb = std::move(cb)](int res) {
+    if (res < 0) {
+      std::error_code ec{-res, std::system_category()};
+      LOG(ERROR) << "Could not load item at offset " << offset << " of size " << to_read
+                 << " from disk with error: " << ec.value() << " " << ec.message();
+      cb(nonstd::make_unexpected(ec));
+      return;
+    }
+
+    size_t bytes_read = static_cast<size_t>(res);
+    next_read_offset_ += bytes_read;
+    total_backing_bytes_ -= bytes_read;
+
+    VLOG(2) << "Loaded item with offset " << offset << " of size " << bytes_read
+            << " for connection " << this;
+
+    MaybePunchHole();
+
+    cb(bytes_read);
+  });
 }
 
 }  // namespace facade

@@ -28,12 +28,24 @@ class DiskBackedQueue {
 
   io::Result<size_t> ReadTo(io::MutableBytes out);
 
+  using AsyncWriteCallback = std::function<void(std::error_code)>;
+
+  void WriteAsync(io::Bytes bytes, AsyncWriteCallback cb);
+
+  using AsyncReadCallback = std::function<void(io::Result<size_t>)>;
+
+  // Async read variant. Callback is invoked with Result containing bytes read or error.
+  void ReadToAsync(io::MutableBytes out, AsyncReadCallback cb);
+
   // Check if backing file is empty, i.e. backing file has 0 bytes.
   bool Empty() const;
 
   std::error_code Close();
 
  private:
+  // Punch holes over the aligned region we have fully read past so the OS can reclaim pages.
+  void MaybePunchHole();
+
   // Single O_RDWR file used for both writes and reads, avoiding a separate fd for fallocate.
   std::unique_ptr<util::fb2::LinuxFile> file_;
 
