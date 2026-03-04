@@ -3067,6 +3067,7 @@ void Service::RegisterCommands() {
   RegisterBitopsFamily(&registry_);
   RegisterHllFamily(&registry_);
   RegisterBloomFamily(&registry_);
+  RegisterCmsFamily(&registry_);
   RegisterJsonFamily(&registry_);
 #endif
 
