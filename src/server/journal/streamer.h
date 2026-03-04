@@ -6,9 +6,12 @@
 
 #include "base/cycle_clock.h"
 #include "server/cluster/slot_set.h"
-#include "server/common.h"
+#include "server/common_types.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
+#include "server/synchronization.h"
+#include "util/fiber_socket_base.h"
 
 namespace dfly {
 
@@ -22,7 +25,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     LSN start_partial_sync_at = 0;
   };
 
-  JournalStreamer(journal::Journal* journal, ExecutionState* cntx, Config config);
+  JournalStreamer(ExecutionState* cntx, Config config);
 
   virtual ~JournalStreamer();
 
@@ -59,7 +62,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     return cntx_->IsRunning();
   }
 
-  void WaitForInflightToComplete();
+  void WaitForInflightToComplete(bool with_timeout);
 
   size_t inflight_bytes() const {
     return in_flight_bytes_;
@@ -82,8 +85,6 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   void OnCompletion(std::error_code ec, size_t len);
 
   bool IsStalled() const;
-
-  journal::Journal* journal_;
 
   util::fb2::Fiber stalled_data_writer_;
   util::fb2::Done stalled_data_writer_done_;
@@ -108,8 +109,7 @@ class CmdSerializer;
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                  ExecutionState* cntx);
+  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx);
   ~RestoreStreamer() override;
 
   void Start(util::FiberSocketBase* dest) override;
@@ -128,7 +128,8 @@ class RestoreStreamer : public JournalStreamer {
   bool ShouldWrite(SlotId slot_id) const;
 
   // Returns true if any entry was actually written
-  bool WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table);
+  bool WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table,
+                   bool on_db_change);
 
   void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                   uint64_t expire_ms);

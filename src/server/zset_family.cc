@@ -4,7 +4,7 @@
 
 #include "server/zset_family.h"
 
-#include "server/acl/acl_commands_def.h"
+#include <absl/strings/ascii.h>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -18,14 +18,17 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -1161,7 +1164,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
-      return cmd_cntx->SendError(std::move(error));
+      return cmd_cntx->SendError(error);
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
@@ -2914,6 +2917,48 @@ void CmdZUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
 }  // namespace
 
 #define HFUNC(x) SetHandler(&Cmd##x)
+
+LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) {
+  unsigned char* lp = lpNew(blob.size());
+  if (!ZiplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
+    LOG(ERROR) << "Zset ziplist integrity check failed.";
+    zfree(lp);
+    return LoadBlobResult::kCorrupted;
+  }
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  unsigned encoding = OBJ_ENCODING_LISTPACK;
+  void* inner;
+  if (lpBytes(lp) >= server.max_listpack_map_bytes) {
+    inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp);
+    lpFree(lp);
+    encoding = OBJ_ENCODING_SKIPLIST;
+  } else {
+    lp = lpShrinkToFit(lp);
+    inner = lp;
+  }
+
+  pv->InitRobj(OBJ_ZSET, encoding, inner);
+  return LoadBlobResult::kSuccess;
+}
+
+LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "Zset listpack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* src_lp = (unsigned char*)blob.data();
+  unsigned long long bytes = lpBytes(src_lp);
+  unsigned char* lp = (uint8_t*)zmalloc(bytes);
+  std::memcpy(lp, src_lp, bytes);
+  pv->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+  return LoadBlobResult::kSuccess;
+}
 
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask =

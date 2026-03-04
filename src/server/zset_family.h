@@ -9,6 +9,7 @@
 
 #include "facade/op_status.h"
 #include "server/common.h"
+#include "server/table.h"
 
 namespace facade {
 class SinkReplyBuilder;
@@ -16,14 +17,14 @@ class SinkReplyBuilder;
 
 namespace dfly {
 
-class CommandRegistry;
-class Transaction;
-class CommandContext;
 struct OpArgs;
 
 class ZSetFamily {
  public:
   static void Register(CommandRegistry* registry);
+
+  static LoadBlobResult LoadZiplistBlob(std::string_view blob, PrimeValue* pv);
+  static LoadBlobResult LoadListpackBlob(std::string_view blob, PrimeValue* pv);
 
   using IndexInterval = std::pair<int64_t, int64_t>;
   using MScoreResponse = std::vector<std::optional<double>>;

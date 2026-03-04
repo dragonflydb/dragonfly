@@ -11,6 +11,7 @@
 #include "facade/dragonfly_connection.h"
 #include "server/cluster/slot_set.h"
 #include "server/cluster_support.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 

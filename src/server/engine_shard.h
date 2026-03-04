@@ -9,9 +9,7 @@
 #include "core/page_usage/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
-#include "server/common.h"
-#include "server/sharding.h"
-#include "server/tx_base.h"
+#include "server/common_types.h"
 #include "util/sliding_counter.h"
 
 typedef char* sds;
@@ -22,10 +20,6 @@ class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
 
-namespace journal {
-class Journal;
-}  // namespace journal
-
 class EngineShard {
   friend class EngineShardSet;
 
@@ -34,6 +28,9 @@ class EngineShard {
     uint64_t defrag_attempt_total = 0;
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
+    uint64_t defrag_skipped_mem_under_threshold = 0;
+    uint64_t defrag_skipped_within_check_interval = 0;
+    uint64_t defrag_skipped_not_enough_fragmentation = 0;
     uint64_t poll_execution_total = 0;
 
     // number of optimistic executions - that were run as part of the scheduling.
@@ -55,6 +52,11 @@ class EngineShard {
 
     // how many huffman tables were built successfully in the background
     uint32_t huffman_tables_built = 0;
+
+    // Stream access pattern metrics (per-command, not per-entry).
+    uint64_t stream_sequential_accesses = 0;  // head/tail: XADD, XREAD recent, XTRIM, etc.
+    uint64_t stream_random_accesses = 0;      // arbitrary-ID lookups: XRANGE partial, XDEL, XCLAIM
+    uint64_t stream_fetch_all_accesses = 0;   // full stream scan from beginning
 
     Stats& operator+=(const Stats&);
   };
@@ -145,12 +147,12 @@ class EngineShard {
     return counter_[unsigned(type)].SumTail();
   }
 
-  journal::Journal* journal() {
+  bool journal() const {
     return journal_;
   }
 
-  void set_journal(journal::Journal* j) {
-    journal_ = j;
+  void set_journal(bool enable) {
+    journal_ = enable;
   }
 
   void SetReplica(bool replica) {
@@ -214,6 +216,9 @@ class EngineShard {
     return defrag_state_.cursor;
   }
 
+  // Return total segments merged.
+  size_t CompactTable(double threshold, DbIndex db_idx);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -221,9 +226,17 @@ class EngineShard {
     time_t last_check_time = 0;
     float page_utilization_threshold = 0.8;
 
-    // check the current threshold and return true if
-    // we need to do the defragmentation
-    bool CheckRequired();
+    enum class SkipReason : uint8_t {
+      MemoryTooLow,
+      MemoryBelowThreshold,
+      CheckWithinInterval,
+      NotEnoughFragmentation,
+      CheckInProgress,
+      NotSkipped,
+    };
+
+    // check the current threshold and return a reason if we skip the defragmentation
+    SkipReason CheckRequired();
 
     void UpdateScanState(uint64_t cursor_val);
 
@@ -282,6 +295,7 @@ class EngineShard {
 
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;
+  bool journal_ = false;
 
   // Precise tracking of used memory by persistent shard local values and structures
   MiMemoryResource mi_resource_;
@@ -296,7 +310,7 @@ class EngineShard {
   Transaction* continuation_trans_ = nullptr;
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;
-  journal::Journal* journal_ = nullptr;
+
   IntentLock shard_lock_;
 
   uint32_t defrag_task_id_ = UINT32_MAX, huffman_check_task_id_ = UINT32_MAX;

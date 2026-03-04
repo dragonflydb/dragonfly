@@ -58,4 +58,6 @@ auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
   return jsoncons::jsonpath::make_expression<Json, TmpAllocT>(AllocSetT(), path, ec);
 }
 
+size_t ComputeMemorySize(const JsonType& j);
+
 }  // namespace dfly

@@ -42,7 +42,7 @@ size_t GetMemoryUsage() {
   return JsonFamilyMemoryTest::GetMemoryResource()->used();
 }
 
-size_t GetJsonMemoryUsageFromString(std::string_view json_str) {
+size_t GetJsonMemoryUsageFromString(std::string_view json_str, bool include_root = true) {
   size_t start = GetMemoryUsage();
   auto json = ParseJsonUsingShardHeap(json_str);
   if (!json) {
@@ -56,6 +56,8 @@ size_t GetJsonMemoryUsageFromString(std::string_view json_str) {
   DCHECK(json_on_heap);
 
   size_t result = GetMemoryUsage() - start;
+  if (!include_root)
+    result -= mi_usable_size(ptr);
 
   // Free the memory
   json_on_heap->~JsonType();
@@ -222,6 +224,27 @@ TEST_F(JsonFamilyMemoryTest, JsonShrinking) {
   auto final_size = get<int64_t>(resp.u);
   EXPECT_GT(final_size, start_size);      // Should be larger than initial
   EXPECT_LT(final_size, start_size * 2);  // But not unreasonably large
+}
+
+TEST_F(JsonFamilyMemoryTest, ShortKeyAccounting) {
+  const std::string value(128, 'v');
+  std::string json = "{";
+  for (int i = 0; i < 512; ++i) {
+    if (i)
+      json += ",";
+    json += absl::StrFormat(R"("k%d":"%s")", i, value);
+  }
+  json += "}";
+
+  auto resp = Run({"JSON.SET", "j1", "$", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "MEMORY", "j1"});
+
+  const auto actual = get<int64_t>(resp.u);
+  const auto expected = static_cast<int64_t>(GetJsonMemoryUsageFromString(json, false));
+
+  EXPECT_LE(std::llabs(actual - expected), 64);
 }
 
 }  // namespace dfly

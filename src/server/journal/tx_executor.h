@@ -5,8 +5,9 @@
 
 #include <unordered_map>
 
-#include "server/common.h"
+#include "server/execution_state.h"
 #include "server/journal/types.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 

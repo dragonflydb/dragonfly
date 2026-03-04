@@ -40,7 +40,16 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
   if (it != indices_.end())
     return false;
 
-  const bool copy_vector = (data_type != DocIndex::HASH);
+  // We make a copy of vector data when:
+  // 1. Data type is JSON. This is because JSON object is not represented as contiguous memory.
+  // 2. Data type is HASH and vector data memory size is smaller than threshold for listpack
+  // encoding.
+  //    We use pesimistic approach for decision and expect that ONLY VECTOR data field is used.
+  //    When HSET object is created function `IsGoodForListpack` decides if object should be encoded
+  //    as listpack or StringMap. Problem with listpack encoding is that vector memory, if
+  //    referenced, can have wrong alignment for vector distance operations.
+  const bool copy_vector =
+      (data_type == DocIndex::JSON) || (params.dim * 4 < server.max_listpack_map_bytes);
 
   indices_[key] = std::make_shared<search::HnswVectorIndex>(params, copy_vector);
 
@@ -77,8 +86,9 @@ absl::flat_hash_set<std::string> GlobalHnswIndexRegistry::GetIndexNames() const 
   std::shared_lock<std::shared_mutex> lock(registry_mutex_);
   absl::flat_hash_set<std::string> index_names;
   for (const auto& [key, _] : indices_) {
-    // Keys are in format "index_name:field_name", extract index_name
-    size_t pos = key.find(':');
+    // Keys are in format "index_name:field_name", extract index_name.
+    // Use rfind because index names may legally contain ':' (e.g. ":Order:index").
+    size_t pos = key.rfind(':');
     if (pos != std::string::npos) {
       index_names.insert(key.substr(0, pos));
     }

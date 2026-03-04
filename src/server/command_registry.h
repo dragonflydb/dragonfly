@@ -7,7 +7,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
-#include <hdr/hdr_histogram.h>
 
 #include <functional>
 #include <optional>
@@ -15,6 +14,8 @@
 #include "base/function2.hpp"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
+
+struct hdr_histogram;
 
 namespace dfly {
 
@@ -34,8 +35,7 @@ enum CommandOpt : uint32_t {
   ADMIN = 1U << 7,  // implies NOSCRIPT,
   NOSCRIPT = 1U << 8,
   BLOCKING = 1U << 9,
-  HIDDEN = 1U << 10,            // does not show in COMMAND command output
-  INTERLEAVED_KEYS = 1U << 11,  // keys are interleaved with arguments
+  HIDDEN = 1U << 10,  // does not show in COMMAND command output
   GLOBAL_TRANS = 1U << 12,
   STORE_LAST_KEY = 1U << 13,  // The command my have a store key as the last argument.
 
@@ -147,6 +147,10 @@ class CommandId : public facade::CommandId {
     return can_be_monitored_;
   }
 
+  int8_t interleaved_step() const {
+    return interleave_step_;
+  }
+
   CommandId&& SetHandler(Handler f, bool async_support = false) && {
     support_async_ |= async_support;
     handler_ = std::move(f);
@@ -205,6 +209,7 @@ class CommandId : public facade::CommandId {
   bool is_alias_{false};
   bool can_be_monitored_{true};
   bool support_async_{false};
+  int8_t interleave_step_{0};
 
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;

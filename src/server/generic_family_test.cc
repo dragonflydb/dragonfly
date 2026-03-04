@@ -1665,4 +1665,58 @@ TEST_F(GenericFamilyTest, Delex) {
   EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
 }
 
+TEST_F(GenericFamilyTest, Rm) {
+  // Basic: RM 0 on empty db returns [0, 0]
+  auto resp = Run({"rm", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], "0");
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With MATCH arg — still parses OK
+  resp = Run({"rm", "0", "match", "foo*"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With TYPE arg — still parses OK
+  resp = Run({"rm", "0", "type", "string"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With COUNT arg — still parses OK
+  resp = Run({"rm", "0", "match", "foo*", "count", "100"});
+  ASSERT_THAT(resp, ArrLen(2));
+
+  // Invalid cursor → error
+  resp = Run({"rm", "notanumber"});
+  EXPECT_THAT(resp, ErrArg("invalid cursor"));
+
+  // Invalid options → syntax error
+  resp = Run({"rm", "0", "badopt"});
+  EXPECT_THAT(resp, ErrArg("syntax"));
+}
+
+TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
+  for (int i = 0; i < 10; ++i)
+    Run({"set", absl::StrCat("foo", i), "val"});
+  for (int i = 0; i < 5; ++i)
+    Run({"set", absl::StrCat("bar", i), "val"});
+
+  // Delete all foo* keys by iterating until cursor returns 0
+  uint32_t total_deleted = 0;
+  uint64_t cursor = 0;
+  do {
+    auto resp = Run({"rm", absl::StrCat(cursor), "match", "foo*", "count", "100"});
+    ASSERT_THAT(resp, ArrLen(2));
+    ASSERT_TRUE(absl::SimpleAtoi(resp.GetVec()[0].GetString(), &cursor));
+    total_deleted += resp.GetVec()[1].GetInt().value();
+  } while (cursor != 0);
+
+  EXPECT_EQ(total_deleted, 10u);
+
+  // foo* keys are gone, bar* keys remain
+  EXPECT_EQ(Run({"exists", "foo0"}), 0);
+  EXPECT_EQ(Run({"exists", "bar0"}), 1);
+  EXPECT_EQ(Run({"dbsize"}), 5);
+}
+
 }  // namespace dfly

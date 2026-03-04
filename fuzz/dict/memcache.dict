@@ -1,0 +1,81 @@
+# Memcache text protocol dictionary for AFL++
+
+# Store commands
+"set"
+"add"
+"replace"
+"append"
+"prepend"
+"cas"
+
+# Retrieval commands
+"get"
+"gets"
+"gat"
+"gats"
+
+# Utility commands
+"delete"
+"incr"
+"decr"
+"flush_all"
+"stats"
+"version"
+"quit"
+
+# Meta commands
+"ms"
+"mg"
+"md"
+"ma"
+"mn"
+"me"
+
+# Flags/options
+"noreply"
+
+# Common keys
+"key"
+"mykey"
+"k1"
+"k2"
+"k3"
+"counter"
+
+# Numbers
+"0"
+"1"
+"5"
+"10"
+"100"
+"1000"
+"65535"
+"4294967295"
+"99999999999"
+
+# Expiry values
+"0"
+"30"
+"3600"
+"9999999"
+
+# Line endings
+"\x0d\x0a"
+
+# Partial commands for edge cases
+"set "
+"get "
+"delete "
+"incr "
+"decr "
+"cas "
+"gat "
+
+# Malformed patterns
+"\x0d"
+"\x0a"
+"\x00"
+"\xff"
+" "
+"  "
+""

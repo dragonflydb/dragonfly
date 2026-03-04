@@ -11,6 +11,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
 #include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -115,7 +116,8 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 
   is_linux_file_ = file_type & FileType::IO_URING;
   bool align_writes = (file_type & FileType::DIRECT) != 0;
-  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, align_writes, snapshot_id));
+  saver_.reset(
+      new RdbSaver(io_sink_.get(), save_mode, align_writes, snapshot_id, DflyVersion::CURRENT_VER));
 
   return saver_->SaveHeader(std::move(glob_data));
 }

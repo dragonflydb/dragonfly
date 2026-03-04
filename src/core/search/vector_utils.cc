@@ -25,25 +25,6 @@ namespace {
 #define FAST_MATH
 #endif
 
-FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
-#ifdef WITH_SIMSIMD
-  simsimd_distance_t distance = 0;
-  simsimd_cos_f32(u, v, dims, &distance);
-  return static_cast<float>(distance);
-#else
-  float sum_uv = 0, sum_uu = 0, sum_vv = 0;
-  for (size_t i = 0; i < dims; i++) {
-    sum_uv += u[i] * v[i];
-    sum_uu += u[i] * u[i];
-    sum_vv += v[i] * v[i];
-  }
-
-  if (float denom = sum_uu * sum_vv; denom != 0.0f)
-    return 1 - sum_uv / sqrt(denom);
-  return 0.0f;
-#endif
-}
-
 OwnedFtVector ConvertToFtVector(string_view value) {
   // Value cannot be casted directly as it might be not aligned as a float (4 bytes).
   // Misaligned memory access is UB.
@@ -83,6 +64,26 @@ FAST_MATH float IPDistance(const float* u, const float* v, size_t dims) {
   for (size_t i = 0; i < dims; i++)
     sum_uv += u[i] * v[i];
   return 1.0f - sum_uv;
+#endif
+}
+
+// Cosine distance: 1 - (dot_product(u, v) / (||u|| * ||v||))
+FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
+#ifdef WITH_SIMSIMD
+  simsimd_distance_t distance = 0;
+  simsimd_cos_f32(u, v, dims, &distance);
+  return static_cast<float>(distance);
+#else
+  float sum_uv = 0, sum_uu = 0, sum_vv = 0;
+  for (size_t i = 0; i < dims; i++) {
+    sum_uv += u[i] * v[i];
+    sum_uu += u[i] * u[i];
+    sum_vv += v[i] * v[i];
+  }
+
+  if (float denom = sum_uu * sum_vv; denom != 0.0f)
+    return 1 - sum_uv / sqrt(denom);
+  return 0.0f;
 #endif
 }
 

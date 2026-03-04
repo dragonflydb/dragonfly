@@ -18,6 +18,7 @@
 #include "server/error.h"
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/server_family.h"
 #include "util/fibers/synchronization.h"
 
@@ -35,8 +36,8 @@ namespace dfly::cluster {
 class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
-                     journal::Journal* journal, OutgoingMigration* om)
-      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &exec_st_) {
+                     OutgoingMigration* om)
+      : ProtocolClient(server_context), streamer_(slice, std::move(slots), &exec_st_) {
     exec_st_.SwitchErrorHandler([om](auto ge) { om->Finish(std::move(ge)); });
   }
 
@@ -101,7 +102,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.SendFinalize(attempt);
   }
 
-  const dfly::GenericError GetError() const {
+  dfly::GenericError GetError() const {
     return exec_st_.GetError();
   }
 
@@ -146,13 +147,9 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
   return true;
 }
 
-void OutgoingMigration::OnAllShards(
-    std::function<void(std::unique_ptr<SliceSlotMigration>&)> func) {
-  shard_set->pool()->AwaitFiberOnAll([this, &func](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      func(slot_migrations_[shard->shard_id()]);
-    }
-  });
+void OutgoingMigration::OnAllShards(std::function<void(UniqueSliceSlotMigration&)> func) {
+  shard_set->RunBlockingInParallel(
+      [this, &func](auto* shard) { func(slot_migrations_[shard->shard_id()]); });
 }
 
 void OutgoingMigration::Finish(const GenericError& error) {
@@ -281,9 +278,9 @@ void OutgoingMigration::SyncFb() {
 
     OnAllShards([this](auto& migration) {
       DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
-      server_family_->journal()->StartInThread();
-      migration = std::make_unique<SliceSlotMigration>(
-          &db_slice, server(), migration_info_.slot_ranges, server_family_->journal(), this);
+      journal::StartInThread();
+      migration = std::make_unique<SliceSlotMigration>(&db_slice, server(),
+                                                       migration_info_.slot_ranges, this);
     });
 
     if (!ChangeState(MigrationState::C_SYNC)) {

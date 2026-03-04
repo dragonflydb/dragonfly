@@ -9,8 +9,11 @@
 #include <vector>
 
 #include "base/integral_types.h"
-#include "server/common.h"
+#include "facade/facade_types.h"
+
 namespace dfly {
+
+using facade::CmdArgList;
 
 constexpr size_t kMaximumSlowlogArgCount = 31;  // 32 - 1 for the command name
 constexpr size_t kMaximumSlowlogArgLength = 128;

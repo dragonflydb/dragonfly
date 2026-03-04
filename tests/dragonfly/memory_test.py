@@ -11,7 +11,7 @@ from .instance import DflyInstanceFactory
 from .utility import tmp_file_name
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
@@ -152,6 +152,7 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     await client.execute_command("set x y")
 
 
+@pytest.mark.large
 @pytest.mark.asyncio
 @dfly_args(
     {

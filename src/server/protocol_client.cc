@@ -101,13 +101,13 @@ void ValidateClientTlsFlags() {
   }
 }
 
-void ProtocolClient::MaybeInitSslCtx() {
 #ifdef DFLY_USE_SSL
+void ProtocolClient::MaybeInitSslCtx() {
   if (GetFlag(FLAGS_tls_replication)) {
     ssl_ctx_ = CreateSslCntx(facade::TlsContextRole::CLIENT);
   }
-#endif
 }
+#endif
 
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
   server_context_.host = std::move(host);
@@ -174,9 +174,11 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
       }
 
       if (ssl_ctx_) {
+#ifdef DFLY_USE_SSL
         auto tls_sock = std::make_unique<tls::TlsSocket>(mythread->CreateSocket());
         tls_sock->InitSSL(ssl_ctx_);
         sock_ = std::move(tls_sock);
+#endif
       } else {
         sock_.reset(mythread->CreateSocket());
       }

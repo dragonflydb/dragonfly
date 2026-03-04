@@ -149,7 +149,7 @@ def sentinel(tmp_dir, port_picker) -> Sentinel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.slow
+@pytest.mark.large
 async def test_failover(df_factory: DflyInstanceFactory, sentinel, port_picker):
     master = df_factory.create(port=sentinel.initial_master_port)
     replica = df_factory.create(port=port_picker.get_available_port())
@@ -219,7 +219,7 @@ async def test_failover(df_factory: DflyInstanceFactory, sentinel, port_picker):
 
 
 @pytest.mark.asyncio
-@pytest.mark.slow
+@pytest.mark.large
 async def test_master_failure(df_factory, sentinel, port_picker):
     master = df_factory.create(port=sentinel.initial_master_port)
     replica = df_factory.create(port=port_picker.get_available_port())

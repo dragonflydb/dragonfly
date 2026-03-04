@@ -11,9 +11,6 @@ namespace dfly {
 
 class ServerFamily;
 
-namespace journal {
-class Journal;
-}
 }  // namespace dfly
 namespace dfly::cluster {
 class ClusterFamily;
@@ -77,12 +74,12 @@ class OutgoingMigration : private ProtocolClient {
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
  private:
-  // should be run for all shards
-  void StartFlow(journal::Journal* journal, io::Sink* dest);
-
   MigrationState GetStateImpl() const;
-  // SliceSlotMigration manages state and data transfering for the corresponding shard
+
+  // SliceSlotMigration manages state and data transferring for the corresponding shard
   class SliceSlotMigration;
+
+  using UniqueSliceSlotMigration = std::unique_ptr<SliceSlotMigration>;
 
   void SyncFb();
   // return true if migration is finalized even with C_ERROR state
@@ -90,9 +87,8 @@ class OutgoingMigration : private ProtocolClient {
 
   bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
-  void OnAllShards(std::function<void(std::unique_ptr<SliceSlotMigration>&)>);
+  void OnAllShards(std::function<void(UniqueSliceSlotMigration&)>);
 
- private:
   MigrationInfo migration_info_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
   ServerFamily* server_family_;

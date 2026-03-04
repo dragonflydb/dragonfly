@@ -247,6 +247,21 @@ static void *createDoubleObject(const redisReadTask *task, double value, char *s
 }
 
 static void *createNilObject(const redisReadTask *task) {
+    int type = task->type;
+    int is_aggregate = (type == REDIS_REPLY_ARRAY || type == REDIS_REPLY_MAP ||
+                        type == REDIS_REPLY_SET || type == REDIS_REPLY_PUSH);
+
+    /* For aggregate nils (*-1, etc.) preserve the original aggregate type
+     * with SIZE_MAX elements as a sentinel, so callers can distinguish
+     * null arrays from null bulk strings. */
+    if (is_aggregate) {
+        void *obj = createArrayObject(task, 0);
+        if (obj == NULL)
+            return NULL;
+        ((redisReply*)obj)->elements = SIZE_MAX;
+        return obj;
+    }
+
     redisReply *r, *parent;
 
     r = createReplyObject(REDIS_REPLY_NIL);

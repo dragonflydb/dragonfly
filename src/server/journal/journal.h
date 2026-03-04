@@ -1,78 +1,66 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 #include "server/journal/types.h"
 #include "util/fibers/detail/fiber_interface.h"
-#include "util/proactor_pool.h"
 
 namespace dfly {
 
-class Transaction;
-
 namespace journal {
 
-class Journal {
+void StartInThread();
+
+// Starts the journal at specified LSN
+// Also drops the (resets) the partial sync buffers
+void StartInThreadAtLsn(LSN lsn);
+
+std::error_code Close();
+
+//******* The following functions must be called in the context of the owning shard *********//
+
+bool HasRegisteredCallbacks();
+
+bool IsLSNInBuffer(LSN lsn);
+
+std::string_view GetEntry(LSN lsn);
+
+LSN GetLsn();
+uint32_t RegisterConsumer(JournalConsumerInterface* consumer);
+void UnregisterConsumer(uint32_t id);
+
+void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, std::optional<SlotId> slot,
+                 Entry::Payload payload);
+
+size_t LsnBufferSize();
+size_t LsnBufferBytes();
+
+void SetFlushMode(bool allow_flush);
+
+class DisableFlushGuard {
  public:
-  using Span = absl::Span<const std::string_view>;
-
-  Journal();
-
-  void StartInThread();
-
-  // Starts the journal at specified LSN
-  // Also drops the (resets) the partial sync buffers
-  void StartInThreadAtLsn(LSN lsn);
-
-  std::error_code Close();
-
-  //******* The following functions must be called in the context of the owning shard *********//
-
-  uint32_t RegisterOnChange(JournalConsumerInterface* consumer);
-  void UnregisterOnChange(uint32_t id);
-  bool HasRegisteredCallbacks() const;
-
-  bool IsLSNInBuffer(LSN lsn) const;
-  std::string_view GetEntry(LSN lsn) const;
-
-  LSN GetLsn() const;
-
-  void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                   std::optional<SlotId> slot, Entry::Payload payload);
-
-  void SetFlushMode(bool allow_flush);
-
-  size_t LsnBufferSize() const;
-  size_t LsnBufferBytes() const;
-
- private:
-  mutable util::fb2::Mutex state_mu_;
-};
-
-class JournalFlushGuard {
- public:
-  explicit JournalFlushGuard(Journal* journal) : journal_(journal) {
+  explicit DisableFlushGuard(bool j) : journal_(j) {
     if (journal_ && counter_ == 0) {
-      journal_->SetFlushMode(false);
+      SetFlushMode(false);
     }
     util::fb2::detail::EnterFiberAtomicSection();
     ++counter_;
   }
 
-  ~JournalFlushGuard() {
+  ~DisableFlushGuard() {
     util::fb2::detail::LeaveFiberAtomicSection();
     --counter_;
     if (journal_ && counter_ == 0) {
-      journal_->SetFlushMode(true);  // Restore the state on destruction
+      SetFlushMode(true);  // Restore the state on destruction
     }
   }
 
-  JournalFlushGuard(const JournalFlushGuard&) = delete;
-  JournalFlushGuard& operator=(const JournalFlushGuard&) = delete;
+  DisableFlushGuard(const DisableFlushGuard&) = delete;
+  DisableFlushGuard& operator=(const DisableFlushGuard&) = delete;
 
  private:
-  Journal* journal_;
+  bool journal_;
   static size_t thread_local counter_;
 };
 

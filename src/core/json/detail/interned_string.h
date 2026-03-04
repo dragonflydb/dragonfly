@@ -106,7 +106,9 @@ class InternedString {
   // Increments the refcount if the entry is not null
   void Acquire();
 
-  // Decrements the refcount, removes entry from the pool if necessary, destroying the interned blob
+  // Decrements the refcount, removes entry from the pool if necessary, destroying the interned
+  // blob. A side effect may be shrinking the pool if the load factor is suboptimal (see
+  // kLoadFactorToShrinkPool in the implementation)
   void Release();
 
   // Wraps a null pointer by default
@@ -129,3 +131,20 @@ template <std::contiguous_iterator It> InternedString::InternedString(It begin, 
 }
 
 }  // namespace dfly::detail
+
+namespace dfly {
+
+struct InternedStringStats {
+  size_t pool_entries = 0;
+  size_t pool_bytes = 0;
+  size_t hits = 0;
+  size_t misses = 0;
+  size_t pool_table_bytes = 0;
+  size_t live_references = 0;
+
+  InternedStringStats& operator+=(const InternedStringStats& other);
+};
+
+InternedStringStats GetInternedStringStats();
+
+}  // namespace dfly

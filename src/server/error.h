@@ -5,7 +5,6 @@
 #pragma once
 
 #include <atomic>
-#include <string>
 #include <system_error>
 
 #include "facade/error.h"

@@ -19,6 +19,7 @@
 #include "core/interpreter.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
@@ -171,8 +172,13 @@ void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 }
 
 void ScriptMgr::ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  string_view sha = ArgS(args, 1);
+  if (sha.size() != ScriptKey{}.size()) {
+    return builder->SendError(kSyntaxErr);
+  }
+
   lock_guard lk{mu_};
-  ScriptKey key{ArgS(args, 1)};
+  ScriptKey key{sha};
   auto& data = db_[key];
 
   for (auto flag : args.subspan(2)) {
@@ -253,7 +259,8 @@ unique_ptr<char[]> CharBufFromSV(string_view sv) {
   return ptr;
 }
 
-io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter* interpreter) {
+nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
+                                                         Interpreter* interpreter) {
   char sha_buf[64];
   Interpreter::FuncSha1(body, sha_buf);
   string_view sha{sha_buf, std::strlen(sha_buf)};

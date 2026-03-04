@@ -3,6 +3,8 @@
 //
 #include "server/debugcmd.h"
 
+#include "core/detail/gen_utils.h"
+
 #define HUF_STATIC_LINKING_ONLY
 
 extern "C" {
@@ -22,6 +24,7 @@ extern "C" {
 
 #include <algorithm>
 #include <filesystem>
+#include <numeric>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -38,6 +41,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/main_service.h"
 #include "server/multi_command_squasher.h"
+#include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
@@ -676,6 +680,8 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    per second.",
         "SEGMENTS",
         "    Prints segment info for the current database.",
+        "COMPACT-TABLE threshold",
+        "    Attempts to merge underutilized segments in dash table",
         "HELP",
         "    Prints this help.",
     };
@@ -760,6 +766,11 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   if (subcmd == "SEGMENTS") {
     return Segments(args.subspan(1), cmd_cntx);
   }
+
+  if (subcmd == "COMPACT-TABLE") {
+    return CompactTable(args.subspan(1), cmd_cntx);
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cmd_cntx->SendError(reply, kSyntaxErrType);
 }
@@ -896,6 +907,10 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
   }
   if (parser.HasError()) {
     cmd_cntx->SendError(parser.TakeError().MakeReply());
+    return nullopt;
+  }
+  if (options.val_size == 0) {
+    cmd_cntx->SendError("val_size must be positive");
     return nullopt;
   }
   return options;
@@ -1592,6 +1607,28 @@ void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
   absl::StrAppend(&result, "Segment Size Histogram: \n");
   absl::StrAppend(&result, hist.ToString(), "\n");
   rb->SendVerbatimString(result);
+}
+
+void DebugCmd::CompactTable(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  double threshold = 0.25;
+  if (args.size() > 0) {
+    if (!absl::SimpleAtod(facade::ToSV(args[0]), &threshold)) {
+      return rb->SendError("Invalid threshold value");
+    }
+    if (threshold <= 0.0 || threshold > 1.0) {
+      return rb->SendError("Threshold must be between 0 and 1");
+    }
+  }
+
+  const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
+  std::vector<size_t> results(shard_set->size());
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    results[shard->shard_id()] = shard->CompactTable(threshold, db_idx);
+  });
+
+  rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
 }
 
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {

@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <memory>
+
+#include "core/search/mrmw_mutex.h"
 #include "core/search/search.h"
 
 namespace dfly::search {
@@ -15,11 +18,6 @@ struct HnswIndexMetadata {
   size_t cur_element_count = 0;  // Current number of elements in the index
   int maxlevel = -1;             // Maximum level of the graph
   size_t enterpoint_node = 0;    // Entry point node for the graph
-  size_t M = 0;                  // Number of established connections per element
-  size_t maxM = 0;               // Maximum connections for upper layers
-  size_t maxM0 = 0;              // Maximum connections for layer 0
-  size_t ef_construction = 0;    // Size of dynamic candidate list for construction
-  double mult = 0.0;             // Multiplier for random level generation
 };
 
 // Node data structure for HNSW serialization
@@ -60,9 +58,14 @@ class HnswVectorIndex {
                                                  std::optional<size_t> ef) const;
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                                  const std::vector<GlobalDocId>& allowed) const;
+  std::vector<std::pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+                                                       const std::vector<GlobalDocId>& docs) const;
 
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
+
+  // Set metadata (used during restoration)
+  void SetMetadata(const HnswIndexMetadata& metadata);
 
   // Get total number of nodes in the index
   size_t GetNodeCount() const;
@@ -71,10 +74,22 @@ class HnswVectorIndex {
   // Returns vector of node data for serialization
   std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const;
 
+  // Restore graph structure from serialized nodes with metadata
+  // This restores the HNSW graph links but NOT the vector data
+  // Vector data must be populated separately via UpdateVectorData
+  void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata);
+
+  // Update vector data for an existing node (used after RestoreFromNodes)
+  // This populates the vector data for a node that already has graph links
+  bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field);
+
+  // Acquire a read lock on the internal MRMW mutex.
+  // Use this during serialization to block concurrent Add/Remove (write) operations.
+  std::unique_ptr<MRMWMutexLock> GetReadLock() const;
+
  private:
   bool copy_vector_;
   size_t dim_;
-  VectorSimilarity sim_;
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 

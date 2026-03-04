@@ -9,17 +9,19 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
-#include "base/spinlock.h"
 #include "core/search/base.h"
+#include "core/search/hnsw_index.h"
 #include "io/io.h"
 #include "io/io_buf.h"
-#include "server/common.h"
 #include "server/detail/decompress.h"
+#include "server/execution_state.h"
 #include "server/journal/serializer.h"
+#include "server/rdb_load_context.h"
 
 struct streamID;
 
@@ -133,10 +135,10 @@ class RdbLoaderBase {
   };
 
   struct LoadConfig {
-    bool streamed = false;  // Big value streamed incrementally
+    bool chunked = false;   // Big value streamed incrementally
     size_t reserve = 0;     // Number of elements to reserve to optimize big value load
-    bool append = false;    // Append stream to existing object
-    bool finalize = false;  // Last portion of stream, finalize object
+    bool append = false;    // Append chunk to existing object
+    bool finalize = false;  // Last portion of chunked stream, finalize object
   };
 
   class OpaqueObjLoader;
@@ -208,7 +210,8 @@ class RdbLoaderBase {
 
 class RdbLoader : protected RdbLoaderBase {
  public:
-  explicit RdbLoader(Service* service, std::string snapshot_id = {});
+  // load_context is shared across all RdbLoader instances in a load session.
+  explicit RdbLoader(Service* service, RdbLoadContext* load_context, std::string snapshot_id = {});
 
   ~RdbLoader();
 
@@ -274,10 +277,6 @@ class RdbLoader : protected RdbLoaderBase {
     full_sync_cut_cb = std::move(cb);
   }
 
-  // Performs post load procedures while still remaining in global LOADING state.
-  // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
-  static void PerformPostLoad(Service* service, bool is_error = false);
-
   uint32_t shard_id() const {
     return shard_id_;
   }
@@ -334,29 +333,31 @@ class RdbLoader : protected RdbLoaderBase {
   // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
+  // Load HNSW index metadata from JSON, sets metadata on the GlobalHnswIndexRegistry
+  void LoadHnswIndexMetadataFromAux(std::string&& value);
+
   // Load synonyms from RESP string and issue FT.SYNUPDATE call
   void LoadSearchSynonymsFromAux(std::string&& value);
 
-  // Get pending synonym commands collected from all RdbLoader instances
-  static std::vector<std::string> TakePendingSynonymCommands();
+  // Restore HNSW vector index graph from serialized node data.
+  std::error_code RestoreVectorIndex(std::string_view index_key, std::string_view index_name,
+                                     std::string_view field_name, uint64_t elements_number);
+
+  // Load HNSW vector index nodes into a vector for deferred restoration.
+  std::error_code LoadVectorIndexNodes(uint64_t elements_number,
+                                       std::vector<search::HnswNodeData>* nodes);
+
+  // Skip over serialized HNSW vector index node data without restoring.
+  std::error_code SkipVectorIndex(std::string_view index_key, uint64_t elements_number);
 
   Service* service_;
-  static std::vector<std::string> pending_synonym_cmds_;
-  static base::SpinLock search_index_mu_;  // guards created_search_indices_
-  static absl::flat_hash_set<std::string> created_search_indices_;
-
-  // Pending index key-to-DocId mappings to apply after indices are created
-  struct PendingIndexMapping {
-    uint32_t shard_id;
-    std::string index_name;
-    std::vector<std::pair<std::string, search::DocId>> mappings;
-  };
-  std::vector<PendingIndexMapping> pending_index_mappings_;
+  RdbLoadContext* load_context_;
 
   std::string snapshot_id_;
   bool override_existing_keys_ = false;
   bool load_unowned_slots_ = false;
   bool rdb_ignore_expiry_;
+  const bool deserialize_hnsw_index_;
   uint32_t shard_id_ = UINT32_MAX;
   uint32_t shard_count_ = 0;
   size_t table_used_memory_ = 0;
@@ -381,9 +382,11 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
-  // Map of currently streamed big values
-  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_streamed_;
-  base::SpinLock now_streamed_mu_;  // guards now_streamed_
+  // Map of currently chunked big values
+  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_chunked_;
+  base::SpinLock now_chunked_mu_;  // guards now_chunked_
+
+  std::string last_key_loaded_;
 };
 
 }  // namespace dfly

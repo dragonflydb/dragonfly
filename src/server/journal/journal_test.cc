@@ -1,12 +1,16 @@
+#include <boost/circular_buffer.hpp>
 #include <random>
 #include <string>
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/gen_utils.h"
+#include "server/common.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
+#include "util/fibers/fibers.h"
 
 using namespace testing;
 using namespace std;
@@ -216,6 +220,33 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+TEST(Journal, CircularMemory) {
+  boost::circular_buffer<string> ring_buffer(1024);
+  for (int i = 0; i < 2000; ++i) {
+    ring_buffer.push_back(string(512, 'a'));
+  }
+
+  size_t cap = 0;
+  for (size_t i = 0; i < ring_buffer.size(); ++i) {
+    cap += ring_buffer[i].capacity();
+  }
+  LOG(INFO) << "Total capacity: " << cap;
+  for (size_t i = 0; i < 2000; ++i) {
+    ring_buffer.push_back(string(16, 'a'));
+  }
+  cap = 0;
+  for (size_t i = 0; i < ring_buffer.size(); ++i) {
+    cap += ring_buffer[i].capacity();
+  }
+  LOG(INFO) << "Total capacity after push: " << cap;
+
+  string tmp(1 << 16, 'x');
+  tmp = string(4, 'a');
+  LOG(INFO) << "Tmp string capacity: " << tmp.capacity();
+  tmp = string(32, 'a');
+  LOG(INFO) << "Tmp string capacity: " << tmp.capacity();
 }
 
 }  // namespace journal

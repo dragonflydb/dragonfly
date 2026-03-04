@@ -11,23 +11,11 @@
 
 #include "base/iterator.h"
 #include "common/arg_range.h"
+#include "server/common_types.h"
 
 namespace dfly {
 
-class EngineShard;
-class Transaction;
-class Namespace;
-class DbSlice;
-
-using DbIndex = uint16_t;
-using ShardId = uint16_t;
-using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
-
 using cmn::ArgSlice;
-
-constexpr DbIndex kInvalidDbId = DbIndex(-1);
-constexpr ShardId kInvalidSid = ShardId(-1);
-constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.
 
 struct KeyLockArgs {
   DbIndex db_index = 0;
@@ -225,7 +213,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
 
 // Record expiry in journal with independent transaction.
 // Must be called from shard thread owning key.
-// Might block the calling fiber unless Journal::SetFlushMode(false) is called.
+// Might block the calling fiber unless journal::SetFlushMode(false) is called.
 void RecordExpiryBlocking(DbIndex dbid, std::string_view key);
 
 }  // namespace dfly

@@ -19,6 +19,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -176,7 +177,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   }
 
   // Disable flush journal changes to prevent preemtion in GarbageCollect.
-  journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   // bool should_print = (eb.key_hash % 128) == 0;
 
@@ -207,7 +208,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     return 0;
 
   // Disable flush journal changes to prevent preemtion in evict.
-  journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
 
@@ -945,7 +946,9 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
-    if (index == 0) {  // TODO: Async dealloc?
+    if (index == 0) {
+      // TODO: Async dealloc?
+      // TODO: Drop of global HNSW index doesn't respect per-shard ordering
       owner_->search_indices()->DropAllIndices();
     }
 
@@ -1328,7 +1331,7 @@ void DbSlice::ExpireAllIfNeeded() {
   // we don't preempt in ExpireIfNeeded
   serialization_latch_.Wait();
   // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(owner_->journal());
+  journal::DisableFlushGuard journal_flush_guard(owner_->journal());
 
   for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
@@ -1464,7 +1467,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
                                                               size_t starting_segment_id,
                                                               size_t increase_goal_bytes) {
   // Disable flush journal changes to prevent preemtion
-  journal::JournalFlushGuard journal_flush_guard(shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard(shard_owner()->journal());
   FiberAtomicGuard guard;
   DCHECK(!owner_->IsReplica());
 
@@ -1488,7 +1491,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 
   string tmp;
 
-  bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
+  bool record_keys = owner_->journal() || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {

@@ -178,6 +178,12 @@ TEST_F(MCParserTest, Gat) {
   res = Parse("gats 1000 foo bar baz\r\n");
   EXPECT_EQ(MemcacheParser::OK, res);
   EXPECT_EQ(cmd_.expire_ts, 3000);
+
+  res = Parse("gats 100\r\n");
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, res);
+
+  res = Parse("gat 100\r\n");
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, res);
 }
 
 TEST_F(MCParserTest, ValueState) {
@@ -196,6 +202,33 @@ TEST_F(MCParserTest, ValueState) {
   st = parser_.Parse("\n", &consumed_, &cmd_);
   EXPECT_EQ(MemcacheParser::OK, st);
   EXPECT_EQ(consumed_, 1);
+}
+
+TEST_F(MCParserTest, MaxValueLen) {
+  MemcacheParser capped_parser(10);
+  cmn::BackedArguments ba;
+  MemcacheParser::Command cmd;
+  cmd.backed_args = &ba;
+  uint32_t consumed;
+
+  // Value within limit — accepted.
+  auto st = capped_parser.Parse("set k 0 0 10\r\n", &consumed, &cmd);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+
+  // Value exceeds limit — rejected.
+  capped_parser.Reset();
+  st = capped_parser.Parse("set k 0 0 11\r\n", &consumed, &cmd);
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, st);
+
+  // Meta set within limit.
+  capped_parser.Reset();
+  st = capped_parser.Parse("ms key 10\r\n", &consumed, &cmd);
+  EXPECT_EQ(MemcacheParser::INPUT_PENDING, st);
+
+  // Meta set exceeds limit.
+  capped_parser.Reset();
+  st = capped_parser.Parse("ms key 11\r\n", &consumed, &cmd);
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, st);
 }
 
 TEST_F(MCParserTest, ParseError) {

@@ -1,0 +1,14 @@
+*3
+$3
+SET
+$3
+src
+$5
+hello
+*3
+$4
+COPY
+$3
+src
+$3
+dst

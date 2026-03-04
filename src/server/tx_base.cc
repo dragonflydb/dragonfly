@@ -56,21 +56,18 @@ void RecordJournal(const OpArgs& op_args, string_view cmd, const ShardArgs& args
                    uint32_t shard_cnt) {
   DCHECK(op_args.tx);
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
-  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt);
+  op_args.tx->LogJournalOnShard(Payload(cmd, args), shard_cnt);
 }
 
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice args,
                    uint32_t shard_cnt) {
   DCHECK(op_args.tx);
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
-  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt);
+  op_args.tx->LogJournalOnShard(Payload(cmd, args), shard_cnt);
 }
 
 void RecordExpiryBlocking(DbIndex dbid, string_view key) {
-  auto journal = EngineShard::tlocal()->journal();
-  CHECK(journal);
-
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, KeySlot(key),
+  journal::RecordEntry(0, journal::Op::EXPIRED, dbid, 1, KeySlot(key),
                        Payload("DEL", ArgSlice{key}));
 }
 

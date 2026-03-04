@@ -10,7 +10,9 @@
 #include <utility>
 #include <vector>
 
-#include "server/common.h"
+#include "core/tiering_types.h"
+#include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
+#include "server/stats.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/entry_map.h"
@@ -37,6 +39,14 @@ struct TieredStorageBase {
   };
 
   template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
+};
+
+struct TieredDelayedEntry {
+  DbIndex dbid;
+  PrimeKey key;
+  util::fb2::Future<io::Result<std::string>> value;
+  time_t expire;
+  uint32_t mc_flags;
 };
 
 #ifdef WITH_TIERING
@@ -113,8 +123,8 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  PrimeValue DeleteCool(detail::TieredColdRecord* record);
-  detail::TieredColdRecord* PopCool();
+  PrimeValue DeleteCool(tiering::TieredColdRecord* record);
+  tiering::TieredColdRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
 
@@ -124,7 +134,7 @@ class TieredStorage : public TieredStorageBase {
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 
-  using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
+  using CoolQueue = ::boost::intrusive::list<tiering::TieredColdRecord>;
   CoolQueue cool_queue_;
 
   struct {

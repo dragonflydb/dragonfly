@@ -5,8 +5,11 @@
 #include "server/journal/cmd_serializer.h"
 
 #include "server/container_utils.h"
+#include "server/db_slice.h"
+#include "server/engine_shard.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
+#include "server/tiered_storage.h"
 
 namespace dfly {
 
@@ -66,8 +69,11 @@ class CommandAggregator {
 
 }  // namespace
 
-CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size)
-    : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
+CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
+                             size_t max_serialization_buffer_size)
+    : db_slice_(db_slice),
+      cb_(std::move(cb)),
+      max_serialization_buffer_size_(max_serialization_buffer_size) {
   serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
@@ -116,6 +122,40 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
     SerializeExpireIfNeeded(key, expire_ms);
   }
   return commands;
+}
+
+size_t CmdSerializer::SerializeDelayedEntries(bool force,
+                                              absl::flat_hash_set<std::string>* tiered_keys) {
+  size_t serialized = 0;
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    auto& entry = it->second;
+    // Skip unresolved entries unless force is true
+    if (!force && !entry->value.IsResolved()) {
+      ++it;
+      continue;
+    }
+
+    // If tiered_keys filter is provided, only serialize matching keys
+    // Compare the string key from the map with the keys in tiered_keys set
+    if (tiered_keys && !tiered_keys->contains(it->first)) {
+      ++it;
+      continue;
+    }
+
+    // Get the value from the future (blocks if not resolved and force=true)
+    auto res = entry->value.Get();
+    if (!res.has_value()) {
+      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
+      it++;
+      continue;
+    }
+
+    // Serialize the entry and remove it from delayed_entries_
+    PrimeValue pv{*res};
+    serialized += SerializeEntry(entry->key.ToString(), entry->key, pv, entry->expire);
+    delayed_entries_.erase(it++);
+  }
+  return serialized;
 }
 
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
@@ -213,8 +253,10 @@ size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uin
   if (pv.IsExternal()) {
     if (pv.IsCool()) {
       pv.GetCool().record->value.GetString(&str);
+    } else {
+      SerializeExternal(key, pv, expire_ms);
+      return 0;
     }
-    LOG(FATAL) << "External string not supported yet";
   } else {
     pv.GetString(&str);
   }
@@ -239,11 +281,10 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   string expire_str = absl::StrCat(expire_ms);
   args.push_back(expire_str);
 
-  io::StringSink value_dump_sink;
   // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
   // = true when we are sure that all shards ignore crc during migration process
-  SerializerBase::DumpValue(serializer_.get(), pv, &value_dump_sink, false);
-  args.push_back(value_dump_sink.str());
+  std::string value_dump = SerializerBase::DumpValue(serializer_.get(), pv, false);
+  args.push_back(value_dump);
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
 
@@ -252,6 +293,18 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   }
 
   SerializeCommand("RESTORE", args);
+}
+
+void CmdSerializer::SerializeExternal(std::string_view key, const PrimeValue& pv,
+                                      time_t expire_time) {
+  // In cluster mode, db_id is always 0
+  constexpr DbIndex kClusterDbId = 0;
+  auto future = ReadTieredString(kClusterDbId, key, pv, EngineShard::tlocal()->tiered_storage());
+  PrimeKey prime_key{key};
+  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(kClusterDbId, prime_key) : 0;
+  auto entry = std::make_unique<TieredDelayedEntry>(kClusterDbId, std::move(prime_key),
+                                                    std::move(future), expire_time, mc_flags);
+  delayed_entries_.emplace(key, std::move(entry));
 }
 
 }  // namespace dfly

@@ -11,9 +11,8 @@
 #include "base/histogram.h"
 #include "core/interpreter.h"
 #include "server/acl/acl_log.h"
-#include "server/acl/user_registry.h"
 #include "server/channel_store.h"
-#include "server/common.h"
+#include "server/common_types.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
 #include "util/sliding_counter.h"
@@ -22,7 +21,8 @@ typedef struct mi_heap_s mi_heap_t;
 
 namespace facade {
 class Connection;
-}
+struct ConnectionStats;
+}  // namespace facade
 
 namespace util {
 class ListenerInterface;
@@ -30,9 +30,9 @@ class ListenerInterface;
 
 namespace dfly {
 
-namespace journal {
-class Journal;
-}  // namespace journal
+namespace acl {
+class UserRegistry;
+}  // namespace acl
 
 // This would be used as a thread local storage of sending
 // monitor messages.
@@ -123,6 +123,7 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t multi_squash_exec_reply_usec = 0;
     uint64_t squashed_commands = 0;
     uint64_t squash_stats_ignored = 0;
+    uint64_t blocking_commands_in_pipelines = 0;
     uint64_t blocked_on_interpreter = 0;
 
     uint64_t rdb_save_usec = 0;
@@ -153,9 +154,7 @@ class ServerState {  // public struct - to allow initialization.
   // function to avoid this and access the correct thread local after the migration.
   static ServerState* __attribute__((noinline)) SafeTLocal();
 
-  static facade::ConnectionStats* tl_connection_stats() {
-    return &facade::tl_facade_stats->conn_stats;
-  }
+  static facade::ConnectionStats* tl_connection_stats();
 
   ServerState();
   ~ServerState();
@@ -214,26 +213,11 @@ class ServerState {  // public struct - to allow initialization.
     return qps_.SumTail();
   }
 
-  void RecordCmd(const bool is_main_conn) {
-    if (is_main_conn) {
-      ++tl_connection_stats()->command_cnt_main;
-    } else {
-      ++tl_connection_stats()->command_cnt_other;
-    }
-    qps_.Inc();
-  }
+  void RecordCmd(bool is_main_conn);
 
   // data heap used by zmalloc and shards.
   mi_heap_t* data_heap() {
     return data_heap_;
-  }
-
-  journal::Journal* journal() {
-    return journal_;
-  }
-
-  void set_journal(journal::Journal* j) {
-    journal_ = j;
   }
 
   constexpr MonitorsRepo& Monitors() {
@@ -305,7 +289,7 @@ class ServerState {  // public struct - to allow initialization.
   // Decommits 3 possible heaps according to the flags.
   // For decommit_glibcmalloc the heap is global for the process, for others it's specific only
   // for this thread.
-  enum {
+  enum : uint8_t {
     kDataHeap = 1,
     kBackingHeap = 2,
     kGlibcmalloc = 4,
@@ -328,7 +312,6 @@ class ServerState {  // public struct - to allow initialization.
   int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;
   mi_heap_t* data_heap_;
-  journal::Journal* journal_ = nullptr;
 
   InterpreterManager interpreter_mgr_;
   absl::flat_hash_map<ScriptMgr::ScriptKey, ScriptMgr::ScriptParams> cached_script_params_;

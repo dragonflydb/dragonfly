@@ -4,11 +4,14 @@
 
 #include "server/acl/validator.h"
 
+#include <absl/strings/numbers.h>
+
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "facade/dragonfly_connection.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/conn_context.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 

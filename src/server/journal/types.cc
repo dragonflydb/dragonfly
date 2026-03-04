@@ -4,6 +4,8 @@
 
 #include "server/journal/types.h"
 
+#include <absl/strings/str_join.h>
+
 namespace dfly::journal {
 
 using namespace std;

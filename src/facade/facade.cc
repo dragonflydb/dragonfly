@@ -8,6 +8,7 @@
 #include "base/logging.h"
 #include "facade/command_id.h"
 #include "facade/error.h"
+#include "facade/facade_stats.h"
 #include "facade/parsed_command.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_expr.h"
@@ -22,7 +23,7 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 216);
+  static_assert(kSizeConnStats == 272);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -37,6 +38,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(command_cnt_other);
   ADD(pipelined_cmd_cnt);
   ADD(pipelined_cmd_latency);
+  pipelined_latency_hist.Merge(o.pipelined_latency_hist);
   ADD(pipelined_wait_latency);
   ADD(conn_received_cnt);
   ADD(num_conns_main);
