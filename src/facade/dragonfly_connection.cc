@@ -2304,11 +2304,11 @@ bool Connection::ExecuteMCBatch() {
       continue;
     }
 
-    // - We must continue with async execution if we already have executing commands
-    // - only v2 loop supports any async commands so far
-    auto mode = is_head      ? AsyncPreference::PREFER_ASYNC
-                : ioloop_v2_ ? AsyncPreference::ONLY_ASYNC
-                             : AsyncPreference::ONLY_SYNC;
+    // We must continue with async execution if we already have executing commands
+    auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
+
+    if (!ioloop_v2_)  // only v2 loop supports any async commands so far
+      mode = AsyncPreference::ONLY_SYNC;
 
     auto dispatch_res = service_->DispatchMC(cmd, mode);
 

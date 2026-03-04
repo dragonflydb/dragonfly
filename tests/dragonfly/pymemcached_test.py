@@ -224,7 +224,7 @@ class TestMemcached:
         client_sock.sendall(payload)
 
         response = b""
-        while b"CLIENT_ERROR" not in response:
+        while b"CLIENT_ERROR bad command line format\r\n" not in response:
             data = client_sock.recv(4096)
             if not data:
                 break
