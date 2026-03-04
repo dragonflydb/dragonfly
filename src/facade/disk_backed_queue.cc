@@ -1,4 +1,4 @@
-// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 //
 // See LICENSE for licensing terms.
 //
@@ -6,7 +6,10 @@
 #include "facade/disk_backed_queue.h"
 
 #include <absl/strings/str_cat.h>
+#include <fcntl.h>
 
+#include <cerrno>
+#include <cstring>
 #include <string>
 
 #include "base/flags.h"
@@ -38,20 +41,13 @@ DiskBackedQueue::DiskBackedQueue(uint32_t conn_id)
 
 std::error_code DiskBackedQueue::Init() {
   std::string backing_name = absl::StrCat(absl::GetFlag(FLAGS_disk_backpressure_folder), id_);
-  {
-    // Kernel transparently handles buffering via the page cache.
-    auto res = util::fb2::OpenWrite(backing_name, {} /* overwrite mode + non-direct io */);
-    if (!res) {
-      return res.error();
-    }
-    writer_.reset(*res);
-  }
-
-  auto res = util::fb2::OpenRead(backing_name);
+  // Open a single O_RDWR file so the same fd serves writes, reads, and fallocate punch holes.
+  // Kernel transparently handles buffering via the page cache.
+  auto res = util::fb2::OpenLinux(backing_name, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
   if (!res) {
     return res.error();
   }
-  reader_.reset(*res);
+  file_ = std::move(*res);
 
   VLOG(3) << "Created backing for connection " << this << " " << backing_name;
 
@@ -62,19 +58,15 @@ DiskBackedQueue::~DiskBackedQueue() {
 }
 
 std::error_code DiskBackedQueue::Close() {
-  if (writer_ && reader_) {
-    auto ec = writer_->Close();
+  if (file_) {
+    auto ec = file_->Close();
     LOG_IF(WARNING, ec) << ec.message();
-
-    auto ec2 = reader_->Close();
-    LOG_IF(WARNING, ec2) << ec.message();
 
     std::string backing = absl::StrCat(absl::GetFlag(FLAGS_disk_backpressure_folder), id_);
     int errc = unlink(backing.c_str());
     LOG_IF(ERROR, errc != 0) << "Failed to unlink backing file: "
                              << std::error_code{errc, std::system_category()};
-    // Return the first error.
-    return ec ? ec : ec2;
+    return ec;
   }
 
   return {};
@@ -90,15 +82,15 @@ bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
 }
 
 std::error_code DiskBackedQueue::Write(io::Bytes bytes) {
-  auto ec = writer_->Write(bytes);
+  auto ec = file_->Write(bytes, write_offset_, 0);
   if (ec) {
     VLOG(2) << "Failed to offload blob of size " << bytes.size()
             << " to backing with error: " << ec;
     return ec;
   }
 
+  write_offset_ += bytes.size();
   total_backing_bytes_ += bytes.size();
-  total_backing_block_bytes_ += bytes.size();
 
   VLOG(2) << "Offload connection " << this << " backpressure of " << bytes.size();
   return {};
@@ -106,9 +98,10 @@ std::error_code DiskBackedQueue::Write(io::Bytes bytes) {
 
 io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
   const size_t k_read_size = 4096;
-  const size_t to_read = std::min(std::min(k_read_size, total_backing_bytes_), out.size());
+  const size_t to_read = std::min({k_read_size, total_backing_bytes_, out.size()});
 
-  auto result = reader_->Read(next_read_offset_, out);
+  iovec iov{.iov_base = out.data(), .iov_len = to_read};
+  auto result = file_->ReadSome(&iov, 1, next_read_offset_, 0);
   if (!result) {
     LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << to_read
                << " from disk with error: " << result.error().value() << " "
@@ -116,24 +109,28 @@ io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
     return result;
   }
 
-  VLOG(2) << "Loaded item with offset " << next_read_offset_ << " of size " << to_read
+  next_read_offset_ += *result;
+  total_backing_bytes_ -= *result;
+
+  VLOG(2) << "Loaded item with offset " << next_read_offset_ - *result << " of size " << *result
           << " for connection " << this;
 
-  if (total_backing_block_bytes_ >= 4096) {
-    // Respect allignment
-    const size_t punch = (total_backing_block_bytes_ % 4096) * 4096;
-    // fallocate is not cpu only.
-    // TODO: do this via iouring, potentially merge both read/writer and use linux file instead.
-    int res = fallocate(reader_->Handle(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, punch);
-    // Should not fail, it is alligned
-    DCHECK(res == 0);
-    total_backing_block_bytes_ -= punch;
+  // Punch holes over the aligned region we have fully read past so the OS can reclaim pages.
+  // Both offset and length must be multiples of the filesystem block size: XFS returns EINVAL
+  // otherwise, and ext4/tmpfs only zero partial blocks rather than freeing them.
+  // We assume 4096-byte blocks (correct for virtually all deployments); a fully robust
+  // implementation would query the actual block size via fstatfs(file_->GetFd(), &fsst) and
+  // align to fsst.f_bsize instead.
+  // TODO: do this via io_uring (FallocateAsync on LinuxFile).
+  const size_t aligned_end = (next_read_offset_ / 4096) * 4096;
+  if (aligned_end > punch_offset_) {
+    int res = fallocate(file_->GetFd(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, punch_offset_,
+                        aligned_end - punch_offset_);
+    DCHECK_EQ(res, 0) << "fallocate punch failed: " << strerror(errno);
+    punch_offset_ = aligned_end;
   }
 
-  next_read_offset_ += to_read;
-  total_backing_bytes_ -= to_read;
-
-  return {to_read};
+  return {*result};
 }
 
 }  // namespace facade

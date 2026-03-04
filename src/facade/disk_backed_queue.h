@@ -1,10 +1,8 @@
-// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
-
-#include <io/file.h>
 
 #include <functional>
 #include <memory>
@@ -12,6 +10,7 @@
 #include <system_error>
 
 #include "io/io.h"
+#include "util/fibers/uring_file.h"
 
 namespace facade {
 
@@ -35,13 +34,14 @@ class DiskBackedQueue {
   std::error_code Close();
 
  private:
-  // File Reader/Writer
-  std::unique_ptr<io::WriteFile> writer_;
-  std::unique_ptr<io::ReadonlyFile> reader_;
+  // Single O_RDWR file used for both writes and reads, avoiding a separate fd for fallocate.
+  std::unique_ptr<util::fb2::LinuxFile> file_;
 
+  size_t write_offset_ = 0;
   size_t total_backing_bytes_ = 0;
-  size_t total_backing_block_bytes_ = 0;
   size_t next_read_offset_ = 0;
+  // Tracks how far into the file holes have been punched (always 4096-aligned).
+  size_t punch_offset_ = 0;
 
   // Read only constants
   const size_t max_backing_size_ = 0;
