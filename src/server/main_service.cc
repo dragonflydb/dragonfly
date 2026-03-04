@@ -1504,10 +1504,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         return DispatchResult::WOULD_BLOCK;
       [[fallthrough]];
     case AsyncPreference::PREFER_ASYNC:
-      if (!cid->SupportsAsync())
-        break;
-
-      parsed_cmd->SetDeferredReply();
+      if (cid->SupportsAsync())
+        parsed_cmd->SetDeferredReply();
       break;
   };
 
