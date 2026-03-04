@@ -1687,6 +1687,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 
     auto opts = CallbackResultOptions::DefaultMutateOptions();
     auto res = json_path.ExecuteMutateCallback<Nothing>(updater.GetJson(), cb, opts);
+    parsed_json.reset();
     updater.SetJsonSize();
 
     res_status = res.status();
