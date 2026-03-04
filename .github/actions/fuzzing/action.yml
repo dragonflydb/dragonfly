@@ -158,7 +158,7 @@ runs:
         fi
 
         if [ -d "$HANGS_DIR" ]; then
-          HANG_COUNT=$(find "$HANGS_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+          HANG_COUNT=$(find "$HANGS_DIR" -maxdepth 1 -type f -name 'id:*' ! -name 'RECORD:*' 2>/dev/null | wc -l)
         fi
 
         if [ -d "$QUEUE_DIR" ]; then
@@ -187,16 +187,16 @@ runs:
         if [ "$CRASH_COUNT" -gt 0 ]; then
           echo "::error::Found $CRASH_COUNT crash(es)!"
           echo ""
-          echo "Crash files:"
-          ls -lh "$CRASHES_DIR" || true
+          echo "Crash input files (excluding RECORD):"
+          find "$CRASHES_DIR" -maxdepth 1 -name 'id:*' ! -name 'RECORD:*' -type f | sort || true
           exit 1
         fi
 
         if [ "$HANG_COUNT" -gt 0 ]; then
           echo "::error::Found $HANG_COUNT hang(s)!"
           echo ""
-          echo "Hang files:"
-          ls -lh "$HANGS_DIR" || true
+          echo "Hang input files (excluding RECORD):"
+          find "$HANGS_DIR" -maxdepth 1 -name 'id:*' ! -name 'RECORD:*' -type f | sort || true
           exit 1
         fi
 
@@ -247,13 +247,31 @@ runs:
         retention-days: 10
         if-no-files-found: ignore
 
+    - name: Package hang artifacts
+      shell: bash
+      if: failure() && steps.analyze.outputs.hang_count > 0
+      run: |
+        HANGS_DIR="fuzz/artifacts/${{ inputs.target }}/default/hangs"
+
+        if [ ! -d "$HANGS_DIR" ] || [ -z "$(ls -A "$HANGS_DIR" 2>/dev/null)" ]; then
+          echo "No hang artifacts to package"
+          exit 0
+        fi
+
+        mkdir -p fuzz/packaged_hangs
+        tar -czf "fuzz/packaged_hangs/hangs-${{ inputs.target }}.tar.gz" \
+          -C "$(dirname "$HANGS_DIR")" hangs/
+
+        echo "Packaged hangs:"
+        ls -lh fuzz/packaged_hangs/
+
     - name: Upload hang artifacts
       if: failure() && steps.analyze.outputs.hang_count > 0
       uses: actions/upload-artifact@v4
       with:
         name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-hangs-${{ inputs.run-number }}
         path: |
-          fuzz/artifacts/${{ inputs.target }}/default/hangs/
+          fuzz/packaged_hangs/*.tar.gz
           fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
         retention-days: 10
         if-no-files-found: ignore
