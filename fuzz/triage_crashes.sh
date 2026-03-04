@@ -198,11 +198,22 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     LOG_DIR="$WORK_DIR/logs_${CRASH_ID}"
     mkdir -p "$LOG_DIR"
 
+    # Mirror the exact flags used by run_fuzzer.sh so replay runs in the same
+    # server configuration as when the crash was found.
+    # Missing rename_command flags are the most common cause of false positives:
+    # if FLUSHALL/FLUSHDB/SHUTDOWN are not disabled, they execute during replay,
+    # wiping state or shutting down the server before the crash can trigger.
     DF_ARGS=(
         --port "$RESP_PORT"
         --log_dir="$LOG_DIR"
         --proactor_threads 1
-        '--dbfilename='
+        --dbfilename=""
+        --omit_basic_usage
+        --rename_command=SHUTDOWN=
+        --rename_command=DEBUG=
+        --rename_command=FLUSHALL=
+        --rename_command=FLUSHDB=
+        --max_bulk_len=1048576
     )
     [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
 
