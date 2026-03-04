@@ -1858,10 +1858,10 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         try:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
-            # If this ever fails gain, adjust the target_ops
-            # Df is blazingly fast, so by the time we tick a second time on
-            # line 1674, DF already replicated all the data so the assertion
-            # at the end of the test will always fail
+            # Wait for the two nodes to be in sync (stable state replication)
+            await wait_available_async(c_replica)
+
+            # Now start seeding and dropping
             fill_task = asyncio.create_task(seeder.run())
 
             for _ in range(3):
