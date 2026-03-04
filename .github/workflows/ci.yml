@@ -192,7 +192,7 @@ jobs:
 
       - name: Upload unit logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: unit_logs
           path: /tmp/*INFO*
@@ -210,7 +210,7 @@ jobs:
 
       - name: Upload regression logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: regression_logs
           path: /tmp/failed/*
@@ -261,7 +261,7 @@ jobs:
           ls -l ..
 
       - name: Authenticate to AWS
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1
@@ -278,7 +278,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: large-tests-arm-logs
           path: /tmp/failed/*
