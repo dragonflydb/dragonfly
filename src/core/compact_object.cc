@@ -31,6 +31,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/tiering_types.h"
 
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json object defragmentation");
@@ -1140,7 +1141,7 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
 }
 
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
-                         detail::TieredColdRecord* record) {
+                         tiering::TieredColdRecord* record) {
   encoding_ = record->value.encoding_;
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 

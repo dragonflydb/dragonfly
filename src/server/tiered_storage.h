@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/tiering_types.h"
 #include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/stats.h"
 #include "server/table.h"
@@ -122,8 +123,8 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  PrimeValue DeleteCool(detail::TieredColdRecord* record);
-  detail::TieredColdRecord* PopCool();
+  PrimeValue DeleteCool(tiering::TieredColdRecord* record);
+  tiering::TieredColdRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
 
@@ -133,7 +134,7 @@ class TieredStorage : public TieredStorageBase {
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 
-  using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
+  using CoolQueue = ::boost::intrusive::list<tiering::TieredColdRecord>;
   CoolQueue cool_queue_;
 
   struct {

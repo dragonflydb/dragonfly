@@ -29,12 +29,9 @@ class OpManager {
     size_t pending_stash_cnt = 0;
   };
 
-  using KeyRef = std::pair<DbIndex, std::string_view>;
+  using KeyRef = ::dfly::tiering::KeyRef;
 
-  // Two separate keyspaces are provided - one for strings, one for numeric identifiers.
-  // Ids can be used to track auxiliary values that don't map to real keys (like a page index).
-  // Specifically, we track page indexes when serializing small-bin pages with multiple items.
-  using PendingId = std::variant<unsigned, KeyRef>;
+  using PendingId = ::dfly::tiering::PendingId;
 
   explicit OpManager(size_t max_size);
   virtual ~OpManager();
@@ -75,7 +72,7 @@ class OpManager {
   Stats GetStats() const;
 
  protected:
-  using OwnedEntryId = std::variant<unsigned, DbKeyId>;
+  using OwnedEntryId = std::variant<uintptr_t, DbKeyId>;
 
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
@@ -88,14 +85,18 @@ class OpManager {
   // Notify delete. Return true if the filled segment needs to be marked as free.
   virtual bool NotifyDelete(DiskSegment segment) = 0;
 
-  // Describes pending futures for a single entry
+  // Describes pending read futures for a single entry
   struct EntryOps {
     EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder);
 
     // unique identifier for the entry being read. Used to notify higher layers.
     OwnedEntryId id;
+
+    // For multi-bin reads is a precise segment of the entry within a page.
     DiskSegment segment;
-    absl::InlinedVector<ReadCallback, 1> callbacks;
+
+    // We may have multiple callbacks for the same entry.
+    absl::InlinedVector<ReadCallback, 1> read_cbs;
     std::unique_ptr<Decoder> decoder;
     bool deleting = false;
   };
@@ -111,8 +112,11 @@ class OpManager {
     // Find if there are operations for the given segment, return nullptr otherwise
     EntryOps* Find(DiskSegment segment);
 
-    DiskSegment segment;                       // spanning segment of whole read
-    absl::InlinedVector<EntryOps, 1> key_ops;  // enqueued operations for different keys
+    DiskSegment segment;  // spanning segment of whole read
+
+    // enqueued operations for different keys for this segment.
+    // Has size() > 1 only for small-bin pages with multiple items, otherwise size() == 1.
+    absl::InlinedVector<EntryOps, 1> entry_ops;
   };
 
   // Prepare read operation for aligned segment or return pending if it exists.
@@ -132,6 +136,10 @@ class OpManager {
 
   DiskStorage storage_;
 
+  // Pending read operations are keyed by the offset of their aligned segment.
+  // This prevents an ABA problem in scenarios like: read (pending) → delete → stash → read.
+  // After the stash, the second read targets a different segment offset, so it won't
+  // interfere with the first read's pending operation, even for the same PendingId.
   absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;
 
   size_t pending_stash_counter_ = 0;

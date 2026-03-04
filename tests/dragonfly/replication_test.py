@@ -2219,6 +2219,7 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     assert set(keys_master) == set(keys_replica)
 
 
+@pytest.mark.large
 async def test_saving_replica(df_factory):
     master = df_factory.create(proactor_threads=1)
     replica = df_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}")
@@ -2823,6 +2824,7 @@ async def test_replica_of_replica(df_factory):
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
 
 
+@pytest.mark.large
 async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     df_factory: DflyInstanceFactory, df_seeder_factory
 ):
@@ -3083,6 +3085,7 @@ async def test_replicaof_inside_multi(df_factory):
     assert MULTI_COMMANDS_TO_ISSUE == num_successes
 
 
+@pytest.mark.large
 async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
     master = df_factory.create(proactor_threads=1, serialization_max_chunk_size=100000000000)
     replicas = [df_factory.create(proactor_threads=1) for i in range(2)]
@@ -3112,6 +3115,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
+@pytest.mark.large
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
@@ -3609,6 +3613,7 @@ async def test_replication_onmove_flow(df_factory, serialization_max_size):
         assert moved_saved > 0
 
 
+@pytest.mark.large
 @dfly_args({"proactor_threads": 1})
 async def test_big_strings(df_factory):
     master = df_factory.create(
