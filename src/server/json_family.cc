@@ -1657,39 +1657,33 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
-    string_view strpath = cur_path ? *cur_path : string_view{};
-    DVLOG(2) << "Handling " << strpath << " " << val->to_string();
-
-    // Parse JSON inside the callback, after JsonAutoUpdater has measured start_size_.
-    // This avoids memory tracking bugs from having parsed_json alive during measurements.
-    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-    if (!parsed_json) {
-      return {};
-    }
-
-    // https://datatracker.ietf.org/doc/html/rfc7386#section-2
-    try {
-      mergepatch::apply_merge_patch(*val, *parsed_json);
-    } catch (const std::exception& e) {
-      LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *val
-                            << " and patch: " << *parsed_json << ", path: " << strpath;
-    }
-
-    return {};
-  };
-
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   OpStatus res_status = it_res.status();
 
   if (res_status == OpStatus::OK) {
     JsonAutoUpdater updater(op_args, key, *std::move(it_res));
 
-    std::optional<JsonType> json = ShardJsonFromString(json_str);
-    if (!json) {
+    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+    if (!parsed_json) {
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       return OpStatus::INVALID_JSON;
     }
+
+    auto cb = [&](std::optional<std::string_view> cur_path,
+                  JsonType* val) -> MutateCallbackResult<> {
+      string_view strpath = cur_path ? *cur_path : string_view{};
+      DVLOG(2) << "Handling " << strpath << " " << val->to_string();
+
+      // https://datatracker.ietf.org/doc/html/rfc7386#section-2
+      try {
+        mergepatch::apply_merge_patch(*val, *parsed_json);
+      } catch (const std::exception& e) {
+        LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *val
+                              << " and patch: " << *parsed_json << ", path: " << strpath;
+      }
+
+      return {};
+    };
 
     auto opts = CallbackResultOptions::DefaultMutateOptions();
     auto res = json_path.ExecuteMutateCallback<Nothing>(updater.GetJson(), cb, opts);
