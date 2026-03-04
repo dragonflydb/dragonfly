@@ -159,7 +159,7 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
   const size_t prev_capacity = io_buf.Capacity();
   f();
   const size_t capacity = io_buf.Capacity();
-  if (stats != nullptr && prev_capacity != capacity) {
+  if (prev_capacity != capacity) {
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
@@ -703,8 +703,15 @@ void Connection::OnPostMigrateThread() {
 void Connection::OnConnectionStart() {
   SetName(absl::StrCat(id_));
 
+  // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
     is_main_ = lsnr->IsMainInterface();
+  }
+
+  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
+    int val = 1;
+    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+    DCHECK_EQ(res, 0);
   }
 }
 
@@ -712,12 +719,6 @@ void Connection::HandleRequests() {
   VLOG(1) << "[" << id_ << "] HandleRequests";
   DCHECK(tl_facade_stats);
   auto& conn_stats = tl_facade_stats->conn_stats;
-
-  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
-    int val = 1;
-    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-    DCHECK_EQ(res, 0);
-  }
 
   auto remote_ep = RemoteEndpointStr();
 
@@ -964,12 +965,7 @@ bool Connection::IsMain() const {
 }
 
 bool Connection::IsMainOrMemcache() const {
-  if (is_main_) {
-    return true;
-  }
-
-  const Listener* lsnr = static_cast<Listener*>(listener());
-  return lsnr && lsnr->protocol() == Protocol::MEMCACHE;
+  return is_main_ || protocol_ == Protocol::MEMCACHE;
 }
 
 void Connection::SetName(string name) {
@@ -1082,7 +1078,6 @@ void Connection::ConnectionFlow() {
       // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
       // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
       migration_allowed_to_register_ = true;
-      // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -2541,8 +2536,6 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     return;
   }
 
-  // TODO non epoll API via EnableRecvMultishot
-  // if (std::holds_alternative<io::MutableBytes>(n.read_result))
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
     if (!std::get<RecvNoti>(n.read_result)) {
@@ -2583,7 +2576,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io_ec_ = ec;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    io_buf_.WriteAndCommit(buf.data(), buf.size());
+    UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
+                        [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
   } else {
     LOG(FATAL) << "Should not reach here";
   }
