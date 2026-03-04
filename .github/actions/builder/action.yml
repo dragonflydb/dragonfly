@@ -35,7 +35,12 @@ inputs:
   with-aws:
     description: "Build with AWS support"
     required: false
-    default: 'OFF'
+    default: 'ON'
+    type: string
+  targets:
+    description: "Build targets to compile"
+    required: false
+    default: 'src/all'
     type: string
 
 runs:
@@ -90,5 +95,5 @@ runs:
       shell: bash
       run: |
         cd ${GITHUB_WORKSPACE}/${{ inputs.build-dir }}
-        echo "Building target: src/all"
-        ninja src/all
+        echo "Building target: ${{ inputs.targets }}"
+        ninja ${{ inputs.targets }}

@@ -43,7 +43,7 @@ jobs:
         uses: ./.github/actions/builder
         with:
           build-type: ${{matrix.build-type}}
-          with-aws: 'ON'
+          targets: 'dragonfly'
 
       - name: Authenticate to AWS
         uses: aws-actions/configure-aws-credentials@v5
