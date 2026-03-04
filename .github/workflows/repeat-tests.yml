@@ -81,17 +81,12 @@ jobs:
           mv dragonfly-x86_64 dragonfly
           ls -l
 
-      - name: Configure & Build
-        shell: bash
+      - name: Build Dragonfly
         if: ${{ inputs.use_release != 'yes' }}
-        run: |
-          # -no-pie to disable address randomization so we could symbolize stacktraces
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
-                -DCMAKE_CXX_FLAGS=-no-pie
-          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
-          pwd
-          ls -l ..
+        uses: ./.github/actions/builder
+        with:
+          build-type: ${{matrix.build-type}}
+          with-aws: 'ON'
 
       - name: Sync valkey tests
         uses: ./.github/actions/sync-valkey-tests
