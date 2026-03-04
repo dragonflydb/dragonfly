@@ -2051,6 +2051,87 @@ TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
+TEST_F(SearchFamilyTest, AggregateFilterNumeric) {
+  Run({"ft.create", "i1", "schema", "group", "tag", "value", "numeric"});
+  Run({"hset", "k1", "group", "a", "value", "10"});
+  Run({"hset", "k2", "group", "a", "value", "20"});
+  Run({"hset", "k3", "group", "b", "value", "30"});
+  Run({"hset", "k4", "group", "b", "value", "5"});
+
+  // clang-format off
+  // GROUPBY group, SUM value, then FILTER to keep only groups with total > 15
+  auto resp = Run({"ft.aggregate", "i1", "*",
+                   "GROUPBY", "1", "@group",
+                       "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total > 15"});
+  // clang-format on
+
+  // group "a" has total 30, group "b" has total 35 — both pass
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("group", "a", "total", "30"),
+                                         IsMap("group", "b", "total", "35")));
+
+  // clang-format off
+  resp = Run({"ft.aggregate", "i1", "*",
+              "GROUPBY", "1", "@group",
+                  "REDUCE", "SUM", "1", "@value", "AS", "total",
+              "FILTER", "@total > 32"});
+  // clang-format on
+
+  // Only group "b" (total=35) passes
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("group", "b", "total", "35")));
+}
+
+TEST_F(SearchFamilyTest, AggregateFilterStringEquality) {
+  Run({"ft.create", "i1", "schema", "category", "tag", "price", "numeric"});
+  Run({"hset", "k1", "category", "tech", "price", "100"});
+  Run({"hset", "k2", "category", "sports", "price", "50"});
+  Run({"hset", "k3", "category", "tech", "price", "200"});
+
+  // clang-format off
+  auto resp = Run({"ft.aggregate", "i1", "*",
+                   "GROUPBY", "1", "@category",
+                       "REDUCE", "SUM", "1", "@price", "AS", "total",
+                   "FILTER", "@category == 'tech'"});
+  // clang-format on
+
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("category", "tech", "total", "300")));
+}
+
+TEST_F(SearchFamilyTest, AggregateFilterCompound) {
+  Run({"ft.create", "i1", "schema", "route_name", "tag", "value", "numeric"});
+  Run({"hset", "k1", "route_name", "tech", "value", "10"});
+  Run({"hset", "k2", "route_name", "sports", "value", "20"});
+  Run({"hset", "k3", "route_name", "cooking", "value", "30"});
+
+  // clang-format off
+  // Compound filter with || and &&
+  auto resp = Run({"ft.aggregate", "i1", "*",
+                   "GROUPBY", "1", "@route_name",
+                       "REDUCE", "SUM", "1", "@value", "AS", "distance",
+                   "FILTER", "(@route_name == 'tech' && @distance < 15) || "
+                             "(@route_name == 'sports' && @distance < 25)"});
+  // clang-format on
+
+  // tech: distance=10 < 15 passes; sports: distance=20 < 25 passes; cooking: no match
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route_name", "tech", "distance", "10"),
+                                         IsMap("route_name", "sports", "distance", "20")));
+}
+
+TEST_F(SearchFamilyTest, AggregateFilterEmpty) {
+  Run({"ft.create", "i1", "schema", "group", "tag", "value", "numeric"});
+  Run({"hset", "k1", "group", "a", "value", "10"});
+
+  // clang-format off
+  auto resp = Run({"ft.aggregate", "i1", "*",
+                   "GROUPBY", "1", "@group",
+                       "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total > 999"});
+  // clang-format on
+
+  // No groups pass the filter — empty result (just the count: 0)
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 TEST_F(SearchFamilyTest, InvalidCreateOptions) {
   // Test with a duplicate field in the schema
   auto resp = Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "title", "TEXT", "title", "TEXT"});

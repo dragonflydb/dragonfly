@@ -119,6 +119,8 @@ AggregationStep MakeSortStep(SortParams sort_params);
 // Make `LIMIT offset num` step
 AggregationStep MakeLimitStep(size_t offset, size_t num);
 
+// Note: FILTER step is in aggregate_expr.h (MakeFilterStep)
+
 // Process values with given steps
 AggregationResult Process(std::vector<DocValues> values,
                           absl::Span<const std::string_view> fields_to_print,
