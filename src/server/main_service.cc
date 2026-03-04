@@ -1488,7 +1488,9 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
   if (cid == nullptr) {
-    DCHECK(async_pref == AsyncPreference::ONLY_SYNC);  // Error will be missed, temporary
+    if (async_pref != AsyncPreference::ONLY_SYNC) {
+      parsed_cmd->SetDeferredReply();
+    }
     parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
@@ -1874,6 +1876,9 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
       return DispatchResult::OK;
     default:
+      if (apref != AsyncPreference::ONLY_SYNC) {
+        parsed_cmd->SetDeferredReply();
+      }
       cmd_ctx->SendSimpleString("CLIENT_ERROR bad command line format");
       return DispatchResult::ERROR;
   }

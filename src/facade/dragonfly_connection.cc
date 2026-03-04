@@ -2304,13 +2304,28 @@ bool Connection::ExecuteMCBatch() {
       continue;
     }
 
-    // We must continue with async execution if we already have executing commands
-    auto mode = is_head ? AsyncPreference::PREFER_ASYNC : AsyncPreference::ONLY_ASYNC;
+    // - We must continue with async execution if we already have executing commands
+    // - only v2 loop supports any async commands so far
+    auto mode = is_head      ? AsyncPreference::PREFER_ASYNC
+                : ioloop_v2_ ? AsyncPreference::ONLY_ASYNC
+                             : AsyncPreference::ONLY_SYNC;
 
-    if (!ioloop_v2_)  // only v2 loop supports any async commands so far
-      mode = AsyncPreference::ONLY_SYNC;
+    auto dispatch_res = service_->DispatchMC(cmd, mode);
 
-    if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK)
+    // Enforce the pipeline invariant between the IO loop (producer) and AsyncFiber (consumer).
+    // To prevent stream corruption, the command state must satisfy ONE of these rules:
+    // 1. It is the head command (safely writes to the socket directly).
+    // 2. It executed asynchronously (dispatch_res is not WOULD_BLOCK) AND buffered its reply
+    // locally (is_deferred = true).
+    // 3. It stalled the pipeline (dispatch_res is WOULD_BLOCK) AND did NOT buffer a reply
+    //    (is_deferred = false).
+    bool is_deferred = cmd->IsDeferredReply();
+    DCHECK(is_head || (is_deferred ^ (dispatch_res == DispatchResult::WOULD_BLOCK)))
+        << "Pipeline contract breach! Invalid state for non-head command. "
+        << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred
+        << ", Command Type: " << cmd->mc_command()->type;
+
+    if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
 
     conn_stats.pipeline_dispatch_commands++;
