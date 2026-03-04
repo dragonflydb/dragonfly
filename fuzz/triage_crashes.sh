@@ -74,7 +74,12 @@ fi
 
 # ─── Working directory ────────────────────────────────────────────────────────
 WORK_DIR=$(mktemp -d /tmp/triage_XXXXXX)
-trap 'rm -rf "$WORK_DIR"' EXIT
+DF_PID=""
+cleanup() {
+    [[ -n "$DF_PID" ]] && kill -9 "$DF_PID" 2>/dev/null || true
+    rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT INT TERM
 
 # ─── Extract zip ──────────────────────────────────────────────────────────────
 print_info "Extracting $(basename "$CRASHES_ZIP")..."
@@ -207,7 +212,18 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     if ! wait_for_port 127.0.0.1 "$RESP_PORT" "$STARTUP_TIMEOUT"; then
         print_error "Dragonfly did not start within ${STARTUP_TIMEOUT}s (crash $CRASH_ID)"
         kill -9 "$DF_PID" 2>/dev/null || true
-        wait "$DF_PID" 2>/dev/null || true
+        wait "$DF_PID" 2>/dev/null && true || true
+        DF_PID=""
+        FAILED=$((FAILED + 1))
+        echo ""
+        continue
+    fi
+    # In memcache mode also verify the memcache listener is up before replaying
+    if [[ "$MODE" == "memcache" ]] && ! wait_for_port 127.0.0.1 "$MC_PORT" 3; then
+        print_error "Memcache port $MC_PORT not ready (crash $CRASH_ID)"
+        kill -9 "$DF_PID" 2>/dev/null || true
+        wait "$DF_PID" 2>/dev/null && true || true
+        DF_PID=""
         FAILED=$((FAILED + 1))
         echo ""
         continue
@@ -235,10 +251,19 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         echo -e "  ${YELLOW}FALSE POSITIVE${NC} — Dragonfly alive after replay"
         FALSE_POSITIVE=$((FALSE_POSITIVE + 1))
         kill -9 "$DF_PID" 2>/dev/null || true
-        wait "$DF_PID" 2>/dev/null || true
+        wait "$DF_PID" 2>/dev/null && true || true
+        DF_PID=""
     else
-        wait "$DF_PID" 2>/dev/null || true
-        EXIT_CODE=$?
+        # Capture signal without triggering set -e (assignment always exits 0)
+        wait "$DF_PID" 2>/dev/null && EXIT_CODE=0 || EXIT_CODE=$?
+        DF_PID=""
+        # Sanity check: exit code > 128 means killed by signal; otherwise not a signal death
+        if [[ $EXIT_CODE -le 128 ]]; then
+            echo -e "  ${YELLOW}FALSE POSITIVE${NC} — Dragonfly exited cleanly (code $EXIT_CODE)"
+            FALSE_POSITIVE=$((FALSE_POSITIVE + 1))
+            echo ""
+            continue
+        fi
         SIGNAL=$((EXIT_CODE - 128))
         CONFIRMED=$((CONFIRMED + 1))
 
