@@ -1485,10 +1485,16 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  // We must resolve the command ID (cid) before the guard block.
+  // The following switch statement relies on the command's metadata
+  // (e.g., SupportsAsync()) to evaluate execution preferences,
+  // making this lookup a hard dependency for the logic below.
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
   if (cid == nullptr) {
-    DCHECK(async_pref == AsyncPreference::ONLY_SYNC);  // Error will be missed, temporary
+    if (async_pref != AsyncPreference::ONLY_SYNC) {
+      parsed_cmd->SetDeferredReply();
+    }
     parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
@@ -1502,10 +1508,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         return DispatchResult::WOULD_BLOCK;
       [[fallthrough]];
     case AsyncPreference::PREFER_ASYNC:
-      if (!cid->SupportsAsync())
-        break;
-
-      parsed_cmd->SetDeferredReply();
+      if (cid->SupportsAsync())
+        parsed_cmd->SetDeferredReply();
       break;
   };
 
@@ -1874,6 +1878,9 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
       return DispatchResult::OK;
     default:
+      if (apref != AsyncPreference::ONLY_SYNC) {
+        parsed_cmd->SetDeferredReply();
+      }
       cmd_ctx->SendSimpleString("CLIENT_ERROR bad command line format");
       return DispatchResult::ERROR;
   }
