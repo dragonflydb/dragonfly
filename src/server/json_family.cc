@@ -517,8 +517,8 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
   const bool is_new_key = it_res->is_new;
 
   if (type != OBJ_JSON) {
-    // TODO -- This is a performance regression. If json_str is large, we parse it here
-    // then again later after we set up the JsonAutoUpdater. The issue is that we
+    // TODO -- this is a performance regression. If json_str is large, we parse it here
+    // then again  later after we set up the JsonAutoUpdater. The issue here is that we
     // need to deallocate before we create the updater but after we parse the string. Yet,
     // parsing requires the updater to be created first(see its comments).
     if (!ShardJsonFromString(json_str)) {
@@ -1657,23 +1657,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  // TODO: This is a performance reegression on large json strings- we might parse many times as cb
-  // gets called multiple times. We can't store the result here because we have not yet setup the
-  // JsonAutoUpdater
-
-  // Validate JSON is parseable before mutation
-  if (!ShardJsonFromString(json_str)) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_JSON;
-  }
-
   auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
     string_view strpath = cur_path ? *cur_path : string_view{};
     DVLOG(2) << "Handling " << strpath << " " << val->to_string();
 
     // Parse JSON inside the callback, after JsonAutoUpdater has measured start_size_.
     // This avoids memory tracking bugs from having parsed_json alive during measurements.
-    // We already validated above, so this should succeed.
     std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
     if (!parsed_json) {
       return {};
@@ -1690,10 +1679,27 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  OpStatus res_status = it_res.status();
 
-  if (res.status() != OpStatus::KEY_NOTFOUND)
-    return res.status();
+  if (res_status == OpStatus::OK) {
+    JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+
+    std::optional<JsonType> json = ShardJsonFromString(json_str);
+    if (!json) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      return OpStatus::INVALID_JSON;
+    }
+
+    auto opts = CallbackResultOptions::DefaultMutateOptions();
+    auto res = json_path.ExecuteMutateCallback<Nothing>(updater.GetJson(), cb, opts);
+    updater.SetJsonSize();
+
+    res_status = res.status();
+  }
+
+  if (res_status != OpStatus::KEY_NOTFOUND)
+    return res_status;
 
   if (json_path.RefersToRootElement()) {
     return OpSet(op_args, key, path, json_path, json_str, false, false).status();
