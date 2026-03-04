@@ -1809,22 +1809,24 @@ void Connection::AsyncFiber() {
         }
       }
 
-      // We prioritize pipeline execution over the admin queue in two distinct cases:
-      // 1. defer_migration: A migration is requested (Redis only), but we must drain the existing
+      // We prioritize pipeline execution over the admin queue in two distinct cases (Pipeline queue
+      // must be non-empty for both cases):
+      // 1. A migration is requested (Redis only), but we must drain the existing
       // pipeline first.
-      // 2. force_pipeline: The dispatch quota was reached, forcing a pipeline execution to prevent
+      // 2.  The dispatch quota was reached, forcing a pipeline execution to prevent
       // starvation.
-      bool defer_migration = false;
-      bool force_pipeline = false;
+      bool prefer_pipeline_execution = false;
       if (parsed_head_ != nullptr) {
-        defer_migration = is_migration_req && (protocol_ == Protocol::REDIS);
-        force_pipeline = quota_reached;
+        prefer_pipeline_execution =
+            quota_reached || (is_migration_req && (protocol_ == Protocol::REDIS));
       }
-      bool prefer_pipeline_execution = defer_migration || force_pipeline;
       if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
-        VLOG_IF(1, force_pipeline)
-            << "[" << id_ << "] AsyncFiber quota reached (" << async_dispatch_quota
-            << "). Forcing pipeline execution to prevent starvation.";
+        VLOG_IF(1, prefer_pipeline_execution)
+            << "[" << id_ << "] Preferring pipeline execution over admin queue. "
+            << "Migration requested: " << is_migration_req
+            << ", dispatch quota reached: " << quota_reached
+            << ", async_dispatch_quota: " << async_dispatch_quota
+            << ", dispatch_q_cmd_processed: " << dispatch_q_cmd_processed;
         ProcessPipelineCommand();
         dispatch_q_cmd_processed = 0;
       } else {  // 3. Process admin Queue
