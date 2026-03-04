@@ -159,7 +159,7 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
   const size_t prev_capacity = io_buf.Capacity();
   f();
   const size_t capacity = io_buf.Capacity();
-  if (stats != nullptr && prev_capacity != capacity) {
+  if (prev_capacity != capacity) {
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
@@ -703,8 +703,15 @@ void Connection::OnPostMigrateThread() {
 void Connection::OnConnectionStart() {
   SetName(absl::StrCat(id_));
 
+  // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
     is_main_ = lsnr->IsMainInterface();
+  }
+
+  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
+    int val = 1;
+    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+    DCHECK_EQ(res, 0);
   }
 }
 
@@ -712,12 +719,6 @@ void Connection::HandleRequests() {
   VLOG(1) << "[" << id_ << "] HandleRequests";
   DCHECK(tl_facade_stats);
   auto& conn_stats = tl_facade_stats->conn_stats;
-
-  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
-    int val = 1;
-    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-    DCHECK_EQ(res, 0);
-  }
 
   auto remote_ep = RemoteEndpointStr();
 
@@ -964,12 +965,7 @@ bool Connection::IsMain() const {
 }
 
 bool Connection::IsMainOrMemcache() const {
-  if (is_main_) {
-    return true;
-  }
-
-  const Listener* lsnr = static_cast<Listener*>(listener());
-  return lsnr && lsnr->protocol() == Protocol::MEMCACHE;
+  return is_main_ || protocol_ == Protocol::MEMCACHE;
 }
 
 void Connection::SetName(string name) {
@@ -1082,7 +1078,6 @@ void Connection::ConnectionFlow() {
       // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
       // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
       migration_allowed_to_register_ = true;
-      // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -1809,22 +1804,24 @@ void Connection::AsyncFiber() {
         }
       }
 
-      // We prioritize pipeline execution over the admin queue in two distinct cases:
-      // 1. defer_migration: A migration is requested (Redis only), but we must drain the existing
+      // We prioritize pipeline execution over the admin queue in two distinct cases (Pipeline queue
+      // must be non-empty for both cases):
+      // 1. A migration is requested (Redis only), but we must drain the existing
       // pipeline first.
-      // 2. force_pipeline: The dispatch quota was reached, forcing a pipeline execution to prevent
+      // 2.  The dispatch quota was reached, forcing a pipeline execution to prevent
       // starvation.
-      bool defer_migration = false;
-      bool force_pipeline = false;
+      bool prefer_pipeline_execution = false;
       if (parsed_head_ != nullptr) {
-        defer_migration = is_migration_req && (protocol_ == Protocol::REDIS);
-        force_pipeline = quota_reached;
+        prefer_pipeline_execution =
+            quota_reached || (is_migration_req && (protocol_ == Protocol::REDIS));
       }
-      bool prefer_pipeline_execution = defer_migration || force_pipeline;
       if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
-        VLOG_IF(1, force_pipeline)
-            << "[" << id_ << "] AsyncFiber quota reached (" << async_dispatch_quota
-            << "). Forcing pipeline execution to prevent starvation.";
+        VLOG_IF(1, prefer_pipeline_execution)
+            << "[" << id_ << "] Preferring pipeline execution over admin queue. "
+            << "Migration requested: " << is_migration_req
+            << ", dispatch quota reached: " << quota_reached
+            << ", async_dispatch_quota: " << async_dispatch_quota
+            << ", dispatch_q_cmd_processed: " << dispatch_q_cmd_processed;
         ProcessPipelineCommand();
         dispatch_q_cmd_processed = 0;
       } else {  // 3. Process admin Queue
@@ -2539,8 +2536,6 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     return;
   }
 
-  // TODO non epoll API via EnableRecvMultishot
-  // if (std::holds_alternative<io::MutableBytes>(n.read_result))
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
     if (!std::get<RecvNoti>(n.read_result)) {
@@ -2581,7 +2576,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io_ec_ = ec;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    io_buf_.WriteAndCommit(buf.data(), buf.size());
+    UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
+                        [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
   } else {
     LOG(FATAL) << "Should not reach here";
   }

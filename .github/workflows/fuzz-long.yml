@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   fuzz-long:
+    if: github.repository == 'dragonflydb/dragonfly'
     runs-on: CI-LARGE-86
     timeout-minutes: 120
 

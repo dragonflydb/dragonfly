@@ -11,7 +11,7 @@ on:
 jobs:
   test-rpm:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    if: github.repository == 'dragonflydb/dragonfly' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     container:
       image: ghcr.io/romange/fedora:30
     steps:
@@ -25,7 +25,7 @@ jobs:
 
   test-deb-ubuntu:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    if: github.repository == 'dragonflydb/dragonfly' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     container:
       image: ghcr.io/romange/ubuntu:noble
     steps:
@@ -42,7 +42,7 @@ jobs:
   notify-on-failure:
     runs-on: ubuntu-latest
     needs: [test-rpm, test-deb-ubuntu]
-    if: ${{ always() && (needs.test-rpm.result == 'failure' || needs.test-deb-ubuntu.result == 'failure') }}
+    if: github.repository == 'dragonflydb/dragonfly' && always() && (needs.test-rpm.result == 'failure' || needs.test-deb-ubuntu.result == 'failure')
     steps:
       - name: Notify on failure
         run: |

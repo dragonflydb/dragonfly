@@ -13,6 +13,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'dragonflydb/dragonfly'
     runs-on: ubuntu-latest
     name: Build
     timeout-minutes: 60
