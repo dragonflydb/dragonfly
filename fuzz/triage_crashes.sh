@@ -233,9 +233,17 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     REPLAY_PORT="$RESP_PORT"
     [[ "$MODE" == "memcache" ]] && REPLAY_PORT="$MC_PORT"
 
-    python3 "$REPLAY_SCRIPT" \
-        "$CRASH_DATA_DIR" "$CRASH_ID" 127.0.0.1 "$REPLAY_PORT" \
-        >/dev/null 2>&1 || true
+    if ! python3 "$REPLAY_SCRIPT" \
+            "$CRASH_DATA_DIR" "$CRASH_ID" 127.0.0.1 "$REPLAY_PORT" \
+            >/dev/null 2>&1; then
+        print_warn "Replay script failed for crash $CRASH_ID — skipping"
+        kill -9 "$DF_PID" 2>/dev/null || true
+        wait "$DF_PID" 2>/dev/null && true || true
+        DF_PID=""
+        FAILED=$((FAILED + 1))
+        echo ""
+        continue
+    fi
 
     # Wait for Dragonfly to die (poll every 100ms)
     DIED=false
