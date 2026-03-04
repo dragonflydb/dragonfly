@@ -2320,7 +2320,7 @@ bool Connection::ExecuteMCBatch() {
     // 3. It stalled the pipeline (dispatch_res is WOULD_BLOCK) AND did NOT buffer a reply
     //    (is_deferred = false).
     bool is_deferred = cmd->IsDeferredReply();
-    DCHECK(is_head || (is_deferred ^ (dispatch_res == DispatchResult::WOULD_BLOCK)))
+    DCHECK(is_head || (is_deferred == (dispatch_res != DispatchResult::WOULD_BLOCK)))
         << "Pipeline contract breach! Invalid state for non-head command. "
         << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred
         << ", Command Type: " << cmd->mc_command()->type;
