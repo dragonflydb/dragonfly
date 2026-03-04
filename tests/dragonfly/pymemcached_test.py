@@ -231,14 +231,17 @@ class TestMemcached:
             response += data
         client_sock.close()
 
-        # We expect: strict ordering: STORED -> VALUE -> CLIENT_ERROR
+        # Ensure strict ordering: STORED -> GETS (VALUE + END) -> CLIENT_ERROR
         idx_stored = response.find(b"STORED\r\n")
         idx_value = response.find(b"VALUE mykey")
         idx_error = response.find(b"CLIENT_ERROR bad command line format")
-        # Ensure all responses actually exist
-        assert idx_stored != -1 and idx_value != -1 and idx_error != -1
-        # Ensure they arrived in the exact correct order
-        assert idx_stored < idx_value < idx_error, f"Responses out of order: {response}"
+        # Look for the GETS terminator specifically AFTER the value
+        idx_end = response.find(b"END\r\n", idx_value)
+
+        assert idx_stored != -1 and idx_value != -1 and idx_error != -1 and idx_end != -1
+        assert (
+            idx_stored < idx_value < idx_end < idx_error
+        ), f"Responses out of order/interleaved: {response}"
 
         # Final sanity check to ensure the connection/server is still healthy
         assert memcached_client.set("sanity_check", "alive")

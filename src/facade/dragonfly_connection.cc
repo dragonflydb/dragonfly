@@ -2315,10 +2315,11 @@ bool Connection::ExecuteMCBatch() {
     // Enforce the pipeline invariant between the IO loop (producer) and AsyncFiber (consumer).
     // To prevent stream corruption, the command state must satisfy ONE of these rules:
     // 1. It is the head command (safely writes to the socket directly).
-    // 2. It executed asynchronously (dispatch_res is not WOULD_BLOCK) AND buffered its reply
-    // locally (is_deferred = true).
-    // 3. It stalled the pipeline (dispatch_res is WOULD_BLOCK) AND did NOT buffer a reply
-    //    (is_deferred = false).
+    // 2. It did not stall the pipeline (dispatch_res != WOULD_BLOCK) and therefore
+    //    must have buffered its reply locally (is_deferred == true).
+    // 3. It stalled the pipeline because it requires synchronous execution
+    //    (dispatch_res == WOULD_BLOCK) and therefore must NOT have buffered
+    //    a reply (is_deferred == false).
     bool is_deferred = cmd->IsDeferredReply();
     DCHECK(is_head || (is_deferred == (dispatch_res != DispatchResult::WOULD_BLOCK)))
         << "Pipeline contract breach! Invalid state for non-head command. "

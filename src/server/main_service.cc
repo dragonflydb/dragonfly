@@ -1485,6 +1485,10 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  // We must resolve the command ID (cid) before the guard block.
+  // The following switch statement relies on the command's metadata
+  // (e.g., SupportsAsync()) to evaluate execution preferences,
+  // making this lookup a hard dependency for the logic below.
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
   if (cid == nullptr) {
