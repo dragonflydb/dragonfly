@@ -24,18 +24,18 @@ class DiskBackedQueue {
   // Check if we can offload bytes to backing file.
   bool HasEnoughBackingSpaceFor(size_t bytes) const;
 
-  std::error_code Write(io::Bytes bytes);
+  std::error_code Push(io::Bytes bytes);
 
-  io::Result<size_t> ReadTo(io::MutableBytes out);
+  io::Result<size_t> Pop(io::MutableBytes out);
 
-  using AsyncWriteCallback = std::function<void(std::error_code)>;
+  using AsyncPushCallback = std::function<void(std::error_code)>;
 
-  void WriteAsync(io::Bytes bytes, AsyncWriteCallback cb);
+  void PushAsync(io::Bytes bytes, AsyncPushCallback cb);
 
-  using AsyncReadCallback = std::function<void(io::Result<size_t>)>;
+  using AsyncPopCallback = std::function<void(io::Result<size_t>)>;
 
   // Async read variant. Callback is invoked with Result containing bytes read or error.
-  void ReadToAsync(io::MutableBytes out, AsyncReadCallback cb);
+  void PopAsync(io::MutableBytes out, AsyncPopCallback cb);
 
   // Check if backing file is empty, i.e. backing file has 0 bytes.
   bool Empty() const;
@@ -57,7 +57,6 @@ class DiskBackedQueue {
 
   // Read only constants
   const size_t max_backing_size_ = 0;
-  const size_t max_queue_load_size_ = 0;
 
   // same as connection id. Used to uniquely identify the backed file
   const size_t id_ = 0;

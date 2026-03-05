@@ -48,7 +48,7 @@ TEST_F(DiskBackedQueueTest, ReadWrite) {
     for (size_t i = 0; i < 100; ++i) {
       auto cmd = absl::StrCat("SET FOO", i, " BAR");
       auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(cmd.data()), cmd.size());
-      EXPECT_FALSE(backing.Write(bytes));
+      EXPECT_FALSE(backing.Push(bytes));
       absl::StrAppend(&commands, cmd);
     }
 
@@ -57,7 +57,7 @@ TEST_F(DiskBackedQueueTest, ReadWrite) {
       LOG(INFO) << "ping";
       std::string buf(1024, 'c');
       auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(bytes);
+      auto res = backing.Pop(bytes);
       EXPECT_TRUE(res);
       absl::StrAppend(&results, buf.substr(0, *res));
     }
@@ -80,14 +80,14 @@ TEST_F(DiskBackedQueueTest, PunchHoleReleasesSpace) {
     // Write 3 pages (12288 bytes) so the punch logic is triggered on reads.
     std::string data(12288, 'x');
     ASSERT_FALSE(
-        backing.Write(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
+        backing.Push(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
 
     // Read all data back in 4096-byte chunks.
     std::string results;
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(out);
+      auto res = backing.Pop(out);
       ASSERT_TRUE(res);
       results.append(buf.data(), *res);
     }
@@ -115,13 +115,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleAdvancesOffset) {
     // Write 8 pages so we can do several reads and check the hole grows.
     std::string data(32768, 'y');
     ASSERT_FALSE(
-        backing.Write(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
+        backing.Push(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
 
     // Read exactly 4096 bytes (1 page).
     {
       std::string buf(4096, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(out);
+      auto res = backing.Pop(out);
       ASSERT_TRUE(res);
     }
 
@@ -151,7 +151,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     // This is 2 full pages (8192 bytes) + 1808 partial bytes.
     std::string data(10000, 'z');
     ASSERT_FALSE(
-        backing.Write(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
+        backing.Push(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
 
     // Read 3000 bytes (unaligned, less than 1 page).
     // next_read_offset_ will be 3000, but aligned_end = (3000/4096)*4096 = 0.
@@ -160,7 +160,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     {
       std::string buf(3000, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(out);
+      auto res = backing.Pop(out);
       ASSERT_TRUE(res);
       results.append(buf.data(), *res);
     }
@@ -179,7 +179,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     {
       std::string buf(2000, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(out);
+      auto res = backing.Pop(out);
       ASSERT_TRUE(res);
       results.append(buf.data(), *res);
     }
@@ -198,7 +198,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     {
       std::string buf(3500, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(out);
+      auto res = backing.Pop(out);
       ASSERT_TRUE(res);
       results.append(buf.data(), *res);
     }
@@ -214,7 +214,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.ReadTo(out);
+      auto res = backing.Pop(out);
       ASSERT_TRUE(res);
       results.append(buf.data(), *res);
     }
@@ -242,7 +242,7 @@ TEST_F(DiskBackedQueueTest, AsyncReadWrite) {
         auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(cmd.data()), cmd.size());
 
         util::fb2::Done done;
-        backing.WriteAsync(bytes, [&done](std::error_code ec) {
+        backing.PushAsync(bytes, [&done](std::error_code ec) {
           EXPECT_FALSE(ec);
           done.Notify();
         });
@@ -260,7 +260,7 @@ TEST_F(DiskBackedQueueTest, AsyncReadWrite) {
         auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
 
         util::fb2::Done done;
-        backing.ReadToAsync(bytes, [&done, &results, &buf](io::Result<size_t> res) {
+        backing.PopAsync(bytes, [&done, &results, &buf](io::Result<size_t> res) {
           EXPECT_TRUE(res);
           results.append(buf.data(), *res);
           done.Notify();
@@ -287,11 +287,11 @@ TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
     std::string data(12288, 'x');
 
     util::fb2::Done write_done;
-    backing.WriteAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
-                       [&write_done](std::error_code ec) {
-                         ASSERT_FALSE(ec);
-                         write_done.Notify();
-                       });
+    backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
+                      [&write_done](std::error_code ec) {
+                        ASSERT_FALSE(ec);
+                        write_done.Notify();
+                      });
     write_done.Wait();
 
     // Async read all data back in 4096-byte chunks
@@ -301,7 +301,7 @@ TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
 
       util::fb2::Done read_done;
-      backing.ReadToAsync(out, [&read_done, &results, &buf](io::Result<size_t> res) {
+      backing.PopAsync(out, [&read_done, &results, &buf](io::Result<size_t> res) {
         ASSERT_TRUE(res);
         results.append(buf.data(), *res);
         read_done.Notify();

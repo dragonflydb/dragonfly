@@ -28,15 +28,10 @@ ABSL_FLAG(size_t, disk_backpressure_file_max_bytes, 50_MB,
           "Maximum size of the backing file. When max size is reached, connection will "
           "stop offloading backpressure to disk and block on client read.");
 
-ABSL_FLAG(size_t, disk_backpressure_load_size, 30,
-          "How many items to load in dispatch queue from the disk-backed file.");
-
 namespace facade {
 
 DiskBackedQueue::DiskBackedQueue(uint32_t conn_id)
-    : max_backing_size_(absl::GetFlag(FLAGS_disk_backpressure_file_max_bytes)),
-      max_queue_load_size_(absl::GetFlag(FLAGS_disk_backpressure_load_size)),
-      id_(conn_id) {
+    : max_backing_size_(absl::GetFlag(FLAGS_disk_backpressure_file_max_bytes)), id_(conn_id) {
 }
 
 std::error_code DiskBackedQueue::Init() {
@@ -81,7 +76,7 @@ bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
   return (bytes + total_backing_bytes_) < max_backing_size_;
 }
 
-std::error_code DiskBackedQueue::Write(io::Bytes bytes) {
+std::error_code DiskBackedQueue::Push(io::Bytes bytes) {
   auto ec = file_->Write(bytes, write_offset_, 0);
   if (ec) {
     VLOG(2) << "Failed to offload blob of size " << bytes.size()
@@ -96,7 +91,7 @@ std::error_code DiskBackedQueue::Write(io::Bytes bytes) {
   return {};
 }
 
-io::Result<size_t> DiskBackedQueue::ReadTo(io::MutableBytes out) {
+io::Result<size_t> DiskBackedQueue::Pop(io::MutableBytes out) {
   const size_t k_read_size = 4096;
   const size_t to_read = std::min({k_read_size, total_backing_bytes_, out.size()});
 
@@ -136,7 +131,7 @@ void DiskBackedQueue::MaybePunchHole() {
   }
 }
 
-void DiskBackedQueue::WriteAsync(io::Bytes bytes, AsyncWriteCallback cb) {
+void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
   const size_t offset = write_offset_;
   const size_t size = bytes.size();
 
@@ -155,7 +150,7 @@ void DiskBackedQueue::WriteAsync(io::Bytes bytes, AsyncWriteCallback cb) {
   });
 }
 
-void DiskBackedQueue::ReadToAsync(io::MutableBytes out, AsyncReadCallback cb) {
+void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
   const size_t k_read_size = 4096;
   const size_t to_read = std::min({k_read_size, total_backing_bytes_, out.size()});
   const size_t offset = next_read_offset_;
