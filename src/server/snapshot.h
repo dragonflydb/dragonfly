@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <deque>
+#include <vector>
 
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
@@ -104,16 +104,6 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   void ThrottleIfNeeded();
 
  private:
-  [[maybe_unused]] void SerializeIndexMapping(
-      uint32_t shard_id, std::string_view index_name,
-      const std::vector<std::pair<std::string, search::DocId>>& mappings);
-
-  // Serialize ShardDocIndex key-to-DocId mappings for all search indices on this shard
-  void SerializeIndexMappings();
-
-  // Serialize HNSW global indices for shard 0 only
-  void SerializeGlobalHnswIndices();
-
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(bool send_full_sync_cut);
@@ -125,22 +115,30 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Returns number of serialized entries, updates bucket version to snapshot version.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
-  // Serialize entry into passed serializer.
+  // Serialize entry into main serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
+
+  // Serialize (trigger tiered load) of external value and save it to delayed entries
+  void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
+                         uint32_t mc_flags);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
   // DbSlice moved listener
   void OnMoved(DbIndex db_index, const DbSlice::MovedItemsVec& items);
+
+  // Return true if internal cursor passed this cursor on db index
   bool IsPositionSerialized(DbIndex db_index, PrimeTable::Cursor cursor);
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
-  void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
-                         uint32_t mc_flags);
+
+  // Wait for delayed entries and serialize them to main or separate serializer (and flush).
+  // If force is false, it selects only completed entries to reduce blocking delays.
+  size_t PushExternal(bool force);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
@@ -152,7 +150,15 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
 
-  // An entry whose value must be awaited
+  [[maybe_unused]] void SerializeIndexMapping(
+      uint32_t shard_id, std::string_view index_name,
+      const std::vector<std::pair<std::string, search::DocId>>& mappings);
+
+  // Serialize ShardDocIndex key-to-DocId mappings for all search indices on this shard
+  void SerializeIndexMappings();
+
+  // Serialize HNSW global indices for shard 0 only
+  void SerializeGlobalHnswIndices();
 
   DbSlice* db_slice_;
   const DbTableArray db_array_;
@@ -160,7 +166,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::deque<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::vector<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
