@@ -764,11 +764,6 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   return cursor;
 }
 
-void RecordDelete(DbIndex dbid, string_view key) {
-  journal::RecordEntry(0, journal::Op::COMMAND, dbid, 1, KeySlot(key),
-                       journal::Entry::Payload("DEL", ArgSlice{key}));
-}
-
 void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
                      uint32_t* deleted) {
   StringVec keys;

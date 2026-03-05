@@ -88,7 +88,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     // PING forces replica to send the most recent last_acked_lsn.
     // ACKS from the replica are send only every X commands or every 3 seconds (flag configurable)
     // or when forced (by the PING above).
-    journal::RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+    journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
   }
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];

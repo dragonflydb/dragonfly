@@ -207,13 +207,16 @@ class ShardArgs {
 
 // Record non auto journal command with own txid and dbid.
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, const ShardArgs& args,
-                   uint32_t shard_cnt = 1);
-void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
-                   uint32_t shard_cnt = 1);
+                   uint32_t unused = 1);
+void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args, uint32_t unused = 1);
+
+void RecordDelete(DbIndex dbid, std::string_view key);
 
 // Record expiry in journal with independent transaction.
 // Must be called from shard thread owning key.
 // Might block the calling fiber unless journal::SetFlushMode(false) is called.
-void RecordExpiryBlocking(DbIndex dbid, std::string_view key);
+inline void RecordExpiryBlocking(DbIndex dbid, std::string_view key) {
+  RecordDelete(dbid, key);
+}
 
 }  // namespace dfly

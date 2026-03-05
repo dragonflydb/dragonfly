@@ -97,13 +97,13 @@ TEST(Journal, WriteRead) {
   using Payload = Entry::Payload;
 
   std::vector<Entry> test_entries = {
-      {0, Op::COMMAND, 0, 2, nullopt, Payload("MSET", slice("A", "1", "B", "2"))},
-      {0, Op::COMMAND, 0, 2, nullopt, Payload("MSET", slice("C", "3"))},
-      {1, Op::COMMAND, 0, 2, nullopt, Payload("DEL", list("A", "B"))},
-      {2, Op::COMMAND, 1, 1, nullopt, Payload("LPUSH", list("l", "v1", "v2"))},
-      {3, Op::COMMAND, 0, 1, nullopt, Payload("MSET", slice("D", "4"))},
-      {4, Op::COMMAND, 1, 1, nullopt, Payload("DEL", list("l1"))},
-      {5, Op::COMMAND, 2, 1, nullopt, Payload("DEL", list("E", "2"))}};
+      {0, Op::COMMAND, 0, nullopt, Payload("MSET", slice("A", "1", "B", "2"))},
+      {0, Op::COMMAND, 0, nullopt, Payload("MSET", slice("C", "3"))},
+      {1, Op::COMMAND, 0, nullopt, Payload("DEL", list("A", "B"))},
+      {2, Op::COMMAND, 1, nullopt, Payload("LPUSH", list("l", "v1", "v2"))},
+      {3, Op::COMMAND, 0, nullopt, Payload("MSET", slice("D", "4"))},
+      {4, Op::COMMAND, 1, nullopt, Payload("DEL", list("l1"))},
+      {5, Op::COMMAND, 2, nullopt, Payload("DEL", list("E", "2"))}};
 
   // Write all entries to a buffer.
   base::IoBuf buf;
