@@ -42,21 +42,6 @@ runs:
     - name: Sync valkey-search tests
       uses: ./.github/actions/sync-valkey-tests
 
-    - name: Prepare Step
-      shell: bash
-      run: |
-        DOCKER_VERSION="26.1.4"
-        RUNNER_ARCH="${{ runner.arch }}"
-        if [ "$RUNNER_ARCH" == "X64" ]; then
-          ARCH="x86_64"
-        elif [ "$RUNNER_ARCH" == "ARM64" ]; then
-          ARCH="aarch64"
-        else
-          echo "Unknown architecture: ${RUNNER_ARCH}"
-          exit 1
-        fi
-        curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
-        registry="ghcr.io/romange" && for image in fedora:30 ubuntu:noble; do ./docker pull "$registry/$image"; done
     - name: Free disk space
       if: contains(runner.labels, 'self-hosted') == false
       shell: bash
