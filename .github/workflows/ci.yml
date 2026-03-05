@@ -35,7 +35,7 @@ jobs:
           source venv/bin/activate
           pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
         shell: bash
-  build:
+  build-unit:
     strategy:
       matrix:
         # Test of these containers
@@ -45,20 +45,26 @@ jobs:
         # -no-pie to disable address randomization so we could symbolize stacktraces
         cxx_flags: ["-Werror -no-pie"]
         sanitizers: ["NoSanitizers"]
+        runner: [CI-LARGE-86, CI-LARGE-ARM]
+        exclude:  # alpine-dev does not work on arm64
+          - container: "alpine-dev:latest"
+            runner: CI-LARGE-ARM
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
             sanitizers: "NoSanitizers"
+            runner: CI-LARGE-86
           - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
             cxx_flags: "-Wno-error=unused-command-line-argument"
             sanitizers: "Sanitizers"
+            runner: CI-LARGE-86
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       # Seems that docker by default prohibits running iouring syscalls
@@ -121,17 +127,16 @@ jobs:
       - name: C++ Unit Tests - IoUring
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          echo Run ctest -V -L DFLY
 
           GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
-          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
+          FLAGS_proactor_threads=4 FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test
 
           # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
           FLAGS_fiber_safety_margin=4096 timeout 5m ./allocation_tracker_test
 
           timeout 5m ./dragonfly_test
           timeout 5m ./json_family_test --jsonpathv2=false
-          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+          timeout 5m ./tiered_storage_test --vmodule=db_slice=1 --logtostderr
           timeout 5m ./search_test --use_numeric_range_tree=false
           timeout 5m ./search_family_test --use_numeric_range_tree=false
 
@@ -149,7 +154,8 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          FLAGS_proactor_threads=4 GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true \
+          GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
           timeout 20m ctest -V -L DFLY -E allocation_tracker_test
 
           FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
@@ -157,12 +163,13 @@ jobs:
       - name: C++ Unit Tests - IoUring with cluster mode
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+          FLAGS_proactor_threads=4 FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
+          FLAGS_proactor_threads=4 FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated \
+          FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
       - name: Upload unit logs on failure
         if: failure()
@@ -171,13 +178,85 @@ jobs:
           name: unit_logs
           path: /tmp/*INFO*
 
+  build-for-regression:
+    strategy:
+      matrix:
+        build-type: [Debug, Release]
+        runner: [CI-LARGE-86, CI-LARGE-ARM]
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Build Dragonfly
+        uses: ./.github/actions/builder
+        with:
+          build-type: ${{matrix.build-type}}
+          c-compiler: gcc
+          cxx-compiler: g++
+          cxx-flags: "-Werror -no-pie"
+          sanitizers: NoSanitizers
+          with-aws: 'OFF'
+
+      - name: Upload dragonfly binary for regression tests
+        uses: actions/upload-artifact@v6
+        with:
+          name: dragonfly-${{ matrix.runner }}-${{ matrix.build-type }}
+          path: build/dragonfly
+
+  regression-tests:
+    needs: [build-for-regression]
+    strategy:
+      matrix:
+        build-type: [Debug, Release]
+        runner: [CI-LARGE-86, CI-LARGE-ARM]
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /var/crash:/var/crash
+        - /:/hostroot
+        - /mnt:/mnt
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Download dragonfly binary
+        uses: actions/download-artifact@v7
+        with:
+          name: dragonfly-${{ matrix.runner }}-${{ matrix.build-type }}
+          path: build
+
+      - name: Ensure binary is executable
+        run: |
+          chmod +x build/dragonfly
+
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:20-gcc14'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
           run-only-on-ubuntu-latest: true
           build-folder-name: build
+          s3-bucket: ''
           # Non-release build will not run tests marked as opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
@@ -186,12 +265,12 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: regression_logs
+          name: regression_logs-${{ matrix.runner }}-${{ matrix.build-type }}
           path: /tmp/failed/*
 
   lint-test-chart:
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build-unit]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/lint-test-chart
