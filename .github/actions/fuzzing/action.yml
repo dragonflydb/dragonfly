@@ -50,9 +50,9 @@ runs:
         afl-fuzz -h | head -5 || true
 
         # Verify AFL++ compilers are available
-        which afl-clang-lto
-        which afl-clang-lto++
-        afl-clang-lto --version
+        which afl-clang-fast
+        which afl-clang-fast++
+        afl-clang-fast --version
 
     - name: Configure system for fuzzing
       shell: bash
