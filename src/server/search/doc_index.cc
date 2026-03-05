@@ -338,7 +338,15 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
   // the existing DocIds to add documents to the regular indices.
   if (!is_restored) {
     key_index_ = DocKeyIndex{};
+    // Full rebuild handles all documents — discard any buffered state from LOADING.
+    is_restoring_vectors_ = false;
+    pending_vector_updates_.clear();
+  } else {
+    // Restored path: VectorLoop will call RestoreGlobalVectorIndices which drains
+    // the buffers. Until then, buffer any journal-driven mutations.
+    is_restoring_vectors_ = true;
   }
+
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
   // Create builder and start indexing
@@ -447,6 +455,13 @@ void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeVal
 
 void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
+  if (is_restoring_vectors_) {
+    // Buffer the key — will be re-applied after RestoreGlobalVectorIndices completes.
+    std::string_view key = key_index_.Get(doc_id);
+    pending_vector_updates_.emplace(key);
+    return;
+  }
+
   auto accessor = GetAccessor(db_cntx, *pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
@@ -463,6 +478,13 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
 
 void ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
                                                    const DbContext& db_cntx, const PrimeValue& pv) {
+  if (is_restoring_vectors_) {
+    // Buffer the key — will be re-applied after RestoreGlobalVectorIndices completes.
+    std::string_view key = key_index_.Get(doc_id);
+    pending_vector_updates_.emplace(key);
+    return;
+  }
+
   auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
@@ -470,6 +492,16 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
     if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
         index) {
       index->Remove(global_id, *accessor, field_ident);
+    }
+  }
+}
+
+void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
+  GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
+  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+    if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
+        index) {
+      index->Remove(global_id);
     }
   }
 }
@@ -531,6 +563,44 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   } else {
     VLOG(1) << "Restored vectors for index " << index_name << ": " << successful_updates << "/"
             << total_docs << " documents";
+  }
+
+  // Drain pending vector updates that arrived via journal during the LOADING window.
+  // Clear the flag BEFORE draining so that AddDoc/AddDocToGlobalVectorIndex work normally.
+  is_restoring_vectors_ = false;
+
+  if (!pending_vector_updates_.empty()) {
+    LOG(INFO) << "Draining " << pending_vector_updates_.size()
+              << " pending vector updates for index '" << index_name << "' on shard "
+              << EngineShard::tlocal()->shard_id();
+
+    for (const auto& key : pending_vector_updates_) {
+      auto local_id = key_index_.Find(key);
+      auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
+
+      if (it && IsValid(it->it)) {
+        // Key exists in DB — ensure it's properly indexed with current data.
+        PrimeValue& pv = it->it->second;
+
+        if (local_id) {
+          // Already in key_index_ (from snapshot). Remove old HNSW node and re-add
+          // with current vector data to match master state.
+          RemoveFromAllHnswIndices(*local_id);
+          AddDocToGlobalVectorIndex(*local_id, op_args.db_cntx, &pv);
+        } else {
+          // New document not in key_index_ (added during full sync).
+          auto doc_id = AddDoc(key, op_args.db_cntx, pv);
+          if (doc_id) {
+            AddDocToGlobalVectorIndex(*doc_id, op_args.db_cntx, &pv);
+          }
+        }
+      } else if (local_id) {
+        // Key absent from DB — remove stale HNSW node and key_index_ entry.
+        RemoveFromAllHnswIndices(*local_id);
+        key_index_.Remove(*local_id);
+      }
+    }
+    pending_vector_updates_.clear();
   }
 }
 

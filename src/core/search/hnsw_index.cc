@@ -560,6 +560,10 @@ void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string
   adapter_->Remove(id);
 }
 
+void HnswVectorIndex::Remove(GlobalDocId id) {
+  adapter_->Remove(id);
+}
+
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
   return adapter_->GetMetadata();
 }

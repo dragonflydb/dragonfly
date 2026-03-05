@@ -377,6 +377,9 @@ class ShardDocIndex {
                                                     const SearchParams::SortOption& sort,
                                                     const OpArgs& op_args) const;
 
+  // Remove a DocId from all HNSW indices for this index.
+  void RemoveFromAllHnswIndices(search::DocId doc_id);
+
  private:
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
@@ -384,6 +387,12 @@ class ShardDocIndex {
   Synonyms synonyms_;
 
   std::unique_ptr<search::IndexBuilder> builder_;
+
+  // Buffered state for journal events arriving while HNSW vector indices
+  // are being restored from serialized graph data (is_restoring_vectors_ == true).
+  // Drained by RestoreGlobalVectorIndices after the graph is fully restored.
+  absl::flat_hash_set<std::string> pending_vector_updates_;
+  bool is_restoring_vectors_ = false;
 };
 
 // Stores shard doc indices by name on a specific shard.
