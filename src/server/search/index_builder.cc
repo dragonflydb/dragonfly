@@ -99,6 +99,11 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
     return;
   }
 
+  // Non-restored path: rebuilding HNSW from scratch. Clear the restoring flag and discard
+  // any pending updates — the full table traversal below will pick up all current documents.
+  index_->is_restoring_vectors_ = false;
+  index_->pending_vector_updates_.clear();
+
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
     std::string_view key = it->first.GetSlice(&scratch);

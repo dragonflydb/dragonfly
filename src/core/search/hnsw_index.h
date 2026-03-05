@@ -49,6 +49,7 @@ class HnswVectorIndex {
 
   bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
   void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+  void Remove(search::GlobalDocId id);
 
   bool IsVectorCopied() const {
     return copy_vector_;
