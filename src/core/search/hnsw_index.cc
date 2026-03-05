@@ -378,8 +378,15 @@ struct HnswlibAdapter {
     DCHECK_EQ(world_.cur_element_count.load(), 0u)
         << "RestoreFromNodes should only be called on an empty index during deserialization";
 
-    // Ensure we have enough capacity
-    size_t required_capacity = metadata.cur_element_count;
+    // Ensure we have enough capacity.
+    // Metadata may have been captured before the snapshot read-lock, so
+    // cur_element_count can be smaller than actual node internal_ids when
+    // concurrent writes happen.  Compute the real requirement from nodes.
+    size_t max_internal_id = 0;
+    for (const auto& node : nodes) {
+      max_internal_id = std::max<size_t>(max_internal_id, node.internal_id);
+    }
+    size_t required_capacity = std::max(metadata.cur_element_count, max_internal_id + 1);
     if (world_.max_elements_ < required_capacity) {
       world_.resizeIndex(required_capacity);
     }
@@ -457,16 +464,17 @@ struct HnswlibAdapter {
             << ", enterpoint=" << metadata.enterpoint_node;
   }
 
-  // Update vector data for an existing node (used after RestoreFromNodes)
-  void UpdateVectorData(GlobalDocId id, const void* data) {
+  // Update vector data for an existing node (used after RestoreFromNodes).
+  // Returns false if the node doesn't exist in the index.
+  bool UpdateVectorData(GlobalDocId id, const void* data) {
     TryProcessDeferred();
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
 
     // Find the internal id for this label
     auto it = world_.label_lookup_.find(id);
     if (it == world_.label_lookup_.end()) {
-      LOG(WARNING) << "UpdateVectorData: label " << id << " not found in index";
-      return;
+      VLOG(1) << "UpdateVectorData: label " << id << " not found in index";
+      return false;
     }
 
     size_t internal_id = it->second;
@@ -488,6 +496,7 @@ struct HnswlibAdapter {
     if (world_.isMarkedDeleted(internal_id)) {
       world_.unmarkDeletedInternal(internal_id);
     }
+    return true;
   }
 
   std::unique_ptr<MRMWMutexLock> GetReadLock() const {
@@ -560,6 +569,10 @@ void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string
   adapter_->Remove(id);
 }
 
+void HnswVectorIndex::Remove(GlobalDocId id) {
+  adapter_->Remove(id);
+}
+
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
   return adapter_->GetMetadata();
 }
@@ -601,8 +614,7 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
     data = std::get<BorrowedFtVector>(*vector_ptr);
   }
 
-  adapter_->UpdateVectorData(id, data);
-  return true;
+  return adapter_->UpdateVectorData(id, data);
 }
 
 std::unique_ptr<MRMWMutexLock> HnswVectorIndex::GetReadLock() const {

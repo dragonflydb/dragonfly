@@ -70,6 +70,11 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
                        << ", removing from key index";
           index_->key_index_.Remove(*doc_id);
         }
+      } else {
+        // New document not in the restored key_index_ (added by journal events during
+        // full sync before the index was created). Add normally so it gets a new DocId
+        // and is included in regular indices. VectorLoop will add it to HNSW.
+        index_->AddDoc(key, db_cntx, pv);
       }
     } else {
       index_->AddDoc(key, db_cntx, pv);

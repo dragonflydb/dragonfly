@@ -345,8 +345,14 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
     shard_set->AwaitRunningOnShardQueue([&per_shard_mappings](EngineShard* es) {
       for (const auto& [name, keys] : per_shard_mappings[es->shard_id()]) {
         if (auto* index = es->search_indices()->GetIndex(name); index) {
-          index->RestoreKeyIndex(keys);
-          VLOG(1) << "Restored " << keys.size() << " key mappings for index " << name
+          // keys are stored in doc_id order (vector index = doc_id).
+          std::vector<std::pair<std::string, search::DocId>> mappings;
+          mappings.reserve(keys.size());
+          for (size_t i = 0; i < keys.size(); ++i) {
+            mappings.emplace_back(keys[i], static_cast<search::DocId>(i));
+          }
+          index->RestoreKeyIndex(mappings);
+          VLOG(1) << "Restored " << mappings.size() << " key mappings for index " << name
                   << " on shard " << es->shard_id();
         }
       }

@@ -251,6 +251,16 @@ string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   return keys_[id];
 }
 
+bool ShardDocIndex::DocKeyIndex::IsValid(DocId id) const {
+  if (id >= last_id_ || id >= keys_.size())
+    return false;
+  // Check if the key at this slot is still tracked in the reverse map with the same id.
+  // This correctly handles empty keys: freed slots have their key extracted from ids_,
+  // while valid empty-key docs still have ids_[""] == id.
+  auto it = ids_.find(keys_[id]);
+  return it != ids_.end() && it->second == id;
+}
+
 size_t ShardDocIndex::DocKeyIndex::Size() const {
   return ids_.size();
 }
@@ -490,10 +500,17 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   size_t failed_updates = 0;
   size_t missing_documents = 0;
 
+  // Collect missing document IDs to remove after the loop (can't modify key_index_ during
+  // iteration over GetDocKeysMap).
+  std::vector<std::pair<DocId, GlobalDocId>> missing_doc_ids;
+
   for (const auto& [key, local_id] : key_index_.GetDocKeysMap()) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
     if (!it || !IsValid(it->it)) {
       ++missing_documents;
+      GlobalDocId global_id =
+          search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
+      missing_doc_ids.emplace_back(local_id, global_id);
       continue;
     }
 
@@ -511,7 +528,17 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
             pv.SetOmitDefrag(true);
           }
         } else {
-          ++failed_updates;
+          // Node not in restored HNSW graph (new doc added during full sync via journal
+          // events before index was created). Fall back to Add.
+          bool added = index->Add(global_id, *doc, field_ident);
+          if (added) {
+            ++successful_updates;
+            if (!index->IsVectorCopied()) {
+              pv.SetOmitDefrag(true);
+            }
+          } else {
+            ++failed_updates;
+          }
         }
       }
     }
@@ -522,8 +549,21 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
     }
   }
 
+  // Remove HNSW nodes for documents that no longer exist in DB (deleted before or during
+  // restoration). Without this, stale nodes remain in the graph with no vector data, causing
+  // inconsistent KNN search results compared to the master.
+  for (const auto& [local_id, global_id] : missing_doc_ids) {
+    for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+          index) {
+        index->Remove(global_id);
+      }
+    }
+    key_index_.Remove(local_id);
+  }
+
   // Log summary of vector restoration
-  size_t total_docs = key_index_.GetDocKeysMap().size();
+  size_t total_docs = key_index_.GetDocKeysMap().size() + missing_doc_ids.size();
   if (failed_updates > 0 || missing_documents > 0) {
     LOG(WARNING) << "Restored vectors for index " << index_name << ": " << successful_updates
                  << " successful, " << failed_updates << " failed (missing vector field), "

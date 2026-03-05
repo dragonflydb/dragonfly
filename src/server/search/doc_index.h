@@ -243,6 +243,7 @@ class ShardDocIndex {
     void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+    bool IsValid(DocId id) const;
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
 
