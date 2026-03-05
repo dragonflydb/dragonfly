@@ -30,9 +30,12 @@ struct Decoder;
 struct TieredStorageBase {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-  struct StashDescriptor {
-    std::variant<std::array<std::string_view, 2>, uint8_t*> blob;
-    CompactObj::ExternalRep rep;
+  struct StashDescriptor : public tiering::FragmentRef::SerializationDescr {
+    StashDescriptor() = default;
+
+    StashDescriptor(const tiering::FragmentRef::SerializationDescr& params)  // NOLINT
+        : tiering::FragmentRef::SerializationDescr(params) {
+    }
 
     size_t EstimatedSerializedSize() const;
     size_t Serialize(io::MutableBytes buffer) const;
@@ -78,7 +81,7 @@ class TieredStorage : public TieredStorageBase {
   }
 
   // Returns StashDescriptor if a value should be stashed.
-  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const;
+  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment_ref) const;
 
   // Stash value, returns optional future for backpressure
   // if `provide_bp` is set and conditions are met.
@@ -88,8 +91,8 @@ class TieredStorage : public TieredStorageBase {
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, PrimeValue* value);
 
-  // Cancel pending stash for value, must have IO_PENDING flag set
-  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
+  // Cancel pending stash for the fragment, must have HasStashPending() true.
+  void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
@@ -126,7 +129,7 @@ class TieredStorage : public TieredStorageBase {
   PrimeValue DeleteCool(tiering::TieredColdRecord* record);
   tiering::TieredColdRecord* PopCool();
 
-  PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
+  PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
 
   // Stash operations waiting for completion to throttle
   tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;
@@ -225,7 +228,7 @@ class TieredStorage : public TieredStorageBase {
     return {};
   }
 
-  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const {
+  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment) const {
     return {};
   }
 
@@ -249,7 +252,7 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
+  void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref) {
   }
 
   TieredStats GetStats() const {

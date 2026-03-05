@@ -59,6 +59,7 @@ namespace dfly {
 using namespace std;
 using namespace util;
 
+using tiering::FragmentRef;
 using tiering::KeyRef;
 using tiering::TieredColdRecord;
 
@@ -80,28 +81,6 @@ void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats)
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
-}
-
-// Determine required byte size and encoding type based on value.
-// Do NOT enforce rules depending on dynamic runtime values as this is called
-// when scheduling stash and just before succeeeding and is expected to return the same results
-TieredStorage::StashDescriptor DetermineSerializationParams(const PrimeValue& pv) {
-  switch (pv.ObjType()) {
-    case OBJ_STRING: {
-      if (!pv.HasAllocated())
-        return {};
-      auto strs = pv.GetRawString();
-      return {strs, CompactObj::ExternalRep::STRING};
-    }
-    case OBJ_HASH: {
-      if (pv.Encoding() == kEncodingListPack) {
-        return {static_cast<uint8_t*>(pv.RObjPtr()), CompactObj::ExternalRep::SERIALIZED_MAP};
-      }
-      return {};
-    }
-    default:
-      return {};
-  };
 }
 
 string SerializeToString(const TieredStorage::StashDescriptor& blobs) {
@@ -233,7 +212,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-      StashDescriptor blobs = DetermineSerializationParams(*pv);
+      StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
@@ -472,22 +451,23 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
-void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
-  DCHECK(value->HasStashPending());
+void TieredStorage::CancelStash(DbIndex dbid, std::string_view key,
+                                tiering::FragmentRef fragment_ref) {
+  DCHECK(fragment_ref.HasStashPending());
 
   // If any previous write was happening, it has been cancelled
   if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
     std::move(node.mapped()).Resolve(false);
 
   // TODO: Don't recompute size estimate, try-delete bin first
-  auto blobs = DetermineSerializationParams(*value);
+  StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
   size_t size = blobs.EstimatedSerializedSize();
   if (OccupiesWholePages(size)) {
     op_manager_->CancelPending(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->CancelPending(*bin);
   }
-  value->SetStashPending(false);
+  fragment_ref.ClearStashPending();
 }
 
 TieredStats TieredStorage::GetStats() const {
@@ -641,17 +621,18 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
   return gained;
 }
 
-auto TieredStorage::ShouldStash(const PrimeValue& pv) const -> std::optional<StashDescriptor> {
+auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
+    -> std::optional<StashDescriptor> {
   // Check value state
-  if (pv.IsExternal() || pv.HasStashPending())
+  if (fragment_ref.IsOffloaded() || fragment_ref.HasStashPending())
     return nullopt;
 
   // For now, hash offloading is conditional
-  if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
+  if (fragment_ref.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
     return nullopt;
 
   // Estimate value size
-  StashDescriptor blobs = DetermineSerializationParams(pv);
+  StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
   size_t estimated_size = blobs.EstimatedSerializedSize();
   if (estimated_size < config_.min_value_size)
     return nullopt;
