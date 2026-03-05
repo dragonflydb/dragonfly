@@ -36,7 +36,6 @@ REPLICA_BUILD="${REPLICA_BUILD:-$PROJECT_ROOT/build}"
 REPLICA_PORT="${REPLICA_PORT:-7380}"
 MASTER_PORT="${MASTER_PORT:-6379}"   # must match --port in run_fuzzer.sh
 
-REPLICA_PID=""
 WATCHDOG_PID=""
 
 print_info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -44,7 +43,6 @@ print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 
 cleanup() {
     [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
-    [[ -n "$REPLICA_PID" ]] && kill "$REPLICA_PID" 2>/dev/null || true
     wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -71,143 +69,103 @@ check_requirements() {
     fi
 }
 
-# ── Replica ───────────────────────────────────────────────────────────────────
+# ── Lifecycle watchdog ────────────────────────────────────────────────────────
+#
+# Polls the master port every 200 ms.
+# Master UP  (was down) → kill any stale replica, start a fresh one + REPLICAOF.
+# Master DOWN (was up)  → kill the replica.
+#
+# Result: each AFL++ master instance gets exactly one fresh replica that lives
+# and dies together with it.
 
-wait_for_port() {
-    local port="$1" label="$2"
-    local deadline=$((SECONDS + 15))
-    while [[ $SECONDS -lt $deadline ]]; do
-        if python3 -c "
-import socket, sys
-s = None
-ok = False
-try:
-    s = socket.create_connection(('127.0.0.1', $port), timeout=1.0)
-    s.sendall(b'*1\r\n\$4\r\nPING\r\n')
-    ok = b'PONG' in s.recv(64)
-except Exception:
-    pass
-finally:
-    if s:
-        try: s.close()
-        except Exception: pass
-sys.exit(0 if ok else 1)
-" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.2
-    done
-    print_warning "$label on port $port did not become ready"
-    return 1
-}
-
-start_replica() {
-    print_info "Starting plain replica on port $REPLICA_PORT ($REPLICA_BUILD/dragonfly)..."
-    "$REPLICA_BUILD/dragonfly" \
-        --port="$REPLICA_PORT" \
-        --logtostderr \
-        --proactor_threads=2 \
-        --dbfilename="" \
-        --rename_command=SHUTDOWN= \
-        &>/dev/null &
-    REPLICA_PID=$!
-
-    wait_for_port "$REPLICA_PORT" "replica"
-    print_info "Replica ready (PID=$REPLICA_PID)."
-}
-
-configure_replication() {
-    # Point replica at master. The master is not running yet; Dragonfly retries
-    # the connection automatically once AFL++ starts the master binary.
-    print_info "Configuring replica → master 127.0.0.1:$MASTER_PORT (retries until master starts)..."
-    python3 -c "
-import socket, sys
-mport = '$MASTER_PORT'.encode()
-cmd = (b'*3\r\n\$9\r\nREPLICAOF\r\n'
-       b'\$9\r\n127.0.0.1\r\n'
-       b'\$' + str(len(mport)).encode() + b'\r\n' + mport + b'\r\n')
-try:
-    s = socket.create_connection(('127.0.0.1', $REPLICA_PORT), timeout=3)
-    s.sendall(cmd)
-    s.recv(64)
-    s.close()
-    print('REPLICAOF configured.')
-except Exception as e:
-    print('WARNING: REPLICAOF failed:', e, file=sys.stderr)
-    sys.exit(1)
-"
-}
-
-# ── Watchdog ──────────────────────────────────────────────────────────────────
-
-start_watchdog() {
-    # Runs in background. Every 2 seconds checks that the replica is in slave
-    # mode; if not (e.g. after a replica restart or an unexpected REPLICAOF NO ONE),
-    # re-sends REPLICAOF so it reconnects to the master automatically.
+run_lifecycle_watchdog() {
     (
-        local mport="$MASTER_PORT"
-        local rport="$REPLICA_PORT"
-        while true; do
-            sleep 2
-            python3 - <<EOF 2>/dev/null
-import socket, sys
-rport = $rport
-mport = '$mport'.encode()
+        _rep_pid=""
+
+        # Kill the replica (if running) when this subshell exits for any reason.
+        trap 'kill "$_rep_pid" 2>/dev/null; wait "$_rep_pid" 2>/dev/null' EXIT
+        trap 'exit 0' TERM INT
+
+        kill_replica() {
+            if [[ -n "$_rep_pid" ]] && kill -0 "$_rep_pid" 2>/dev/null; then
+                kill "$_rep_pid" 2>/dev/null
+                wait "$_rep_pid" 2>/dev/null
+            fi
+            _rep_pid=""
+        }
+
+        start_fresh_replica() {
+            kill_replica
+
+            "$REPLICA_BUILD/dragonfly" \
+                --port="$REPLICA_PORT" \
+                --logtostderr \
+                --proactor_threads=2 \
+                --dbfilename="" \
+                --rename_command=SHUTDOWN= \
+                &>/dev/null &
+            _rep_pid=$!
+
+            # Wait for replica to accept connections (max 5 s).
+            local t=0
+            while [[ $t -lt 50 ]]; do
+                nc -z -w1 127.0.0.1 "$REPLICA_PORT" 2>/dev/null && break
+                sleep 0.1
+                t=$((t + 1))
+            done
+
+            # Point replica at master.
+            python3 -c "
+import socket
+mport = '$MASTER_PORT'.encode()
+cmd = (b'*3\r\n\$9\r\nREPLICAOF\r\n\$9\r\n127.0.0.1\r\n\$'
+       + str(len(mport)).encode() + b'\r\n' + mport + b'\r\n')
 try:
-    s = socket.create_connection(('127.0.0.1', rport), timeout=1)
-    s.sendall(b'*2\r\n\$4\r\nINFO\r\n\$11\r\nreplication\r\n')
-    data = b''
-    for _ in range(10):
-        chunk = s.recv(4096)
-        if not chunk: break
-        data += chunk
-        if b'role:' in data: break
-    s.close()
-    if b'role:slave' in data:
-        sys.exit(0)
-    # Not a slave – reconfigure
-    s = socket.create_connection(('127.0.0.1', rport), timeout=2)
-    s.sendall(b'*3\r\n\$9\r\nREPLICAOF\r\n\$9\r\n127.0.0.1\r\n\$'
-              + str(len(mport)).encode() + b'\r\n' + mport + b'\r\n')
-    s.recv(64)
-    s.close()
+    s = socket.create_connection(('127.0.0.1', $REPLICA_PORT), timeout=2)
+    s.sendall(cmd); s.recv(64); s.close()
 except Exception:
-    pass
-EOF
+    pass" 2>/dev/null
+        }
+
+        master_was_up=0
+        while true; do
+            sleep 0.2
+
+            nc -z -w1 127.0.0.1 "$MASTER_PORT" 2>/dev/null \
+                && master_up=1 || master_up=0
+
+            if [[ $master_up -eq 1 && $master_was_up -eq 0 ]]; then
+                start_fresh_replica
+            elif [[ $master_up -eq 0 && $master_was_up -eq 1 ]]; then
+                kill_replica
+            fi
+
+            master_was_up=$master_up
         done
     ) &
     WATCHDOG_PID=$!
-    print_info "Watchdog started (PID=$WATCHDOG_PID) — auto-reconnects replica if needed."
+    print_info "Lifecycle watchdog started (PID=$WATCHDOG_PID)."
+    print_info "Fresh replica will start/stop together with each AFL++ master instance."
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
     check_requirements
-    start_replica
-    configure_replication
-    start_watchdog
+    run_lifecycle_watchdog
 
     echo ""
-    print_info "Replica is up. It connects to master once AFL++ starts it on port $MASTER_PORT."
+    print_info "Watchdog is running. Fresh replica starts as soon as AFL++ brings up the master."
     print_info "Starting instrumented master via run_fuzzer.sh (AFL_PROACTOR_THREADS=2)..."
     echo ""
 
-    # Run the standard instrumented fuzzer with 2 proactor threads.
-    # The replica in the background connects to master as soon as AFL++ starts it,
-    # and re-syncs (full sync) every time AFL++ restarts the master process.
     export AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
     export BUILD_DIR="$BUILD_DIR"
 
-    # Keep the loop limit low so the master restarts frequently, triggering a full
-    # sync on every restart. This maximises coverage of the full-sync, PSYNC, and
-    # journal-streaming code paths. The default 10000 used for single-instance
-    # fuzzing is too high here: replication bugs are most likely to surface during
-    # the sync handshake, not after thousands of steady-state commands.
-    export AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-100}"
+    export AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-10000}"
 
     # Do NOT use exec here — we need the trap to fire on exit so that
-    # the replica and watchdog are cleaned up when AFL++ stops.
+    # the watchdog (and the replica it manages) are cleaned up when AFL++ stops.
     "$SCRIPT_DIR/run_fuzzer.sh" "$@"
 }
 

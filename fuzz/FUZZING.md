@@ -132,7 +132,6 @@ python3 replay_crash.py crashes 000000 127.0.0.1 11211
 |--------|-----------|-------|----------|
 | `resp` | `seeds/resp/` | 79 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops |
 | `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands, flush, stats |
-| `replication` | `seeds/replication/` | 13 | basic writes, multi-type, network drops, MULTI/EXEC, replica reads, DELETE/EXPIRE propagation, FLUSHDB, interleaved commands |
 
 To add a new RESP seed:
 ```
@@ -150,11 +149,6 @@ To add a new memcache seed:
 set mykey 0 0 5
 hello
 get mykey
-```
-
-To add or regenerate replication seeds:
-```bash
-python3 fuzz/generate_replication_seeds.py
 ```
 
 ---
@@ -183,10 +177,9 @@ background and stays connected to the master via the standard replication
 protocol.
 
 Every time AFL++ restarts the master (every `AFL_LOOP_LIMIT` iterations,
-default 100), the replica detects the broken connection, waits 500 ms, and
-reconnects — triggering a fresh **full sync**.  This exercises full-sync,
-PSYNC, and journal-streaming code paths under coverage-guided mutation
-pressure.
+default 10000), a fresh replica is started automatically — triggering a new
+**full sync**.  This exercises full-sync, PSYNC, and journal-streaming code
+paths under coverage-guided mutation pressure.
 
 If the **master crashes**, AFL++ detects it immediately via instrumentation
 and saves the crashing input.  The replica is not instrumented and is not
@@ -217,7 +210,7 @@ Configuration via environment variables:
 | `REPLICA_BUILD` | `build` | Plain replica build directory |
 | `MASTER_PORT` | `6379` | Master listen port (matches `run_fuzzer.sh`) |
 | `REPLICA_PORT` | `7380` | Replica listen port |
-| `AFL_LOOP_LIMIT` | `100` | Master restart interval; lower = more full syncs |
+| `AFL_LOOP_LIMIT` | `10000` | Iterations per master instance (= `AFL_PERSISTENT_RECORD`) |
 | `AFL_PROACTOR_THREADS` | `2` | Proactor threads for both master and replica |
 
 ### Crash Replay
