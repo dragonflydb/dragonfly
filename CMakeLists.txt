@@ -12,9 +12,8 @@ option(USE_AFL "Enable AFL++ fuzzing" OFF)
 if(USE_AFL)
   # Automatically set AFL++ compilers if not already set
   if(NOT CMAKE_C_COMPILER MATCHES "afl-" AND NOT CMAKE_CXX_COMPILER MATCHES "afl-")
-    # Try to find afl-clang-fast
-    find_program(AFL_CC afl-clang-lto)
-    find_program(AFL_CXX afl-clang-lto++)
+    find_program(AFL_CC afl-clang-fast)
+    find_program(AFL_CXX afl-clang-fast++)
 
     if(AFL_CC AND AFL_CXX)
       message(STATUS "AFL++ fuzzing enabled - setting compilers")
