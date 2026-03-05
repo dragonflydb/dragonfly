@@ -161,42 +161,48 @@ python3 fuzz/generate_replication_seeds.py
 
 ## Master-Replica Fuzzing
 
-Tests two Dragonfly instances (master + replica) for crashes and data
-consistency violations under random command sequences and network drops.
+Tests Dragonfly's replication code paths — full sync, PSYNC, and journal
+streaming — by running an instrumented master under AFL++ with a live replica
+connected in the background.
 
 ### How It Works
 
-Unlike the single-instance fuzzers, the replication fuzzer uses a
-**black-box orchestrator** approach:
+The replication fuzzer runs an **instrumented master** under AFL++ with a
+**plain replica** connected in the background:
 
 ```
-AFL++ (dumb mode, -n)
-  └─► replication_orchestrator.py   ← AFL++ target (no instrumentation)
-        ├─► master :7379             ← plain Dragonfly build
-        └─► replica :7380            ← plain Dragonfly build
+AFL++ (coverage-guided)
+  └─► build-dbg/dragonfly :6379    ← instrumented master (USE_AFL=ON)
+        ↑ replicates from
+  build/dragonfly :7380             ← plain replica (normal release build)
 ```
 
-The orchestrator reads a **multiplexed binary input** encoding:
-- Commands to send to master (`ACTION_MASTER = 0`)
-- Commands to send to replica (`ACTION_REPLICA = 1`)
-- Network drop events (`ACTION_NET_DROP = 2`) – disconnect replica then reconnect
-- Wait events (`ACTION_WAIT = 3`) – poll master `INFO replication` until `lag=0`
+AFL++ mutates RESP commands and feeds them to the **master** directly (same
+as the single-instance fuzzer).  The replica runs continuously in the
+background and stays connected to the master via the standard replication
+protocol.
 
-After each iteration the orchestrator checks data consistency via
-`DBSIZE` + full `SCAN` key-set comparison.  If either instance crashes, or if
-the key sets diverge, it signals `SIGABRT` → AFL++ saves the input as a crash.
+Every time AFL++ restarts the master (every `AFL_LOOP_LIMIT` iterations,
+default 100), the replica detects the broken connection, waits 500 ms, and
+reconnects — triggering a fresh **full sync**.  This exercises full-sync,
+PSYNC, and journal-streaming code paths under coverage-guided mutation
+pressure.
 
-Because Dragonfly is **not instrumented**, AFL++ runs in dumb mode (`-n`) and
-uses the custom Python mutator (`replication_mutator.py`) as the sole mutation
-source.  Coverage guidance is traded for the ability to fuzz across two
-independent processes with a fully reproducible single-file crash format.
+If the **master crashes**, AFL++ detects it immediately via instrumentation
+and saves the crashing input.  The replica is not instrumented and is not
+a crash target — it is purely a load generator for the master's replication
+code.
 
 ### Build and Run
 
 ```bash
-# Normal (uninstrumented) build
-./helio/blaze.sh
-cd build-dbg && ninja dragonfly
+# Instrumented master (USE_AFL=ON, for build-dbg/)
+cmake -B build-dbg -DUSE_AFL=ON -DCMAKE_BUILD_TYPE=Debug -GNinja
+ninja -C build-dbg dragonfly
+
+# Plain replica (normal release build, for build/)
+./helio/blaze.sh -release
+ninja -C build-opt dragonfly   # or copy to build/
 
 # Run fuzzer
 cd <repo-root>
@@ -207,40 +213,31 @@ Configuration via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MASTER_PORT` | `7379` | Master listen port |
+| `BUILD_DIR` | `build-dbg` | Instrumented master build directory |
+| `REPLICA_BUILD` | `build` | Plain replica build directory |
+| `MASTER_PORT` | `6379` | Master listen port (matches `run_fuzzer.sh`) |
 | `REPLICA_PORT` | `7380` | Replica listen port |
-| `BUILD_DIR` | `build-dbg` | Path to build directory |
-| `TIMEOUT` | `30000` | AFL++ per-iteration timeout (ms) |
-| `WAIT_TIMEOUT_MS` | `3000` | Max ms to wait for replica sync per iteration |
+| `AFL_LOOP_LIMIT` | `100` | Master restart interval; lower = more full syncs |
+| `AFL_PROACTOR_THREADS` | `2` | Proactor threads for both master and replica |
 
 ### Crash Replay
 
-```bash
-# 1. Start instances
-./build-dbg/dragonfly --port 7379 --logtostderr --proactor_threads 2 --dbfilename=""
-./build-dbg/dragonfly --port 7380 --logtostderr --proactor_threads 2 --dbfilename=""
-redis-cli -p 7380 REPLICAOF 127.0.0.1 7379
-
-# 2. Replay crash 0
-python3 fuzz/replay_replication_crash.py \
-    fuzz/artifacts/replication/default/crashes 0
-
-# 3. Verbose output
-python3 fuzz/replay_replication_crash.py \
-    fuzz/artifacts/replication/default/crashes 0 --verbose
-```
-
-State-history replay (for stateful crashes) works automatically when
-`AFL_PERSISTENT_RECORD` is set: AFL++ saves RECORD files and
-`replay_replication_crash.py` replays them in order before the crashing input.
-
-### Persistent Mode (Faster)
-
-Install `python-afl` for higher iteration throughput:
+Crashes are saved as RESP inputs to the master; replay with a replica attached
+to reproduce the replication-specific crash:
 
 ```bash
-pip install python-afl
+# 1. Start plain replica
+./build/dragonfly --port 7380 --logtostderr --proactor_threads 2 --dbfilename="" &
+
+# 2. Start master and configure replication
+./build-dbg/dragonfly --port 6379 --logtostderr --proactor_threads 2 --dbfilename="" &
+redis-cli -p 7380 REPLICAOF 127.0.0.1 6379
+
+# 3. Replay crash 0 (same script as single-instance RESP)
+python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
 ```
 
-The orchestrator detects `python-afl` automatically and switches to persistent
-mode (Dragonfly instances stay alive across AFL++ loop iterations).
+State-history replay works automatically when `AFL_PERSISTENT_RECORD` is set
+(synced to `AFL_LOOP_LIMIT`): AFL++ saves RECORD files alongside the crash and
+`replay_crash.py` replays them in order to rebuild master state before the
+crashing input.

@@ -1,51 +1,49 @@
 #!/usr/bin/env bash
-# Run AFL++ replication fuzzer.
+# Fuzz Dragonfly replication by running AFL++ against an instrumented master
+# (build-dbg/) with a plain replica (build/) connected in the background.
 #
-# Starts two plain (uninstrumented) Dragonfly instances – master and replica –
-# then runs AFL++ in dumb mode (-n) using the replication orchestrator as the
-# target.  AFL++ mutates the multiplexed input format handled by
-# replication_orchestrator.py and detects crashes / consistency violations.
+# The replica continuously replicates from the master, exercising full-sync,
+# journal streaming, and PSYNC code paths under AFL++ mutation pressure.
+# When the master crashes, AFL++ detects it immediately via instrumentation.
+#
+# Builds:
+#   Instrumented master : BUILD_DIR     (default: build-dbg, must have USE_AFL=ON)
+#   Plain replica       : REPLICA_BUILD (default: build, normal release build)
 #
 # Usage:
-#   ./run_replication_fuzzer.sh
+#   ./fuzz/run_replication_fuzzer.sh
 #
 # Configuration (environment variables):
-#   MASTER_PORT   (default 7379)
-#   REPLICA_PORT  (default 7380)
-#   BUILD_DIR     (default build-dbg)
-#   OUTPUT_DIR    (default fuzz/artifacts/replication)
-#   TIMEOUT       AFL++ per-iteration timeout in ms (default 30000)
+#   BUILD_DIR       Instrumented master build  (default: build-dbg)
+#   REPLICA_BUILD   Plain replica build        (default: build)
+#   REPLICA_PORT    Replica listen port        (default: 7380)
+#   MASTER_PORT     Master listen port         (default: 6379, matches run_fuzzer.sh)
+#
+# All other env vars accepted by run_fuzzer.sh apply here too
+# (AFL_LOOP_LIMIT, OUTPUT_DIR, etc.).
 
 set -e
 
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-MASTER_PORT="${MASTER_PORT:-7379}"
-REPLICA_PORT="${REPLICA_PORT:-7380}"
 BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build-dbg}"
-DRAGONFLY="${DRAGONFLY:-$BUILD_DIR/dragonfly}"
-FUZZ_DIR="$SCRIPT_DIR"
-OUTPUT_DIR="${OUTPUT_DIR:-$FUZZ_DIR/artifacts/replication}"
-CORPUS_DIR="${CORPUS_DIR:-$FUZZ_DIR/corpus/replication}"
-SEEDS_DIR="${SEEDS_DIR:-$FUZZ_DIR/seeds/replication}"
-TIMEOUT="${TIMEOUT:-30000}"
+REPLICA_BUILD="${REPLICA_BUILD:-$PROJECT_ROOT/build}"
+REPLICA_PORT="${REPLICA_PORT:-7380}"
+MASTER_PORT="${MASTER_PORT:-6379}"   # must match --port in run_fuzzer.sh
 
-MASTER_PID=""
 REPLICA_PID=""
+WATCHDOG_PID=""
 
 print_info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
-print_note()    { echo -e "${BLUE}[NOTE]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 
 cleanup() {
-    print_info "Stopping instances..."
-    [[ -n "$MASTER_PID" ]] && kill "$MASTER_PID" 2>/dev/null || true
+    [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
     [[ -n "$REPLICA_PID" ]] && kill "$REPLICA_PID" 2>/dev/null || true
     wait 2>/dev/null || true
 }
@@ -54,9 +52,16 @@ trap cleanup EXIT INT TERM
 # ── Checks ────────────────────────────────────────────────────────────────────
 
 check_requirements() {
-    if [[ ! -f "$DRAGONFLY" ]]; then
-        print_warning "dragonfly binary not found at $DRAGONFLY"
-        print_warning "Build with: cd $BUILD_DIR && ninja dragonfly"
+    if [[ ! -f "$BUILD_DIR/dragonfly" ]]; then
+        print_warning "Instrumented master not found at $BUILD_DIR/dragonfly"
+        print_warning "Build with: cmake -B build-dbg -DUSE_AFL=ON -DCMAKE_BUILD_TYPE=Debug -GNinja"
+        print_warning "           ninja -C build-dbg dragonfly"
+        exit 1
+    fi
+
+    if [[ ! -f "$REPLICA_BUILD/dragonfly" ]]; then
+        print_warning "Plain replica binary not found at $REPLICA_BUILD/dragonfly"
+        print_warning "Build with: ./helio/blaze.sh && ninja -C build dragonfly"
         exit 1
     fi
 
@@ -64,30 +69,22 @@ check_requirements() {
         print_warning "afl-fuzz not found. Install AFL++ from https://github.com/AFLplusplus/AFLplusplus"
         exit 1
     fi
-
-    if ! python3 -c "import afl" 2>/dev/null; then
-        print_note "python-afl not installed (pip install python-afl)"
-        print_note "Orchestrator will run in single-shot mode (slower)."
-    fi
 }
 
-# ── Instance management ───────────────────────────────────────────────────────
+# ── Replica ───────────────────────────────────────────────────────────────────
 
-wait_for_ping() {
-    local host="$1" port="$2" label="$3"
+wait_for_port() {
+    local port="$1" label="$2"
     local deadline=$((SECONDS + 15))
     while [[ $SECONDS -lt $deadline ]]; do
-        # NOTE: use `except Exception` not bare `except` — bare except catches
-        # SystemExit too, which would swallow sys.exit(0) and always report failure.
         if python3 -c "
 import socket, sys
-ok = False
 s = None
+ok = False
 try:
-    s = socket.create_connection(('$host', $port), timeout=1.0)
+    s = socket.create_connection(('127.0.0.1', $port), timeout=1.0)
     s.sendall(b'*1\r\n\$4\r\nPING\r\n')
-    data = s.recv(64)
-    ok = b'PONG' in data
+    ok = b'PONG' in s.recv(64)
 except Exception:
     pass
 finally:
@@ -100,23 +97,13 @@ sys.exit(0 if ok else 1)
         fi
         sleep 0.2
     done
-    print_warning "$label on port $port did not become ready in time"
+    print_warning "$label on port $port did not become ready"
     return 1
 }
 
-start_instances() {
-    print_info "Starting master on port $MASTER_PORT..."
-    "$DRAGONFLY" \
-        --port="$MASTER_PORT" \
-        --logtostderr \
-        --proactor_threads=2 \
-        --dbfilename="" \
-        --rename_command=SHUTDOWN= \
-        &>/dev/null &
-    MASTER_PID=$!
-
-    print_info "Starting replica on port $REPLICA_PORT..."
-    "$DRAGONFLY" \
+start_replica() {
+    print_info "Starting plain replica on port $REPLICA_PORT ($REPLICA_BUILD/dragonfly)..."
+    "$REPLICA_BUILD/dragonfly" \
         --port="$REPLICA_PORT" \
         --logtostderr \
         --proactor_threads=2 \
@@ -125,104 +112,103 @@ start_instances() {
         &>/dev/null &
     REPLICA_PID=$!
 
-    wait_for_ping "127.0.0.1" "$MASTER_PORT"  "master"
-    wait_for_ping "127.0.0.1" "$REPLICA_PORT" "replica"
-    print_info "Both instances ready."
+    wait_for_port "$REPLICA_PORT" "replica"
+    print_info "Replica ready (PID=$REPLICA_PID)."
+}
 
-    # Connect replica to master via REPLICAOF
+configure_replication() {
+    # Point replica at master. The master is not running yet; Dragonfly retries
+    # the connection automatically once AFL++ starts the master binary.
+    print_info "Configuring replica → master 127.0.0.1:$MASTER_PORT (retries until master starts)..."
     python3 -c "
 import socket, sys
-master_port = str($MASTER_PORT)
-replica_port = $REPLICA_PORT
-args = [b'REPLICAOF', b'127.0.0.1', master_port.encode()]
-cmd  = b'*%d\r\n' % len(args)
-for a in args:
-    cmd += b'\$%d\r\n%s\r\n' % (len(a), a)
+mport = '$MASTER_PORT'.encode()
+cmd = (b'*3\r\n\$9\r\nREPLICAOF\r\n'
+       b'\$9\r\n127.0.0.1\r\n'
+       b'\$' + str(len(mport)).encode() + b'\r\n' + mport + b'\r\n')
 try:
-    s = socket.create_connection(('127.0.0.1', replica_port), timeout=3)
+    s = socket.create_connection(('127.0.0.1', $REPLICA_PORT), timeout=3)
     s.sendall(cmd)
     s.recv(64)
     s.close()
-    print('Replication configured.')
+    print('REPLICAOF configured.')
 except Exception as e:
     print('WARNING: REPLICAOF failed:', e, file=sys.stderr)
     sys.exit(1)
 "
 }
 
-# ── Corpus setup ──────────────────────────────────────────────────────────────
+# ── Watchdog ──────────────────────────────────────────────────────────────────
 
-setup_corpus() {
-    mkdir -p "$OUTPUT_DIR" "$CORPUS_DIR"
-
-    if [[ -z "$(ls -A "$CORPUS_DIR" 2>/dev/null)" ]]; then
-        if [[ -d "$SEEDS_DIR" ]] && [[ -n "$(ls -A "$SEEDS_DIR" 2>/dev/null)" ]]; then
-            print_info "Copying seeds to corpus..."
-            cp "$SEEDS_DIR"/* "$CORPUS_DIR/"
-        else
-            print_info "Generating seeds..."
-            python3 "$FUZZ_DIR/generate_replication_seeds.py" --output-dir "$SEEDS_DIR"
-            cp "$SEEDS_DIR"/* "$CORPUS_DIR/"
-        fi
-    fi
+start_watchdog() {
+    # Runs in background. Every 2 seconds checks that the replica is in slave
+    # mode; if not (e.g. after a replica restart or an unexpected REPLICAOF NO ONE),
+    # re-sends REPLICAOF so it reconnects to the master automatically.
+    (
+        local mport="$MASTER_PORT"
+        local rport="$REPLICA_PORT"
+        while true; do
+            sleep 2
+            python3 - <<EOF 2>/dev/null
+import socket, sys
+rport = $rport
+mport = '$mport'.encode()
+try:
+    s = socket.create_connection(('127.0.0.1', rport), timeout=1)
+    s.sendall(b'*2\r\n\$4\r\nINFO\r\n\$11\r\nreplication\r\n')
+    data = b''
+    for _ in range(10):
+        chunk = s.recv(4096)
+        if not chunk: break
+        data += chunk
+        if b'role:' in data: break
+    s.close()
+    if b'role:slave' in data:
+        sys.exit(0)
+    # Not a slave – reconfigure
+    s = socket.create_connection(('127.0.0.1', rport), timeout=2)
+    s.sendall(b'*3\r\n\$9\r\nREPLICAOF\r\n\$9\r\n127.0.0.1\r\n\$'
+              + str(len(mport)).encode() + b'\r\n' + mport + b'\r\n')
+    s.recv(64)
+    s.close()
+except Exception:
+    pass
+EOF
+        done
+    ) &
+    WATCHDOG_PID=$!
+    print_info "Watchdog started (PID=$WATCHDOG_PID) — auto-reconnects replica if needed."
 }
 
-# ── Fuzzer ────────────────────────────────────────────────────────────────────
-
-show_config() {
-    echo ""
-    print_info "AFL++ Replication Fuzzer Configuration:"
-    echo "  Master port  : $MASTER_PORT"
-    echo "  Replica port : $REPLICA_PORT"
-    echo "  Binary       : $DRAGONFLY"
-    echo "  Corpus       : $CORPUS_DIR"
-    echo "  Output       : $OUTPUT_DIR"
-    echo "  Timeout      : ${TIMEOUT}ms per iteration"
-    echo ""
-    print_note "Mode: dumb (-n), no instrumentation on Dragonfly"
-    print_note "Detects: crashes in master or replica, data inconsistency"
-    print_note "Replay: python3 fuzz/replay_replication_crash.py <crashes_dir> <id>"
-    echo ""
-}
-
-run_fuzzer() {
-    print_info "Starting AFL++..."
-
-    AFL_CMD=(
-        afl-fuzz
-        -n                     # dumb mode: Dragonfly is not instrumented
-        -o "$OUTPUT_DIR"
-        -t "$TIMEOUT"
-        -i "$CORPUS_DIR"
-    )
-
-    # Note: don't use the RESP dict here — our input is a binary mux format,
-    # not raw RESP.  Dictionary insertions would corrupt the mux framing.
-
-    AFL_CMD+=(
-        --
-        python3
-        "$FUZZ_DIR/replication_orchestrator.py"
-    )
-
-    export MASTER_PORT REPLICA_PORT
-    export PYTHONPATH="$FUZZ_DIR"
-    export AFL_PYTHON_MODULE=replication_mutator
-    export AFL_CUSTOM_MUTATOR_ONLY=1
-    export AFL_EXPAND_HAVOC_NOW=1
-
-    print_info "Running: ${AFL_CMD[*]}"
-    echo ""
-
-    exec "${AFL_CMD[@]}"
-}
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
     check_requirements
-    start_instances
-    setup_corpus
-    show_config
-    run_fuzzer
+    start_replica
+    configure_replication
+    start_watchdog
+
+    echo ""
+    print_info "Replica is up. It connects to master once AFL++ starts it on port $MASTER_PORT."
+    print_info "Starting instrumented master via run_fuzzer.sh (AFL_PROACTOR_THREADS=2)..."
+    echo ""
+
+    # Run the standard instrumented fuzzer with 2 proactor threads.
+    # The replica in the background connects to master as soon as AFL++ starts it,
+    # and re-syncs (full sync) every time AFL++ restarts the master process.
+    export AFL_PROACTOR_THREADS="${AFL_PROACTOR_THREADS:-2}"
+    export BUILD_DIR="$BUILD_DIR"
+
+    # Keep the loop limit low so the master restarts frequently, triggering a full
+    # sync on every restart. This maximises coverage of the full-sync, PSYNC, and
+    # journal-streaming code paths. The default 10000 used for single-instance
+    # fuzzing is too high here: replication bugs are most likely to surface during
+    # the sync handshake, not after thousands of steady-state commands.
+    export AFL_LOOP_LIMIT="${AFL_LOOP_LIMIT:-100}"
+
+    # Do NOT use exec here — we need the trap to fire on exit so that
+    # the replica and watchdog are cleaned up when AFL++ stops.
+    "$SCRIPT_DIR/run_fuzzer.sh" "$@"
 }
 
 main "$@"
