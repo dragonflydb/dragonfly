@@ -14,7 +14,10 @@ namespace dfly::search {
 // Metadata structure for HNSW index serialization
 // Contains the key parameters needed to restore the index state
 struct HnswIndexMetadata {
-  size_t max_elements = 0;       // Maximum number of elements the index can hold
+  size_t max_elements = 0;  // Maximum number of elements the index can hold
+  // Note: cur_element_count may be smaller than actual node count during concurrent writes,
+  // so we compute the real requirement from nodes during restoration.
+  // TODO: consider removing it from metadata and rely entirely on node data for restoration.
   size_t cur_element_count = 0;  // Current number of elements in the index
   int maxlevel = -1;             // Maximum level of the graph
   size_t enterpoint_node = 0;    // Entry point node for the graph

@@ -232,6 +232,20 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   return id;
 }
 
+ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::AddNew(string_view key) {
+  DCHECK_EQ(ids_.count(key), 0u);
+
+  DocId id = last_id_++;
+  if (id < keys_.size()) {
+    keys_[id] = key;
+  } else {
+    DCHECK_EQ(keys_.size(), id);
+    keys_.emplace_back(key);
+  }
+
+  ids_[key] = id;
+  return id;
+}
 std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Find(string_view key) const {
   auto it = ids_.find(key);
   return it != ids_.end() ? std::make_optional(it->second) : std::nullopt;
@@ -249,6 +263,16 @@ string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK(id < last_id_ && std::find(free_ids_.begin(), free_ids_.end(), id) == free_ids_.end());
 
   return keys_[id];
+}
+
+bool ShardDocIndex::DocKeyIndex::IsValid(DocId id) const {
+  if (id >= last_id_ || id >= keys_.size())
+    return false;
+  // Check if the key at this slot is still tracked in the reverse map with the same id.
+  // This correctly handles empty keys: freed slots have their key extracted from ids_,
+  // while valid empty-key docs still have ids_[""] == id.
+  auto it = ids_.find(keys_[id]);
+  return it != ids_.end() && it->second == id;
 }
 
 size_t ShardDocIndex::DocKeyIndex::Size() const {
@@ -522,10 +546,28 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   size_t failed_updates = 0;
   size_t missing_documents = 0;
 
-  for (const auto& [key, local_id] : key_index_.GetDocKeysMap()) {
+  // Collect missing document IDs to remove after the loop (can't modify key_index_ during
+  // iteration over the snapshot). Store the key too so we can re-validate: concurrent fibers
+  // may free and reuse the DocId during Yield(), making the original local_id stale.
+  struct MissingDoc {
+    std::string key;
+    DocId local_id;
+    GlobalDocId global_id;
+  };
+  std::vector<MissingDoc> missing_doc_ids;
+
+  // Snapshot the map: Yield() inside the loop lets other fibers run (e.g. FullSyncDflyFb
+  // finishing its RDB load), which may mutate key_index_ via doc_del_cb_ and invalidate
+  // flat_hash_map iterators.
+  auto doc_keys_snapshot = key_index_.GetDocKeysMap();
+
+  for (const auto& [key, local_id] : doc_keys_snapshot) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
     if (!it || !IsValid(it->it)) {
       ++missing_documents;
+      GlobalDocId global_id =
+          search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
+      missing_doc_ids.push_back({std::string(key), local_id, global_id});
       continue;
     }
 
@@ -543,7 +585,17 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
             pv.SetOmitDefrag(true);
           }
         } else {
-          ++failed_updates;
+          // Node not in restored HNSW graph (new doc added during full sync via journal
+          // events before index was created). Fall back to Add.
+          bool added = index->Add(global_id, *doc, field_ident);
+          if (added) {
+            ++successful_updates;
+            if (!index->IsVectorCopied()) {
+              pv.SetOmitDefrag(true);
+            }
+          } else {
+            ++failed_updates;
+          }
         }
       }
     }
@@ -554,8 +606,25 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
     }
   }
 
+  // Remove HNSW nodes for documents that no longer exist in DB (deleted before or during
+  // restoration). Without this, stale nodes remain in the graph with no vector data, causing
+  // inconsistent KNN search results compared to the master.
+  // Re-validate each entry: concurrent fibers may have freed and reused the DocId.
+  for (const auto& [key, local_id, global_id] : missing_doc_ids) {
+    for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
+          index) {
+        index->Remove(global_id);
+      }
+    }
+    // Only remove from key_index_ if the mapping still matches the snapshot.
+    if (key_index_.Find(key) == local_id) {
+      key_index_.Remove(local_id);
+    }
+  }
+
   // Log summary of vector restoration
-  size_t total_docs = key_index_.GetDocKeysMap().size();
+  size_t total_docs = doc_keys_snapshot.size();
   if (failed_updates > 0 || missing_documents > 0) {
     LOG(WARNING) << "Restored vectors for index " << index_name << ": " << successful_updates
                  << " successful, " << failed_updates << " failed (missing vector field), "

@@ -240,9 +240,15 @@ class ShardDocIndex {
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
+
+    // Like Add but always allocates a fresh DocId, never reusing free_ids_.
+    // Used during restored CursorLoop to avoid colliding with HNSW node ids.
+    DocId AddNew(std::string_view key);
+
     void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+    bool IsValid(DocId id) const;
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
 
