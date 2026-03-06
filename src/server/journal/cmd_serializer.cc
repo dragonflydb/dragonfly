@@ -162,7 +162,6 @@ void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_vi
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command
                        0,                     // db index
-                       1,                     // shard count
                        0,                     // slot-id, but it is ignored at this level
                        journal::Entry::Payload(cmd, ArgSlice(args)));
 
