@@ -17,7 +17,6 @@ from .utility import (
 from .instance import DflyInstance, DflyInstanceFactory
 
 BASIC_ARGS = {
-    "port": 6379,
     "proactor_threads": 4,
     "tiered_prefix": "/tmp/tiered/backing",
     "tiered_offload_threshold": "1.0",  # offload immediately
@@ -191,7 +190,7 @@ async def test_replication(
         "proactor_threads": 2,
         "maxmemory": "512MB",
         "serialization_max_chunk_size": 64000,
-        "tiered_offload_threshold": "0.9",
+        "tiered_experimental_cooling": False,
     }
 )
 async def test_tiered_replication_with_hashes(
@@ -209,7 +208,6 @@ async def test_tiered_replication_with_hashes(
     # Start replica
     replica = df_factory.create(
         proactor_threads=1,
-        port=df_server.port + 1,
         dbfilename="",
     )
     replica.start()
@@ -232,6 +230,7 @@ async def test_tiered_replication_with_hashes(
             )
             if monitor.task in done:
                 wait_task.cancel()
+                await asyncio.gather(wait_task, return_exceptions=True)
                 monitor.assert_no_match()
             if wait_task in done:
                 wait_task.result()  # propagate exceptions
