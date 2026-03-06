@@ -303,8 +303,8 @@ fires, it **synchronously** invokes the callback, which for `SliceSnapshot` is `
 
 ## All Code Paths That Acquire `big_value_mu_`
 
-There are exactly **five** call sites that lock `big_value_mu_`. The diagrams below show the
-complete call chain from lock acquisition to potential blocking points.
+Currently there are **five** call sites in `snapshot.cc` that lock `big_value_mu_`. The diagrams
+below show the complete call chain from lock acquisition to potential blocking points.
 
 ### Path 1: `BucketSaveCb` (traversal fiber, both modes)
 
@@ -418,8 +418,16 @@ flowchart TD
 
 ### `big_value_mu_` (ThreadLocalMutex)
 
-A `ThreadLocalMutex` (`src/server/synchronization.h`) serving as the primary synchronization
-barrier. Its role differs by mode:
+A `ThreadLocalMutex` (`src/server/synchronization.cc`) serving as the primary synchronization
+barrier.
+
+**Important:** `ThreadLocalMutex::lock()` and `unlock()` are **no-ops** when
+`serialization_max_chunk_size == 0`. This means `big_value_mu_` only provides actual
+synchronization when big-value streaming is enabled. When it is disabled, all `lock_guard`
+calls on this mutex are effectively free, and the system relies on cooperative scheduling
+(no preemption during serialization) for correctness.
+
+Its role differs by mode:
 
 **PIT mode:** Prevents mutations from modifying a bucket while it is being serialized, and
 prevents journal entries from being written during bucket serialization. This enforces both
