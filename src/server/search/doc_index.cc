@@ -547,8 +547,14 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   size_t missing_documents = 0;
 
   // Collect missing document IDs to remove after the loop (can't modify key_index_ during
-  // iteration over GetDocKeysMap).
-  std::vector<std::pair<DocId, GlobalDocId>> missing_doc_ids;
+  // iteration over the snapshot). Store the key too so we can re-validate: concurrent fibers
+  // may free and reuse the DocId during Yield(), making the original local_id stale.
+  struct MissingDoc {
+    std::string key;
+    DocId local_id;
+    GlobalDocId global_id;
+  };
+  std::vector<MissingDoc> missing_doc_ids;
 
   // Snapshot the map: Yield() inside the loop lets other fibers run (e.g. FullSyncDflyFb
   // finishing its RDB load), which may mutate key_index_ via doc_del_cb_ and invalidate
@@ -561,7 +567,7 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
       ++missing_documents;
       GlobalDocId global_id =
           search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
-      missing_doc_ids.emplace_back(local_id, global_id);
+      missing_doc_ids.push_back({std::string(key), local_id, global_id});
       continue;
     }
 
@@ -603,14 +609,18 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   // Remove HNSW nodes for documents that no longer exist in DB (deleted before or during
   // restoration). Without this, stale nodes remain in the graph with no vector data, causing
   // inconsistent KNN search results compared to the master.
-  for (const auto& [local_id, global_id] : missing_doc_ids) {
+  // Re-validate each entry: concurrent fibers may have freed and reused the DocId.
+  for (const auto& [key, local_id, global_id] : missing_doc_ids) {
     for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
       if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
           index) {
         index->Remove(global_id);
       }
     }
-    key_index_.Remove(local_id);
+    // Only remove from key_index_ if the mapping still matches the snapshot.
+    if (key_index_.Find(key) == local_id) {
+      key_index_.Remove(local_id);
+    }
   }
 
   // Log summary of vector restoration
