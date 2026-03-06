@@ -123,7 +123,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
-  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it, bool from_cb);
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
@@ -139,8 +139,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
-  void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
-                         uint32_t mc_flags);
+  void SerializeExternal(DbIndex db_index, std::string_view key, const PrimeValue& pv,
+                         time_t expire_time, uint32_t mc_flags);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
@@ -152,6 +152,10 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
 
+  // Serialize delayed entries. If tiered_keys is provided, only serialize entries with
+  // keys in the set. Can block.
+  void PushDelayedEntries(bool force, absl::flat_hash_set<std::string>* tiered_keys);
+
   // An entry whose value must be awaited
 
   DbSlice* db_slice_;
@@ -160,7 +164,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::deque<TieredDelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  absl::flat_hash_map<std::string, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
