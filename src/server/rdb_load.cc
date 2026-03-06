@@ -2667,20 +2667,26 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     return;
   }
 
-  DbSlice::ItAndUpdater& res = *op_res;
-  res.it->first.SetSticky(item->is_sticky);
+  DbSlice::ItAndUpdater& updater = *op_res;
+  updater.it->first.SetSticky(item->is_sticky);
   if (item->has_mc_flags) {
-    res.it->second.SetFlag(true);
-    db_slice->SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
+    updater.it->second.SetFlag(true);
+    db_slice->SetMCFlag(db_cntx.db_index, updater.it->first.AsRef(), item->mc_flags);
   }
 
-  if (!override_existing_keys_ && !res.is_new) {
+  if (!override_existing_keys_ && !updater.is_new) {
     LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind << " of type "
-                 << res.it->second.ObjType();
+                 << updater.it->second.ObjType();
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
-    StashPrimeValue(db_cntx.db_index, item->key, false, &res.it->second, ts);
+    // Finalize the AutoUpdater before stashing. The stash callback may complete
+    // (e.g. during the SleepFor yield below) and transform the PrimeValue to external,
+    // changing MallocUsed(). If the AutoUpdater ran after that, it would compute a
+    // bogus negative memory delta and crash in AccountObjectMemory.
+    auto it = updater.it;
+    updater.post_updater.Run();
+    StashPrimeValue(db_cntx.db_index, item->key, &it->second, ts, nullptr);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
