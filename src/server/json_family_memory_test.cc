@@ -247,4 +247,17 @@ TEST_F(JsonFamilyMemoryTest, ShortKeyAccounting) {
   EXPECT_LE(std::llabs(actual - expected), 64);
 }
 
+TEST_F(JsonFamilyMemoryTest, MergeMemoryTrackingCrash) {
+  Run("JSON.SET key $ {\"x\":1}");
+
+  auto resp = Run("JSON.MERGE key $ {\"y\":2}");
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run("JSON.MERGE key $ null");
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run("JSON.GET key");
+  ASSERT_THAT(resp, "null");
+}
+
 }  // namespace dfly
