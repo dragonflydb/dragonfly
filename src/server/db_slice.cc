@@ -1158,11 +1158,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
       table_memory_ += (db.expire.mem_usage() - table_before);
     }
   } else {
-    // we shouldn't have expiration if expire_at_ms is 0.
-    auto fresh_exp_it = db.expire.Find(it->first.AsRef());
-    LOG_IF(DFATAL, IsValid(fresh_exp_it))
-        << "Inconsistent state, entry " << key
-        << " leave stale expiration: " << fresh_exp_it->second.duration_ms();
+    // If the key had an expiry but the new value should have none, clear it.
+    if (IsValid(res.exp_it)) {
+      RemoveExpire(cntx.db_index, res.it);
+      res.exp_it = ExpIterator{};
+    }
   }
 
   return op_result;

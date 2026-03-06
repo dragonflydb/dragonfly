@@ -865,6 +865,32 @@ TEST_F(GenericFamilyTest, SortStore) {
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 }
 
+TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
+  // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
+  Run({"del", "src", "dest"});
+  Run({"sadd", "src", "3", "1", "2"});
+  Run({"sadd", "dest", "old"});
+  Run({"expire", "dest", "100"});
+  EXPECT_GT(Run({"ttl", "dest"}).GetInt(), 0);
+
+  auto resp = Run({"sort", "src", "store", "dest"});
+  EXPECT_EQ(3, resp.GetInt());
+  // Destination must have no expiry after SORT STORE overwrites it.
+  EXPECT_EQ(-1, Run({"ttl", "dest"}).GetInt());
+  ASSERT_THAT(Run({"lrange", "dest", "0", "-1"}).GetVec(), ElementsAre("1", "2", "3"));
+
+  // SORT src STORE src (same key), src has an expiry — must not crash and must clear expiry.
+  Run({"del", "myset"});
+  Run({"sadd", "myset", "c", "a", "b"});
+  Run({"expire", "myset", "100"});
+  EXPECT_GT(Run({"ttl", "myset"}).GetInt(), 0);
+
+  resp = Run({"sort", "myset", "ALPHA", "store", "myset"});
+  EXPECT_EQ(3, resp.GetInt());
+  EXPECT_EQ(-1, Run({"ttl", "myset"}).GetInt());
+  ASSERT_THAT(Run({"lrange", "myset", "0", "-1"}).GetVec(), ElementsAre("a", "b", "c"));
+}
+
 TEST_F(GenericFamilyTest, Sort_RO) {
   // Test list sort with params
   Run({"del", "list-1"});
