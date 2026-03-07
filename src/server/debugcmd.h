@@ -63,6 +63,7 @@ class DebugCmd {
   void IOStats(CmdArgList args, CommandContext* cmd_cntx);
   void Segments(CmdArgList args, CommandContext* cmd_cntx);
   void CompactTable(CmdArgList args, CommandContext* cmd_cntx);
+  void CountUniqueStrings(const CommandContext* cmd_cntx) const;
   struct PopulateBatch {
     DbIndex dbid;
     uint64_t index[32];
