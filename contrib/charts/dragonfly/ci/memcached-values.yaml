@@ -1,0 +1,3 @@
+memcached:
+  enabled: true
+  port: 11211
