@@ -793,18 +793,25 @@ async def is_saving(c_client: aioredis.Redis):
     return "saving:1" in (await c_client.execute_command("INFO PERSISTENCE"))
 
 
-def assert_eventually(wrapped=None, *, times=100):
+def assert_eventually(wrapped=None, *, times=100, timeout=None):
     if wrapped is None:
-        return functools.partial(assert_eventually, times=times)
+        return functools.partial(assert_eventually, times=times, timeout=timeout)
 
     @wrapt.decorator
     async def wrapper(wrapped, instance, args, kwargs):
-        for attempt in range(times):
+        max_attempts = times
+        if timeout is not None:  # If timeout is set, we will ignore times and use timeout.
+            start = time.time()
+            max_attempts = 1 << 32  # Effectively infinite
+
+        for attempt in range(max_attempts):
             try:
                 result = await wrapped(*args, **kwargs)
                 return result
-            except AssertionError as e:
-                if attempt == times - 1:
+            except AssertionError:
+                if timeout is not None and (time.time() - start) > timeout:
+                    raise
+                if attempt == max_attempts - 1:
                     raise
                 await asyncio.sleep(0.1)
 
