@@ -836,7 +836,8 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
-  // If we are beyond the offloading threshold, StashPrimeValue might return a backpressure future.
+  // If we are beyond the offloading threshold, StashPrimeValue may populate a backpressure future
+  // via the provided out-parameter.
   if (auto* ts = shard->tiered_storage(); ts) {
     StashPrimeValue(op_args_.db_cntx.db_index, key, pv, ts, params.backpressure);
   }

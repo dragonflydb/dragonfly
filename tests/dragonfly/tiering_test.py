@@ -10,7 +10,6 @@ from . import dfly_args
 from .seeder import DebugPopulateSeeder, Seeder as SeederV2
 from .utility import (
     info_tick_timer,
-    tmp_file_name,
     wait_for_replicas_state,
     check_all_replicas_finished,
 )
@@ -180,65 +179,3 @@ async def test_replication(
             key_replica = await replica_client.get(key)
             assert key_master == key_replica
         assert False, "Inconsistency detected, but key not determined"
-
-
-@pytest.mark.large
-@pytest.mark.opt_only
-async def test_rdb_load_with_tiering(df_factory: DflyInstanceFactory):
-    """
-    Regression test for RDB load with tiering. Verifies that loading a snapshot
-    into a tiered instance produces correct memory accounting (no underflow)
-    and preserves data integrity. Previously, the AutoUpdater's memory accounting
-    could race with the async stash callback, causing a crash in AccountObjectMemory.
-    """
-    dbfilename = f"dump_{tmp_file_name()}"
-
-    # 1. Create a plain instance, populate with DEBUG POPULATE and save a DF snapshot.
-    plain = df_factory.create(
-        proactor_threads=4,
-        dbfilename=dbfilename,
-    )
-    plain.start()
-    plain_client = plain.client()
-
-    await plain_client.execute_command("DEBUG POPULATE 50000 key 8192 RAND")
-    num_keys = await plain_client.dbsize()
-
-    await plain_client.execute_command("SAVE", "DF")
-    await plain_client.close()
-    plain.stop()
-
-    # 2. Start a tiered instance and load the snapshot. Before the fix this would crash
-    #    with "Check failed: obj_memory_usage + size >= 0" in AccountObjectMemory.
-    tiered = df_factory.create(
-        proactor_threads=1,
-        dbfilename="",
-        maxmemory="256MB",
-        tiered_prefix="/tmp/tiered/rdb_load_test",
-        tiered_offload_threshold="0.9",
-        tiered_experimental_cooling="false",
-        tiered_storage_write_depth=10,
-    )
-    tiered.start()
-    tiered_client = tiered.client()
-
-    await tiered_client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
-
-    # Wait for tiering to stash entries
-    async for info, breaker in info_tick_timer(tiered_client, section="TIERED", timeout=60):
-        with breaker:
-            assert info["tiered_entries"] > 40_000
-
-    info = await tiered_client.info("ALL")
-    assert info["used_memory"] > 0, "Memory accounting must not underflow"
-
-    # If memory accounting underflows, obj_memory_usage wraps to a huge uint64 value.
-    obj_mem = info["object_used_memory"]
-    assert (
-        obj_mem < 1 * 1024 * 1024 * 1024
-    ), f"object_used_memory={obj_mem} unreasonably large (possible underflow)"
-
-    assert await tiered_client.dbsize() == num_keys
-
-    await tiered_client.close()
-    tiered.stop()

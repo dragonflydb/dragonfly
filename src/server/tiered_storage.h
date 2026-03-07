@@ -192,8 +192,8 @@ template <typename T>
 TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                                        std::function<T(std::string*)> modf, TieredStorage* ts);
 
-// Stash value if meets criteria, and return backpressure future if it was stashed
-// and backpressure is not nullptr.
+// Stash value if it meets criteria. If the value was stashed and `backpressure` is not nullptr,
+// assign/set the backpressure future to `*backpressure`.
 void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                      BackPressureFuture* backpressure);
 #else
