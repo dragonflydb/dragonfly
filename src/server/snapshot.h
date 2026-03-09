@@ -153,7 +153,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Serialize delayed entries. If tiered_keys is provided, only serialize entries with
   // keys in the set. Can block.
-  void PushDelayedEntries(bool force, absl::flat_hash_set<std::string>* tiered_keys);
+  void PushDelayedEntries(bool force, absl::flat_hash_set<std::pair<DbIndex, string>>* tiered_keys);
 
   // An entry whose value must be awaited
 
@@ -163,7 +163,11 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  absl::flat_hash_map<std::string, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
+
+  // Delayed entries that are waiting for tiered storage reads to complete before they can be
+  // serialized. Tuple <db_index, key> is used as a key to uniquely identify entry.
+  absl::flat_hash_map<std::pair<DbIndex, std::string>, std::unique_ptr<TieredDelayedEntry>>
+      delayed_entries_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;

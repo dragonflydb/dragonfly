@@ -374,7 +374,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   unsigned result = 0;
 
-  absl::flat_hash_set<string> tiered_keys;
+  absl::flat_hash_set<std::pair<DbIndex, string>> tiered_keys;
   const bool track_tiered_keys = from_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
@@ -382,7 +382,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
     if (track_tiered_keys) {
-      tiered_keys.emplace(it->first.ToString());
+      tiered_keys.emplace(std::make_pair(db_index, it->first.ToString()));
     }
   }
   PushDelayedEntries(from_cb, &tiered_keys);
@@ -476,7 +476,8 @@ bool SliceSnapshot::PushSerialized(bool force) {
   return FlushSerialized();
 }
 
-void SliceSnapshot::PushDelayedEntries(bool force, absl::flat_hash_set<std::string>* tiered_keys) {
+void SliceSnapshot::PushDelayedEntries(
+    bool force, absl::flat_hash_set<std::pair<DbIndex, string>>* tiered_keys) {
   for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
     auto& entry = it->second;
     // Skip unresolved entries unless force is true
@@ -493,16 +494,19 @@ void SliceSnapshot::PushDelayedEntries(bool force, absl::flat_hash_set<std::stri
     }
 
     // Get the value from the future (blocks if not resolved and force=true)
-    auto res = entry->value.Get();
-    if (!res.has_value()) {
-      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
+    auto value = entry->value.Get();
+    if (!value.has_value()) {
+      cntx_->ReportError(make_error_code(errc::io_error),
+                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       it++;
-      continue;
+      break;
     }
 
     // Serialize the entry and remove it from delayed_entries_
-    PrimeValue pv{*res};
-    serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
+    PrimeValue pv{*value};
+    io::Result<uint8_t> res =
+        serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
+    CHECK(res);
     delayed_entries_.erase(it++);
 
     // While serializing delayed entries we can accumulate data that exceeds the threshold
@@ -520,7 +524,7 @@ void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const Prime
   auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
                                                     expire_time, mc_flags);
-  delayed_entries_.emplace(key, std::move(entry));
+  delayed_entries_.emplace(std::make_pair(db_index, key), std::move(entry));
   ++type_freq_map_[RDB_TYPE_STRING];
 }
 
