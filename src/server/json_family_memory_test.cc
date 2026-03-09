@@ -38,6 +38,15 @@ class JsonFamilyMemoryTest : public BaseFamilyTest {
   }
 };
 
+// Single-thread fixture so all keys land on the same shard and share the same
+// thread-local InternedBlobPool. Required to reproduce interned string sharing bugs.
+class JsonFamilyMemoryTestSingleThread : public JsonFamilyMemoryTest {
+ public:
+  JsonFamilyMemoryTestSingleThread() {
+    num_threads_ = 1;
+  }
+};
+
 size_t GetMemoryUsage() {
   return JsonFamilyMemoryTest::GetMemoryResource()->used();
 }
@@ -258,6 +267,15 @@ TEST_F(JsonFamilyMemoryTest, MergeMemoryTrackingCrash) {
 
   resp = Run("JSON.GET key");
   ASSERT_THAT(resp, "null");
+}
+
+TEST_F(JsonFamilyMemoryTestSingleThread, InternedStringSharedBlobAccounting) {
+  // ref count for x = 1
+  ASSERT_THAT(Run("json.set foo $ {\"x\":3}"), "OK");
+  // ref count for x = 2
+  ASSERT_THAT(Run("json.set bar $ {\"x\":5}"), "OK");
+  Run("del foo");
+  Run("json.merge bar $ null");
 }
 
 }  // namespace dfly
