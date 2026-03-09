@@ -206,10 +206,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
            sizeof(labeltype));
   }
 
-  inline labeltype* getExternalLabeLp(tableint internal_id) const {
-    return (labeltype*)(data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
-  }
-
   inline char* getDataPtrByInternalId(tableint internal_id) const {
     return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
   }
@@ -1269,7 +1265,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     // Initialisation of the data and label
-    memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
+    setExternalLabel(cur_c, label);
 
     if (copy_vector_) {
       memcpy(getDataByInternalId(cur_c), data_point_in, data_size_);
