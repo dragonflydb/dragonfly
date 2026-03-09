@@ -888,98 +888,92 @@ struct NegativeExpire {};  // Returned if relative expiry was in the past
 std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
     facade::CmdArgParser parser, const CommandContext* cmd_cntx);
 
-struct SetStrCmd : public dfly::cmd::SimpleContext<SetStrCmd> {
-  PrepareResult Prepare(ArgSlice args, CommandContext* cmd_cntx) override;
-  OpStatus operator()(const ShardArgs& args, const OpArgs& op_args) const;
-  void Reply(SinkReplyBuilder* rb) override;
-
- private:
-  SetCmd::SetParams sparams_{};
-  string_view key_;
-  string_view value_;
-
-  mutable OpStatus status_ = OpStatus::OK;
-  mutable optional<StringResult> prev_val_;
-  mutable optional<util::fb2::Future<bool>> backpressure_;
-
-  bool is_mc_ = false;
-  bool is_negative_expire_ = false;  // Used to clean-up keys with negative TTL
-  bool is_get_ = false;
-};
-
-SetStrCmd::PrepareResult SetStrCmd::Prepare(ArgSlice args, CommandContext* cmd_cntx) {
-  is_mc_ = (cmd_cntx->mc_command() != nullptr);
+static cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
+  bool is_mc = (cmd_cntx->mc_command() != nullptr);
   facade::CmdArgParser parser{args};
-  std::tie(key_, value_) = parser.Next<string_view, string_view>();
+  auto [key, value] = parser.Next<string_view, string_view>();
   auto params_result = ParseSetParams(parser, cmd_cntx);
 
   if (holds_alternative<facade::ErrorReply>(params_result)) {
-    return get<facade::ErrorReply>(params_result);
+    co_return get<facade::ErrorReply>(std::move(params_result));
   }
 
   // Handle "Negative Expire" (e.g EX -1)
-  is_negative_expire_ = holds_alternative<NegativeExpire>(params_result);
-  if (!is_negative_expire_) {
-    sparams_ = get<SetCmd::SetParams>(params_result);
-    if (sparams_.flags & SetCmd::SET_GET) {
-      is_get_ = true;
-      sparams_.prev_val = &prev_val_;
+  bool is_negative_expire = holds_alternative<NegativeExpire>(params_result);
+  SetCmd::SetParams sparams;
+  bool is_get = false;
+  optional<StringResult> prev_val;
+  optional<util::fb2::Future<bool>> backpressure;
+
+  if (!is_negative_expire) {
+    sparams = get<SetCmd::SetParams>(params_result);
+    if (sparams.flags & SetCmd::SET_GET) {
+      is_get = true;
+      sparams.prev_val = &prev_val;
     }
-    sparams_.backpressure = &backpressure_;
+    sparams.backpressure = &backpressure;
   }
 
-  DVLOG(2) << "Set key=" << key_ << " value_len=" << value_.size() << " is_mc=" << is_mc_
-           << " is_get=" << is_get_ << " is_negative_expire=" << is_negative_expire_
-           << " sparams_=" << sparams_;
-  return SingleHop();
-}
+  DVLOG(2) << "Set key=" << key << " value_len=" << value.size() << " is_mc=" << is_mc
+           << " is_get=" << is_get << " is_negative_expire=" << is_negative_expire
+           << " sparams_=" << sparams;
 
-OpStatus SetStrCmd::operator()(const ShardArgs& args, const OpArgs& op_args) const {
-  if (is_negative_expire_) {
-    auto del_status = GenericFamily::OpDel(op_args, args, false);
+  OpStatus status = OpStatus::OK;
+  auto cb = [&](Transaction* tx, EngineShard* es) {
+    auto shard_args = tx->GetShardArgs(es->shard_id());
+    auto op_args = tx->GetOpArgs(es);
 
-    // If we successfully deleted or the key was already gone, that's success.
-    if (del_status == OpStatus::OK || del_status == OpStatus::KEY_NOTFOUND) {
-      status_ = OpStatus::OK;
-      return status_;
+    if (is_negative_expire) {
+      auto del_status = GenericFamily::OpDel(op_args, shard_args, false);
+      // If we successfully deleted or the key was already gone, that's success.
+      if (del_status == OpStatus::OK || del_status == OpStatus::KEY_NOTFOUND) {
+        status = OpStatus::OK;
+        return status;
+      }
+      // Anything else should be propagated as an error
+      status = del_status.status();
+      return status;
     }
 
-    // Anything else should be propagated as an error
-    status_ = del_status.status();
-    return status_;
-  }
+    bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+    SetCmd set_cmd(op_args, explicit_journal);
+    status = set_cmd.Set(sparams, key, value);
+    return status;
+  };
 
-  bool explicit_journal = this->cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-  SetCmd set_cmd(op_args, explicit_journal);
-  status_ = set_cmd.Set(sparams_, key_, value_);
-  return status_;
-}
+  co_await cmd::SingleHop(cb);
 
-void SetStrCmd::Reply(SinkReplyBuilder* rb) {
-  if (status_ == OpStatus::WRONG_TYPE) {
-    return rb->SendError(kWrongTypeErr);
+  auto* rb = cmd_cntx->rb();
+  if (status == OpStatus::WRONG_TYPE) {
+    rb->SendError(kWrongTypeErr);
+    co_return std::nullopt;
   }
-  if (status_ == OpStatus::OUT_OF_MEMORY) {
-    return rb->SendError(kOutOfMemory);
+  if (status == OpStatus::OUT_OF_MEMORY) {
+    rb->SendError(kOutOfMemory);
+    co_return std::nullopt;
   }
   // Note: We don't backpressure for the above errors, user should be notified immediately.
   // If backpressure was provided, wait with reasonable limit (to avoid client deadlocking).
-  if (backpressure_) {
-    std::move(backpressure_)->GetFor(std::chrono::milliseconds(5));
+  if (backpressure) {
+    std::move(backpressure)->GetFor(std::chrono::milliseconds(5));
   }
-  if (is_mc_) {  // MC reply
-    MCRender render(this->cmd_cntx->mc_command()->cmd_flags);
-    return rb->SendSimpleString(render.RenderStored(status_ == OpStatus::OK));
+  if (is_mc) {  // MC reply
+    MCRender render(cmd_cntx->mc_command()->cmd_flags);
+    rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
+    co_return std::nullopt;
   }
   auto* redis_rb = static_cast<RedisReplyBuilder*>(rb);
-  if (is_get_) {  // Redis SET ... GET Reply
-    return GetReplies{rb}.Send(std::move(prev_val_));
+  if (is_get) {  // Redis SET ... GET Reply
+    GetReplies{rb}.Send(std::move(prev_val));
+    co_return std::nullopt;
   }
-  if (status_ == OpStatus::OK) {  // Redis standard reply
-    return redis_rb->SendOk();
+  if (status == OpStatus::OK) {  // Redis standard reply
+    redis_rb->SendOk();
+    co_return std::nullopt;
   }
-  DCHECK_EQ(status_, OpStatus::SKIPPED) << "Unexpected status for SET command: " << status_;
-  return redis_rb->SendNull();
+  DCHECK_EQ(status, OpStatus::SKIPPED) << "Unexpected status for SET command: " << status;
+  redis_rb->SendNull();
+  co_return std::nullopt;
 }
 
 std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
@@ -1741,8 +1735,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
 
   registry->StartFamily(acl::STRING);
   *registry
-      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetHandler(
-             SetStrCmd::Run, true)
+      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetAsyncHandler(
+             CmdSet)
       << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
