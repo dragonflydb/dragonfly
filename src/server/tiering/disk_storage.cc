@@ -30,7 +30,7 @@ namespace {
 
 UringBuf AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
-  VLOG(1) << "Fallback to temporary allocation: " << size;
+  VLOG(2) << "Fallback to temporary allocation: " << size;
 
   uint8_t* buf = new (align_val_t(kPageSize)) uint8_t[size];
   return UringBuf{{buf, size}, nullopt};
@@ -153,7 +153,9 @@ io::Result<std::pair<size_t, UringBuf>> DiskStorage::PrepareStash(size_t length)
   if (offset >= 0)
     return std::make_pair(offset, PrepareBuf(length));
 
-  // If we don't have enough space, request grow and return to avoid blocking
+  // If we don't have "enough space", request grow and return to avoid blocking.
+  // Note that `alloc_.Malloc` may fail even if we have enough space due to fragmentation,
+  // as internally it uses different 256MB segments for different block sizes.
   if (offset < 0) {
     auto ec = RequestGrow(-offset);
     return make_unexpected(ec ? ec : make_error_code(errc::operation_would_block));
@@ -201,6 +203,8 @@ DiskStorage::Stats DiskStorage::GetStats() const {
 }
 
 error_code DiskStorage::RequestGrow(off_t grow_size) {
+  VLOG(1) << "Requesting grow by " << grow_size << " current capacity: " << alloc_.capacity();
+
   DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);
   if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);

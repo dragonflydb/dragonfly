@@ -8,14 +8,14 @@ import redis
 from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
-from .instance import RedisServer
+from .instance import DflyInstanceFactory, RedisServer
 from random import randint as rand
 import string
 import random
 from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
-from .utility import wait_available_async, is_saving, tmp_file_name
+from .utility import assert_eventually, wait_available_async, is_saving, tmp_file_name
 
 from .seeder import DebugPopulateSeeder
 
@@ -678,6 +678,62 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     assert info["used_memory_peak"] < 2300e6
 
     assert await DebugPopulateSeeder.capture(async_client) == start_capture
+
+
+@pytest.mark.large
+async def test_rdb_load_with_tiering_6823(df_factory: DflyInstanceFactory):
+    """
+    Regression test for RDB load with tiering. Verifies that loading a snapshot
+    into a tiered instance produces correct memory accounting (no underflow)
+    and preserves data integrity. Covers #6823.
+    """
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    # 1. Create a non-tiered instance, populate with DEBUG POPULATE and save a DF snapshot.
+    plain = df_factory.create(
+        proactor_threads=4,
+        dbfilename=dbfilename,
+    )
+    plain.start()
+    plain_client = plain.client()
+
+    await plain_client.execute_command("DEBUG POPULATE 50000 key 8192 RAND")
+    num_keys = await plain_client.dbsize()
+
+    await plain_client.execute_command("SAVE", "DF")
+    plain.stop()
+
+    # 2. Start a tiered instance and load the snapshot. Before the fix this would crash
+    #    with "Check failed: obj_memory_usage + size >= 0" in AccountObjectMemory.
+    tiered = df_factory.create(
+        proactor_threads=1,
+        dbfilename="",
+        maxmemory="256MB",
+        tiered_prefix="/tmp/tiered/rdb_load_test",
+        tiered_offload_threshold="0.9",
+        tiered_experimental_cooling="false",
+        tiered_storage_write_depth=10,
+    )
+    tiered.start()
+    tiered_client = tiered.client()
+
+    assert await tiered_client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs") == "OK"
+
+    # Wait for tiering to stash entries
+    @assert_eventually(timeout=30)
+    async def assert_tiered_reached():
+        info = await tiered_client.info("TIERED")
+        assert info["tiered_entries"] > 40_000
+
+    await assert_tiered_reached()
+
+    info = await tiered_client.info("memory")
+    used_mem = info["used_memory"]
+    obj_mem = info["object_used_memory"]
+    assert used_mem > 20_000_000 and used_mem < 300_000_000
+    assert obj_mem > 20_000_000 and obj_mem < 300_000_000
+
+    assert info["num_entries"] == num_keys
 
 
 @dfly_args({"serialization_max_chunk_size": 4096, "proactor_threads": 1})
