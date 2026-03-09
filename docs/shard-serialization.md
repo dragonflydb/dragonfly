@@ -557,7 +557,7 @@ from running if `SerializeBucket` preempts (e.g., during large value serializati
 Condition variable used in `HandleFlushData` to ensure records are pushed to the consumer
 in sequential order of their `rec_id_`. If fiber A has `id=5` and fiber B has `id=6`, B waits
 until A finishes pushing and updates `last_pushed_id_` to 5.
-This is needed because fibers are awaken in arbitrary order and reordering flushed chunks breaks
+This is needed because fibers are awakened in arbitrary order and reordering flushed chunks breaks
 the wire protocol.
 
 
