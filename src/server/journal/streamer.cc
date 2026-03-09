@@ -663,6 +663,11 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
   return written;
 }
 
+// Ordering invariant (PIT mode, slot migration):
+//   Same as SliceSnapshot::OnDbChange — for any key K the baseline must be sent before any
+//   journal entry that mutates K. RestoreStreamer always uses PIT mode (snapshot_version_ != 0)
+//   and serializes-before-mutate via CVCUponInsert (inserts) or WriteBucket (updates).
+//   big_value_mu_ prevents interleaving with the traversal fiber's WriteBucket.
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";

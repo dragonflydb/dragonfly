@@ -191,6 +191,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t moved_saved = 0;
+    size_t flushed_under_lock = 0;
   } stats_;
 
   ThreadLocalMutex big_value_mu_;

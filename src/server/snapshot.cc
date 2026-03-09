@@ -327,7 +327,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   // serialized + side_saved must be equal to the total saved.
   VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
           << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls
-          << ", journal_saved " << stats_.jounal_changes << ", moved_saved " << stats_.moved_saved;
+          << ", journal_saved " << stats_.jounal_changes << ", moved_saved " << stats_.moved_saved
+          << ", flushed_under_lock " << stats_.flushed_under_lock;
 }
 
 bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {
@@ -413,6 +414,9 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   if (data.empty())
     return;
 
+  if (big_value_mu_.is_locked()) {
+    ++stats_.flushed_under_lock;
+  }
   size_t serialized = data.size();
   uint64_t id = rec_id_++;
 
@@ -523,11 +527,22 @@ void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const Prim
   ++type_freq_map_[RDB_TYPE_STRING];
 }
 
+// Ordering invariant (both modes):
+//   For any key K, the replica must receive K's baseline value strictly before any journal entry
+//   that mutates K. This is required for baseline-dependent journal entries (e.g., HSET, LPUSH)
+//   which cannot be replayed without the prior value.
+//
+// PIT mode: enforced by serialize-before-mutate. OnDbChange serializes the bucket before the
+//   mutation commits; ConsumeJournalChange runs after the mutation on the same fiber, so the
+//   baseline is always first. big_value_mu_ prevents interleaving with the traversal fiber's
+//   SerializeBucket (which can preempt via consume_fun_).
+//
+// Non-PIT mode: OnDbChange only acquires big_value_mu_ as a barrier — no serialization. The
+//   mutex prevents journaling mutations from slipping in the middle of bucket serialization
+//   on the traversal fiber — see ConsumeJournalChange for details. OnMoved handles items
+//   displaced across the traversal cursor.
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
-  // Only when creating point in time snapshot we need to serialize the bucket before we change the
-  // db entry. When creating no point in time snapshot we need to call OnDbChange which will take
-  // the big_value_mu_ to make sure we do not mutate the bucket while serializing it.
   if (use_snapshot_version_) {
     PrimeTable* table = db_slice_->GetTables(db_index).first;
     const PrimeTable::bucket_iterator* bit = req.update();
@@ -573,13 +588,26 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
   }
 }
 
-// For any key any journal entry must arrive at the replica strictly after its first original rdb
-// value. This is guaranteed because journal change callbacks run after OnDbChange, and no
-// database switch can be performed between those two calls, as they are part of one transaction.
+// big_value_mu_ prevents expiry/eviction DEL journal entries from interleaving with an
+// in-progress SaveEntry for a large value. SaveEntry may yield mid-entry (emitting chunks
+// across multiple scheduler turns); expiry paths emit DEL via RecordDelete directly,
+// bypassing OnDbChange. Without the lock, such a DEL could be written between two chunks
+// of the same entry, producing an invalid wire format for the downstream consumer.
+//
+// Note: even if the protocol were extended to support interleaved chunks, the lock would
+// still be required semantically: a DEL journal entry must not be applied on the replica
+// while the entry's baseline is still being loaded. The delayed deletion queue proposal
+// in the design doc addresses this without a shard-wide lock.
+//
+// Note: for transaction-driven mutations, baseline-before-journal ordering is already
+// guaranteed by call order on the mutation fiber (OnDbChange precedes ConsumeJournalChange);
+// big_value_mu_ is not needed for that ordering.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
-  // We grab the lock in case we are in the middle of serializing a bucket, so it serves as a
-  // barrier here for atomic serialization.
   std::lock_guard barrier(big_value_mu_);
+
+  // remove when we support interleaving chunks.
+  LOG_IF(DFATAL, serialize_bucket_running_)
+      << "Internal error: can not run interleave journal and bucket serialization";
   std::ignore = serializer_->WriteJournalEntry(item.journal_item.data);
   ++stats_.jounal_changes;
 }
