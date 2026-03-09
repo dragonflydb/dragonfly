@@ -904,8 +904,8 @@ non-PIT phases may simplify, replace, or remove experimental behavior rather tha
 
 8. **Simplify `rec_id_` / `seq_cond_` ordering once tagged-chunk delivery is proven.**
    - **Prerequisites:** 2.7, 1.4.
-   - With tagged chunks support, we may not need a consistent global order between differrent
-     fibers.In that case `rec_id_`  `seq_cond_.wait` become redundant.
+   - With tagged chunks support, we may not need a consistent global order between different
+     fibers. In that case `rec_id_` / `seq_cond_.wait` become redundant.
    - Remove `rec_id_` / `seq_cond_` only after demonstrating (via tests and observability)
      that we do not corrupt the replication stream.
    - Goal: avoid removing an ordering mechanism before its replacement is demonstrably sound.
