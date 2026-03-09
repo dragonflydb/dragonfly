@@ -1666,8 +1666,6 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
   return OpStatus::SYNTAX_ERR;
 }
 
-}  // namespace
-
 void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
@@ -2204,6 +2202,8 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
     reply_generic::Send(result, cmd_cntx);
   }
 }
+
+}  // namespace
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 

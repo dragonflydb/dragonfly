@@ -4,6 +4,8 @@
 
 #include "server/cmd_support.h"
 
+#include <absl/cleanup/cleanup.h>
+
 #include "base/logging.h"
 
 namespace dfly::cmd {
@@ -54,6 +56,27 @@ BlockResult HopCoordinator::SingleHop(CommandContext* cmd_cntx, Transaction::Run
   // Schedule single hop and return blocker
   tx_keepalive_->SingleHopAsync(cb);
   return tx_keepalive_->Blocker();
+}
+
+bool SingleHopWaiter::await_ready() noexcept {
+  return (blocker = SingleHop(cmd_cntx, callback)) == nullptr;
+}
+
+void SingleHopWaiter::await_suspend(std::coroutine_handle<> handle) const noexcept {
+  // TODO: functor calling resume is double indirection and wasted space for cleaner
+  absl::Cleanup cleaner = [handle] { handle.destroy(); };
+  cmd_cntx->Resolve(blocker, [handle, cleaner = std::move(cleaner)](auto* rb) mutable {
+    handle.resume();
+    std::move(cleaner).Cancel();
+  });
+}
+
+facade::OpStatus SingleHopWaiter::await_resume() const noexcept {
+  return *cmd_cntx->tx()->LocalResultPtr();
+}
+
+void CmdR::Coro::return_value(facade::ErrorReply&& err) const noexcept {
+  cmd_cntx->SendError(err);
 }
 
 }  // namespace dfly::cmd
