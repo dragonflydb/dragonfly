@@ -510,10 +510,14 @@ void SliceSnapshot::PushDelayedEntries(
     delayed_entries_.erase(it++);
 
     // While serializing delayed entries we can accumulate data that exceeds the threshold
-    // so we should push it.
-    // IF this is forced action we want to push all antries in this loop.
-    PushSerialized(force);
+    // so we should push it. Aggregate and push in batches, if threshold is reached, to avoid
+    // pushing forcefully to often.
+    PushSerialized(false);
   }
+
+  // If we called this function from callback we should push now all tiered keys that are not yet
+  // pushed but serialized into buffer.
+  PushSerialized(force);
 }
 
 void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
