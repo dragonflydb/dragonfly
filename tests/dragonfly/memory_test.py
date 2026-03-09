@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import string
+import time
 
 import pytest
 import redis
@@ -422,3 +423,24 @@ async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
         all_keys.update(keys)
 
     assert len(all_keys) == 1000
+
+
+@pytest.mark.asyncio
+async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
+    df_server = df_factory.create(proactor_threads=1)
+    df_server.start()
+    client = df_server.client()
+
+    await client.execute_command("DEBUG", "POPULATE", 500000, "key", 1, "EXPIRE", 3, 4)
+    await asyncio.sleep(2.5)
+    worst_ping = 0
+    deadline = time.monotonic() + 30
+    while await client.dbsize() > 0:
+        t0 = time.monotonic()
+        assert t0 < deadline, "All keys did not expire in 30 seconds"
+        await client.ping()
+        worst_ping = max(time.monotonic() - t0, worst_ping)
+        await asyncio.sleep(0.05)
+    assert (
+        worst_ping < 0.1
+    ), f"Worst PING latency {worst_ping:.3f}s exceeded 100ms during mass expiry"
