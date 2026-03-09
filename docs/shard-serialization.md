@@ -672,10 +672,10 @@ See Roadmap items 3, 5, 6.
 ### 3. Shared serializer buffer and wire-format coupling
 
 **Problem.** `ConsumeJournalChange` and `SerializeBucket` write to the same `serializer_`
-buffer (the "buffer exclusivity" role from [§2](#2-shard-wide-stall-under-big_value_mu_)).
+buffer (the "buffer exclusivity" role from [§1](#1-shard-wide-stall-under-big_value_mu_)).
 Even with separate buffers, interleaved output from two serializers cannot be demuxed by the
 consumer without a framing protocol — a journal entry injected mid-RDB-entry produces an
-unparseable byte stream (see the [eviction counter-example](#2-shard-wide-stall-under-big_value_mu_)
+unparseable byte stream (see the [eviction counter-example](#1-shard-wide-stall-under-big_value_mu_)
 for a concrete scenario).
 
 **Goal.** Decouple journal and bucket serialization so they can produce data independently,
