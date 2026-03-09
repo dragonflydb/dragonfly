@@ -564,9 +564,11 @@ struct GetReplies {
   bool null_on_io_error_;
 };
 
-void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmd_cntx) {
+cmd::CmdR ExtendGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
+  bool prepend = cmd_cntx->cid()->name().starts_with('P');
+
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
   if (cmd_cntx->mc_command() == nullptr) {
@@ -575,17 +577,23 @@ void ExtendGeneric(CmdArgList args, bool prepend, CommandContext* cmd_cntx) {
     };
 
     RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    GetReplies{rb}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+    GetReplies{rb}.Send(co_await cmd::SingleHopT(cb));
   } else {
     // Memcached skips if key is missing
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    OpResult<bool> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+    OpResult<bool> result = co_await cmd::SingleHopT(cb);
     MCRender render(cmd_cntx->mc_command()->cmd_flags);
-    cmd_cntx->SendSimpleString(render.RenderStored(result.value_or(false)));
+    if (result) {
+      cmd_cntx->SendSimpleString(render.RenderStored(result.value()));
+    } else {
+      cmd_cntx->SendError(result.status());
+    }
   }
+
+  co_return std::nullopt;
 }
 
 // Wrapper to call SetCmd::Set in ScheduleSingleHop
@@ -851,39 +859,6 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void AyncCmdSet(string_view key, string_view value, SetCmd::SetParams sparams,
-                CommandContext* cmd_cntx) {
-  CHECK(cmd_cntx->mc_command());
-
-  auto cb = [cmd_cntx, key, value, sparams](Transaction* t, EngineShard* shard) {
-    bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-    SetCmd set_cmd(t->GetOpArgs(shard), explicit_journal);
-
-    return set_cmd.Set(sparams, key, value);
-  };
-
-  // Wrap callback to keep it alive inside the replier
-  auto wrapped_cb = std::make_unique<decltype(cb)>(std::move(cb));
-  cmd_cntx->tx()->SingleHopAsync(*wrapped_cb);
-
-  auto replier = [cmd_cntx, tx = boost::intrusive_ptr{cmd_cntx->tx()},
-                  wrapped_cb = std::move(wrapped_cb)](SinkReplyBuilder* rb) {
-    switch (auto status = *tx->LocalResultPtr()) {
-      case OpStatus::SKIPPED:
-      case OpStatus::OK: {
-        MCRender render(cmd_cntx->mc_command()->cmd_flags);
-        rb->SendSimpleString(render.RenderStored(status == OpStatus::OK));
-        return;
-      }
-      case OpStatus::OUT_OF_MEMORY:
-        return rb->SendError(kOutOfMemory);
-      default:
-        LOG(FATAL) << "Unknown status" << status;
-    };
-  };
-  cmd_cntx->Resolve(cmd_cntx->tx()->Blocker(), std::move(replier));
-}
-
 struct NegativeExpire {};  // Returned if relative expiry was in the past
 std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
     CmdArgParser parser, const CommandContext* cmd_cntx) {
@@ -947,35 +922,32 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
   return sparams;
 }
 
-void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto [key, value] = parser.Next<string_view, string_view>();
   auto params_result = ParseSetParams(parser, cmd_cntx);
 
   if (holds_alternative<facade::ErrorReply>(params_result))
-    return cmd_cntx->SendError(get<facade::ErrorReply>(params_result));
+    co_return get<facade::ErrorReply>(params_result);
 
   if (holds_alternative<NegativeExpire>(params_result)) {
-    cmd_cntx->tx()->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
+    auto del_cb = [](const Transaction* tx, EngineShard* es) {
       ShardArgs args = tx->GetShardArgs(es->shard_id());
       GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
       return OpStatus::OK;
-    });
+    };
+    co_await cmd::SingleHop(del_cb);
+
     if (cmd_cntx->mc_command() != nullptr) {
       cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
     } else {
       cmd_cntx->SendOk();
     }
-    return;
+    co_return std::nullopt;
   }
 
   auto& sparams = get<SetCmd::SetParams>(params_result);
-
-  // Experimental async path, memcache only
-  if (cmd_cntx->IsDeferredReply()) {
-    return AyncCmdSet(key, value, sparams, cmd_cntx);
-  }
 
   optional<StringResult> prev;
   if (sparams.flags & SetCmd::SET_GET)
@@ -984,10 +956,23 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   optional<util::fb2::Future<bool>> backpressure;
   sparams.backpressure = &backpressure;
 
-  OpStatus result = SetGeneric(sparams, key, value, *cmd_cntx);
-  if (result == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), true).Set(sparams, key, value);
+  };
+
+  OpStatus result = co_await cmd::SingleHop(cb);
+  auto* rb = cmd_cntx->rb();
+
+  switch (result) {
+    case OpStatus::WRONG_TYPE:
+      rb->SendError(kWrongTypeErr);  // TODO(vlad): use co_return after await?
+      co_return std::nullopt;
+    case OpStatus::OUT_OF_MEMORY:
+      rb->SendError(kOutOfMemory);
+      co_return std::nullopt;
+    default:
+      break;
+  };
 
   // If backpressure was provided, wait with reasonable limit (to avoid client deadlocking).
   if (backpressure) {
@@ -995,22 +980,20 @@ void CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
-  }
-
-  if (result == OpStatus::OUT_OF_MEMORY) {
-    return cmd_cntx->SendError(kOutOfMemory);
+    GetReplies{rb}.Send(std::move(prev));
+    co_return std::nullopt;
   }
 
   if (cmd_cntx->mc_command() != nullptr) {
     MCRender render(cmd_cntx->mc_command()->cmd_flags);
-    return cmd_cntx->SendSimpleString(render.RenderStored(result == OpStatus::OK));
-  }
-  if (result == OpStatus::OK) {
-    cmd_cntx->SendOk();
+    rb->SendSimpleString(render.RenderStored(result == OpStatus::OK));
+  } else if (result == OpStatus::OK) {
+    rb->SendOk();
   } else {
-    cmd_cntx->SendNull();
+    static_cast<RedisReplyBuilder*>(rb)->SendNull();
   }
+
+  co_return std::nullopt;
 }
 
 /// (P)SETEX key seconds (milliseconds) value
@@ -1141,14 +1124,6 @@ void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(status);
 
   GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
-}
-
-void CmdAppend(CmdArgList args, CommandContext* cmd_cntx) {
-  ExtendGeneric(args, false, cmd_cntx);
-}
-
-void CmdPrepend(CmdArgList args, CommandContext* cmd_cntx) {
-  ExtendGeneric(args, true, cmd_cntx);
 }
 
 void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1717,13 +1692,15 @@ void RegisterStringFamily(CommandRegistry* registry) {
 
   registry->StartFamily(acl::STRING);
   *registry
-      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetHandler(CmdSet,
-                                                                                          true)
+      << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetAsyncHandler(
+             CmdSet)
       << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
       << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
-      << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
-      << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
+      << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
+             ExtendGeneric)
+      << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
+             ExtendGeneric)
       << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
       << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
       << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetHandler(IncrDecrCmd::Run, true)
