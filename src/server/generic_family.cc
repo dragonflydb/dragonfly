@@ -1181,7 +1181,7 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
   return res;
 }
 
-cmd::CmdR CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
+static cmd::CmdR CmdDel(CmdArgList args, CommandContext* cmd_cntx) {
   bool async_unlink =
       cmd_cntx->cid()->name() == "UNLINK" && absl::GetFlag(FLAGS_unlink_experimental_async);
 
@@ -2649,13 +2649,11 @@ constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
 }  // namespace acl
 
-constexpr auto CmdDelV = [](CmdArgList args, CommandContext* cntx) { CmdDel(args, cntx); };
-
 void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   registry->StartFamily();
   *registry
-      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.SetHandler(CmdDelV, true)
+      << CI{"DEL", CO::JOURNALED, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
       << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
@@ -2689,7 +2687,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.SetHandler(CmdDelV, true)
+      << CI{"UNLINK", CO::JOURNALED, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(CmdDel)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)

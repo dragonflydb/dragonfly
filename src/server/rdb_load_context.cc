@@ -41,6 +41,7 @@ HnswRemapTable BuildRemapTable(
     const absl::flat_hash_map<uint32_t, std::vector<PendingIndexMapping>>& index_mappings,
     ShardId new_shard_count) {
   HnswRemapTable remap_table;
+#ifdef WITH_SEARCH
   absl::flat_hash_map<std::string, absl::flat_hash_map<uint32_t, search::DocId>> doc_id_counters;
 
   for (const auto& [master_shard_id, pim_vec] : index_mappings) {
@@ -67,7 +68,7 @@ HnswRemapTable BuildRemapTable(
       }
     }
   }
-
+#endif
   return remap_table;
 }
 
@@ -77,7 +78,7 @@ absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
     std::vector<PendingHnswNodes>& pending_nodes,
     const std::vector<PendingHnswMetadata>& hnsw_metadata, const HnswRemapTable& remap_table) {
   absl::flat_hash_set<std::string> failed_indices;
-
+#ifdef WITH_SEARCH
   for (auto& pn : pending_nodes) {
     auto remap_it = remap_table.find(pn.index_name);
 
@@ -130,7 +131,7 @@ absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
     LOG(INFO) << "Restored HNSW index " << pn.index_name << ":" << pn.field_name << " with "
               << pn.nodes.size() << " nodes (" << remapped << " global_ids remapped)";
   }
-
+#endif
   return failed_indices;
 }
 
@@ -311,6 +312,7 @@ RdbLoadContext::PerShardMappings RdbLoadContext::RemapHnswForDifferentShardCount
 }
 
 void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
+#ifdef WITH_SEARCH
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // In case search module is disabled
     return;
@@ -390,6 +392,7 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   // Wait until index building ends
   shard_set->RunBlockingInParallel(
       [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
+#endif
 }
 
 }  // namespace dfly
