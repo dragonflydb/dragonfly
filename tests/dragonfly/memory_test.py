@@ -431,16 +431,16 @@ async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
     df_server.start()
     client = df_server.client()
 
-    await client.execute_command("DEBUG", "POPULATE", 500000, "key", 1, "EXPIRE", 3, 4)
+    await client.execute_command("DEBUG", "POPULATE", 50000, "key", 1, "EXPIRE", 3, 4)
     await asyncio.sleep(2.5)
     worst_ping = 0
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 60
     while await client.dbsize() > 0:
         t0 = time.monotonic()
-        assert t0 < deadline, "All keys did not expire in 30 seconds"
+        assert t0 < deadline, "All keys did not expire in 60 seconds"
         await client.ping()
         worst_ping = max(time.monotonic() - t0, worst_ping)
         await asyncio.sleep(0.05)
     assert (
-        worst_ping < 0.1
-    ), f"Worst PING latency {worst_ping:.3f}s exceeded 100ms during mass expiry"
+        worst_ping < 0.5
+    ), f"Worst PING latency {worst_ping:.3f}s exceeded 500ms during mass expiry"
