@@ -411,7 +411,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    SerializeExternal(db_indx, pk.ToString(), pv, expire_time, mc_flags);
+    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -463,7 +463,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
-size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
+size_t SliceSnapshot::FlushSerialized() {
   std::string blob = serializer_->Flush(SerializerBase::FlushState::kFlushEndEntry);
   size_t serialized = blob.size();
   HandleFlushData(std::move(blob));
@@ -512,12 +512,13 @@ void SliceSnapshot::PushDelayedEntries(bool force, absl::flat_hash_set<std::stri
   }
 }
 
-void SliceSnapshot::SerializeExternal(DbIndex db_index, std::string_view key, const PrimeValue& pv,
+void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
                                       time_t expire_time, uint32_t mc_flags) {
   // We prefer avoid blocking, so we just schedule a tiered read and append
   // it to the delayed entries.
+  auto key = pk.ToString();
   auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
-  auto entry = std::make_unique<TieredDelayedEntry>(db_index, PrimeKey{key}, std::move(future),
+  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
                                                     expire_time, mc_flags);
   delayed_entries_.emplace(key, std::move(entry));
   ++type_freq_map_[RDB_TYPE_STRING];
