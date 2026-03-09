@@ -618,7 +618,7 @@ subsequent baseline bytes reconstruct `K` on the replica, reversing the deletion
 - no code path blocks on downstream I/O while holding a shard-wide lock.
 
 **Approach.** See [§5 summary table](#5-summary-mutex-roles-and-their-replacements) for the
-full mapping. Key mechanisms: bucket completion state ([§1](#1-imprecise-bucket-completion-tracking)),
+full mapping. Key mechanisms: bucket completion state ([§2](#2-imprecise-bucket-completion-tracking)),
 separate serializer instances ([§3](#3-shared-serializer-buffer-and-wire-format-coupling)),
 and non-preempting chunk production. See Roadmap items 6, 7, 8, 9.
 
