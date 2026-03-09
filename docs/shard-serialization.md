@@ -160,7 +160,7 @@ bucket's baseline is fully emitted (Phase 1, item 6 — deferred deletion queue)
   `OnDbChange` per evicted key would add overhead and preemption points inside the loop.
 
 The ordering issue is twofold: byte-stream integrity
-([§2](#2-shard-wide-stall-under-big_value_mu_)) and baseline-before-journal correctness — a
+([§1](#1-shard-wide-stall-under-big_value_mu_)) and baseline-before-journal correctness — a
 `DEL` must not be emitted (even to a separate stream) while the same key's baseline is still
 being serialized. Roadmap item 6 proposes a **deferred deletion queue** to address this
 without blocking or re-entrancy.
