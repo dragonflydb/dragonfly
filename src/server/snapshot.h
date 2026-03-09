@@ -153,7 +153,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Serialize delayed entries. If tiered_keys is provided, only serialize entries with
   // keys in the set. Can block.
-  void PushDelayedEntries(bool force, absl::flat_hash_set<std::pair<DbIndex, string>>* tiered_keys);
+  void PushDelayedEntries(bool force,
+                          absl::flat_hash_set<std::pair<DbIndex, std::string>>* tiered_keys);
 
   // An entry whose value must be awaited
 

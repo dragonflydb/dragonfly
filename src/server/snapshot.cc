@@ -381,7 +381,8 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     ++result;
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
-    if (track_tiered_keys) {
+    // Track tiered keys to push them with priority after the loop, but only for callbacks.
+    if (track_tiered_keys && it->second.IsExternal()) {
       tiered_keys.emplace(std::make_pair(db_index, it->first.ToString()));
     }
   }
@@ -477,7 +478,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::PushDelayedEntries(
-    bool force, absl::flat_hash_set<std::pair<DbIndex, string>>* tiered_keys) {
+    bool force, absl::flat_hash_set<std::pair<DbIndex, std::string>>* tiered_keys) {
   for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
     auto& entry = it->second;
     // Skip unresolved entries unless force is true
@@ -498,8 +499,7 @@ void SliceSnapshot::PushDelayedEntries(
     if (!value.has_value()) {
       cntx_->ReportError(make_error_code(errc::io_error),
                          absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
-      it++;
-      break;
+      return;
     }
 
     // Serialize the entry and remove it from delayed_entries_
