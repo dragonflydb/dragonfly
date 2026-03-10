@@ -32,12 +32,17 @@ Strip any query parameters from `run_id`.
 
 List crash artifacts via the GitHub API, then download each as a `.zip` directly:
 
+**IMPORTANT**: Run each command as a separate Bash tool call (no `&&` chaining)
+to ensure auto-approval works with the user's permission patterns.
+
 ```bash
 # List artifacts — filter for names containing "crash"
 gh api repos/{owner}/{repo}/actions/runs/{run_id}/artifacts
 
-# Download each crash artifact by ID
+# Create output directory
 mkdir -p /tmp/fuzz-repro-{run_id}
+
+# Download each crash artifact by ID (separate command)
 gh api repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip > /tmp/fuzz-repro-{run_id}/<artifact-name>.zip
 ```
 
@@ -65,7 +70,7 @@ Check if the debug binary already exists and runs:
 Only build if the binary doesn't exist or fails to run:
 
 ```bash
-cd build-dbg && ninja dragonfly
+ninja -C build-dbg dragonfly
 ```
 
 If `build-dbg` doesn't exist, run `./helio/blaze.sh` first.

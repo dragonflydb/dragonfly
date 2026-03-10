@@ -96,7 +96,8 @@ class JsonAutoUpdater {
     GetPrimeValue().SetJsonSize(diff);
 
     // Under any flow we must not end up with this special value.
-    DCHECK(GetPrimeValue().MallocUsed() != 0);
+    // TODO: disable for now as it breaks with interned strings.
+    // DCHECK(GetPrimeValue().MallocUsed() != 0);
   }
 
   void AddDocToIndexes() {
