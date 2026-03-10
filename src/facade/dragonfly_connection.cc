@@ -11,6 +11,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/time.h>
+#include <sys/socket.h>
 
 #include <numeric>
 #include <variant>
@@ -722,7 +723,61 @@ void Connection::HandleRequests() {
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    // Must be done atomically before the premption point in Accept so that at any
+    // Aggressive Pre-Filter: Prevent fiber exhaustion from stalled/zombie connections.
+    //
+    // While TCP_DEFER_ACCEPT delays the initial accept() until data arrives, advanced asynchronous
+    // APIs like io_uring can occasionally fire the accept completion slightly before the payload is
+    // fully readable in user-space.
+    //
+    // Instead of calling a standard socket Read(), which could suspend the fiber indefinitely if a
+    // malicious/misbehaving client connects and (deliberately) stalls, we use a non-blocking PEEK.
+    // If data isn't immediately available, we allow a strict 500 microsecond micro-yield window.
+    //
+    // Legitimate clients will pass this instantly, silent zombies are dropped and their resources
+    // are reclaimed before they can hoard server connection slots.
+    int fd = socket_->native_handle();
+    if (fd >= 0) {
+      // We peek up to 2 bytes because we are expecting the 2-byte TLS magic header (0x16 0x03).
+      uint8_t peek_buf[2]{};
+      ssize_t peek_res;
+
+      // Try up to 6 times total (1 immediate fast-path attempt + 5 retries).
+      // Max total wait: ~500µs.
+      static constexpr int kPeekMaxRetries = 5;
+      static const std::chrono::microseconds kRetryDelay(100);
+      for (int i = 0; i <= kPeekMaxRetries; ++i) {
+        // Attempt a non-blocking peek to verify data is immediately readable.
+        // The do-while loop ensures we safely retry the system call if it is
+        // temporarily interrupted by an OS-level signal (EINTR).
+        do {
+          peek_res = ::recv(fd, peek_buf, sizeof(peek_buf), MSG_PEEK | MSG_DONTWAIT);
+        } while ((peek_res < 0) && (errno == EINTR));
+
+        // If we got data (>= 0) or a hard error that isn't EAGAIN, break out immediately.
+        if (peek_res >= 0 || errno != EAGAIN) {
+          break;
+        }
+
+        // If it's EAGAIN and we haven't exhausted our retries, yield the fiber.
+        if (i < kPeekMaxRetries) {
+          ThisFiber::SleepFor(kRetryDelay);
+        }
+      }
+
+      // If we exhausted the loop and it's STILL EAGAIN, it's a zombie.
+      if ((peek_res < 0) && (errno == EAGAIN)) {
+        conn_stats.tls_accept_disconnects++;
+        return;
+      }
+
+      // Connection closed or reset before sending any data.
+      if (peek_res == 0 || ((peek_res < 0) && (errno == ECONNRESET))) {
+        conn_stats.tls_accept_disconnects++;
+        return;
+      }
+    }
+
+    // Must be done atomically before the preemption point in Accept so that at any
     // point in time, the socket_ is defined.
     uint8_t buf[2];
     auto read_sz = socket_->Read(io::MutableBytes(buf));

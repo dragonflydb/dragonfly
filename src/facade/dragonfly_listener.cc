@@ -5,6 +5,7 @@
 #include "facade/dragonfly_listener.h"
 
 #include <mimalloc.h>
+#include <netinet/tcp.h>
 #include <openssl/err.h>
 
 #include <memory>
@@ -184,6 +185,21 @@ error_code Listener::ConfigureServerSocket(int fd) {
 
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
+  }
+
+  // Instruct the kernel to defer waking up accept() until actual payload data arrives,
+  // with a timeout of 1 second.
+  // This provides a kernel-level shield against "Pure Zombie" storms—where malicious or
+  // misconfigured clients complete the TCP 3-way handshake but never send data (or immediately
+  // send FIN/RST). The kernel will silently clean up these empty connections without
+  // consuming Dragonfly fibers or OpenSSL memory.
+  // This imposes zero latency penalty on well-behaved clients, as the kernel instantly
+  // yields the connection to user-space the moment their first byte (e.g., TLS ClientHello
+  // or RESP command) arrives.
+  static constexpr int kDeferAcceptTimeoutSec = 1;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &kDeferAcceptTimeoutSec,
+                 sizeof(kDeferAcceptTimeoutSec)) < 0) {
+    LOG(WARNING) << "Could not set TCP_DEFER_ACCEPT " << SafeErrorMessage(errno);
   }
   bool success = ConfigureKeepAlive(fd);
 
