@@ -188,21 +188,28 @@ error_code Listener::ConfigureServerSocket(int fd) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
 
-#ifdef TCP_DEFER_ACCEPT  // defined by Linux OS-Kernel
+#ifdef TCP_DEFER_ACCEPT  // TCP_DEFER_ACCEPT is only for Linux, and defined by Linux OS-Kernel
   if (GetFlag(FLAGS_enable_tcp_defer_accept)) {
-    // Instruct the kernel to defer waking up accept() until actual payload data arrives,
-    // with a timeout of 1 second.
-    // This provides a kernel-level shield against "Pure Zombie" storms - where malicious or
-    // misconfigured clients complete the TCP 3-way handshake but never send data (or immediately
-    // send FIN/RST). The kernel will silently clean up these empty connections without
-    // consuming Dragonfly fibers or OpenSSL memory.
-    // This imposes zero latency penalty on well-behaved clients, as the kernel instantly
-    // yields the connection to user-space the moment their first byte (e.g., TLS ClientHello
-    // or RESP command) arrives.
-    static constexpr int kDeferAcceptTimeoutSec = 1;
-    if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &kDeferAcceptTimeoutSec,
-                   sizeof(kDeferAcceptTimeoutSec)) < 0) {
-      LOG(WARNING) << "Could not set TCP_DEFER_ACCEPT " << SafeErrorMessage(errno);
+    sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    // TCP_DEFER_ACCEPT is only applicable to TCP (IPv4/IPv6) sockets, not Unix domain sockets
+    // (UDS).
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0 &&
+        (addr.ss_family == AF_INET || addr.ss_family == AF_INET6)) {
+      // Instruct the kernel to defer waking up accept() until actual payload data arrives,
+      // with a timeout of 1 second.
+      // This provides a kernel-level shield against "Pure Zombie" storms - where malicious or
+      // misconfigured clients complete the TCP 3-way handshake but never send data (or immediately
+      // send FIN/RST). The kernel will silently clean up these empty connections without
+      // consuming Dragonfly fibers or OpenSSL memory.
+      // This imposes zero latency penalty on well-behaved clients, as the kernel instantly
+      // yields the connection to user-space the moment their first byte (e.g., TLS ClientHello
+      // or RESP command) arrives.
+      static constexpr int kDeferAcceptTimeoutSec = 1;
+      if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &kDeferAcceptTimeoutSec,
+                     sizeof(kDeferAcceptTimeoutSec)) < 0) {
+        LOG(WARNING) << "Could not set TCP_DEFER_ACCEPT " << SafeErrorMessage(errno);
+      }
     }
   }
 #endif

@@ -744,14 +744,12 @@ void Connection::HandleRequests() {
     // which writes them into OpenSSL's internal BIO so that Accept() can drive the normal handshake
     // from there.
     //
-    // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3,
-    //   Byte  0:    ContentType        — 0x16 = Handshake
-    //   Bytes 1–2:  ProtocolVersion    — 0x0301 (TLS 1.0/1.2/1.3 all use 0x03
-    //                                    as the major byte in the record layer)
-    //   Bytes 3–4:  Length (uint16 BE) — payload length, max 2^14 = 16384
-
-    // Must be done atomically before the preemption point in Accept so that at any
-    // point in time, the socket_ is defined.
+    // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3):
+    // - Byte 0: ContentType (0x16 = Handshake)
+    // - Bytes 1–2: ProtocolVersion. While the minor version varies (0x01 for TLS 1.0,
+    //   0x03 for TLS 1.2/1.3), the major version is consistently 0x03 for all
+    //   modern TLS versions.
+    // - Bytes 3–4: Length (uint16 BE) — payload length, max 2^14 = 16384
     uint8_t buf[5];  // universal TLS Record Header size is 5 bytes
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
@@ -797,6 +795,8 @@ void Connection::HandleRequests() {
       return;
     }
 
+    // Must be done atomically before the preemption point in Accept so that at any
+    // point in time, the socket_ is defined.
     {
       FiberAtomicGuard fg;
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
