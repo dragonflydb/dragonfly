@@ -587,9 +587,9 @@ cmd::CmdR ExtendGeneric(CmdArgList args, CommandContext* cmd_cntx) {
     OpResult<bool> result = co_await cmd::SingleHopT(cb);
     MCRender render(cmd_cntx->mc_command()->cmd_flags);
     if (result) {
-      cmd_cntx->SendSimpleString(render.RenderStored(result.value()));
+      cmd_cntx->rb()->SendSimpleString(render.RenderStored(result.value()));
     } else {
-      cmd_cntx->SendError(result.status());
+      cmd_cntx->rb()->SendError(result.status());
     }
   }
 
@@ -940,9 +940,10 @@ cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
     co_await cmd::SingleHop(del_cb);
 
     if (cmd_cntx->mc_command() != nullptr) {
-      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
+      cmd_cntx->rb()->SendSimpleString(
+          MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
     } else {
-      cmd_cntx->SendOk();
+      cmd_cntx->rb()->SendOk();
     }
     co_return std::nullopt;
   }
