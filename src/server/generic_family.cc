@@ -331,9 +331,9 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
       return OpStatus::IO_ERROR;
 
     // TODO: allow saving string directly without proxy object
-    str_res = SerializerBase::DumpValue(PrimeValue{*res});
+    str_res = RdbSerializerBase::DumpValue(PrimeValue{*res});
   } else {
-    str_res = SerializerBase::DumpValue(pv);
+    str_res = RdbSerializerBase::DumpValue(pv);
   }
 
   return {std::move(str_res)};

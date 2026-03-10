@@ -458,7 +458,7 @@ size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
     CHECK(delayed_entries_.empty());
     serializer = serializer_.get();
   }
-  std::string blob = serializer->Flush(SerializerBase::FlushState::kFlushEndEntry);
+  std::string blob = serializer->Flush(RdbSerializerBase::FlushState::kFlushEndEntry);
 
   size_t serialized = blob.size();
   HandleFlushData(std::move(blob));

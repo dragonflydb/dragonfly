@@ -587,6 +587,14 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return bucket_id_;
   }
 
+  // Returns the unique address of the physical bucket as an integer.
+  // Stable for the lifetime of a serialization (mutations that could trigger
+  // segment splits are blocked while a snapshot version is registered).
+  uintptr_t bucket_address() const {
+    assert(owner_ && seg_id_ < owner_->segment_.size());
+    return reinterpret_cast<uintptr_t>(&owner_->segment_[seg_id_]->GetBucket(bucket_id_));
+  }
+
   unsigned slot_id() const {
     return slot_id_;
   }
