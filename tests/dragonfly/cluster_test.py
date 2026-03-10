@@ -3811,7 +3811,7 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
 )
 async def test_cluster_config_slot_overflow_doesnt_crash(df_factory: DflyInstanceFactory):
     instance = df_factory.create(port=next(next_port))
-    instance.start()
+    df_factory.start_all([instance])
     client = instance.client()
     node_id = "0" * 40
 
