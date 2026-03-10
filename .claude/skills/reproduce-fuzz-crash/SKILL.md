@@ -9,8 +9,8 @@ allowed-tools: Bash, Read, Grep, Glob, Write
 
 # Reproduce Fuzz Crash
 
-Given a GitHub Actions fuzz run URL, download crash artifacts, replay them
-against a local Dragonfly build, and produce a crash analysis report.
+Given a GitHub Actions fuzz run URL, download crash artifacts, triage them
+with `fuzz/triage_crashes.sh`, and produce a crash analysis report.
 
 **Input**: `$ARGUMENTS` — a GitHub Actions run URL like:
 `https://github.com/dragonflydb/dragonfly/actions/runs/22906484769`
@@ -30,39 +30,29 @@ Strip any query parameters from `run_id`.
 
 ### Step 2: Download artifacts
 
-Use `gh` CLI to download all artifacts from the run:
+List crash artifacts via the GitHub API, then download each as a `.zip` directly:
 
 ```bash
-gh run download {run_id} --repo {owner}/{repo} --dir /tmp/fuzz-repro-{run_id}
+# List artifacts — filter for names containing "crash"
+gh api repos/{owner}/{repo}/actions/runs/{run_id}/artifacts
+
+# Download each crash artifact by ID
+mkdir -p /tmp/fuzz-repro-{run_id}
+gh api repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip > /tmp/fuzz-repro-{run_id}/<artifact-name>.zip
 ```
 
-### Step 3: Discover crashes
+This gives real `.zip` files that the triage script can consume directly.
 
-Look for crash tarballs inside the downloaded artifacts:
+If no crash artifacts are found, report that the run has no crash artifacts and stop.
 
-```bash
-find /tmp/fuzz-repro-{run_id} -name 'crash-*.tar.gz'
-```
+Note: there may be duplicate artifact names (same name, different IDs) from
+retried jobs. Download the **most recent** one (highest artifact ID).
 
-The typical structure is:
-```
-{artifact-name}/packaged/crash-NNNNNN.tar.gz
-```
+### Step 3: Determine mode
 
-Each tarball contains:
-```
-crash-NNNNNN/
-  replay_crash.py
-  crashes/
-    id:NNNNNN,sig:...,src:...    # the crash input
-    RECORD:NNNNNN,cnt:000000     # preceding inputs (persistent mode state)
-    RECORD:NNNNNN,cnt:000001
-    ...
-```
-
-Extract all tarballs into `/tmp/fuzz-repro-{run_id}/extracted/`.
-
-If no crash tarballs found, report that the run has no crash artifacts and stop.
+Infer the protocol mode from the artifact name:
+- Contains "memcache" → `memcache`
+- Otherwise → `resp`
 
 ### Step 4: Check Dragonfly binary
 
@@ -80,51 +70,25 @@ cd build-dbg && ninja dragonfly
 
 If `build-dbg` doesn't exist, run `./helio/blaze.sh` first.
 
-### Step 5: Replay each crash
+### Step 5: Run triage_crashes.sh
 
-For each extracted `crash-NNNNNN` directory:
-
-1. **Start Dragonfly** on a non-conflicting port (use 16399) with output captured:
+For each zip file, run:
 
 ```bash
-./build-dbg/dragonfly --port 16399 --logtostderr --proactor_threads 1 \
-    --dbfilename="" > /tmp/fuzz-repro-{run_id}/dragonfly-NNNNNN.log 2>&1 &
-DFPID=$!
+./fuzz/triage_crashes.sh ./build-dbg/dragonfly <mode> /tmp/fuzz-repro-{run_id}/<artifact-name>.zip
 ```
 
-2. **Wait for ready** — poll with `redis-cli -p 16399 ping` until PONG (up to 15s).
+Capture the full output.
 
-3. **Replay** using the repo's `fuzz/replay_crash.py`:
+### Step 6: Analyze and report
 
-```bash
-python3 fuzz/replay_crash.py \
-    /tmp/fuzz-repro-{run_id}/extracted/crash-NNNNNN/crashes \
-    NNNNNN 127.0.0.1 16399
-```
+Parse the triage output for confirmed crashes. For each confirmed crash:
 
-4. **Wait briefly** (1-2s), then check if the process is still alive:
+1. **Read the source** at the crash location — use the stack trace to identify
+   the source file and line number, then read that code.
+2. **Provide analysis**: likely root cause, what to investigate.
 
-```bash
-kill -0 $DFPID 2>/dev/null
-redis-cli -p 16399 ping
-```
-
-5. **Collect result**:
-   - If process died: read the log file for the crash output and stack trace.
-   - If process is still alive: the crash is non-deterministic (timing-dependent).
-     Kill it with `kill $DFPID` and note this in the report.
-
-6. **Decode the crash input**: Use both `strings` and `xxd` on the crash input
-   file (`id:NNNNNN,...`). `strings` gives a clean view of the Redis commands;
-   `xxd` shows the full binary content for completeness.
-
-7. **Read the source at the crash location**: Use the stack trace to identify
-   the source file and line number of the assertion/crash, then read that code
-   to provide a more informed analysis.
-
-### Step 6: Produce the report
-
-Print a structured report to the user. Format:
+Print a structured report:
 
 ```
 ## Fuzz Crash Report
@@ -136,22 +100,12 @@ Print a structured report to the user. Format:
 
 ### Crash NNNNNN
 
-**Reproduced**: Yes / No (non-deterministic)
+**Reproduced**: Yes / No (false positive)
 **Signal**: SIGABRT (6) / SIGSEGV (11) / etc.
 
 **Stack trace**:
 \```
-<cleaned up stack trace from the log, showing function names>
-\```
-
-**Failing assertion** (if SIGABRT):
-\```
-<the CHECK/DCHECK failure message>
-\```
-
-**Crash input** (decoded):
-\```
-<the Redis commands from xxd/strings of the crash input file>
+<stack trace from triage output>
 \```
 
 **Analysis**:
@@ -160,23 +114,16 @@ the assertion message, and the crash input. Identify the source file and
 line number. Suggest what to investigate.>
 ```
 
-### Step 7: Cleanup
-
-After reporting, clean up the dragonfly process if still running:
-
-```bash
-kill $DFPID 2>/dev/null
-```
-
-Do NOT delete `/tmp/fuzz-repro-{run_id}/` — the user may want to inspect it.
-
 ## Important Notes
 
-- Use port **16399** to avoid conflicts with any running Dragonfly instance.
-- The replay script is at `fuzz/replay_crash.py` in the project root.
-- Crashes from persistent-mode fuzzing depend on accumulated state from
-  RECORD files. The replay script handles this automatically.
-- Some crashes are non-deterministic (thread timing). If replay doesn't
-  crash, note this clearly — it doesn't mean the bug is invalid.
+- The triage script uses port **6379** (resp) or **11211** (memcache).
+  Ensure no other Dragonfly or Redis instance is using these ports.
+- The script adds `--rename_command` flags to avoid false positives from
+  commands like DEBUG SLEEP that the fuzzer might generate.
+- Some crashes are non-deterministic (thread timing). The script reports
+  these as "FALSE POSITIVE" — note this clearly, it doesn't mean the bug
+  is invalid, just that it didn't reproduce on this run.
+- The script handles its own cleanup of Dragonfly processes.
+- Do NOT delete `/tmp/fuzz-repro-{run_id}/` — the user may want to inspect it.
 - If `gh run download` fails with permissions, suggest the user authenticate
   with `gh auth login`.
