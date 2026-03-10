@@ -387,8 +387,11 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     }
   }
 
-  // We should push tracked tiered keys forcefully. Other entris can be pushed if they are resolved.
-  PushDelayedEntries(false, track_tiered_keys ? &bucket_tiered_keys : nullptr);
+  // Push tracked tiered keys forcefully. If there are too many delayed entries
+  // accumulated we should also push them forcefully.
+  const size_t kMaxDelayedEntries = 512;
+  PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
+                     track_tiered_keys ? &bucket_tiered_keys : nullptr);
   serialize_bucket_running_ = false;
   return result;
 }
