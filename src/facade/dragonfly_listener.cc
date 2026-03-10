@@ -5,6 +5,7 @@
 #include "facade/dragonfly_listener.h"
 
 #include <mimalloc.h>
+#include <netinet/tcp.h>
 #include <openssl/err.h>
 
 #include <memory>
@@ -27,6 +28,7 @@ ABSL_FLAG(uint32_t, conn_io_threads, 0, "Number of threads used for handing serv
 ABSL_FLAG(uint32_t, conn_io_thread_start, 0, "Starting thread id for handling server connections");
 ABSL_FLAG(bool, tls, false, "");
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
+ABSL_FLAG(bool, enable_tcp_defer_accept, true, "Enable TCP_DEFER_ACCEPT option on server sockets");
 
 ABSL_FLAG(bool, conn_use_incoming_cpu, false,
           "If true uses incoming cpu of a socket in order to distribute"
@@ -185,6 +187,25 @@ error_code Listener::ConfigureServerSocket(int fd) {
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
+
+#ifdef TCP_DEFER_ACCEPT  // defined by Linux OS-Kernel
+  if (GetFlag(FLAGS_enable_tcp_defer_accept)) {
+    // Instruct the kernel to defer waking up accept() until actual payload data arrives,
+    // with a timeout of 1 second.
+    // This provides a kernel-level shield against "Pure Zombie" storms - where malicious or
+    // misconfigured clients complete the TCP 3-way handshake but never send data (or immediately
+    // send FIN/RST). The kernel will silently clean up these empty connections without
+    // consuming Dragonfly fibers or OpenSSL memory.
+    // This imposes zero latency penalty on well-behaved clients, as the kernel instantly
+    // yields the connection to user-space the moment their first byte (e.g., TLS ClientHello
+    // or RESP command) arrives.
+    static constexpr int kDeferAcceptTimeoutSec = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &kDeferAcceptTimeoutSec,
+                   sizeof(kDeferAcceptTimeoutSec)) < 0) {
+      LOG(WARNING) << "Could not set TCP_DEFER_ACCEPT " << SafeErrorMessage(errno);
+    }
+  }
+#endif
   bool success = ConfigureKeepAlive(fd);
 
 #ifdef __linux__

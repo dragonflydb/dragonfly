@@ -724,9 +724,35 @@ void Connection::HandleRequests() {
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    // Must be done atomically before the premption point in Accept so that at any
+    // Early TLS connection filter
+    //
+    // Before entering the expensive OpenSSL handshake we pre-read the first complete TLS record
+    // (the ClientHello) on the raw TCP socket. This serves two purposes
+    //  1. Wrong-client detection (header check):
+    //     Clients that forgot to enable TLS (e.g. a plaintext Redis client connecting to the TLS
+    //     port) will not send a valid TLS Record Layer header.  We detect this immediately and
+    //     reply with a human-readable "-ERR" message before disconnecting, instead of letting
+    //     OpenSSL produce a cryptic handshake failure.
+    //
+    //  2. Zombie-connection rejection (full ClientHello read): Zombie connections — / broken
+    //     clients — open a TCP socket but never send the ClientHello. By
+    //     demanding the entire first TLS record before allocating any SSL state, we drop these
+    //     cheaply on the raw socket instead of tying up an OpenSSL context and handshake state
+    //     machine that will never complete.
+    //
+    // The pre-read bytes (header + payload) are then injected into the TlsSocket via InitSSL(),
+    // which writes them into OpenSSL's internal BIO so that Accept() can drive the normal handshake
+    // from there.
+    //
+    // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3,
+    //   Byte  0:    ContentType        — 0x16 = Handshake
+    //   Bytes 1–2:  ProtocolVersion    — 0x0301 (TLS 1.0/1.2/1.3 all use 0x03
+    //                                    as the major byte in the record layer)
+    //   Bytes 3–4:  Length (uint16 BE) — payload length, max 2^14 = 16384
+
+    // Must be done atomically before the preemption point in Accept so that at any
     // point in time, the socket_ is defined.
-    uint8_t buf[2];
+    uint8_t buf[5];  // universal TLS Record Header size is 5 bytes
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
       auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
@@ -746,10 +772,35 @@ void Connection::HandleRequests() {
       return;
     }
 
+    uint16_t client_hello_payload_length = (buf[3] << 8) | buf[4];
+    // TLS specification caps the payload at 2^14 = 16384 bytes:
+    // RFC 5246 (TLS 1.2), §6.2.1: "The length MUST NOT exceed 2^14."
+    // RFC 8446 (TLS 1.3), §5.1:   "The length MUST NOT exceed 2^14 bytes."
+    if ((client_hello_payload_length == 0) || (client_hello_payload_length > 16384)) {
+      LOG_EVERY_T(INFO, 1) << "Invalid TLS record length: " << client_hello_payload_length;
+      conn_stats.tls_accept_disconnects++;
+      return;
+    }
+
+    // Copy the header to inject it once together with the ClientHello payload during InitSSL().
+    vector<uint8_t> client_hello(client_hello_payload_length + sizeof(buf));
+    memcpy(client_hello.data(), buf, sizeof(buf));
+    // Read runs in a loop until it reads the full ClientHello payload, or encounters an error or
+    // EOF. This is to handle cases where the client hello is sent in multiple TCP segments.
+    read_sz = socket_->Read(
+        io::MutableBytes(client_hello.data() + sizeof(buf), client_hello_payload_length));
+    if (!read_sz || (*read_sz < client_hello_payload_length)) {
+      auto msg = !read_sz ? read_sz.error().message() : "Connection closed by peer (EOF)";
+      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " " << msg
+                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      conn_stats.tls_accept_disconnects++;
+      return;
+    }
+
     {
       FiberAtomicGuard fg;
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-      tls_sock->InitSSL(ssl_ctx_, buf);
+      tls_sock->InitSSL(ssl_ctx_, client_hello);
       SetSocket(tls_sock.release());
     }
     FiberSocketBase::AcceptResult aresult = socket_->Accept();
