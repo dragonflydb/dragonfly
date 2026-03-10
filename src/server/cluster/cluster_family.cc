@@ -730,11 +730,13 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_c
 
   CmdArgParser parser(args);
   do {
-    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    auto [slot_start, slot_end] = parser.Next<ParsedSlotId, ParsedSlotId>();
+    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+    if (slot_start > slot_end) {
+      return cmd_cntx->SendError("Invalid slot range");
+    }
     slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   DeleteSlots(SlotRanges(std::move(slot_ranges)));
 
