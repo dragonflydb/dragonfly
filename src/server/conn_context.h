@@ -418,6 +418,12 @@ class CommandContext : public facade::ParsedCommand {
   // Stores backing array for tail args slice
   CmdArgVec arg_slice_backing;
 
+  // Fixed size of reserved stack if not nullptr
+  static constexpr size_t kReservedStack = 256;
+
+  // Pointer to reserved stack buffer that can be used to avoid coroutine allocatio
+  std::byte* reseved_stack = nullptr;
+
  protected:
   void ReuseInternal() final;
 

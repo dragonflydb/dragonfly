@@ -10,6 +10,7 @@
 #include <variant>
 
 #include "facade/error.h"
+#include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "server/conn_context.h"
 #include "server/engine_shard.h"
@@ -172,6 +173,19 @@ struct CmdR::Coro {
     return SingleHopWaiterT<RT>{cmd_cntx, callback};
   }
 
+  // Custom new operator to avoid allocating coroutines if stack space is available and enough
+  static void* operator new(std::size_t size, facade::CmdArgList /*unused*/, CommandContext* cntx) {
+    if (size <= CommandContext::kReservedStack && cntx->reseved_stack)
+      return cntx->reseved_stack;
+    return std::malloc(size);
+  }
+
+  static void operator delete(void* ptr, std::size_t size) {
+    auto* promise = reinterpret_cast<promise_type*>(ptr);
+    if (size > CommandContext::kReservedStack || promise->cmd_cntx->reseved_stack == nullptr)
+      std::free(ptr);
+  }
+
   // Return error
   void return_value(const facade::ErrorReply& err) const noexcept;
 
@@ -194,5 +208,19 @@ struct CmdR::Coro {
 
   CommandContext* cmd_cntx;
 };
+
+// Wrap coroutine call into a void-returning functor that also enable coroutine allocation
+// optimization by using the stack for synchronous calls
+inline auto Wrap(auto f) {
+  return [f](ArgSlice args, CommandContext* cntx) {
+    if (cntx->IsDeferredReply()) {
+      f(args, cntx);
+    } else {
+      std::byte stack_space[CommandContext::kReservedStack];
+      cntx->reseved_stack = stack_space;
+      f(args, cntx);
+    }
+  };
+}
 
 }  // namespace dfly::cmd

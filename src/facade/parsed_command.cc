@@ -4,12 +4,16 @@
 
 #include "facade/parsed_command.h"
 
+#include <coroutine>
+#include <variant>
+
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
+#include "facade/reply_payload.h"
 
 namespace facade {
 
@@ -129,10 +133,31 @@ bool ParsedCommand::CanReply() const {
 }
 
 void ParsedCommand::SendReply() {
-  dfly::Overloaded ov{
-      [this](payload::Payload& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
-      [this](AsyncTask& task) { return task.replier(rb_); }};
-  return std::visit(ov, reply_);
+  // If the reply is stored, consume it
+  if (std::holds_alternative<payload::Payload>(reply_))
+    return CapturingReplyBuilder::Apply(std::move(std::get<payload::Payload>(reply_)), rb_);
+
+  // Otherwise handle responder of async task
+  dfly::Overloaded ov{[this](ReplyFunc& f) { f(rb_); },
+                      [](std::coroutine_handle<> h) { h.resume(); }};
+  std::visit(ov, std::get<AsyncTask>(reply_).replier);
+}
+
+ParsedCommand::AsyncTask::~AsyncTask() {
+  // We must destroy the unfinished coroutine to free resources
+  if (std::holds_alternative<std::coroutine_handle<>>(replier))
+    std::get<std::coroutine_handle<>>(replier).destroy();
+  replier = {};
+}
+
+void ParsedCommand::AsyncTask::Reply(facade::SinkReplyBuilder* rb) {
+  auto coro_cb = [](std::coroutine_handle<> h) {
+    DCHECK(h.done()) << "Only one suspension point is supported";
+    h.resume();
+  };
+  dfly::Overloaded ov{[rb](ReplyFunc& f) { f(rb); }, coro_cb};
+  std::visit(ov, replier);
+  replier = {};  // reset replier after its done
 }
 
 }  // namespace facade

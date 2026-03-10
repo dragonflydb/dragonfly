@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <coroutine>
 #include <variant>
 
 #include "base/function2.hpp"
@@ -161,7 +162,11 @@ class ParsedCommand : public cmn::BackedArguments {
 
   // Resolve deferred command with async task
   void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, ReplyFunc replier) {
-    reply_ = AsyncTask{blocker, std::move(replier)};
+    reply_ = AsyncTask(blocker, std::move(replier));
+  }
+
+  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro) {
+    reply_ = AsyncTask(blocker, coro);
   }
 
  protected:
@@ -169,9 +174,19 @@ class ParsedCommand : public cmn::BackedArguments {
 
  private:
   // Pending async command. Once blocker is ready, replier can be called
+  // TOOD: Use only typed coroutine handle to access blocker through promise directly
   struct AsyncTask {
+    AsyncTask(util::fb2::EmbeddedBlockingCounter* blocker, auto replier)
+        : blocker{blocker}, replier{std::move(replier)} {
+    }
+    AsyncTask(AsyncTask&&) = default;
+    AsyncTask& operator=(AsyncTask&&) = default;
+
+    ~AsyncTask();
+    void Reply(facade::SinkReplyBuilder*);
+
     util::fb2::EmbeddedBlockingCounter* blocker;
-    ReplyFunc replier;
+    std::variant<ReplyFunc, std::coroutine_handle<>> replier;
   };
 
   // if false then the reply was sent directly to reply builder,
@@ -182,7 +197,7 @@ class ParsedCommand : public cmn::BackedArguments {
 };
 
 #ifdef __linux__
-static_assert(sizeof(ParsedCommand) == 232);
+static_assert(sizeof(ParsedCommand) == 240);
 #endif
 
 }  // namespace facade

@@ -301,6 +301,7 @@ void CommandContext::ReuseInternal() {
   tx_ = nullptr;
   arg_slice_backing.clear();
   start_time_ns = 0;
+  reseved_stack = nullptr;
 }
 
 void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
