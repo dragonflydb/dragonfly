@@ -75,7 +75,7 @@ Check if the debug binary already exists and runs:
 Only build if the binary doesn't exist or fails to run:
 
 ```bash
-cd /home/roman/projects/dragonfly/build-dbg && ninja dragonfly
+cd build-dbg && ninja dragonfly
 ```
 
 If `build-dbg` doesn't exist, run `./helio/blaze.sh` first.
