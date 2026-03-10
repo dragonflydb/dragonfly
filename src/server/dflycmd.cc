@@ -512,9 +512,9 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, cmd_cntx))
       return;
 
-    auto new_state = sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
-    if (new_state != GlobalState::TAKEN_OVER) {
-      LOG(WARNING) << new_state << " in progress, could not take over";
+    auto prev_state = sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
+    if (prev_state != GlobalState::ACTIVE) {
+      LOG(WARNING) << prev_state << " in progress, could not take over";
       return cmd_cntx->SendError("Takeover failed!");
     }
   }

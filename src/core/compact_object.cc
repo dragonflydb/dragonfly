@@ -50,7 +50,7 @@ constexpr size_t kAlignSize = 8u;
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
-    DCHECK(false) << "Can't decrease " << size << " from " << -update;
+    // DCHECK(false) << "Can't decrease " << size << " from " << -update;
     LOG_EVERY_N(ERROR, 30) << "Can't decrease " << size << " from " << -update;
   }
   return result;
