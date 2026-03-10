@@ -726,23 +726,23 @@ void Connection::HandleRequests() {
   if (ssl_ctx_) {
     // Early TLS connection filter
     //
-    // Before entering the expensive OpenSSL handshake we pre-read the first complete TLS record
-    // (the ClientHello) on the raw TCP socket. This serves two purposes
-    //  1. Wrong-client detection (header check):
+    // Before entering the expensive OpenSSL handshake we pre-read the 5-byte TLS Record Layer
+    // header on the raw TCP socket. This serves two purposes:
+    //
+    //  1. Wrong-client detection:
     //     Clients that forgot to enable TLS (e.g. a plaintext Redis client connecting to the TLS
     //     port) will not send a valid TLS Record Layer header.  We detect this immediately and
     //     reply with a human-readable "-ERR" message before disconnecting, instead of letting
     //     OpenSSL produce a cryptic handshake failure.
     //
-    //  2. Zombie-connection rejection (full ClientHello read): Zombie connections — / broken
-    //     clients — open a TCP socket but never send the ClientHello. By
-    //     demanding the entire first TLS record before allocating any SSL state, we drop these
-    //     cheaply on the raw socket instead of tying up an OpenSSL context and handshake state
-    //     machine that will never complete.
+    //  2. Zombie-connection rejection:
+    //     Zombie connections —— open a TCP socket but never send any data.  By demanding at least
+    //     the 5-byte header before allocating any SSL state, we drop these cheaply on the raw
+    //     socket instead of tying up an OpenSSL context and handshake state machine that will never
+    //     complete.
     //
-    // The pre-read bytes (header + payload) are then injected into the TlsSocket via InitSSL(),
-    // which writes them into OpenSSL's internal BIO so that Accept() can drive the normal handshake
-    // from there.
+    // The pre-read header bytes are injected into the TlsSocket via InitSSL(), which writes them
+    // into OpenSSL's internal BIO so that Accept() can drive the normal handshake from there.
     //
     // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3):
     // - Byte 0: ContentType (0x16 = Handshake)
@@ -759,10 +759,16 @@ void Connection::HandleRequests() {
       conn_stats.tls_accept_disconnects++;
       return;
     }
-    if (buf[0] != 0x16 || buf[1] != 0x03) {
+
+    // Byte 0: ContentType must be 0x16 (Handshake).
+    // Byte 1: major ProtocolVersion — always 0x03 for TLS 1.0 through TLS 1.3.
+    // Byte 2: minor ProtocolVersion — 0x01 (TLS 1.0), 0x02 (TLS 1.1), 0x03 (TLS 1.2/1.3).
+    //         SSL 3.0 (0x00) is deprecated (RFC 7568) and rejected.
+    if ((buf[0] != 0x16) || (buf[1] != 0x03) || (buf[2] < 0x01) || (buf[2] > 0x03)) {
       VLOG(1) << "Bad TLS header "
               << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
-                              absl::Hex(buf[1], absl::kZeroPad2));
+                              absl::Hex(buf[1], absl::kZeroPad2),
+                              absl::Hex(buf[2], absl::kZeroPad2));
       std::ignore =
           socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
                                     "if you enabled TLS for your client.\r\n"));
@@ -775,22 +781,7 @@ void Connection::HandleRequests() {
     // RFC 5246 (TLS 1.2), §6.2.1: "The length MUST NOT exceed 2^14."
     // RFC 8446 (TLS 1.3), §5.1:   "The length MUST NOT exceed 2^14 bytes."
     if ((client_hello_payload_length == 0) || (client_hello_payload_length > 16384)) {
-      LOG_EVERY_T(INFO, 1) << "Invalid TLS record length: " << client_hello_payload_length;
-      conn_stats.tls_accept_disconnects++;
-      return;
-    }
-
-    // Copy the header to inject it once together with the ClientHello payload during InitSSL().
-    vector<uint8_t> client_hello(client_hello_payload_length + sizeof(buf));
-    memcpy(client_hello.data(), buf, sizeof(buf));
-    // Read runs in a loop until it reads the full ClientHello payload, or encounters an error or
-    // EOF. This is to handle cases where the client hello is sent in multiple TCP segments.
-    read_sz = socket_->Read(
-        io::MutableBytes(client_hello.data() + sizeof(buf), client_hello_payload_length));
-    if (!read_sz || (*read_sz < client_hello_payload_length)) {
-      auto msg = !read_sz ? read_sz.error().message() : "Connection closed by peer (EOF)";
-      LOG_EVERY_T(INFO, 1) << "Error reading from peer " << remote_ep << " " << msg
-                           << ", socket state: " + dfly::GetSocketInfo(socket_->native_handle());
+      VLOG(1) << "Invalid TLS record length: " << client_hello_payload_length;
       conn_stats.tls_accept_disconnects++;
       return;
     }
@@ -800,7 +791,7 @@ void Connection::HandleRequests() {
     {
       FiberAtomicGuard fg;
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-      tls_sock->InitSSL(ssl_ctx_, client_hello);
+      tls_sock->InitSSL(ssl_ctx_, buf);
       SetSocket(tls_sock.release());
     }
     FiberSocketBase::AcceptResult aresult = socket_->Accept();
