@@ -711,9 +711,33 @@ void Connection::HandleRequests() {
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    // Must be done atomically before the premption point in Accept so that at any
-    // point in time, the socket_ is defined.
-    uint8_t buf[2];
+    // Early TLS connection filter
+    //
+    // Before entering the expensive OpenSSL handshake we pre-read the 5-byte TLS Record Layer
+    // header on the raw TCP socket. This serves two purposes:
+    //
+    //  1. Wrong-client detection:
+    //     Clients that forgot to enable TLS (e.g. a plaintext Redis client connecting to the TLS
+    //     port) will not send a valid TLS Record Layer header.  We detect this immediately and
+    //     reply with a human-readable "-ERR" message before disconnecting, instead of letting
+    //     OpenSSL produce a cryptic handshake failure.
+    //
+    //  2. Zombie-connection rejection:
+    //     Zombie connections —— open a TCP socket but never send any data.  By demanding at least
+    //     the 5-byte header before allocating any SSL state, we drop these cheaply on the raw
+    //     socket instead of tying up an OpenSSL context and handshake state machine that will never
+    //     complete.
+    //
+    // The pre-read header bytes are injected into the TlsSocket via InitSSL(), which writes them
+    // into OpenSSL's internal BIO so that Accept() can drive the normal handshake from there.
+    //
+    // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3):
+    // - Byte 0: ContentType (0x16 = Handshake)
+    // - Bytes 1–2: ProtocolVersion. While the minor version varies (0x01 for TLS 1.0,
+    //   0x03 for TLS 1.2/1.3), the major version is consistently 0x03 for all
+    //   modern TLS versions.
+    // - Bytes 3–4: Length (uint16 BE) — payload length, max 2^14 = 16384
+    uint8_t buf[5];  // universal TLS Record Header size is 5 bytes
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
       auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
@@ -722,10 +746,16 @@ void Connection::HandleRequests() {
       stats_->tls_accept_disconnects++;
       return;
     }
-    if (buf[0] != 0x16 || buf[1] != 0x03) {
+
+    // Byte 0: ContentType must be 0x16 (Handshake).
+    // Byte 1: major ProtocolVersion — always 0x03 for TLS 1.0 through TLS 1.3.
+    // Byte 2: minor ProtocolVersion — 0x01 (TLS 1.0), 0x02 (TLS 1.1), 0x03 (TLS 1.2/1.3).
+    //         SSL 3.0 (0x00) is deprecated (RFC 7568) and rejected.
+    if ((buf[0] != 0x16) || (buf[1] != 0x03) || (buf[2] < 0x01) || (buf[2] > 0x03)) {
       VLOG(1) << "Bad TLS header "
               << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
-                              absl::Hex(buf[1], absl::kZeroPad2));
+                              absl::Hex(buf[1], absl::kZeroPad2),
+                              absl::Hex(buf[2], absl::kZeroPad2));
       std::ignore =
           socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
                                     "if you enabled TLS for your client.\r\n"));
@@ -733,6 +763,8 @@ void Connection::HandleRequests() {
       return;
     }
 
+    // Must be done atomically before the preemption point in Accept so that at any
+    // point in time, the socket_ is defined.
     {
       FiberAtomicGuard fg;
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
