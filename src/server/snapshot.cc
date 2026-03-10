@@ -375,7 +375,8 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   unsigned result = 0;
 
   std::vector<TieredDelayEntryKey> bucket_tiered_keys;
-  const bool track_tiered_keys = push_tiered && EngineShard::tlocal()->tiered_storage() != nullptr;
+  const bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
+  const bool track_tiered_keys = push_tiered && tiering_enabled;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
@@ -387,11 +388,14 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     }
   }
 
-  // Push tracked tiered keys forcefully. If there are too many delayed entries
-  // accumulated we should also push them forcefully.
-  const size_t kMaxDelayedEntries = 512;
-  PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
-                     track_tiered_keys ? &bucket_tiered_keys : nullptr);
+  if (tiering_enabled) {
+    // Push tracked tiered keys forcefully. If there are too many delayed entries
+    // accumulated we should also push them forcefully.
+    const size_t kMaxDelayedEntries = 512;
+    PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
+                       track_tiered_keys ? &bucket_tiered_keys : nullptr);
+  }
+
   serialize_bucket_running_ = false;
   return result;
 }
