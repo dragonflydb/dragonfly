@@ -1141,7 +1141,7 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
 }
 
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
-                         tiering::TieredColdRecord* record) {
+                         tiering::TieredCoolRecord* record) {
   encoding_ = record->value.encoding_;
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
