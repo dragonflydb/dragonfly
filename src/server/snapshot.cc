@@ -315,7 +315,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     } while (snapshot_cursor_);
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
-    // We should now push all delayed entries
+    // Wait for all the outstanding delayed entries and serialize them as well.
     PushDelayedEntries(true, nullptr);
     PushSerialized(true);
   }  // for (dbindex)
@@ -363,7 +363,7 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                        bool from_cb) {
+                                        bool push_tiered) {
   if (use_snapshot_version_) {
     DCHECK_LT(it.GetVersion(), snapshot_version_);
     it.SetVersion(snapshot_version_);
@@ -374,8 +374,8 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   unsigned result = 0;
 
-  absl::flat_hash_set<std::pair<DbIndex, string>> tiered_keys;
-  const bool track_tiered_keys = from_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
+  std::vector<TieredDelayEntryKey> bucket_tiered_keys;
+  const bool track_tiered_keys = push_tiered && EngineShard::tlocal()->tiered_storage() != nullptr;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
@@ -383,10 +383,12 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     SerializeEntry(db_index, it->first, it->second);
     // Track tiered keys to push them with priority after the loop, but only for callbacks.
     if (track_tiered_keys && it->second.IsExternal()) {
-      tiered_keys.emplace(std::make_pair(db_index, it->first.ToString()));
+      bucket_tiered_keys.emplace_back(db_index, it->first.ToString());
     }
   }
-  PushDelayedEntries(from_cb, &tiered_keys);
+
+  // We should push tracked tiered keys forcefully. Other entris can be pushed if they are resolved.
+  PushDelayedEntries(false, track_tiered_keys ? &bucket_tiered_keys : nullptr);
   serialize_bucket_running_ = false;
   return result;
 }
@@ -477,46 +479,52 @@ bool SliceSnapshot::PushSerialized(bool force) {
   return FlushSerialized();
 }
 
-void SliceSnapshot::PushDelayedEntries(
-    bool force, absl::flat_hash_set<std::pair<DbIndex, std::string>>* tiered_keys) {
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+void SliceSnapshot::PushDelayedEntries(bool force,
+                                       std::vector<TieredDelayEntryKey>* bucket_tiered_keys) {
+  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
+
+  // Serializes a single delayed entry. Resolves the tiered read future, write the
+  // key/value and removes the entry from the map.
+  auto serialize_entry = [this](DelayedEntryIt it) {
     auto& entry = it->second;
-    // Skip unresolved entries unless force is true
-    if (!force && !entry->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-
-    // If tiered_keys filter is provided, only serialize matching keys
-    // Compare the string key from the map with the keys in tiered_keys set
-    if (tiered_keys && tiered_keys->size() && !tiered_keys->contains(it->first)) {
-      ++it;
-      continue;
-    }
-
-    // Get the value from the future (blocks if not resolved and force=true)
     auto value = entry->value.Get();
+
     if (!value.has_value()) {
       cntx_->ReportError(make_error_code(errc::io_error),
                          absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
     }
 
-    // Serialize the entry and remove it from delayed_entries_
     PrimeValue pv{*value};
-    io::Result<uint8_t> res =
-        serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
+    auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
     CHECK(res);
-    delayed_entries_.erase(it++);
 
-    // While serializing delayed entries we can accumulate data that exceeds the threshold
-    // so we should push it. Aggregate and push in batches, if threshold is reached, to avoid
-    // pushing forcefully to often.
+    delayed_entries_.erase(it);
+
+    // If we have serialized enough data we should push it to avoid building
+    // up a large blob in memory.
     PushSerialized(false);
+  };
+
+  // When tiered_keys are provided, we should serialize the entries matching the keys.
+  if (bucket_tiered_keys) {
+    for (const auto& key : *bucket_tiered_keys) {
+      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
+        serialize_entry(it);
+    }
   }
 
-  // If we called this function from callback we should push now all tiered keys that are not yet
-  // pushed but serialized into buffer.
+  // Serialize the delayed entries that are resolved, or all if force it true.
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved()) {
+      ++it;
+      continue;
+    }
+    serialize_entry(it++);
+  }
+
+  // If we need to serialize all entries (force=true), we should push
+  // leftover serialized data after the loop.
   PushSerialized(force);
 }
 
