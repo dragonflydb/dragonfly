@@ -315,6 +315,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     } while (snapshot_cursor_);
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
+    // Wait for all the outstanding delayed entries and serialize them as well.
+    PushDelayedEntries(true, nullptr);
     PushSerialized(true);
   }  // for (dbindex)
 
@@ -356,12 +358,13 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
   // zero.
   std::lock_guard latch_guard(*latch);
 
-  stats_.loop_serialized += SerializeBucket(db_index, it);
+  stats_.loop_serialized += SerializeBucket(db_index, it, false);
 
   return false;
 }
 
-unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
+unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                        bool push_tiered) {
   if (use_snapshot_version_) {
     DCHECK_LT(it.GetVersion(), snapshot_version_);
     it.SetVersion(snapshot_version_);
@@ -372,11 +375,28 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   unsigned result = 0;
 
+  std::vector<TieredDelayEntryKey> bucket_tiered_keys;
+  const bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
+  const bool track_tiered_keys = push_tiered && tiering_enabled;
+
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
+    // Track tiered keys to push them with priority after the loop, but only for callbacks.
+    if (track_tiered_keys && it->second.IsExternal()) {
+      bucket_tiered_keys.emplace_back(db_index, it->first.ToString());
+    }
   }
+
+  if (tiering_enabled) {
+    // Push tracked tiered keys forcefully. If there are too many delayed entries
+    // accumulated we should also push them forcefully.
+    const size_t kMaxDelayedEntries = 512;
+    PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
+                       track_tiered_keys ? &bucket_tiered_keys : nullptr);
+  }
+
   serialize_bucket_running_ = false;
   return result;
 }
@@ -457,73 +477,77 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   VLOG(2) << "Pushed with Serialize() " << serialized;
 }
 
-size_t SliceSnapshot::FlushSerialized(RdbSerializer* serializer) {
-  if (serializer == nullptr) {
-    CHECK(delayed_entries_.empty());
-    serializer = serializer_.get();
-  }
-  std::string blob = serializer->Flush(SerializerBase::FlushState::kFlushEndEntry);
-
+size_t SliceSnapshot::FlushSerialized() {
+  std::string blob = serializer_->Flush(SerializerBase::FlushState::kFlushEndEntry);
   size_t serialized = blob.size();
   HandleFlushData(std::move(blob));
   return serialized;
 }
 
 bool SliceSnapshot::PushSerialized(bool force) {
-  if (!force && serializer_->SerializedLen() < kMinBlobSize && delayed_entries_.size() < 32)
+  if (!force && serializer_->SerializedLen() < kMinBlobSize)
     return false;
-
-  size_t serialized = 0;
-
-  // Atomic bucket serialization might have accumulated some delayed values.
-  // Because we can finally block in this function, we'll await and serialize them
-  thread_local LocalLatch delayed_flush_latch_;
-  while (!delayed_entries_.empty()) {
-    // After pop_front there is no indication of the operation ongoing, so we need a latch
-    std::unique_lock lk{delayed_flush_latch_};
-
-    RdbSerializer delayed_serializer{compression_mode_};
-    do {
-      // This code can run concurrently, so pop the entries one by one.
-      // Because the keys never repeat (bucket visited once) order is not important.
-      TieredDelayedEntry entry = std::move(delayed_entries_.front());
-      delayed_entries_.pop_front();
-
-      // TODO: https://github.com/dragonflydb/dragonfly/issues/4654
-      // there are a few problems with how we serialize external values.
-      // 1. We may block here too frequently, slowing down the process.
-      // 2. For small bin values, we issue multiple reads for the same page, creating
-      //    read factor amplification that can reach factor of ~60.
-      auto res = entry.value.Get();  // Blocking point
-      if (!res.has_value()) {
-        cntx_->ReportError(make_error_code(errc::io_error),
-                           absl::StrCat("Failed to read ", entry.key.ToString()));
-        return false;
-      }
-
-      // TODO: to introduce RdbSerializer::SaveString that can accept a string value directly.
-      PrimeValue pv{*res};
-      delayed_serializer.SaveEntry(entry.key, pv, entry.expire, entry.mc_flags, entry.dbid);
-    } while (!delayed_entries_.empty());
-
-    lk.unlock();
-    serialized += FlushSerialized(&delayed_serializer);
-  }
-
-  // Flush any of the leftovers to avoid interleavings
-  delayed_flush_latch_.Wait();
-  serialized += FlushSerialized();
-
-  return serialized > 0;
+  return FlushSerialized();
 }
 
-void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv,
+void SliceSnapshot::PushDelayedEntries(bool force,
+                                       std::vector<TieredDelayEntryKey>* bucket_tiered_keys) {
+  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
+
+  // Serializes a single delayed entry. Resolves the tiered read future, write the
+  // key/value and removes the entry from the map.
+  auto serialize_entry = [this](DelayedEntryIt it) {
+    auto& entry = it->second;
+    auto value = entry->value.Get();
+
+    if (!value.has_value()) {
+      cntx_->ReportError(make_error_code(errc::io_error),
+                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
+      return;
+    }
+
+    PrimeValue pv{*value};
+    auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
+    CHECK(res);
+
+    delayed_entries_.erase(it);
+
+    // If we have serialized enough data we should push it to avoid building
+    // up a large blob in memory.
+    PushSerialized(false);
+  };
+
+  // When tiered_keys are provided, we should serialize the entries matching the keys.
+  if (bucket_tiered_keys) {
+    for (const auto& key : *bucket_tiered_keys) {
+      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
+        serialize_entry(it);
+    }
+  }
+
+  // Serialize the delayed entries that are resolved, or all if force it true.
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved()) {
+      ++it;
+      continue;
+    }
+    serialize_entry(it++);
+  }
+
+  // If we need to serialize all entries (force=true), we should push
+  // leftover serialized data after the loop.
+  PushSerialized(force);
+}
+
+void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
                                       time_t expire_time, uint32_t mc_flags) {
   // We prefer avoid blocking, so we just schedule a tiered read and append
   // it to the delayed entries.
-  auto future =
-      ReadTieredString(db_index, key.ToString(), pv, EngineShard::tlocal()->tiered_storage());
-  delayed_entries_.push_back({db_index, std::move(key), std::move(future), expire_time, mc_flags});
+  auto key = pk.ToString();
+  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
+  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
+                                                    expire_time, mc_flags);
+  delayed_entries_.emplace(std::make_pair(db_index, key), std::move(entry));
   ++type_freq_map_[RDB_TYPE_STRING];
 }
 
@@ -549,14 +573,14 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 
     if (bit) {
       if (!bit->is_done() && bit->GetVersion() < snapshot_version_) {
-        stats_.side_saved += SerializeBucket(db_index, *bit);
+        stats_.side_saved += SerializeBucket(db_index, *bit, true);
       }
     } else {
       string_view key = get<string_view>(req.change);
       table->CVCUponInsert(snapshot_version_, key,
                            [this, db_index](PrimeTable::bucket_iterator it) {
                              DCHECK_LT(it.GetVersion(), snapshot_version_);
-                             stats_.side_saved += SerializeBucket(db_index, it);
+                             stats_.side_saved += SerializeBucket(db_index, it, true);
                            });
     }
   }
@@ -583,7 +607,7 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
     if (IsPositionSerialized(id, dest) && !IsPositionSerialized(id, source)) {
       PrimeTable::bucket_iterator bit = db_slice_->GetTables(id).first->CursorToBucketIt(dest);
       ++stats_.moved_saved;
-      SerializeBucket(id, bit);
+      SerializeBucket(id, bit, true);
     }
   }
 }

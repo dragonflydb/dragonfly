@@ -12,11 +12,11 @@ from .utility import (
     info_tick_timer,
     wait_for_replicas_state,
     check_all_replicas_finished,
+    LogMonitor,
 )
 from .instance import DflyInstance, DflyInstanceFactory
 
 BASIC_ARGS = {
-    "port": 6379,
     "proactor_threads": 4,
     "tiered_prefix": "/tmp/tiered/backing",
     "tiered_offload_threshold": "1.0",  # offload immediately
@@ -98,7 +98,6 @@ async def test_mixed_append(async_client: aioredis.Redis):
     assert res == [10 * k for k in key_range]
 
 
-@pytest.mark.skip
 @pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
@@ -179,3 +178,69 @@ async def test_replication(
             key_replica = await replica_client.get(key)
             assert key_master == key_replica
         assert False, "Inconsistency detected, but key not determined"
+
+
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "proactor_threads": 2,
+        "maxmemory": "512MB",
+        "serialization_max_chunk_size": 64000,
+        "tiered_experimental_cooling": False,
+    }
+)
+async def test_tiered_replication_with_hashes(
+    async_client: aioredis.Redis, df_server: DflyInstance, df_factory: DflyInstanceFactory
+):
+    """
+    Test replication from a tiered master with large string and hash data.
+    Verifies that the replica does not encounter internal RDB loading errors.
+    """
+
+    # Fill master with data
+    await async_client.execute_command("DEBUG POPULATE 200000 key 3000")
+    await async_client.execute_command("DEBUG POPULATE 200 hash 70 RAND TYPE HASH ELEMENTS 900")
+
+    # Start replica
+    replica = df_factory.create(
+        proactor_threads=1,
+        dbfilename="",
+    )
+    replica.start()
+    replica_client = replica.client()
+
+    # Monitor replica logs for RDB loading errors in the background
+    monitor = LogMonitor(replica, "Internal error when loading RDB")
+    monitor.start()
+
+    # Start replication
+    await replica_client.replicaof("localhost", df_server.port)
+    logging.info("Waiting for replica to sync")
+
+    # Wait for replication to finish or RDB error
+    try:
+        async with async_timeout.timeout(500):
+            wait_task = asyncio.create_task(wait_for_replicas_state(replica_client))
+            done, _ = await asyncio.wait(
+                [wait_task, monitor.task], return_when=asyncio.FIRST_COMPLETED
+            )
+            if monitor.task in done:
+                wait_task.cancel()
+                await asyncio.gather(wait_task, return_exceptions=True)
+                monitor.assert_no_match()
+            if wait_task in done:
+                wait_task.result()  # propagate exceptions
+    except asyncio.TimeoutError:
+        master_info = await async_client.info("ALL")
+        replica_info = await replica_client.info("ALL")
+        pytest.fail(
+            f"Replica did not sync in time. \nmaster: {master_info} \n\nreplica: {replica_info}"
+        )
+    finally:
+        await monitor.stop()
+
+    await check_all_replicas_finished([replica_client], async_client, timeout=500)
+    monitor.assert_no_match()
