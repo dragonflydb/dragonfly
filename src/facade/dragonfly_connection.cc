@@ -776,16 +776,6 @@ void Connection::HandleRequests() {
       return;
     }
 
-    uint16_t client_hello_payload_length = (buf[3] << 8) | buf[4];
-    // TLS specification caps the payload at 2^14 = 16384 bytes:
-    // RFC 5246 (TLS 1.2), §6.2.1: "The length MUST NOT exceed 2^14."
-    // RFC 8446 (TLS 1.3), §5.1:   "The length MUST NOT exceed 2^14 bytes."
-    if ((client_hello_payload_length == 0) || (client_hello_payload_length > 16384)) {
-      VLOG(1) << "Invalid TLS record length: " << client_hello_payload_length;
-      conn_stats.tls_accept_disconnects++;
-      return;
-    }
-
     // Must be done atomically before the preemption point in Accept so that at any
     // point in time, the socket_ is defined.
     {
