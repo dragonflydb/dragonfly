@@ -90,7 +90,11 @@ struct OpManagerTest : PoolTestBase, OpManager {
   }
 
   void WaitForPendingStashes() {
-    while (GetStats().pending_stash_cnt > 0)
+    // Wait for both: pending_stash_cnt tracks entries awaiting version-matching IO completion,
+    // but cancelled stash IOs (version-mismatched, superseded by newer stashes for the same id)
+    // may still be in flight. Their callbacks free the allocated segments via MarkAsFree,
+    // so we must also wait for pending_ops to drain to ensure allocated_bytes is accurate.
+    while (GetStats().pending_stash_cnt > 0 || GetStats().disk_stats.pending_ops > 0)
       util::ThisFiber::SleepFor(1ms);
   }
 
