@@ -18,6 +18,7 @@ class Proxy:
             )
         except OSError:
             writer.close()
+            await writer.wait_closed()
             return
 
         async def forward(reader, writer):
