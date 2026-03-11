@@ -6,7 +6,6 @@
 
 #include <absl/base/internal/endian.h>
 
-#include <boost/intrusive/list_hook.hpp>
 #include <optional>
 #include <type_traits>
 
@@ -19,6 +18,10 @@
 typedef struct stream stream;
 
 namespace dfly {
+
+namespace tiering {
+struct TieredCoolRecord;
+}
 
 constexpr unsigned kEncodingIntSet = 0;
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
@@ -99,8 +102,6 @@ class RobjWrapper {
 } __attribute__((packed));
 
 static_assert(sizeof(RobjWrapper) == 16);
-
-struct TieredColdRecord;
 
 }  // namespace detail
 
@@ -335,12 +336,12 @@ class CompactObj {
 
   // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
-               detail::TieredColdRecord* record);
+               tiering::TieredCoolRecord* record);
 
   struct CoolItem {
     uint16_t page_offset;
     size_t serialized_size;
-    detail::TieredColdRecord* record;
+    tiering::TieredCoolRecord* record;
   };
 
   // Prerequisite: IsCool() is true.
@@ -452,7 +453,7 @@ class CompactObj {
     uint8_t first_byte;
 
     // We do not have enough space in the common area to store page_index together with
-    // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
+    // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
     struct Offload {
       uint32_t page_index;
       uint32_t reserved;
@@ -460,7 +461,7 @@ class CompactObj {
 
     union {
       Offload offload;
-      detail::TieredColdRecord* cool_record;
+      tiering::TieredCoolRecord* cool_record;
     };
   } __attribute__((packed));
   static_assert(sizeof(ExternalPtr) == 16);
@@ -583,19 +584,6 @@ std::string_view ObjTypeToString(CompactObjType type);
 
 // Returns kInvalidCompactObjType if sv is not a valid type.
 CompactObjType ObjTypeFromString(std::string_view sv);
-
-namespace detail {
-
-struct TieredColdRecord : public ::boost::intrusive::list_base_hook<
-                              boost::intrusive::link_mode<boost::intrusive::normal_link>> {
-  uint64_t key_hash;  // Allows searching the entry in the dbslice.
-  CompactValue value;
-  uint16_t db_index;
-  uint32_t page_index;
-};
-static_assert(sizeof(TieredColdRecord) == 48);
-
-};  // namespace detail
 
 stream* streamNew();
 void freeStream(stream* s);

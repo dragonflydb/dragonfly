@@ -10,10 +10,14 @@
 #include <string_view>
 #include <vector>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/facade_types.h"
 #include "server/cluster_support.h"
 
 namespace dfly::cluster {
+
+// A SlotId validated to be within [0, kMaxSlotNum], usable directly with CmdArgParser::Next().
+using ParsedSlotId = facade::FInt<SlotId{0}, SlotId{kMaxSlotNum}>;
 
 struct SlotRange {
   static constexpr SlotId kMaxSlotId = 0x3FFF;

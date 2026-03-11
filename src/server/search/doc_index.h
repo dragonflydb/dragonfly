@@ -240,9 +240,15 @@ class ShardDocIndex {
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
+
+    // Like Add but always allocates a fresh DocId, never reusing free_ids_.
+    // Used during restored CursorLoop to avoid colliding with HNSW node ids.
+    DocId AddNew(std::string_view key);
+
     void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+    bool IsValid(DocId id) const;
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
 
@@ -256,6 +262,9 @@ class ShardDocIndex {
 
     // Restore key-to-docId mappings from serialized data (RDB load)
     void Restore(const std::vector<std::pair<std::string, search::DocId>>& mappings);
+
+    // Restore from remapped keys in doc_id order (vector index = doc_id).
+    void Restore(const std::vector<std::string>& keys);
 
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
@@ -273,7 +282,7 @@ class ShardDocIndex {
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
-                      search::SearchAlgorithm* search_algo) const;
+                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
@@ -354,6 +363,11 @@ class ShardDocIndex {
     key_index_.Restore(mappings);
   }
 
+  // Restore from remapped keys in doc_id order (vector index = doc_id).
+  void RestoreKeyIndex(const std::vector<std::string>& keys) {
+    key_index_.Restore(keys);
+  }
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
@@ -369,6 +383,9 @@ class ShardDocIndex {
                                                     const SearchParams::SortOption& sort,
                                                     const OpArgs& op_args) const;
 
+  // Remove a DocId from all HNSW indices for this index.
+  void RemoveFromAllHnswIndices(search::DocId doc_id);
+
  private:
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
@@ -376,6 +393,12 @@ class ShardDocIndex {
   Synonyms synonyms_;
 
   std::unique_ptr<search::IndexBuilder> builder_;
+
+  // Buffered state for journal events arriving while HNSW vector indices
+  // are being restored from serialized graph data (is_restoring_vectors_ == true).
+  // Drained by RestoreGlobalVectorIndices after the graph is fully restored.
+  absl::flat_hash_set<std::string> pending_vector_updates_;
+  bool is_restoring_vectors_ = false;
 };
 
 // Stores shard doc indices by name on a specific shard.

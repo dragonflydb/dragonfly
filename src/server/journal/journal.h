@@ -30,7 +30,7 @@ LSN GetLsn();
 uint32_t RegisterConsumer(JournalConsumerInterface* consumer);
 void UnregisterConsumer(uint32_t id);
 
-void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, std::optional<SlotId> slot,
+void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
                  Entry::Payload payload);
 
 size_t LsnBufferSize();

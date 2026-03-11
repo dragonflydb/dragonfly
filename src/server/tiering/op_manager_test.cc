@@ -89,6 +89,15 @@ struct OpManagerTest : PoolTestBase, OpManager {
     });
   }
 
+  void WaitForPendingStashes() {
+    // Wait for both: pending_stash_cnt tracks entries awaiting version-matching IO completion,
+    // but cancelled stash IOs (version-mismatched, superseded by newer stashes for the same id)
+    // may still be in flight. Their callbacks free the allocated segments via MarkAsFree,
+    // so we must also wait for pending_ops to drain to ensure allocated_bytes is accurate.
+    while (GetStats().pending_stash_cnt > 0 || GetStats().disk_stats.pending_ops > 0)
+      util::ThisFiber::SleepFor(1ms);
+  }
+
   absl::flat_hash_map<OwnedEntryId, std::string> fetched_;
   absl::flat_hash_map<OwnedEntryId, DiskSegment> stashed_;
 };
@@ -104,8 +113,7 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     }
 
     EXPECT_EQ(GetStats().pending_stash_cnt, 100);
-    while (GetStats().disk_stats.pending_ops > 0)
-      util::ThisFiber::SleepFor(1ms);
+    WaitForPendingStashes();
 
     EXPECT_EQ(stashed_.size(), 100u);
     EXPECT_EQ(GetStats().disk_stats.allocated_bytes, 100 * kPageSize) << GetStats();
@@ -126,8 +134,7 @@ TEST_F(OpManagerTest, DeleteAfterReads) {
     Open();
 
     EXPECT_FALSE(Stash(0u, absl::StrCat("DATA")));
-    while (stashed_.empty())
-      util::ThisFiber::SleepFor(1ms);
+    WaitForPendingStashes();
 
     std::vector<util::fb2::Future<std::string>> reads;
     for (unsigned i = 0; i < 100; i++)
@@ -155,8 +162,7 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
     }
 
     EXPECT_FALSE(Stash(0u, numbers));
-    while (stashed_.empty())
-      util::ThisFiber::SleepFor(1ms);
+    WaitForPendingStashes();
 
     EXPECT_EQ(stashed_[0u].offset, 0u);
 
@@ -172,13 +178,59 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
   });
 }
 
+// Test ABA scenario: stash an entry, issue an async read, delete it and re-stash a new value
+// under the same id - all without yielding so the read I/O stays in flight. When I/O completes,
+// version tracking in pending_stash_ver_ must ensure only the new stash triggers NotifyStashed
+// while the old one is silently discarded (its segment freed).
+//
+// NOTE: We cannot guarantee that the first read completes after the second stash because we have
+// no control over io_uring completion ordering. In practice, the read submitted first likely
+// completes before or around the same time as the stash. To fully test the interleaving where
+// the new entry's read is issued while the original read is still in flight, we would need a
+// mock DiskStorage that allows explicit control over when I/O completions are delivered.
+// TODO: Add a DiskStorage mock to enable deterministic I/O completion ordering in tests.
+TEST_F(OpManagerTest, StashDeleteRestashWhileReading) {
+  pp_->at(0)->Await([this] {
+    Open();
+
+    // Stash initial value under id 0
+    EXPECT_FALSE(Stash(0u, "ORIGINAL"));
+    WaitForPendingStashes();
+
+    DiskSegment original_segment = stashed_.at(0u);
+
+    // Issue an async read - don't wait on it yet so it stays in flight.
+    auto read_fut = Read(0u, original_segment);
+
+    // Without yielding: delete the entry, clear tracking, re-stash under the same id.
+    // At this point the read for ORIGINAL is still pending in io_uring, and we're issuing
+    // a new stash for id 0 with a bumped version.
+    DeleteOffloaded(original_segment);
+    stashed_.clear();
+    EXPECT_FALSE(Stash(0u, "REPLACEMENT"));
+
+    // Both the read and the new stash are now in flight. Let them complete.
+    WaitForPendingStashes();
+    EXPECT_EQ(read_fut.Get(), "ORIGINAL");
+
+    // Verify only the replacement was notified (single entry in stashed_).
+    ASSERT_EQ(stashed_.size(), 1u);
+    ASSERT_EQ(1, stashed_.count(0u));
+    DiskSegment new_segment = stashed_.at(0u);
+
+    // Read the replacement and verify correctness
+    EXPECT_EQ(Read(0u, new_segment).Get(), "REPLACEMENT");
+
+    Close();
+  });
+}
+
 TEST_F(OpManagerTest, Modify) {
   pp_->at(0)->Await([this] {
     Open();
 
     std::ignore = Stash(0u, "D");
-    while (stashed_.empty())
-      util::ThisFiber::SleepFor(1ms);
+    WaitForPendingStashes();
 
     // Atomically issue sequence of modify-read operations
     std::vector<util::fb2::Future<std::string>> futures;

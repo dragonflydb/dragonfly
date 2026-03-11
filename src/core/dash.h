@@ -226,6 +226,13 @@ class DashTable : public detail::DashTableBase {
     assert(keep != buddy);
     assert(keep_id < buddy_id);  // Callers must iterate low to high to ensure correct orientation
 
+    // Don't merge below initial_depth to maintain Clear() invariant
+    // After merge, keep will have depth-1, which determines unique_segments
+    uint8_t depth_after_merge = keep->local_depth() - 1;
+    if (depth_after_merge < initial_depth_) {
+      return false;
+    }
+
     bool should_rollback = false;
 
     // Decrease depth (merge back to parent)
@@ -578,6 +585,14 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 
   detail::PhysicalBid bucket_id() const {
     return bucket_id_;
+  }
+
+  // Returns the unique address of the physical bucket as an integer.
+  // Stable for the lifetime of a serialization (mutations that could trigger
+  // segment splits are blocked while a snapshot version is registered).
+  uintptr_t bucket_address() const {
+    assert(owner_ && seg_id_ < owner_->segment_.size());
+    return reinterpret_cast<uintptr_t>(&owner_->segment_[seg_id_]->GetBucket(bucket_id_));
   }
 
   unsigned slot_id() const {

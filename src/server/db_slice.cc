@@ -1158,11 +1158,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
       table_memory_ += (db.expire.mem_usage() - table_before);
     }
   } else {
-    // we shouldn't have expiration if expire_at_ms is 0.
-    auto fresh_exp_it = db.expire.Find(it->first.AsRef());
-    LOG_IF(DFATAL, IsValid(fresh_exp_it))
-        << "Inconsistent state, entry " << key
-        << " leave stale expiration: " << fresh_exp_it->second.duration_ms();
+    // If the key had an expiry but the new value should have none, clear it.
+    if (IsValid(res.exp_it)) {
+      RemoveExpire(cntx.db_index, res.it);
+      res.exp_it = ExpIterator{};
+    }
   }
 
   return op_result;
@@ -1364,6 +1364,13 @@ uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
   return next_moved_id_;
 }
 
+// Ordering invariant (PIT mode):
+//   When the traversal fiber visits a bucket in BucketSaveCb, earlier-registered snapshots
+//   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
+//   yet. FlushChangeToEarlierCallbacks invokes their OnDbChange callbacks so they serialize the
+//   bucket before the current snapshot stamps it with its own version. Without this, an earlier
+//   snapshot could miss the bucket entirely — its traversal already passed it, and the version
+//   stamp from the current snapshot would cause the earlier snapshot's OnDbChange to skip it.
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 

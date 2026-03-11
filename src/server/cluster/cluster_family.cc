@@ -542,8 +542,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
 
     // Send journal entry
     // TODO: Break slot migration upon FLUSHSLOTS
-    journal::RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
-                         /* shard_cnt= */ shard_set->size(), nullopt,
+    journal::RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0, nullopt,
                          Payload("DFLYCLUSTER", args_view));
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
@@ -731,11 +730,13 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_c
 
   CmdArgParser parser(args);
   do {
-    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    auto [slot_start, slot_end] = parser.Next<ParsedSlotId, ParsedSlotId>();
+    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+    if (slot_start > slot_end) {
+      return cmd_cntx->SendError("Invalid slot range");
+    }
     slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   DeleteSlots(SlotRanges(std::move(slot_ranges)));
 

@@ -32,6 +32,14 @@ inputs:
     required: false
     default: 'true'
 
+outputs:
+  hang_count:
+    description: "Number of unique hangs found during fuzzing"
+    value: ${{ steps.analyze.outputs.hang_count }}
+  crash_count:
+    description: "Number of unique crashes found during fuzzing"
+    value: ${{ steps.analyze.outputs.crash_count }}
+
 runs:
   using: "composite"
   steps:
@@ -42,9 +50,9 @@ runs:
         afl-fuzz -h | head -5 || true
 
         # Verify AFL++ compilers are available
-        which afl-clang-lto
-        which afl-clang-lto++
-        afl-clang-lto --version
+        which afl-clang-fast
+        which afl-clang-fast++
+        afl-clang-fast --version
 
     - name: Configure system for fuzzing
       shell: bash
@@ -150,7 +158,7 @@ runs:
         fi
 
         if [ -d "$HANGS_DIR" ]; then
-          HANG_COUNT=$(find "$HANGS_DIR" -type f ! -name "README.txt" 2>/dev/null | wc -l)
+          HANG_COUNT=$(find "$HANGS_DIR" -maxdepth 1 -type f -name 'id:*' ! -name 'RECORD:*' 2>/dev/null | wc -l)
         fi
 
         if [ -d "$QUEUE_DIR" ]; then
@@ -172,17 +180,24 @@ runs:
           fi
         fi
 
-        # Fail the job only if crashes were found
+        echo "hang_count=${HANG_COUNT}" >> "$GITHUB_OUTPUT"
+        echo "crash_count=${CRASH_COUNT}" >> "$GITHUB_OUTPUT"
+
+        # Fail the job if crashes or hangs were found
         if [ "$CRASH_COUNT" -gt 0 ]; then
           echo "::error::Found $CRASH_COUNT crash(es)!"
           echo ""
-          echo "Crash files:"
-          ls -lh "$CRASHES_DIR" || true
+          echo "Crash input files (excluding RECORD):"
+          find "$CRASHES_DIR" -maxdepth 1 -name 'id:*' ! -name 'RECORD:*' -type f | sort || true
           exit 1
         fi
 
         if [ "$HANG_COUNT" -gt 0 ]; then
-          echo "::warning::Found $HANG_COUNT hang(s) (not failing the build)"
+          echo "::error::Found $HANG_COUNT hang(s)!"
+          echo ""
+          echo "Hang input files (excluding RECORD):"
+          find "$HANGS_DIR" -maxdepth 1 -name 'id:*' ! -name 'RECORD:*' -type f | sort || true
+          exit 1
         fi
 
         if [ "$CORPUS_SIZE" -gt 0 ]; then
@@ -193,7 +208,7 @@ runs:
 
     - name: Package crash artifacts
       shell: bash
-      if: failure()
+      if: failure() && steps.analyze.outputs.crash_count > 0
       run: |
         CRASHES_DIR="$(pwd)/fuzz/artifacts/${{ inputs.target }}/default/crashes"
 
@@ -222,12 +237,41 @@ runs:
         ls -lh fuzz/packaged/ 2>/dev/null || echo "  (none)"
 
     - name: Upload crash artifacts
-      if: failure()
+      if: failure() && steps.analyze.outputs.crash_count > 0
       uses: actions/upload-artifact@v4
       with:
         name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-crashes-${{ inputs.run-number }}
         path: |
           fuzz/packaged/*.tar.gz
+          fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
+        retention-days: 10
+        if-no-files-found: ignore
+
+    - name: Package hang artifacts
+      shell: bash
+      if: failure() && steps.analyze.outputs.hang_count > 0
+      run: |
+        HANGS_DIR="fuzz/artifacts/${{ inputs.target }}/default/hangs"
+
+        if [ ! -d "$HANGS_DIR" ] || [ -z "$(ls -A "$HANGS_DIR" 2>/dev/null)" ]; then
+          echo "No hang artifacts to package"
+          exit 0
+        fi
+
+        mkdir -p fuzz/packaged_hangs
+        tar -czf "fuzz/packaged_hangs/hangs-${{ inputs.target }}.tar.gz" \
+          -C "$(dirname "$HANGS_DIR")" hangs/
+
+        echo "Packaged hangs:"
+        ls -lh fuzz/packaged_hangs/
+
+    - name: Upload hang artifacts
+      if: failure() && steps.analyze.outputs.hang_count > 0
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-${{ inputs.mode }}-${{ inputs.target }}-hangs-${{ inputs.run-number }}
+        path: |
+          fuzz/packaged_hangs/*.tar.gz
           fuzz/artifacts/${{ inputs.target }}/default/fuzzer_stats
         retention-days: 10
         if-no-files-found: ignore

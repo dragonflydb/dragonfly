@@ -1,0 +1,99 @@
+name: Build Dragonfly
+description: "Build Dragonfly with configurable CMake options"
+
+inputs:
+  build-type:
+    description: "CMake build type (Debug or Release)"
+    required: false
+    default: 'Debug'
+    type: string
+  build-dir:
+    description: "Build directory name (relative to workspace root)"
+    required: false
+    default: 'build'
+    type: string
+  c-compiler:
+    description: "C compiler to use"
+    required: false
+    default: ''
+    type: string
+  cxx-compiler:
+    description: "C++ compiler to use"
+    required: false
+    default: ''
+    type: string
+  cxx-flags:
+    description: "C++ compiler flags"
+    required: false
+    default: '-no-pie'
+    type: string
+  sanitizers:
+    description: "Enable sanitizers (NoSanitizers or Sanitizers)"
+    required: false
+    default: 'NoSanitizers'
+    type: string
+  with-aws:
+    description: "Build with AWS support"
+    required: false
+    default: 'ON'
+    type: string
+  targets:
+    description: "Build targets to compile"
+    required: false
+    default: 'src/all'
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure CMake
+      shell: bash
+      run: |
+        # Set sanitizer flags
+        ASAN="OFF"
+        USAN="OFF"
+        if [ '${{ inputs.sanitizers }}' = 'Sanitizers' ]; then
+          echo "Enabling ASAN/USAN"
+          ASAN="ON"
+          USAN="ON"
+        fi
+
+        # Build cmake command array
+        CMAKE_CMD=(cmake
+          -B "${GITHUB_WORKSPACE}/${{ inputs.build-dir }}"
+          -DCMAKE_BUILD_TYPE="${{ inputs.build-type }}"
+          -GNinja
+        )
+
+        # Add optional compiler flags
+        if [ -n "${{ inputs.c-compiler }}" ]; then
+          CMAKE_CMD+=(-DCMAKE_C_COMPILER="${{ inputs.c-compiler }}")
+        fi
+        if [ -n "${{ inputs.cxx-compiler }}" ]; then
+          CMAKE_CMD+=(-DCMAKE_CXX_COMPILER="${{ inputs.cxx-compiler }}")
+        fi
+        if [ -n "${{ inputs.cxx-flags }}" ]; then
+          CMAKE_CMD+=(-DCMAKE_CXX_FLAGS="${{ inputs.cxx-flags }}")
+        fi
+
+        # Add fixed options
+        CMAKE_CMD+=(
+          -DPRINT_STACKTRACES_ON_SIGNAL=ON
+          -DWITH_AWS="${{ inputs.with-aws }}"
+          -DWITH_GCP=OFF
+          -DWITH_UNWIND=OFF
+          -DWITH_GPERF=OFF
+          -DWITH_ASAN="${ASAN}"
+          -DWITH_USAN="${USAN}"
+        )
+
+        # Execute CMake
+        echo "Running: ${CMAKE_CMD[@]}"
+        "${CMAKE_CMD[@]}"
+
+    - name: Build
+      shell: bash
+      run: |
+        cd ${GITHUB_WORKSPACE}/${{ inputs.build-dir }}
+        echo "Building target: ${{ inputs.targets }}"
+        ninja ${{ inputs.targets }}

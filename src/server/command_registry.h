@@ -151,6 +151,12 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
+  template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, CommandContext*)) && {
+    support_async_ = true;
+    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(args, cntx); };
+    return std::move(*this);
+  }
+
   CommandId&& SetHandler(Handler f, bool async_support = false) && {
     support_async_ |= async_support;
     handler_ = std::move(f);

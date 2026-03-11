@@ -93,9 +93,7 @@ jobs:
           touch /mnt/foo
           ls -la /mnt/foo
 
-      - name: Configure CMake
-        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+      - name: System diagnostics
         run: |
           echo "ulimit is"
           ulimit -s
@@ -104,39 +102,15 @@ jobs:
           df -h
           echo "-----------------------------"
 
-          export ASAN="OFF"
-          export USAN="OFF"
-
-          if [ '${{matrix.sanitizers}}' = 'Sanitizers' ]; then
-            echo "ASAN/USAN"
-            export ASAN="ON"
-            export USAN="ON"
-          fi
-
-          cmake -B ${GITHUB_WORKSPACE}/build \
-            -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
-            -DWITH_AWS=OFF \
-            -DWITH_GCP=OFF \
-            -DWITH_UNWIND=OFF \
-            -DWITH_GPERF=OFF \
-            -GNinja \
-            -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
-            -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
-            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" -DWITH_AWS:BOOL=OFF \
-            -DWITH_ASAN="${ASAN}" \
-            -DWITH_USAN="${USAN}" \
-            -L
-
-          cd ${GITHUB_WORKSPACE}/build && pwd
-          du -hcs _deps/
-
-      - name: Build
-        run: |
-          cd ${GITHUB_WORKSPACE}/build
-          ninja search_family_test
-          df -h
-          echo "-----------------------------"
-          ninja src/all
+      - name: Build Dragonfly
+        uses: ./.github/actions/builder
+        with:
+          build-type: ${{matrix.build-type}}
+          c-compiler: ${{matrix.compiler.c}}
+          cxx-compiler: ${{matrix.compiler.cxx}}
+          cxx-flags: ${{matrix.cxx_flags}}
+          sanitizers: ${{matrix.sanitizers}}
+          with-aws: 'OFF'
 
       - name: PostFail
         if: failure()
@@ -182,10 +156,12 @@ jobs:
 
       - name: C++ Unit Tests - IoUring with cluster mode
         run: |
+          cd ${GITHUB_WORKSPACE}/build
           FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
         run: |
+          cd ${GITHUB_WORKSPACE}/build
           FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
       - name: Upload unit logs on failure
@@ -247,16 +223,11 @@ jobs:
           env
           lsblk -l
 
-      - name: Configure & Build
-        run: |
-          # -no-pie to disable address randomization so we could symbolize stacktraces
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=Release -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
-                -DCMAKE_CXX_FLAGS=-no-pie
-
-          cd ${GITHUB_WORKSPACE}/build && ninja dragonfly
-          pwd
-          ls -l ..
+      - name: Build Dragonfly
+        uses: ./.github/actions/builder
+        with:
+          build-type: Release
+          targets: 'dragonfly'
 
       - name: Authenticate to AWS
         uses: aws-actions/configure-aws-credentials@v5

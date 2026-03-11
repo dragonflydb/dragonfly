@@ -113,6 +113,11 @@ ABSL_FLAG(size_t, squashed_reply_size_limit, 0,
 ABSL_FLAG(bool, always_flush_pipeline, false,
           "if true will flush pipeline response after each pipeline squashing");
 
+ABSL_FLAG(uint32_t, async_dispatch_quota, 100,
+          "Maximum number of consecutive async dispatch messages to process before either "
+          "yielding to I/O when the pipeline appears empty or forcibly processing a queued "
+          "pipelined command to prevent starvation. Set to 0 to disable this mechanism.");
+
 ABSL_FLAG(uint32_t, pipeline_squash_limit, 1 << 30, "Limit on the size of a squashed pipeline. ");
 ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           "If non-zero, waits for this time for more I/O "
@@ -154,7 +159,7 @@ void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
   const size_t prev_capacity = io_buf.Capacity();
   f();
   const size_t capacity = io_buf.Capacity();
-  if (stats != nullptr && prev_capacity != capacity) {
+  if (prev_capacity != capacity) {
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
@@ -698,8 +703,15 @@ void Connection::OnPostMigrateThread() {
 void Connection::OnConnectionStart() {
   SetName(absl::StrCat(id_));
 
+  // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
     is_main_ = lsnr->IsMainInterface();
+  }
+
+  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
+    int val = 1;
+    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+    DCHECK_EQ(res, 0);
   }
 }
 
@@ -708,19 +720,37 @@ void Connection::HandleRequests() {
   DCHECK(tl_facade_stats);
   auto& conn_stats = tl_facade_stats->conn_stats;
 
-  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
-    int val = 1;
-    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-    DCHECK_EQ(res, 0);
-  }
-
   auto remote_ep = RemoteEndpointStr();
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    // Must be done atomically before the premption point in Accept so that at any
-    // point in time, the socket_ is defined.
-    uint8_t buf[2];
+    // Early TLS connection filter
+    //
+    // Before entering the expensive OpenSSL handshake we pre-read the 5-byte TLS Record Layer
+    // header on the raw TCP socket. This serves two purposes:
+    //
+    //  1. Wrong-client detection:
+    //     Clients that forgot to enable TLS (e.g. a plaintext Redis client connecting to the TLS
+    //     port) will not send a valid TLS Record Layer header.  We detect this immediately and
+    //     reply with a human-readable "-ERR" message before disconnecting, instead of letting
+    //     OpenSSL produce a cryptic handshake failure.
+    //
+    //  2. Zombie-connection rejection:
+    //     Zombie connections —— open a TCP socket but never send any data.  By demanding at least
+    //     the 5-byte header before allocating any SSL state, we drop these cheaply on the raw
+    //     socket instead of tying up an OpenSSL context and handshake state machine that will never
+    //     complete.
+    //
+    // The pre-read header bytes are injected into the TlsSocket via InitSSL(), which writes them
+    // into OpenSSL's internal BIO so that Accept() can drive the normal handshake from there.
+    //
+    // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3):
+    // - Byte 0: ContentType (0x16 = Handshake)
+    // - Bytes 1–2: ProtocolVersion. While the minor version varies (0x01 for TLS 1.0,
+    //   0x03 for TLS 1.2/1.3), the major version is consistently 0x03 for all
+    //   modern TLS versions.
+    // - Bytes 3–4: Length (uint16 BE) — payload length, max 2^14 = 16384
+    uint8_t buf[5];  // universal TLS Record Header size is 5 bytes
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
       auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
@@ -729,10 +759,16 @@ void Connection::HandleRequests() {
       conn_stats.tls_accept_disconnects++;
       return;
     }
-    if (buf[0] != 0x16 || buf[1] != 0x03) {
+
+    // Byte 0: ContentType must be 0x16 (Handshake).
+    // Byte 1: major ProtocolVersion — always 0x03 for TLS 1.0 through TLS 1.3.
+    // Byte 2: minor ProtocolVersion — 0x01 (TLS 1.0), 0x02 (TLS 1.1), 0x03 (TLS 1.2/1.3).
+    //         SSL 3.0 (0x00) is deprecated (RFC 7568) and rejected.
+    if ((buf[0] != 0x16) || (buf[1] != 0x03) || (buf[2] < 0x01) || (buf[2] > 0x03)) {
       VLOG(1) << "Bad TLS header "
               << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
-                              absl::Hex(buf[1], absl::kZeroPad2));
+                              absl::Hex(buf[1], absl::kZeroPad2),
+                              absl::Hex(buf[2], absl::kZeroPad2));
       std::ignore =
           socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
                                     "if you enabled TLS for your client.\r\n"));
@@ -740,6 +776,8 @@ void Connection::HandleRequests() {
       return;
     }
 
+    // Must be done atomically before the preemption point in Accept so that at any
+    // point in time, the socket_ is defined.
     {
       FiberAtomicGuard fg;
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
@@ -959,12 +997,7 @@ bool Connection::IsMain() const {
 }
 
 bool Connection::IsMainOrMemcache() const {
-  if (is_main_) {
-    return true;
-  }
-
-  const Listener* lsnr = static_cast<Listener*>(listener());
-  return lsnr && lsnr->protocol() == Protocol::MEMCACHE;
+  return is_main_ || protocol_ == Protocol::MEMCACHE;
 }
 
 void Connection::SetName(string name) {
@@ -1077,7 +1110,6 @@ void Connection::ConnectionFlow() {
       // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
       // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
       migration_allowed_to_register_ = true;
-      // Breaks with TLS. RegisterOnRecv is unimplemented.
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -1713,6 +1745,9 @@ void Connection::AsyncFiber() {
   fb2::NoOpLock noop_lk;
   QueueBackpressure& qbp = GetQueueBackpressure();
   auto& conn_stats = tl_facade_stats->conn_stats;
+  uint32_t dispatch_q_cmd_processed = 0;
+  uint32_t async_dispatch_quota = GetFlag(FLAGS_async_dispatch_quota);
+
   while (!reply_builder_->GetError()) {
     DCHECK_EQ(socket()->proactor(), ProactorBase::me());
     cnd_.wait(noop_lk, [this] {
@@ -1761,6 +1796,11 @@ void Connection::AsyncFiber() {
     bool subscriber_over_limit =
         conn_stats.dispatch_queue_subscriber_bytes >= qbp.publish_buffer_limit;
 
+    // The below if/else conditionally choose between 3 message processing policies:
+    // 1. Pipeline squashing
+    // 2. Process pipeline queue
+    // 3. Process admin queue
+    //
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
     // It is only enabled if the threshold is reached and the whole dispatch queue
@@ -1768,8 +1808,9 @@ void Connection::AsyncFiber() {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = parsed_cmd_q_len_ > squashing_threshold;
     if (squashing_enabled && threshold_reached && dispatch_q_.empty() && !skip_next_squashing_ &&
-        !IsReplySizeOverLimit()) {
+        !IsReplySizeOverLimit()) {  // 1. Pipeline squashing
       SquashPipeline();
+      dispatch_q_cmd_processed = 0;
     } else {
       MessageHandle msg;
 
@@ -1779,23 +1820,51 @@ void Connection::AsyncFiber() {
           !dispatch_q_.empty() &&
           std::holds_alternative<MigrationRequestMessage>(dispatch_q_.front().handle);
 
-      // Check if we are blocked:
-      // Blocked = It IS a migration AND we have pipeline work AND we are in Redis mode.
-      bool is_blocked =
-          is_migration_req && (parsed_head_ != nullptr) && (protocol_ == Protocol::REDIS);
+      // If the quota is reached but the pipeline appears empty, we must yield to the IoLoop
+      // (producer). This allows the discovery and parsing of commands potentially sitting in the
+      // TCP buffer. Without this yield, AsyncFiber would monopolize the CPU, starving the IoLoop
+      // and remaining blind to pending pipeline data.
+      bool quota_reached =
+          (async_dispatch_quota > 0) && (dispatch_q_cmd_processed >= async_dispatch_quota);
+      if (quota_reached && (parsed_head_ == nullptr)) {
+        ThisFiber::Yield();
 
-      // Process Admin Queue
-      // Run if: Queue is not empty and we are not blocked.
-      if (!dispatch_q_.empty() && !is_blocked) {
+        // If it is STILL empty after IoLoop got a chance to run, the client hasn't sent anything.
+        // Reset the counter so we don't yield on every single loop.
+        if (parsed_head_ == nullptr) {
+          dispatch_q_cmd_processed = 0;
+        }
+      }
+
+      // We prioritize pipeline execution over the admin queue in two distinct cases (Pipeline queue
+      // must be non-empty for both cases):
+      // 1. A migration is requested (Redis only), but we must drain the existing
+      // pipeline first.
+      // 2.  The dispatch quota was reached, forcing a pipeline execution to prevent
+      // starvation.
+      bool prefer_pipeline_execution = false;
+      if (parsed_head_ != nullptr) {
+        prefer_pipeline_execution =
+            quota_reached || (is_migration_req && (protocol_ == Protocol::REDIS));
+      }
+      if (dispatch_q_.empty() || prefer_pipeline_execution) {  // 2. Process pipeline Queue
+        VLOG_IF(1, prefer_pipeline_execution)
+            << "[" << id_ << "] Preferring pipeline execution over admin queue. "
+            << "Migration requested: " << is_migration_req
+            << ", dispatch quota reached: " << quota_reached
+            << ", async_dispatch_quota: " << async_dispatch_quota
+            << ", dispatch_q_cmd_processed: " << dispatch_q_cmd_processed;
+        ProcessPipelineCommand();
+        dispatch_q_cmd_processed = 0;
+      } else {  // 3. Process admin Queue
         msg = std::move(dispatch_q_.front());
         dispatch_q_.pop_front();
+        dispatch_q_cmd_processed++;
 
         // Execute and check if we need to terminate the fiber
         if (ProcessAdminMessage(&msg, &async_op)) {
           return;  // don't set conn closing flag
         }
-      } else {  // Process Pipeline Queue
-        ProcessPipelineCommand();
       }
     }
 
@@ -2273,7 +2342,23 @@ bool Connection::ExecuteMCBatch() {
     if (!ioloop_v2_)  // only v2 loop supports any async commands so far
       mode = AsyncPreference::ONLY_SYNC;
 
-    if (service_->DispatchMC(cmd, mode) == DispatchResult::WOULD_BLOCK)
+    auto dispatch_res = service_->DispatchMC(cmd, mode);
+
+    // Enforce the pipeline invariant between the IO loop (producer) and AsyncFiber (consumer).
+    // To prevent stream corruption, the command state must satisfy ONE of these rules:
+    // 1. It is the head command (safely writes to the socket directly).
+    // 2. It did not stall the pipeline (dispatch_res != WOULD_BLOCK) and therefore
+    //    must have buffered its reply locally (is_deferred == true).
+    // 3. It stalled the pipeline because it requires synchronous execution
+    //    (dispatch_res == WOULD_BLOCK) and therefore must NOT have buffered
+    //    a reply (is_deferred == false).
+    bool is_deferred = cmd->IsDeferredReply();
+    DCHECK(is_head || (is_deferred == (dispatch_res != DispatchResult::WOULD_BLOCK)))
+        << "Pipeline contract breach! Invalid state for non-head command. "
+        << "DispatchResult: " << static_cast<int>(dispatch_res) << ", IsDeferred: " << is_deferred
+        << ", Command Type: " << cmd->mc_command()->type;
+
+    if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
 
     conn_stats.pipeline_dispatch_commands++;
@@ -2499,8 +2584,6 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     return;
   }
 
-  // TODO non epoll API via EnableRecvMultishot
-  // if (std::holds_alternative<io::MutableBytes>(n.read_result))
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
     if (!std::get<RecvNoti>(n.read_result)) {
@@ -2541,7 +2624,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io_ec_ = ec;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    io_buf_.WriteAndCommit(buf.data(), buf.size());
+    UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
+                        [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
   } else {
     LOG(FATAL) << "Should not reach here";
   }

@@ -818,6 +818,15 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsOutOfBounds) {
+  EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "0", "16384"}),
+              ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "16384", "16384"}),
+              ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "100", "50"}),
+              ErrArg("Invalid slot range"));
+}
+
 TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
   for (int count : {1, 10, 100, 1000, 10000, 100000}) {
     ConfigSingleNodeCluster(GetMyId());

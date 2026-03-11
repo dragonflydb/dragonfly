@@ -58,8 +58,9 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
-
-using KeyRef = tiering::OpManager::KeyRef;
+using tiering::FragmentRef;
+using tiering::KeyRef;
+using tiering::TieredCoolRecord;
 
 namespace {
 
@@ -79,28 +80,6 @@ void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats)
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
   return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
-}
-
-// Determine required byte size and encoding type based on value.
-// Do NOT enforce rules depending on dynamic runtime values as this is called
-// when scheduling stash and just before succeeeding and is expected to return the same results
-TieredStorage::StashDescriptor DetermineSerializationParams(const PrimeValue& pv) {
-  switch (pv.ObjType()) {
-    case OBJ_STRING: {
-      if (!pv.HasAllocated())
-        return {};
-      auto strs = pv.GetRawString();
-      return {strs, CompactObj::ExternalRep::STRING};
-    }
-    case OBJ_HASH: {
-      if (pv.Encoding() == kEncodingListPack) {
-        return {static_cast<uint8_t*>(pv.RObjPtr()), CompactObj::ExternalRep::SERIALIZED_MAP};
-      }
-      return {};
-    }
-    default:
-      return {};
-  };
 }
 
 string SerializeToString(const TieredStorage::StashDescriptor& blobs) {
@@ -151,8 +130,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       : tiering::OpManager{max_size}, ts_{ts}, db_slice_{*db_slice} {
   }
 
-  // Clear IO pending flag for entry
-  void ClearIoPending(OpManager::KeyRef key) {
+  // Clear Stash pending flag for entry
+  void ClearStashPending(OpManager::KeyRef key) {
     UnblockBackpressure(key, false);
     if (auto pv = Find(key.first, key.second); pv) {
       pv->SetStashPending(false);
@@ -160,10 +139,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  // Clear IO pending flag for all contained entries of bin
-  void ClearIoPending(tiering::SmallBins::BinId id) {
+  // Clear stash pending flag for all contained entries of bin
+  void ClearStashPending(tiering::SmallBins::BinId id) {
     for (const auto& key : ts_->bins_->ReportStashAborted(id))
-      ClearIoPending(key);
+      ClearStashPending(key);
   }
 
   DbTableStats* GetDbTableStats(DbIndex dbid) {
@@ -187,7 +166,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
                      const io::Result<tiering::DiskSegment>& segment) override {
     if (!segment) {
       VLOG(1) << "Stash failed " << segment.error().message();
-      visit([this](auto id) { ClearIoPending(id); }, id);
+      visit([this](auto id) { ClearStashPending(id); }, id);
     } else {
       visit([this, segment](auto id) { SetExternal(id, *segment); }, id);
     }
@@ -232,7 +211,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-      StashDescriptor blobs = DetermineSerializationParams(*pv);
+      StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
@@ -413,9 +392,8 @@ void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key,
   op_manager_->Enqueue(KeyRef(dbid, key), segment, decoder, std::move(cb));
 }
 
-std::optional<util::fb2::Future<bool>> TieredStorage::Stash(DbIndex dbid, string_view key,
-                                                            const StashDescriptor& blobs,
-                                                            bool provide_bp) {
+void TieredStorage::Stash(DbIndex dbid, string_view key, const StashDescriptor& blobs,
+                          BackPressureFuture* backpressure) {
   CHECK(!bins_->IsPending(dbid, key));  // Because has stash pending is false (ShouldStash checks)
 
   size_t est_size = blobs.EstimatedSerializedSize();
@@ -423,8 +401,6 @@ std::optional<util::fb2::Future<bool>> TieredStorage::Stash(DbIndex dbid, string
 
   tiering::OpManager::PendingId id;
   error_code ec;
-
-  // value->SetStashPending(true);  // Optimistically set ahead, unset in case of error
 
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
@@ -435,58 +411,57 @@ std::optional<util::fb2::Future<bool>> TieredStorage::Stash(DbIndex dbid, string
     auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
     ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
   } else {
-    return {};  // added to bin, no operations pending
+    return;  // added to bin, no operations pending
   }
 
   // Set stash pending to false on single value or whole bin
   if (ec) {
-    LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
-    visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
-    return {};
+    // file_too_large if we reached the limits of the storage,
+    // operation_would_block if we need to wait for a file to grow.
+    bool to_log = ec != errc::file_too_large && ec != errc::operation_would_block &&
+                  ec != errc::operation_in_progress;
+    LOG_IF(ERROR, to_log) << "Stash failed: " << ec.message();
+    visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    return;
   }
 
   // If we are in the active offloading phase, throttle stashes by providing backpressure future
-  if (provide_bp && ShouldOffload()) {
+  if (backpressure && ShouldOffload()) {
     stats_.total_clients_throttled++;
-    return stash_backpressure_[{dbid, string{key}}];
+    *backpressure = stash_backpressure_[{dbid, string{key}}];
   }
-
-  return {};
 }
 
-void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
-  DCHECK(value->IsExternal());
-  DCHECK(!value->HasStashPending());
-
+void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
+  DCHECK(!fragment_ref.HasStashPending());
   ++stats_.total_deletes;
 
-  tiering::DiskSegment segment = value->GetExternalSlice();
-  if (value->IsCool()) {
-    auto hot = DeleteCool(value->GetCool().record);
+  tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
+  if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
+    auto hot = DeleteCool(cool);
     DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
-
-  // In any case we delete the offloaded segment and reset the value.
-  value->RemoveExternal();
+  fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
-void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
-  DCHECK(value->HasStashPending());
+void TieredStorage::CancelStash(DbIndex dbid, std::string_view key,
+                                tiering::FragmentRef fragment_ref) {
+  DCHECK(fragment_ref.HasStashPending());
 
   // If any previous write was happening, it has been cancelled
   if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
     std::move(node.mapped()).Resolve(false);
 
   // TODO: Don't recompute size estimate, try-delete bin first
-  auto blobs = DetermineSerializationParams(*value);
+  StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
   size_t size = blobs.EstimatedSerializedSize();
   if (OccupiesWholePages(size)) {
     op_manager_->CancelPending(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->CancelPending(*bin);
   }
-  value->SetStashPending(false);
+  fragment_ref.ClearStashPending();
 }
 
 TieredStats TieredStorage::GetStats() const {
@@ -586,7 +561,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
       } else {
         stats_.offloading_stashes++;
         it->second.SetStashPending(true);
-        Stash(dbid, it->first.GetSlice(&tmp), *blobs, false);
+        Stash(dbid, it->first.GetSlice(&tmp), *blobs, nullptr);
       }
     }
   };
@@ -612,7 +587,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
   size_t gained = 0;
   do {
     size_t memory_before = stats_.cool_memory_used;
-    detail::TieredColdRecord* record = PopCool();
+    TieredCoolRecord* record = PopCool();
     if (record == nullptr)  // nothing to pull anymore
       break;
 
@@ -634,23 +609,24 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
-    CompactObj::DeleteMR<detail::TieredColdRecord>(record);
+    CompactObj::DeleteMR<TieredCoolRecord>(record);
   } while (gained < goal);
 
   return gained;
 }
 
-auto TieredStorage::ShouldStash(const PrimeValue& pv) const -> std::optional<StashDescriptor> {
+auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
+    -> std::optional<StashDescriptor> {
   // Check value state
-  if (pv.IsExternal() || pv.HasStashPending())
+  if (fragment_ref.IsOffloaded() || fragment_ref.HasStashPending())
     return nullopt;
 
   // For now, hash offloading is conditional
-  if (pv.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
+  if (fragment_ref.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
     return nullopt;
 
   // Estimate value size
-  StashDescriptor blobs = DetermineSerializationParams(pv);
+  StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
   size_t estimated_size = blobs.EstimatedSerializedSize();
   if (estimated_size < config_.min_value_size)
     return nullopt;
@@ -671,9 +647,9 @@ auto TieredStorage::ShouldStash(const PrimeValue& pv) const -> std::optional<Sta
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
                              PrimeValue* pv) {
-  detail::TieredColdRecord* record = CompactObj::AllocateMR<detail::TieredColdRecord>();
+  TieredCoolRecord* record = CompactObj::AllocateMR<TieredCoolRecord>();
   cool_queue_.push_front(*record);
-  stats_.cool_memory_used += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
+  stats_.cool_memory_used += (sizeof(TieredCoolRecord) + pv->MallocUsed());
 
   record->key_hash = CompactObj::HashCode(str);
   record->db_index = db_ind;
@@ -692,34 +668,32 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
   return hot;
 }
 
-PrimeValue TieredStorage::DeleteCool(detail::TieredColdRecord* record) {
+PrimeValue TieredStorage::DeleteCool(TieredCoolRecord* record) {
   auto it = CoolQueue::s_iterator_to(*record);
   cool_queue_.erase(it);
 
   PrimeValue hot{std::move(record->value)};
-  stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + hot.MallocUsed());
-  CompactObj::DeleteMR<detail::TieredColdRecord>(record);
+  stats_.cool_memory_used -= (sizeof(TieredCoolRecord) + hot.MallocUsed());
+  CompactObj::DeleteMR<TieredCoolRecord>(record);
   return hot;
 }
 
-detail::TieredColdRecord* TieredStorage::PopCool() {
+TieredCoolRecord* TieredStorage::PopCool() {
   if (cool_queue_.empty())
     return nullptr;
 
-  detail::TieredColdRecord& res = cool_queue_.back();
+  TieredCoolRecord& res = cool_queue_.back();
   cool_queue_.pop_back();
-  stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + res.value.MallocUsed());
+  stats_.cool_memory_used -= (sizeof(TieredCoolRecord) + res.value.MallocUsed());
   return &res;
 }
 
-std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
-                                                       bool provide_bp, PrimeValue* pv,
-                                                       TieredStorage* ts) {
+void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
+                     BackPressureFuture* backpressure) {
   if (auto blobs = ts->ShouldStash(*pv); blobs) {
     pv->SetStashPending(true);
-    return ts->Stash(dbid, key, *blobs, provide_bp);
+    ts->Stash(dbid, key, *blobs, backpressure);
   }
-  return std::nullopt;
 }
 
 void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,

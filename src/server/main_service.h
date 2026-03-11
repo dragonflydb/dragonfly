@@ -65,9 +65,10 @@ class Service : public facade::ServiceInterface {
 
   facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name) ABSL_LOCKS_EXCLUDED(mu_);
 
-  // Returns: the new state.
-  // if from equals the old state then the switch is performed "to" is returned.
-  // Otherwise, does not switch and returns the current state in the system.
+  // Attempts to switch global state from 'from' to 'to'.
+  // Returns the PREVIOUS global state (before the switch attempt).
+  // If from equals the previous state then the switch is performed and 'from' is returned.
+  // Otherwise, does not switch and returns the current (unchanged) state.
   // Upon switch, updates cached global state in threadlocal ServerState struct.
   GlobalState SwitchState(GlobalState from, GlobalState to) ABSL_LOCKS_EXCLUDED(mu_);
 

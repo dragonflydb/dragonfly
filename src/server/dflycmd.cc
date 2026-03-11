@@ -88,7 +88,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
     // PING forces replica to send the most recent last_acked_lsn.
     // ACKS from the replica are send only every X commands or every 3 seconds (flag configurable)
     // or when forced (by the PING above).
-    journal::RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
+    journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
   }
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
@@ -512,9 +512,9 @@ void DflyCmd::TakeOver(CmdArgList args, CommandContext* cmd_cntx) {
     if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, cmd_cntx))
       return;
 
-    auto new_state = sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
-    if (new_state != GlobalState::TAKEN_OVER) {
-      LOG(WARNING) << new_state << " in progress, could not take over";
+    auto prev_state = sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
+    if (prev_state != GlobalState::ACTIVE) {
+      LOG(WARNING) << prev_state << " in progress, could not take over";
       return cmd_cntx->SendError("Takeover failed!");
     }
   }

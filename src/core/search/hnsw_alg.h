@@ -206,10 +206,6 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
            sizeof(labeltype));
   }
 
-  inline labeltype* getExternalLabeLp(tableint internal_id) const {
-    return (labeltype*)(data_level0_memory_ + internal_id * size_data_per_element_ + label_offset_);
-  }
-
   inline char* getDataPtrByInternalId(tableint internal_id) const {
     return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
   }
@@ -1269,7 +1265,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     }
 
     // Initialisation of the data and label
-    memcpy(getExternalLabeLp(cur_c), &label, sizeof(labeltype));
+    setExternalLabel(cur_c, label);
 
     if (copy_vector_) {
       memcpy(getDataByInternalId(cur_c), data_point_in, data_size_);
@@ -1401,6 +1397,40 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
       top_candidates.pop();
     }
+    return result;
+  }
+
+  // Brute-force KNN search over a pre-filtered set of label IDs.
+  // Computes distances for all provided IDs and returns the top-k closest, ordered by distance.
+  std::priority_queue<std::pair<dist_t, labeltype>> subsetKnnSearch(
+      const void* query_data, size_t k, const std::vector<labeltype>& ids) const {
+    std::priority_queue<std::pair<dist_t, labeltype>> result;
+
+    if (cur_element_count == 0 || ids.empty() || k == 0)
+      return result;
+
+    for (const auto& label : ids) {
+      auto it = label_lookup_.find(label);
+
+      if (it == label_lookup_.end()) {
+        continue;
+      }
+
+      tableint internal_id = it->second;
+
+      if (isMarkedDeleted(internal_id)) {
+        continue;
+      }
+
+      dist_t dist = fstdistfunc_(query_data, getDataByInternalId(internal_id), dist_func_param_);
+      if (result.size() < k) {
+        result.emplace(dist, label);
+      } else if (dist < result.top().first) {
+        result.pop();
+        result.emplace(dist, label);
+      }
+    }
+
     return result;
   }
 
