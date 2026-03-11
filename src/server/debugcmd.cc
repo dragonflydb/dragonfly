@@ -1639,17 +1639,20 @@ void DebugCmd::CompactTable(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
-  using PerShardStats = absl::flat_hash_map<unsigned, std::unique_ptr<UniqueStrings>>;
+  using PerShardStats = std::array<std::unique_ptr<UniqueStrings>, OBJ_HASH + 1>;
 
   vector<PerShardStats> all_shards(shard_set->size());
   auto cb = [&all_shards](PrimeIterator it) {
     const unsigned obj_type = it->second.ObjType();
-    if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET && obj_type != OBJ_ZSET)
+    if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET &&
+        obj_type != OBJ_ZSET) {
       return;
+    }
 
     auto& entry = all_shards[EngineShard::tlocal()->shard_id()][obj_type];
-    if (!entry)
+    if (!entry) {
       entry = std::make_unique<UniqueStrings>();
+    }
 
     if (obj_type == OBJ_HASH)
       entry->AddHMap(it->second);
@@ -1663,17 +1666,20 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
 
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
 
-  absl::flat_hash_map<unsigned, UniqueStrings> summary;
-  for (const PerShardStats& e : all_shards) {
-    for (const auto& [type, strings] : e) {
-      summary[type].Add(std::move(*strings));
+  std::array<UniqueStrings, OBJ_HASH + 1> summary;
+  for (const PerShardStats& shard_stat : all_shards) {
+    for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
+      if (shard_stat[obj_type]) {
+        summary[obj_type].Add(std::move(*shard_stat[obj_type]));
+      }
     }
   }
 
   string result;
   StrAppend(&result, "___begin unique string stats___\n\n");
 
-  for (auto& [obj_type, stats] : summary) {
+  for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
+    const UniqueStrings& stats = summary[obj_type];
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, stats.ToString("Strings"));
