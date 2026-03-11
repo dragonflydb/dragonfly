@@ -1023,7 +1023,11 @@ cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpStatus result = co_await cmd::SingleHop(cb);
-  cmd_cntx->rb()->SendError(result);
+  if (result == OpStatus::OK) {
+    cmd_cntx->rb()->SendOk();
+  } else {
+    cmd_cntx->rb()->SendError(result);
+  }
   co_return std::nullopt;
 }
 
@@ -1299,7 +1303,7 @@ cmd::CmdR CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult<double> result = co_await cmd::SingleHopT(cb);
-  auto* rb = cmd_cntx->rb();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!result) {
     DVLOG(2) << "CmdIncrByFloat error: " << key << " status=" << result.status();
@@ -1307,7 +1311,7 @@ cmd::CmdR CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
     co_return std::nullopt;
   }
 
-  static_cast<RedisReplyBuilder*>(rb)->SendDouble(result.value());
+  rb->SendDouble(result.value());
   co_return std::nullopt;
 }
 
