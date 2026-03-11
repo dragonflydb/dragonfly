@@ -65,9 +65,9 @@ bool SingleHopWaiter::await_ready() noexcept {
 void SingleHopWaiter::await_suspend(std::coroutine_handle<> handle) const noexcept {
   // TODO: functor calling resume is double indirection and wasted space for cleaner
   absl::Cleanup cleaner = [handle] { handle.destroy(); };
-  cmd_cntx->Resolve(blocker, [handle, cleaner = std::move(cleaner)](auto* rb) mutable {
-    handle.resume();
+  cmd_cntx->Resolve(blocker, [handle, ran = false, cleaner = std::move(cleaner)](auto* rb) mutable {
     std::move(cleaner).Cancel();
+    handle.resume();
   });
 }
 
@@ -75,7 +75,7 @@ facade::OpStatus SingleHopWaiter::await_resume() const noexcept {
   return *cmd_cntx->tx()->LocalResultPtr();
 }
 
-void CmdR::Coro::return_value(facade::ErrorReply&& err) const noexcept {
+void CmdR::Coro::return_value(const facade::ErrorReply& err) const noexcept {
   cmd_cntx->SendError(err);
 }
 
