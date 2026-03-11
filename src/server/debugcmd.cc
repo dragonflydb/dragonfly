@@ -44,6 +44,7 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
+#include "server/string_stats.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -682,6 +683,8 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    Prints segment info for the current database.",
         "COMPACT-TABLE threshold",
         "    Attempts to merge underutilized segments in dash table",
+        "UNIQ-STRS",
+        "    Prints per-object unique string stats and estimated dedup savings across shards.",
         "HELP",
         "    Prints this help.",
     };
@@ -769,6 +772,10 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (subcmd == "COMPACT-TABLE") {
     return CompactTable(args.subspan(1), cmd_cntx);
+  }
+
+  if (subcmd == "UNIQ-STRS") {
+    return CountUniqueStrings(cmd_cntx);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -1629,6 +1636,62 @@ void DebugCmd::CompactTable(CmdArgList args, CommandContext* cmd_cntx) {
   });
 
   rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
+}
+
+void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
+  using PerShardStats = std::array<std::unique_ptr<UniqueStrings>, OBJ_HASH + 1>;
+
+  vector<PerShardStats> all_shards(shard_set->size());
+  auto cb = [&all_shards](PrimeIterator it) {
+    const unsigned obj_type = it->second.ObjType();
+    if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET &&
+        obj_type != OBJ_ZSET) {
+      return;
+    }
+
+    auto& entry = all_shards[EngineShard::tlocal()->shard_id()][obj_type];
+    if (!entry) {
+      entry = std::make_unique<UniqueStrings>();
+    }
+
+    if (obj_type == OBJ_HASH)
+      entry->AddHMap(it->second);
+    else if (obj_type == OBJ_LIST)
+      entry->AddList(it->second);
+    else if (obj_type == OBJ_SET)
+      entry->AddSet(it->second);
+    else if (obj_type == OBJ_ZSET)
+      entry->AddZSet(it->second);
+  };
+
+  TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
+
+  std::array<UniqueStrings, OBJ_HASH + 1> summary;
+  for (const PerShardStats& shard_stat : all_shards) {
+    for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
+      if (shard_stat[obj_type]) {
+        summary[obj_type].Add(*shard_stat[obj_type]);
+      }
+    }
+  }
+
+  string result;
+  StrAppend(&result, "___begin unique string stats___\n\n");
+
+  for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
+    const UniqueStrings& stats = summary[obj_type];
+    if (stats.total_count == 0) {
+      continue;
+    }
+    StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
+    StrAppend(&result, "________________________________________________________________\n");
+    StrAppend(&result, stats.ToString("Strings"));
+    StrAppend(&result, "\n");
+  }
+
+  StrAppend(&result, "___end unique string stats___\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->SendVerbatimString(result);
 }
 
 void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBatch& batch) {
