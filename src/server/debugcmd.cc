@@ -1663,10 +1663,10 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
 
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
 
-  absl::flat_hash_map<unsigned, UniqueStringsSummary> summary;
+  absl::flat_hash_map<unsigned, UniqueStrings> summary;
   for (const PerShardStats& e : all_shards) {
     for (const auto& [type, strings] : e) {
-      summary[type].Add(*strings);
+      summary[type].Add(std::move(*strings));
     }
   }
 

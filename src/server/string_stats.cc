@@ -23,12 +23,12 @@ namespace dfly {
 using namespace container_utils;
 
 UniqueStrings::UniqueStrings() {
-  MakeHLL(&ctr);
+  MakeHLL(&counter_);
 }
 
 UniqueStrings::UniqueStrings(UniqueStrings&& other) noexcept
-    : ctr{other.ctr}, total_count{other.total_count}, total_bytes{other.total_bytes} {
-  other.ctr = HllBufferPtr{};
+    : total_count{other.total_count}, total_bytes{other.total_bytes}, counter_{other.counter_} {
+  other.counter_ = HllBufferPtr{};
 }
 
 UniqueStrings& UniqueStrings::operator=(UniqueStrings&& other) noexcept {
@@ -36,11 +36,11 @@ UniqueStrings& UniqueStrings::operator=(UniqueStrings&& other) noexcept {
     return *this;
   }
 
-  delete[] ctr.hll;
-  ctr = other.ctr;
+  delete[] counter_.hll;
+  counter_ = other.counter_;
   total_count = other.total_count;
   total_bytes = other.total_bytes;
-  other.ctr = HllBufferPtr{};
+  other.counter_ = HllBufferPtr{};
   return *this;
 }
 
@@ -61,52 +61,14 @@ void UniqueStrings::AddZSet(const PrimeValue& pv) {
   IterateSortedSet(pv, [&](const ContainerEntry& e, auto) { return AddString(e); });
 }
 
-bool UniqueStrings::AddString(const ContainerEntry& e) {  // NOLINT must always return true
-  // Count both strings and ints, because ints might be used as keys and will benefit from
-  // deduplication just like strings.
-  if (e.IsString()) {
-    CHECK_NE(-1, pfadd_dense(ctr, reinterpret_cast<const unsigned char*>(e.data()), e.size()));
-    ++total_count;
-    total_bytes += e.size();
-  } else {
-    const std::string str = e.ToString();
-    CHECK_NE(-1, pfadd_dense(ctr, reinterpret_cast<const unsigned char*>(str.data()), str.size()));
-    ++total_count;
-    total_bytes += str.size();
-  }
-  return true;
+void UniqueStrings::Add(UniqueStrings&& other) {
+  total_count += other.total_count;
+  total_bytes += other.total_bytes;
+  HllBufferPtr inputs[2] = {other.counter_, counter_};
+  CHECK_EQ(0, pfmerge(inputs, 2, counter_));
 }
 
-UniqueStringsSummary::UniqueStringsSummary() {
-  MakeHLL(&ctr);
-}
-
-UniqueStringsSummary::UniqueStringsSummary(UniqueStringsSummary&& other) noexcept
-    : ctr{other.ctr}, total_count{other.total_count}, total_bytes{other.total_bytes} {
-  other.ctr = HllBufferPtr{};
-}
-
-UniqueStringsSummary& UniqueStringsSummary::operator=(UniqueStringsSummary&& other) noexcept {
-  if (this == &other) {
-    return *this;
-  }
-
-  delete[] ctr.hll;
-  ctr = other.ctr;
-  total_count = other.total_count;
-  total_bytes = other.total_bytes;
-  other.ctr = HllBufferPtr{};
-  return *this;
-}
-
-void UniqueStringsSummary::Add(const UniqueStrings& u) {
-  total_count += u.total_count;
-  total_bytes += u.total_bytes;
-  HllBufferPtr inputs[2] = {u.ctr, ctr};
-  CHECK_EQ(0, pfmerge(inputs, 2, ctr));
-}
-
-std::string UniqueStringsSummary::ToString(std::string_view label) const {
+std::string UniqueStrings::ToString(std::string_view label) const {
   if (total_count == 0)
     return {};
   std::string result;
@@ -117,6 +79,29 @@ std::string UniqueStringsSummary::ToString(std::string_view label) const {
   absl::StrAppend(&result, "  average length: ", AverageLength(), "\n");
   absl::StrAppend(&result, "  estimated savings: ", ByteSavingsOnDedup(), " bytes\n");
   return result;
+}
+
+bool UniqueStrings::AddString(const ContainerEntry& e) {  // NOLINT must always return true
+  // Count both strings and ints, because ints might be used as keys and will benefit from
+  // deduplication just like strings.
+  if (e.IsString()) {
+    CHECK_NE(-1, pfadd_dense(counter_, reinterpret_cast<const unsigned char*>(e.data()), e.size()));
+    ++total_count;
+    total_bytes += e.size();
+  } else {
+    const std::string str = e.ToString();
+    CHECK_NE(-1,
+             pfadd_dense(counter_, reinterpret_cast<const unsigned char*>(str.data()), str.size()));
+    ++total_count;
+    total_bytes += str.size();
+  }
+  return true;
+}
+
+uint64_t UniqueStrings::ByteSavingsOnDedup() const {
+  const auto uniques = UniqueCount();
+  const auto diff = total_count > uniques ? total_count - uniques : 0;
+  return diff * AverageLength();
 }
 
 }  // namespace dfly
