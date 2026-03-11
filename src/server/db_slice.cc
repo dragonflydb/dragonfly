@@ -1443,13 +1443,19 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   };
 
   unsigned i = 0;
-  for (; i < count / 3; ++i) {
+
+  auto quota_remains = [] {
+    // Break out of traversal if we spent more than 1ms
+    return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
+  };
+
+  for (; i < count / 3 && quota_remains(); ++i) {
     db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
-    for (; i < count; ++i) {
+    for (; i < count && quota_remains(); ++i) {
       db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
     }
   }
