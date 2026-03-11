@@ -278,6 +278,9 @@ class Connection : public util::Connection {
   std::variant<std::error_code, ParserStatus> IoLoop();
 
   void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+
+  void CheckIoBufCapacity(bool is_iobuf_full);
+
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
 
@@ -364,6 +367,7 @@ class Connection : public util::Connection {
   // Returns true on successful execution, false on reply builder error.
   bool ReplyMCBatch();
 
+  // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
 

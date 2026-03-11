@@ -2631,20 +2631,53 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
   }
 }
 
+void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
+  auto& conn_stats = tl_facade_stats->conn_stats;
+  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
+
+  size_t capacity = io_buf_.Capacity();
+  if (capacity < max_io_buf_len) {
+    size_t parser_hint = 0;
+    if (redis_parser_)
+      parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
+
+    // If we got a partial request and we managed to parse its
+    // length, make sure we have space to store it instead of
+    // increasing space incrementally.
+    // (Note: The buffer object is only working in power-of-2 sizes,
+    // so there's no danger of accidental O(n^2) behavior.)
+    if (parser_hint > capacity) {
+      UpdateIoBufCapacity(io_buf_, &conn_stats,
+                          [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
+    }
+
+    // If we got a partial request because iobuf was full, grow it up to
+    // a reasonable limit to save on Recv() calls.
+    if (is_iobuf_full && capacity < max_io_buf_len / 2) {
+      // Last io used most of the io_buf to the end.
+      UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
+        io_buf_.Reserve(capacity * 2);  // Valid growth range.
+      });
+    }
+
+    if (io_buf_.AppendLen() == 0U) {
+      // it can happen with memcached but not for RedisParser, because RedisParser fully
+      // consumes the passed buffer
+      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
+                               << ", consider to increase max_client_iobuf_len flag";
+    }
+  }
+}
+
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   DCHECK(memcache_parser_) << "Not supported for redis yet";
-  auto& conn_stats = tl_facade_stats->conn_stats;
-
-  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
-  // Return early because RegisterOnRecv() should not be called if the socket
-  // is not open. Both migrations and replication hit this flow upon cancellations.
-  if (!peer->IsOpen()) {
+  // Don't proceed with RegisterOnRecv() if socket is closed (possible cancellation)
+  if (!peer->IsOpen())
     return ParserStatus::OK;
-  }
 
   if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
 #ifdef __linux__
@@ -2663,9 +2696,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
-  // TODO: restructure due to bad OnCompletion interface
+  // Waiter that is passed to the current async command head to be notified on completion
   auto ioevent_cb = [this]() { io_event_.notify(); };
-  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
+  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};  // takes callback by reference
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
 
   do {
@@ -2720,39 +2753,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-
-      size_t capacity = io_buf_.Capacity();
-      if (capacity < max_io_buf_len) {
-        size_t parser_hint = 0;
-        if (redis_parser_)
-          parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
-
-        // If we got a partial request and we managed to parse its
-        // length, make sure we have space to store it instead of
-        // increasing space incrementally.
-        // (Note: The buffer object is only working in power-of-2 sizes,
-        // so there's no danger of accidental O(n^2) behavior.)
-        if (parser_hint > capacity) {
-          UpdateIoBufCapacity(io_buf_, &conn_stats,
-                              [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
-        }
-
-        // If we got a partial request because iobuf was full, grow it up to
-        // a reasonable limit to save on Recv() calls.
-        if (is_iobuf_full && capacity < max_io_buf_len / 2) {
-          // Last io used most of the io_buf to the end.
-          UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
-            io_buf_.Reserve(capacity * 2);  // Valid growth range.
-          });
-        }
-
-        if (io_buf_.AppendLen() == 0U) {
-          // it can happen with memcached but not for RedisParser, because RedisParser fully
-          // consumes the passed buffer
-          LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
-                                   << ", consider to increase max_client_iobuf_len flag";
-        }
-      }
+      GrowBuffer(is_iobuf_full);
     } else if (parse_status != OK) {
       break;
     }
