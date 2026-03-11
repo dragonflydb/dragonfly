@@ -893,7 +893,14 @@ void CompactObj::SetJson(JsonType&& j) {
 void CompactObj::SetJsonSize(int64_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    u_.json_obj.cons.bytes_used = UpdateSize(u_.json_obj.cons.bytes_used, size);
+    int64_t result = static_cast<int64_t>(u_.json_obj.cons.bytes_used) + size;
+    if (result <= 0) {
+      LOG_EVERY_N(ERROR, 30) << "JSON size underflow: " << u_.json_obj.cons.bytes_used << " + "
+                             << size << " = " << result;
+      u_.json_obj.cons.bytes_used = (result < 0) ? static_cast<size_t>(-result) : 1;
+    } else {
+      u_.json_obj.cons.bytes_used = static_cast<size_t>(result);
+    }
   }
 }
 
