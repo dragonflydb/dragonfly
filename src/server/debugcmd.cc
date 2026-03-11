@@ -1670,7 +1670,7 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
   for (const PerShardStats& shard_stat : all_shards) {
     for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
       if (shard_stat[obj_type]) {
-        summary[obj_type].Add(std::move(*shard_stat[obj_type]));
+        summary[obj_type].Add(*shard_stat[obj_type]);
       }
     }
   }
@@ -1680,6 +1680,9 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
 
   for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
     const UniqueStrings& stats = summary[obj_type];
+    if (stats.total_count == 0) {
+      continue;
+    }
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, stats.ToString("Strings"));

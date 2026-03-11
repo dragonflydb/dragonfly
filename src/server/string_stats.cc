@@ -61,7 +61,7 @@ void UniqueStrings::AddZSet(const PrimeValue& pv) {
   IterateSortedSet(pv, [&](const ContainerEntry& e, auto) { return AddString(e); });
 }
 
-void UniqueStrings::Add(UniqueStrings&& other) {
+void UniqueStrings::Add(const UniqueStrings& other) {
   total_count += other.total_count;
   total_bytes += other.total_bytes;
   HllBufferPtr inputs[2] = {other.counter_, counter_};

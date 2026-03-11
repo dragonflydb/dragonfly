@@ -33,7 +33,7 @@ struct UniqueStrings {
   void AddList(const PrimeValue& pv);
   void AddZSet(const PrimeValue& pv);
 
-  void Add(UniqueStrings&& other);
+  void Add(const UniqueStrings& other);
 
   std::string ToString(std::string_view label) const;
 
