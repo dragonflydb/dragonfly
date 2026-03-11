@@ -73,8 +73,6 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
     return;
 
   DbTableStats& stats = db->stats;
-  DCHECK_GE(static_cast<int64_t>(stats.obj_memory_usage) + size, 0)
-      << "Can't decrease " << size << " from " << stats.obj_memory_usage;
 
   stats.AddTypeMemoryUsage(type, size);
 
@@ -146,27 +144,44 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
     return true;
 
   DCHECK_LE(tbl.size(), tbl.capacity());
+  DCHECK_GT(tbl.size(), 0u);
 
   // We take a conservative stance here -
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity) *
-                            GetFlag(FLAGS_table_growth_margin);
+  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity);
 
-  size_t obj_bytes_estimation = db_slice_->bytes_per_object() * table_free_items;
-  bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
-  if (res) {
-    VLOG(1) << "free_items: " << table_free_items
-            << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+  size_t obj_memory_usage = db_slice_->GetDBTable(cntx_.db_index)->stats.obj_memory_usage;
+  size_t avg_obj_size = obj_memory_usage / tbl.size();
+
+  // Catch significant discrepancies in average object size estimation.
+  // Note that this may happen if for example, db0 hosts a lot of small keys,
+  // db1 hosts huge keys etc. The goal of this comparison is to detect these cases and
+  // confirm that discrepancy is justified. Once we gather empirical evidence,
+  // we can remove this check and drop `db_slice_->bytes_per_object()` computation entirely.
+  if (avg_obj_size * 20 < db_slice_->bytes_per_object() ||
+      avg_obj_size > db_slice_->bytes_per_object() * 20) {
+    LOG_EVERY_T(WARNING, 1) << "Avg object size estimation for the table is " << avg_obj_size
+                            << " vs "
+                            << " overall object size estimation " << db_slice_->bytes_per_object();
+  }
+  size_t obj_bytes_estimation =
+      (avg_obj_size * table_free_items) * GetFlag(FLAGS_table_growth_margin);
+
+  bool can_grow = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
+  if (can_grow) {
+    VLOG(1) << "free_items: " << table_free_items << ", obj_bytes: " << avg_obj_size << " vs "
+            << db_slice_->bytes_per_object() << " "
             << " mem_available: " << mem_available;
   } else {
     LOG_EVERY_T(INFO, 1) << "Can't grow, free_items " << table_free_items
-                         << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+                         << ", obj_bytes: " << avg_obj_size << " vs "
+                         << db_slice_->bytes_per_object() << " "
                          << " mem_available: " << mem_available;
   }
 
-  return res;
+  return can_grow;
 }
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
