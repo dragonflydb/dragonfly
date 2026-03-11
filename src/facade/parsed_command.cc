@@ -138,15 +138,15 @@ void ParsedCommand::SendReply() {
     return CapturingReplyBuilder::Apply(std::move(std::get<payload::Payload>(reply_)), rb_);
 
   // Otherwise handle responder of async task
-  dfly::Overloaded ov{[this](ReplyFunc& f) { f(rb_); },
-                      [](std::coroutine_handle<> h) { h.resume(); }};
-  std::visit(ov, std::get<AsyncTask>(reply_).replier);
+  std::get<AsyncTask>(reply_).Reply(rb_);
 }
 
 ParsedCommand::AsyncTask::~AsyncTask() {
   // We must destroy the unfinished coroutine to free resources
-  if (std::holds_alternative<std::coroutine_handle<>>(replier))
-    std::get<std::coroutine_handle<>>(replier).destroy();
+  if (std::holds_alternative<std::coroutine_handle<>>(replier)) {
+    auto h = std::get<std::coroutine_handle<>>(replier);
+    h.destroy();
+  }
   replier = {};
 }
 
@@ -155,8 +155,7 @@ void ParsedCommand::AsyncTask::Reply(facade::SinkReplyBuilder* rb) {
     DCHECK(h.done()) << "Only one suspension point is supported";
     h.resume();
   };
-  dfly::Overloaded ov{[rb](ReplyFunc& f) { f(rb); }, coro_cb};
-  std::visit(ov, replier);
+  std::visit(dfly::Overloaded{[rb](ReplyFunc& f) { f(rb); }, coro_cb}, replier);
   replier = {};  // reset replier after its done
 }
 

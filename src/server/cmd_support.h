@@ -175,14 +175,18 @@ struct CmdR::Coro {
 
   // Custom new operator to avoid allocating coroutines if stack space is available and enough
   static void* operator new(std::size_t size, facade::CmdArgList /*unused*/, CommandContext* cntx) {
-    if (size <= CommandContext::kReservedStack && cntx->reseved_stack)
-      return cntx->reseved_stack;
-    return std::malloc(size);
+    // Allocate one byte more to store in last byte whether stack is local (1) or heap allocated (2)
+    bool local = size + 1 <= CommandContext::kReservedStack && cntx->reseved_stack;
+    void* ptr = local ? cntx->reseved_stack : std::malloc(size + 1);
+    static_cast<char*>(ptr)[size] = local ? 1u : 2u;
+    return ptr;
   }
 
+  // See operator new() above
   static void operator delete(void* ptr, std::size_t size) {
-    auto* promise = reinterpret_cast<promise_type*>(ptr);
-    if (size > CommandContext::kReservedStack || promise->cmd_cntx->reseved_stack == nullptr)
+    char type = static_cast<char*>(ptr)[size];
+    DCHECK(type == 1 || type == 2) << int(type);  // zero means it was not tagged
+    if (type == 2)
       std::free(ptr);
   }
 
