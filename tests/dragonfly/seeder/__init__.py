@@ -328,7 +328,7 @@ class HnswSearchSeeder:
         checks presence in the index, making this a reliable existence check.
         """
         doc_key = doc_id if isinstance(doc_id, str) else doc_id.decode()
-        doc_num = doc_key.removeprefix(self.prefix)
+        doc_num = doc_key[len(self.prefix) :] if doc_key.startswith(self.prefix) else doc_key
         r = await client.execute_command(
             "FT.SEARCH",
             self.index_name,
