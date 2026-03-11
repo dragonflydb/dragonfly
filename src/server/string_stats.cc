@@ -89,11 +89,13 @@ bool UniqueStrings::AddString(const ContainerEntry& e) {  // NOLINT must always 
     ++total_count;
     total_bytes += e.size();
   } else {
-    const std::string str = e.ToString();
-    CHECK_NE(-1,
-             pfadd_dense(counter_, reinterpret_cast<const unsigned char*>(str.data()), str.size()));
+    char buf[absl::numbers_internal::kFastToBufferSize];
+    const char* end = absl::numbers_internal::FastIntToBuffer(e.as_long(), buf);
+    const auto size = end - buf;
+    const int result = pfadd_dense(counter_, reinterpret_cast<const unsigned char*>(buf), size);
+    CHECK_NE(-1, result);
     ++total_count;
-    total_bytes += str.size();
+    total_bytes += size;
   }
   return true;
 }

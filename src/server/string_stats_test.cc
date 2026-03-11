@@ -15,7 +15,7 @@ using namespace testing;
 
 namespace {
 
-auto get_value(std::string_view row) -> std::string {
+std::string GetValue(std::string_view row) {
   static constexpr std::string_view bytes = " bytes";
   auto value = absl::StripAsciiWhitespace(row.substr(row.find(':') + 1));
   if (value.ends_with(bytes))
@@ -51,15 +51,15 @@ class StringStatsTest : public BaseFamilyTest {
 
     ParsedBucket bucket;
     EXPECT_NE(it, rows.end());
-    EXPECT_TRUE(absl::SimpleAtoi(get_value(*++it), &bucket.total_strings));
+    EXPECT_TRUE(absl::SimpleAtoi(GetValue(*++it), &bucket.total_strings));
     EXPECT_NE(it, rows.end());
-    EXPECT_TRUE(absl::SimpleAtoi(get_value(*++it), &bucket.unique_strings));
+    EXPECT_TRUE(absl::SimpleAtoi(GetValue(*++it), &bucket.unique_strings));
     EXPECT_NE(it, rows.end());
-    EXPECT_TRUE(absl::SimpleAtoi(get_value(*++it), &bucket.total_bytes));
+    EXPECT_TRUE(absl::SimpleAtoi(GetValue(*++it), &bucket.total_bytes));
     EXPECT_NE(it, rows.end());
-    EXPECT_TRUE(absl::SimpleAtod(get_value(*++it), &bucket.average_length));
+    EXPECT_TRUE(absl::SimpleAtod(GetValue(*++it), &bucket.average_length));
     EXPECT_NE(it, rows.end());
-    EXPECT_TRUE(absl::SimpleAtoi(get_value(*++it), &bucket.estimated_savings));
+    EXPECT_TRUE(absl::SimpleAtoi(GetValue(*++it), &bucket.estimated_savings));
     return bucket;
   }
 };
@@ -137,6 +137,22 @@ TEST_F(StringStatsTest, EmptyDatabase) {
 
   auto bucket = ParseStats(output);
   EXPECT_FALSE(bucket.has_value());
+}
+
+TEST_F(StringStatsTest, NumberKeys) {
+  for (int i = 0; i < 100; ++i) {
+    Run({"LPUSH", absl::StrCat("h:", i), "007", "value"});
+  }
+
+  const auto resp = Run({"DEBUG", "UNIQ-STRS"});
+  const std::string output = resp.GetString();
+
+  EXPECT_THAT(output, HasSubstr("list"));
+  const auto bucket = ParseStats(output);
+  EXPECT_TRUE(bucket.has_value());
+
+  EXPECT_EQ(bucket->total_strings, 200);
+  EXPECT_EQ(bucket->unique_strings, 2);
 }
 
 }  // namespace dfly
