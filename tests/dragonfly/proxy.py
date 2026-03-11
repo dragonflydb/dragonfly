@@ -12,9 +12,13 @@ class Proxy:
         self.server = None
 
     async def handle(self, reader, writer):
-        remote_reader, remote_writer = await asyncio.open_connection(
-            self.remote_host, self.remote_port
-        )
+        try:
+            remote_reader, remote_writer = await asyncio.open_connection(
+                self.remote_host, self.remote_port
+            )
+        except OSError:
+            writer.close()
+            return
 
         async def forward(reader, writer):
             while True:
