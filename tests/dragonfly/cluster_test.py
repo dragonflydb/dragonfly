@@ -3800,3 +3800,37 @@ async def test_cluster_migration_with_tiering_and_deletes(df_factory: DflyInstan
     # Verify that mutations are applied on the target node after migration
     info = await nodes[1].client.info("keyspace")
     assert info["db0"]["keys"] == keys - delete_succeded
+
+
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "cluster_mode": "yes",
+        "cluster_node_id": "0" * 40,
+    }
+)
+async def test_cluster_config_slot_overflow_doesnt_crash(df_factory: DflyInstanceFactory):
+    instance = df_factory.create(port=next(next_port))
+    df_factory.start_all([instance])
+    client = instance.client()
+    node_id = "0" * 40
+
+    # Build invalid config JSON manually - 1E383 is a valid JSON number but overflows uint16_t.
+    # We must NOT use json.dumps here because Python would reject 1e383 (infinity).
+    invalid_config = (
+        '[{"slot_ranges":[{"start":0,"end":8191}],'
+        '"master":{"id":"' + node_id + '","ip":"127.0.0.1","port":' + str(instance.port) + "},"
+        '"replicas":[]},'
+        '{"slot_ranges":[{"start":8192,"end":1E383}],'
+        '"master":{"id":"' + "1" * 40 + '","ip":"127.0.0.1","port":9999},'
+        '"replicas":[]}]'
+    )
+
+    pipe = client.pipeline(transaction=False)
+    pipe.execute_command("DFLYCLUSTER", "CONFIG", invalid_config)
+    pipe.execute_command("CLUSTER", "MYID")
+    results = await pipe.execute(raise_on_error=False)
+
+    # CONFIG must return an error (not crash), MYID must still work
+    assert isinstance(results[0], Exception)
+    assert results[1] == node_id

@@ -2861,8 +2861,9 @@ VarzValue::Map Service::GetVarzStats() {
 
 GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   util::fb2::LockGuard lk(mu_);
+  GlobalState prev = global_state_;
   if (global_state_ != from) {
-    return global_state_;
+    return prev;
   }
 
   VLOG(1) << "Switching state from " << from << " to " << to;
@@ -2876,11 +2877,12 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
       DCHECK(db.IsLoadRefCountZero());
     }
   });
-  return to;
+  return prev;
 }
 
 bool Service::RequestLoadingState() {
-  if (SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING) {
+  GlobalState prev = SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (prev == GlobalState::ACTIVE || prev == GlobalState::LOADING) {
     util::fb2::LockGuard lk(mu_);
     loading_state_counter_++;
     return true;

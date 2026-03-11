@@ -58,10 +58,9 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
-
 using tiering::FragmentRef;
 using tiering::KeyRef;
-using tiering::TieredColdRecord;
+using tiering::TieredCoolRecord;
 
 namespace {
 
@@ -433,20 +432,16 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, const StashDescriptor& 
   }
 }
 
-void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
-  DCHECK(value->IsExternal());
-  DCHECK(!value->HasStashPending());
-
+void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
+  DCHECK(!fragment_ref.HasStashPending());
   ++stats_.total_deletes;
 
-  tiering::DiskSegment segment = value->GetExternalSlice();
-  if (value->IsCool()) {
-    auto hot = DeleteCool(value->GetCool().record);
+  tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
+  if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
+    auto hot = DeleteCool(cool);
     DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
-
-  // In any case we delete the offloaded segment and reset the value.
-  value->RemoveExternal();
+  fragment_ref.ClearOffloaded();
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
@@ -592,7 +587,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
   size_t gained = 0;
   do {
     size_t memory_before = stats_.cool_memory_used;
-    TieredColdRecord* record = PopCool();
+    TieredCoolRecord* record = PopCool();
     if (record == nullptr)  // nothing to pull anymore
       break;
 
@@ -614,7 +609,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 
     auto* stats = op_manager_->GetDbTableStats(record->db_index);
     stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
-    CompactObj::DeleteMR<TieredColdRecord>(record);
+    CompactObj::DeleteMR<TieredCoolRecord>(record);
   } while (gained < goal);
 
   return gained;
@@ -652,9 +647,9 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
                              PrimeValue* pv) {
-  TieredColdRecord* record = CompactObj::AllocateMR<TieredColdRecord>();
+  TieredCoolRecord* record = CompactObj::AllocateMR<TieredCoolRecord>();
   cool_queue_.push_front(*record);
-  stats_.cool_memory_used += (sizeof(TieredColdRecord) + pv->MallocUsed());
+  stats_.cool_memory_used += (sizeof(TieredCoolRecord) + pv->MallocUsed());
 
   record->key_hash = CompactObj::HashCode(str);
   record->db_index = db_ind;
@@ -673,23 +668,23 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
   return hot;
 }
 
-PrimeValue TieredStorage::DeleteCool(TieredColdRecord* record) {
+PrimeValue TieredStorage::DeleteCool(TieredCoolRecord* record) {
   auto it = CoolQueue::s_iterator_to(*record);
   cool_queue_.erase(it);
 
   PrimeValue hot{std::move(record->value)};
-  stats_.cool_memory_used -= (sizeof(TieredColdRecord) + hot.MallocUsed());
-  CompactObj::DeleteMR<TieredColdRecord>(record);
+  stats_.cool_memory_used -= (sizeof(TieredCoolRecord) + hot.MallocUsed());
+  CompactObj::DeleteMR<TieredCoolRecord>(record);
   return hot;
 }
 
-TieredColdRecord* TieredStorage::PopCool() {
+TieredCoolRecord* TieredStorage::PopCool() {
   if (cool_queue_.empty())
     return nullptr;
 
-  TieredColdRecord& res = cool_queue_.back();
+  TieredCoolRecord& res = cool_queue_.back();
   cool_queue_.pop_back();
-  stats_.cool_memory_used -= (sizeof(TieredColdRecord) + res.value.MallocUsed());
+  stats_.cool_memory_used -= (sizeof(TieredCoolRecord) + res.value.MallocUsed());
   return &res;
 }
 

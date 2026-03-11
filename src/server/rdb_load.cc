@@ -2897,6 +2897,7 @@ error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
 
 error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
                                          string_view field_name, uint64_t elements_number) {
+#ifdef WITH_SEARCH
   // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
   if (!hnsw_index) {
@@ -2915,6 +2916,9 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
     LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   }
   return {};
+#else
+  return SkipVectorIndex(index_key, elements_number);
+#endif
 }
 
 error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_number) {

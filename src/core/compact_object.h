@@ -20,7 +20,7 @@ typedef struct stream stream;
 namespace dfly {
 
 namespace tiering {
-struct TieredColdRecord;
+struct TieredCoolRecord;
 }
 
 constexpr unsigned kEncodingIntSet = 0;
@@ -336,12 +336,12 @@ class CompactObj {
 
   // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
-               tiering::TieredColdRecord* record);
+               tiering::TieredCoolRecord* record);
 
   struct CoolItem {
     uint16_t page_offset;
     size_t serialized_size;
-    tiering::TieredColdRecord* record;
+    tiering::TieredCoolRecord* record;
   };
 
   // Prerequisite: IsCool() is true.
@@ -453,7 +453,7 @@ class CompactObj {
     uint8_t first_byte;
 
     // We do not have enough space in the common area to store page_index together with
-    // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
+    // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
     struct Offload {
       uint32_t page_index;
       uint32_t reserved;
@@ -461,7 +461,7 @@ class CompactObj {
 
     union {
       Offload offload;
-      tiering::TieredColdRecord* cool_record;
+      tiering::TieredCoolRecord* cool_record;
     };
   } __attribute__((packed));
   static_assert(sizeof(ExternalPtr) == 16);

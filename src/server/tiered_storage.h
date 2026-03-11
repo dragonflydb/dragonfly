@@ -91,7 +91,7 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
-  void Delete(DbIndex dbid, PrimeValue* value);
+  void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
   // Cancel pending stash for the fragment, must have HasStashPending() true.
   void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
@@ -128,8 +128,8 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  PrimeValue DeleteCool(tiering::TieredColdRecord* record);
-  tiering::TieredColdRecord* PopCool();
+  PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
+  tiering::TieredCoolRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
 
@@ -139,7 +139,7 @@ class TieredStorage : public TieredStorageBase {
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 
-  using CoolQueue = ::boost::intrusive::list<tiering::TieredColdRecord>;
+  using CoolQueue = ::boost::intrusive::list<tiering::TieredCoolRecord>;
   CoolQueue cool_queue_;
 
   struct {
