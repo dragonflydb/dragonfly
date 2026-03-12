@@ -623,7 +623,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
-
   migration_allowed_to_register_ = false;
 }
 

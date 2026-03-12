@@ -499,8 +499,6 @@ class Connection : public util::Connection {
     };
   };
 
-  size_t backpressure_to_disk_watermark_ = 0;
-
   bool request_shutdown_ = false;
 };
 
