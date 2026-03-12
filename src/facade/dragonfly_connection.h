@@ -361,8 +361,10 @@ class Connection : public util::Connection {
   // parsing is pending more input).
   bool ParseMCBatch();
 
+  // Loop over enqueued async commands and enqueue them for async execution.
+  // If async execution is not possible, handle them in synchronous mode one by one.
   // Returns true on successful execution, false on reply builder error.
-  bool ExecuteMCBatch();
+  bool ExecuteBatch();
 
   // Loop over finished async commands and let them reply.
   // Returns true on successful execution, false on reply builder error.

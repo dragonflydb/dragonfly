@@ -1335,7 +1335,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
   do {
     commands_parsed = ParseMCBatch();
 
-    if (!ExecuteMCBatch())
+    if (!ExecuteBatch())
       return ERROR;
 
     if (!ReplyBatch())
@@ -2310,7 +2310,7 @@ bool Connection::ParseMCBatch() {
   return true;
 }
 
-bool Connection::ExecuteMCBatch() {
+bool Connection::ExecuteBatch() {
   auto& conn_stats = tl_facade_stats->conn_stats;
   auto advance_head = [this]() -> ParsedCommand* {
     auto* cmd = parsed_head_;
@@ -2318,6 +2318,9 @@ bool Connection::ExecuteMCBatch() {
     ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
     return parsed_head_;
   };
+
+  auto dispatch = protocol_ == Protocol::MEMCACHE ? &ServiceInterface::DispatchMC
+                                                  : &ServiceInterface::DispatchCommandSimple;
 
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
@@ -2342,7 +2345,7 @@ bool Connection::ExecuteMCBatch() {
     if (!ioloop_v2_)  // only v2 loop supports any async commands so far
       mode = AsyncPreference::ONLY_SYNC;
 
-    auto dispatch_res = service_->DispatchMC(cmd, mode);
+    auto dispatch_res = (service_->*dispatch)(cmd, mode);
 
     // Enforce the pipeline invariant between the IO loop (producer) and AsyncFiber (consumer).
     // To prevent stream corruption, the command state must satisfy ONE of these rules:
@@ -2735,7 +2738,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
       if (parsed_head_) {
         if (parsed_head_ == parsed_to_execute_)
-          ExecuteMCBatch();
+          ExecuteBatch();
         ReplyBatch();
       }
     }
