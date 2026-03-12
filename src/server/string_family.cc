@@ -21,6 +21,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -730,35 +731,34 @@ OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_vi
   });
 }
 
-void IncrByGeneric(string_view key, int64_t val, CommandContext* cmd_cntx) {
+cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) {
   bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
     return res;
   };
+  auto result = co_await cmd::SingleHopT(cb);
 
-  OpResult<int64_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-
-  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
-
+  auto* rb = cmd_cntx->rb();
   switch (result.status()) {
     case OpStatus::OK:
-      cmd_cntx->SendLong(result.value());
+      rb->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
-      cmd_cntx->SendError(kInvalidIntErr);
+      rb->SendError(kInvalidIntErr);
       break;
     case OpStatus::OUT_OF_RANGE:
-      cmd_cntx->SendError(kIncrOverflow);
+      rb->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      cmd_cntx->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderNotFound());
+      rb->SendSimpleString(MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderNotFound());
       break;
     default:
-      cmd_cntx->SendError(result.status());
+      rb->SendError(result.status());
       break;
   }
+  co_return std::nullopt;
 }
 
 struct GetAndTouchParams {
@@ -1325,64 +1325,66 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
 }
 
-void CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, cmd_cntx);
+  return IncrByGeneric(cmd_cntx, key, 1);
 }
 
-void CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdIncrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+    cmd_cntx->SendError(kInvalidIntErr);
+    return cmd::kAborted;
   }
-  return IncrByGeneric(key, val, cmd_cntx);
+  return IncrByGeneric(cmd_cntx, key, val);
 }
 
-void CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return cmd_cntx->SendError(kInvalidFloatErr);
+    co_return facade::ErrorReply{kInvalidFloatErr};
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrFloat(t->GetOpArgs(shard), key, val);
   };
 
-  OpResult<double> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  OpResult<double> result = co_await cmd::SingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
-  if (!result) {
-    return cmd_cntx->SendError(result.status());
-  }
-
-  rb->SendDouble(result.value());
+  if (result)
+    rb->SendDouble(result.value());
+  else
+    rb->SendError(result.status());
+  co_return std::nullopt;
 }
 
-void CmdDecr(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdDecr(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, cmd_cntx);
+  return IncrByGeneric(cmd_cntx, key, -1);
 }
 
-void CmdDecrBy(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdDecrBy(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+    cmd_cntx->SendError(kInvalidIntErr);
+    return cmd::kAborted;
   }
   if (val == INT64_MIN) {
-    return cmd_cntx->SendError(kIncrOverflow);
+    cmd_cntx->SendError(kIncrOverflow);
+    return cmd::kAborted;
   }
 
-  return IncrByGeneric(key, -val, cmd_cntx);
+  return IncrByGeneric(cmd_cntx, key, -val);
 }
 
 // Reorder per-shard results according to argument order of primary command
@@ -1406,8 +1408,8 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
   }
 }
 
-void MGetGeneric(CmdArgList args, CommandContext* cmd_cntx,
-                 const DbSlice::ExpireParams* gat_params) {
+cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
+                      const DbSlice::ExpireParams* gat_params) {
   DCHECK_GE(args.size(), 1U);
 
   MemcacheCmdFlags cmd_flags;
@@ -1427,13 +1429,13 @@ void MGetGeneric(CmdArgList args, CommandContext* cmd_cntx,
     return OpStatus::OK;
   };
 
-  OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  auto result = co_await cmd::SingleHop(cb);
   CHECK_EQ(OpStatus::OK, result);
 
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
   if (auto err = std::move(tiering_err).Destroy(); err)
-    return cmd_cntx->SendError(err.message());
+    co_return facade::ErrorReply{err.message()};
 
   size_t arg_len = args.size();
 
@@ -1442,57 +1444,49 @@ void MGetGeneric(CmdArgList args, CommandContext* cmd_cntx,
                       absl::MakeSpan(mget_results.get(), arg_len));
 
   if (cmd_cntx->mc_command()) {
-    // We can not access `args` inside the lambda below if it runs asynchronously.
-    // Access to arguments must be done via cmd_cntx.
-    auto replier = [mget_results = std::move(mget_results), cmd_cntx](SinkReplyBuilder* builder) {
-      auto* mc_builder = static_cast<MCReplyBuilder*>(builder);
-      facade::MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
-      for (size_t i = 0; i < cmd_cntx->size(); ++i) {
-        const auto& entry = mget_results[i];
-        if (entry) {
-          mc_builder->SendValue(cmd_cntx->mc_command()->cmd_flags, cmd_cntx->at(i), entry->value, 0,
-                                entry->mc_flag, entry->ttl_sec);
-        } else {
-          mc_builder->SendSimpleString(mc_render.RenderMiss());
-        }
+    auto* mc_builder = static_cast<MCReplyBuilder*>(cmd_cntx->rb());
+    facade::MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
+    for (size_t i = 0; i < cmd_cntx->size(); ++i) {
+      const auto& entry = mget_results[i];
+      if (entry) {
+        mc_builder->SendValue(cmd_cntx->mc_command()->cmd_flags, cmd_cntx->at(i), entry->value, 0,
+                              entry->mc_flag, entry->ttl_sec);
+      } else {
+        mc_builder->SendSimpleString(mc_render.RenderMiss());
       }
-      mc_builder->SendSimpleString(mc_render.RenderGetEnd());
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    }
+    mc_builder->SendSimpleString(mc_render.RenderGetEnd());
   } else {
-    // TODO: remove arg_len capture once we store RESP arguments inside cmd_cntx.
-    auto replier = [arg_len, mget_results = std::move(mget_results),
-                    cmd_cntx](SinkReplyBuilder* builder) {
-      auto* redis_builder = static_cast<RedisReplyBuilder*>(builder);
-      redis_builder->StartArray(arg_len);
-      for (size_t i = 0; i < arg_len; ++i) {
-        const auto& entry = mget_results[i];
-        if (entry) {
-          redis_builder->SendBulkString(entry->value);
-        } else {
-          redis_builder->SendNull();
-        }
+    auto* redis_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+    redis_builder->StartArray(arg_len);
+    for (size_t i = 0; i < arg_len; ++i) {
+      const auto& entry = mget_results[i];
+      if (entry) {
+        redis_builder->SendBulkString(entry->value);
+      } else {
+        redis_builder->SendNull();
       }
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    }
   }
+  co_return std::nullopt;
 }
 
-void CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  MGetGeneric(args, cmd_cntx, nullptr);
+cmd::CmdR CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
+  return MGetGeneric(cmd_cntx, args, nullptr);
 }
 
 // Implements the memcache GAT command. The expected input is
-// GAT key [keys...]
+// GAT key [keys...]§§
 // The expiry argument is stored in mc_command()->expire_ts
-void CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
   if (!cmd_cntx->mc_command()) {
-    return cmd_cntx->SendError("GAT is a memcache-only command");
+    cmd_cntx->SendError("GAT is a memcache-only command");
+    return cmd::kAborted;
   }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
   const DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  MGetGeneric(args, cmd_cntx, &expire_params);
+  return MGetGeneric(cmd_cntx, args, &expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1737,18 +1731,18 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
-      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(Incr)
-      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(Decr)
-      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrBy)
-      << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(IncrByFloat)
-      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.HFUNC(DecrBy)
+      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
+      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
+      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
+      << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
+      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
       << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
              GetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.HFUNC(MGet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
@@ -1757,8 +1751,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
       << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
-      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}.HFUNC(
-             GAT);
+      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
+             .SetAsyncHandler(CmdGAT);
 }
 
 }  // namespace dfly

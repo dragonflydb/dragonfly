@@ -119,6 +119,8 @@ struct CmdR {
   using promise_type = Coro;
 };
 
+static constexpr CmdR kAborted{};
+
 // Implements of co_await for a single hop callback
 struct SingleHopWaiter : HopCoordinator {
   SingleHopWaiter(CommandContext* cntx, Transaction::RunnableType callback)
@@ -158,7 +160,12 @@ template <typename RT> struct SingleHopWaiterT : public SingleHopWaiter {
 
 // Underlying driver (promise) of async
 struct CmdR::Coro {
+  // Coroutine created of a top level command
   Coro(facade::CmdArgList arg, CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  }
+
+  // Coroutine created of a internal function with arguments
+  template <typename... Ts> Coro(CommandContext* cmd_cntx, const Ts&... ts) : cmd_cntx{cmd_cntx} {
   }
 
   auto await_transform(SingleHopSentinel callback) const {
