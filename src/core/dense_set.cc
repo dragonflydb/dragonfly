@@ -721,6 +721,38 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   ObjDelete(obj, false);
 }
 
+void* DenseSet::Detach(DensePtr* prev, DensePtr* ptr) {
+  void* obj = nullptr;
+
+  if (ptr->IsObject()) {
+    obj = ptr->Raw();
+    ptr->Reset();
+    if (prev) {
+      DCHECK(prev->IsLink());
+
+      DenseLinkKey* plink = prev->AsLink();
+      DensePtr tmp = DensePtr::From(plink);
+      tmp.SetTtl(prev->HasTtl());
+      DCHECK(ObjectAllocSize(tmp.GetObject()));
+
+      FreeLink(plink);
+      *prev = tmp;
+      DCHECK(!prev->IsLink());
+    }
+  } else {
+    DCHECK(ptr->IsLink());
+
+    DenseLinkKey* link = ptr->AsLink();
+    obj = link->Raw();
+    *ptr = link->next;
+    FreeLink(link);
+  }
+
+  obj_malloc_used_ -= ObjectAllocSize(obj);
+  --size_;
+  return obj;
+}
+
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
   if (entries_.empty() || size_ == 0) {
     return entries_.end();

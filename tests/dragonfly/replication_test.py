@@ -4122,8 +4122,14 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
     assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
 
 
+@pytest.mark.parametrize(
+    "master_threads, replica_threads",
+    [[3, 4], [4, 4], [4, 3]],
+)
 async def test_hnsw_search_replication_with_network_disruptions(
     df_factory: DflyInstanceFactory,
+    master_threads: int,
+    replica_threads: int,
 ):
     """
     Test HNSW search index replication under continuous traffic and a network disruption.
@@ -4132,8 +4138,8 @@ async def test_hnsw_search_replication_with_network_disruptions(
     search queries, replicates through a proxy, and drops the connection at a random
     moment within the first 10 seconds (may hit full sync or stable sync).
     """
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=4)
+    master = df_factory.create(proactor_threads=master_threads)
+    replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
 
     c_master = master.client()

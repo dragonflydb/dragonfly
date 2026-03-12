@@ -274,4 +274,102 @@ TEST_F(StringMapTest, ExpiryWithMaxAndKeepTTL) {
   EXPECT_FALSE(k.HasExpiry());
 }
 
+TEST_F(StringMapTest, ExtractExisting) {
+  sm_->AddOrUpdate("f1", "v1");
+  sm_->AddOrUpdate("f2", "v2");
+  EXPECT_EQ(sm_->UpperBoundSize(), 2u);
+
+  sds entry = sm_->Extract("f1");
+  ASSERT_NE(entry, nullptr);
+
+  // Verify the extracted entry has the correct value
+  sds val = StringMap::GetValue(entry);
+  EXPECT_EQ(string_view(val, sdslen(val)), "v1");
+
+  // Verify it was removed from the map
+  EXPECT_EQ(sm_->UpperBoundSize(), 1u);
+  EXPECT_FALSE(sm_->Contains("f1"));
+  EXPECT_TRUE(sm_->Contains("f2"));
+
+  // Caller must free via DeleteEntry
+  StringMap::DeleteEntry(entry);
+}
+
+TEST_F(StringMapTest, ExtractNonExisting) {
+  sm_->AddOrUpdate("f1", "v1");
+  sds entry = sm_->Extract("no_such_key");
+  EXPECT_EQ(entry, nullptr);
+  EXPECT_EQ(sm_->UpperBoundSize(), 1u);
+}
+
+TEST_F(StringMapTest, AddOrUpdateAndExtractNew) {
+  // Adding a new field returns nullptr (no previous entry)
+  sds prev = sm_->AddOrUpdateAndExtract("f1", "v1");
+  EXPECT_EQ(prev, nullptr);
+  EXPECT_TRUE(sm_->Contains("f1"));
+  EXPECT_STREQ(sm_->Find("f1")->second, "v1");
+}
+
+TEST_F(StringMapTest, AddOrUpdateAndExtractReplace) {
+  sm_->AddOrUpdate("f1", "old_value");
+  EXPECT_EQ(sm_->UpperBoundSize(), 1u);
+
+  sds prev = sm_->AddOrUpdateAndExtract("f1", "new_value");
+  ASSERT_NE(prev, nullptr);
+
+  // Verify the extracted entry has the old value
+  sds val = StringMap::GetValue(prev);
+  EXPECT_EQ(string_view(val, sdslen(val)), "old_value");
+
+  // Verify map now has the new value
+  EXPECT_STREQ(sm_->Find("f1")->second, "new_value");
+  EXPECT_EQ(sm_->UpperBoundSize(), 1u);
+
+  StringMap::DeleteEntry(prev);
+}
+
+TEST_F(StringMapTest, AddOrUpdateAndExtractWithTtl) {
+  sm_->AddOrUpdate("f1", "v1", 100);
+
+  sds prev = sm_->AddOrUpdateAndExtract("f1", "v2", 200);
+  ASSERT_NE(prev, nullptr);
+
+  sds val = StringMap::GetValue(prev);
+  EXPECT_EQ(string_view(val, sdslen(val)), "v1");
+
+  // Make sure new entry has correct value and ttl
+  auto it = sm_->Find("f1");
+  EXPECT_STREQ(it->second, "v2");
+  EXPECT_TRUE(it.HasExpiry());
+  EXPECT_EQ(it.ExpiryTime(), 200u);
+
+  StringMap::DeleteEntry(prev);
+}
+
+TEST_F(StringMapTest, ExtractMultiple) {
+  for (unsigned i = 0; i < 20; i++) {
+    sm_->AddOrUpdate(to_string(i), "val" + to_string(i));
+  }
+  EXPECT_EQ(sm_->UpperBoundSize(), 20u);
+
+  // Extract every other entry
+  vector<sds> extracted;
+  for (unsigned i = 0; i < 20; i += 2) {
+    sds entry = sm_->Extract(to_string(i));
+    ASSERT_NE(entry, nullptr);
+    extracted.push_back(entry);
+  }
+
+  EXPECT_EQ(sm_->UpperBoundSize(), 10u);
+
+  // Verify remaining entries
+  for (unsigned i = 1; i < 20; i += 2) {
+    EXPECT_TRUE(sm_->Contains(to_string(i)));
+  }
+
+  for (sds entry : extracted) {
+    StringMap::DeleteEntry(entry);
+  }
+}
+
 }  // namespace dfly

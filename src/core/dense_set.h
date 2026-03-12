@@ -291,6 +291,16 @@ class DenseSet {
     return false;
   }
 
+  // Like EraseInternal but returns the detached object instead of deleting it.
+  // Returns nullptr if the object was not found.
+  void* DetachInternal(void* obj, uint32_t cookie) {
+    auto [prev, found] = Find(obj, BucketId(obj, cookie), cookie);
+    if (found) {
+      return Detach(prev, found);
+    }
+    return nullptr;
+  }
+
   void* FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const;
 
   IteratorBase FindIt(const void* ptr, uint32_t cookie) {
@@ -401,6 +411,9 @@ class DenseSet {
   // Deletes the object pointed by ptr and removes it from the set.
   // If ptr is a link then it will be deleted internally.
   void Delete(DensePtr* prev, DensePtr* ptr);
+
+  // Like Delete but returns the raw object instead of calling ObjDelete.
+  void* Detach(DensePtr* prev, DensePtr* ptr);
 
   // Processes a single bucket during Shrink, relocating elements as needed.
   void ShrinkBucket(size_t bucket_idx);

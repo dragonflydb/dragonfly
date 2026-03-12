@@ -67,14 +67,20 @@ StringMap::~StringMap() {
 
 bool StringMap::AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec,
                             bool keepttl) {
-  const uint32_t computed_ttl = ComputeTtl(field, ttl_sec, keepttl);
-  auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), computed_ttl);
-  if (auto prev_entry = static_cast<sds>(AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit));
-      prev_entry) {
-    ObjDelete(prev_entry, false);
+  sds prev = AddOrUpdateAndExtract(field, value, ttl_sec, keepttl);
+  if (prev) {
+    ObjDelete(prev, false);
     return false;
   }
   return true;
+}
+
+sds StringMap::AddOrUpdateAndExtract(std::string_view field, std::string_view value,
+                                     uint32_t ttl_sec, bool keepttl) {
+  const uint32_t computed_ttl = ComputeTtl(field, ttl_sec, keepttl);
+  auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), computed_ttl);
+  auto prev_entry = static_cast<sds>(AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit));
+  return prev_entry;
 }
 
 uint32_t StringMap::ComputeTtl(string_view field, uint32_t ttl_sec, bool keepttl) const {
@@ -105,6 +111,16 @@ bool StringMap::AddOrSkip(std::string_view field, std::string_view value, uint32
 
 bool StringMap::Erase(string_view key) {
   return EraseInternal(&key, 1);
+}
+
+sds StringMap::Extract(string_view key) {
+  return static_cast<sds>(DetachInternal(const_cast<string_view*>(&key), 1));
+}
+
+void StringMap::DeleteEntry(sds entry) {
+  sds value = GetValue(entry);
+  sdsfree(value);
+  sdsfree(entry);
 }
 
 bool StringMap::Contains(string_view field) const {
