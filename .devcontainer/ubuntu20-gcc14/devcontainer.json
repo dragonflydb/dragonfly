@@ -1,0 +1,28 @@
+{
+  "name": "ubuntu20-gcc14",
+  "image": "ghcr.io/romange/ubuntu-dev:20-gcc14",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools-themes",
+        "twxs.cmake",
+        "mk12.better-git-line-blame"
+      ],
+      "settings": {
+        "cmake.buildDirectory": "/build",
+        "cmake.configureArgs": [
+          "-DWITH_AWS=OFF",
+          "-DWITH_GCP=OFF",
+          "-DWITH_GPERF=OFF"
+        ],
+        "extensions.ignoreRecommendations": true
+      }
+    }
+  },
+  "mounts": [
+    "source=ubuntu20-gcc14-vol,target=/build,type=volume"
+  ],
+  "postCreateCommand": ".devcontainer/ubuntu20/post-create.sh ${containerWorkspaceFolder}"
+}
