@@ -1,3 +1,4 @@
+#include <boost/circular_buffer.hpp>
 #include <random>
 #include <string>
 
@@ -96,13 +97,13 @@ TEST(Journal, WriteRead) {
   using Payload = Entry::Payload;
 
   std::vector<Entry> test_entries = {
-      {0, Op::COMMAND, 0, 2, nullopt, Payload("MSET", slice("A", "1", "B", "2"))},
-      {0, Op::COMMAND, 0, 2, nullopt, Payload("MSET", slice("C", "3"))},
-      {1, Op::COMMAND, 0, 2, nullopt, Payload("DEL", list("A", "B"))},
-      {2, Op::COMMAND, 1, 1, nullopt, Payload("LPUSH", list("l", "v1", "v2"))},
-      {3, Op::COMMAND, 0, 1, nullopt, Payload("MSET", slice("D", "4"))},
-      {4, Op::COMMAND, 1, 1, nullopt, Payload("DEL", list("l1"))},
-      {5, Op::COMMAND, 2, 1, nullopt, Payload("DEL", list("E", "2"))}};
+      {0, Op::COMMAND, 0, nullopt, Payload("MSET", slice("A", "1", "B", "2"))},
+      {0, Op::COMMAND, 0, nullopt, Payload("MSET", slice("C", "3"))},
+      {1, Op::COMMAND, 0, nullopt, Payload("DEL", list("A", "B"))},
+      {2, Op::COMMAND, 1, nullopt, Payload("LPUSH", list("l", "v1", "v2"))},
+      {3, Op::COMMAND, 0, nullopt, Payload("MSET", slice("D", "4"))},
+      {4, Op::COMMAND, 1, nullopt, Payload("DEL", list("l1"))},
+      {5, Op::COMMAND, 2, nullopt, Payload("DEL", list("E", "2"))}};
 
   // Write all entries to a buffer.
   base::IoBuf buf;
@@ -219,6 +220,33 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+TEST(Journal, CircularMemory) {
+  boost::circular_buffer<string> ring_buffer(1024);
+  for (int i = 0; i < 2000; ++i) {
+    ring_buffer.push_back(string(512, 'a'));
+  }
+
+  size_t cap = 0;
+  for (size_t i = 0; i < ring_buffer.size(); ++i) {
+    cap += ring_buffer[i].capacity();
+  }
+  LOG(INFO) << "Total capacity: " << cap;
+  for (size_t i = 0; i < 2000; ++i) {
+    ring_buffer.push_back(string(16, 'a'));
+  }
+  cap = 0;
+  for (size_t i = 0; i < ring_buffer.size(); ++i) {
+    cap += ring_buffer[i].capacity();
+  }
+  LOG(INFO) << "Total capacity after push: " << cap;
+
+  string tmp(1 << 16, 'x');
+  tmp = string(4, 'a');
+  LOG(INFO) << "Tmp string capacity: " << tmp.capacity();
+  tmp = string(32, 'a');
+  LOG(INFO) << "Tmp string capacity: " << tmp.capacity();
 }
 
 }  // namespace journal

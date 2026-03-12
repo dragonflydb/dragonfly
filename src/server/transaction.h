@@ -11,6 +11,7 @@
 #include <absl/functional/function_ref.h>
 
 #include <atomic>
+// #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -21,7 +22,6 @@
 #include "server/cluster_support.h"
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "server/table.h"
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
@@ -135,7 +135,7 @@ class Transaction {
   using WaitKeys = std::optional<std::string_view>;
 
   // Modes in which a multi transaction can run.
-  enum MultiMode {
+  enum MultiMode : uint8_t {
     // Invalid state.
     NOT_DETERMINED = 0,
     // Global transaction.
@@ -348,7 +348,7 @@ class Transaction {
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
   // Write a journal entry to a shard journal with the given payload.
-  void LogJournalOnShard(journal::Entry::Payload&& payload, uint32_t shard_cnt) const;
+  void LogJournalOnShard(journal::Entry::Payload&& payload) const;
 
   // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
   void ReviveAutoJournal();

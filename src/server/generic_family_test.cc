@@ -865,6 +865,32 @@ TEST_F(GenericFamilyTest, SortStore) {
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 }
 
+TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
+  // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
+  Run({"del", "src", "dest"});
+  Run({"sadd", "src", "3", "1", "2"});
+  Run({"sadd", "dest", "old"});
+  Run({"expire", "dest", "100"});
+  EXPECT_GT(Run({"ttl", "dest"}).GetInt(), 0);
+
+  auto resp = Run({"sort", "src", "store", "dest"});
+  EXPECT_EQ(3, resp.GetInt());
+  // Destination must have no expiry after SORT STORE overwrites it.
+  EXPECT_EQ(-1, Run({"ttl", "dest"}).GetInt());
+  ASSERT_THAT(Run({"lrange", "dest", "0", "-1"}).GetVec(), ElementsAre("1", "2", "3"));
+
+  // SORT src STORE src (same key), src has an expiry — must not crash and must clear expiry.
+  Run({"del", "myset"});
+  Run({"sadd", "myset", "c", "a", "b"});
+  Run({"expire", "myset", "100"});
+  EXPECT_GT(Run({"ttl", "myset"}).GetInt(), 0);
+
+  resp = Run({"sort", "myset", "ALPHA", "store", "myset"});
+  EXPECT_EQ(3, resp.GetInt());
+  EXPECT_EQ(-1, Run({"ttl", "myset"}).GetInt());
+  ASSERT_THAT(Run({"lrange", "myset", "0", "-1"}).GetVec(), ElementsAre("a", "b", "c"));
+}
+
 TEST_F(GenericFamilyTest, Sort_RO) {
   // Test list sort with params
   Run({"del", "list-1"});
@@ -1663,6 +1689,60 @@ TEST_F(GenericFamilyTest, Delex) {
   EXPECT_THAT(Run({"delex", "key11", "randomarg"}), ErrArg("wrong number of arguments"));
   EXPECT_THAT(Run({"delex", "key12", "IFEQ"}), ErrArg("wrong number of arguments"));
   EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(GenericFamilyTest, Rm) {
+  // Basic: RM 0 on empty db returns [0, 0]
+  auto resp = Run({"rm", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], "0");
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With MATCH arg — still parses OK
+  resp = Run({"rm", "0", "match", "foo*"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With TYPE arg — still parses OK
+  resp = Run({"rm", "0", "type", "string"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With COUNT arg — still parses OK
+  resp = Run({"rm", "0", "match", "foo*", "count", "100"});
+  ASSERT_THAT(resp, ArrLen(2));
+
+  // Invalid cursor → error
+  resp = Run({"rm", "notanumber"});
+  EXPECT_THAT(resp, ErrArg("invalid cursor"));
+
+  // Invalid options → syntax error
+  resp = Run({"rm", "0", "badopt"});
+  EXPECT_THAT(resp, ErrArg("syntax"));
+}
+
+TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
+  for (int i = 0; i < 10; ++i)
+    Run({"set", absl::StrCat("foo", i), "val"});
+  for (int i = 0; i < 5; ++i)
+    Run({"set", absl::StrCat("bar", i), "val"});
+
+  // Delete all foo* keys by iterating until cursor returns 0
+  uint32_t total_deleted = 0;
+  uint64_t cursor = 0;
+  do {
+    auto resp = Run({"rm", absl::StrCat(cursor), "match", "foo*", "count", "100"});
+    ASSERT_THAT(resp, ArrLen(2));
+    ASSERT_TRUE(absl::SimpleAtoi(resp.GetVec()[0].GetString(), &cursor));
+    total_deleted += resp.GetVec()[1].GetInt().value();
+  } while (cursor != 0);
+
+  EXPECT_EQ(total_deleted, 10u);
+
+  // foo* keys are gone, bar* keys remain
+  EXPECT_EQ(Run({"exists", "foo0"}), 0);
+  EXPECT_EQ(Run({"exists", "bar0"}), 1);
+  EXPECT_EQ(Run({"dbsize"}), 5);
 }
 
 }  // namespace dfly

@@ -122,6 +122,31 @@ class TestMemcached:
 
             client.close()
 
+    def test_pipeline_get_then_stats_version(self, df_server: DflyInstance):
+        """
+        Verify GET pipelined before STATS or VERSION doesn't crash the server.
+        """
+        port = int(df_server["memcached_port"])
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(5)
+        client.connect(("127.0.0.1", port))
+        client.sendall(b"get nokey\r\nversion\r\n")
+        response = read_response(client, len(b"END\r\nVERSION 1.6.0 DF\r\n"))
+        client.close()
+        assert response == b"END\r\nVERSION 1.6.0 DF\r\n"
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(5)
+        client.connect(("127.0.0.1", port))
+        client.sendall(b"get nokey\r\nstats\r\n")
+        # Read until both GET's END and STATS' END are received before closing.
+        response = b""
+        while response.count(b"END\r\n") < 2:
+            response += client.recv(4096)
+        client.close()
+        assert response.startswith(b"END\r\nSTAT ")
+
     def test_error_in_pipeline(self, df_server: DflyInstance, memcached_client: MCClient):
         """
         Verify correct responses to  "get x\r\ngetaa\r\nget y z\r\n"
@@ -178,6 +203,49 @@ class TestMemcached:
         assert memcached_client.get("key1") is None
         assert memcached_client.get("key2") is None
         assert memcached_client.get("key3") is None
+
+    def test_pipeline_cas_crash(self, df_server: DflyInstance, memcached_client: MCClient):
+        """
+        Tests that an unsupported/invalid command (CAS) sent in a pipeline
+        after an async command (GETS) does not crash the server
+        and correctly buffers the error reply in order.
+        """
+        client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_sock.settimeout(5)
+        client_sock.connect(("127.0.0.1", int(df_server["memcached_port"])))
+
+        # Command sequence:
+        # 1. SET (sync)
+        # 2. GETS (async - forces the next command to not be the head)
+        # 3. CAS (hits the default block, triggering the early error)
+        payload = (
+            b"set mykey 0 0 5\r\nvalue\r\n" b"gets mykey\r\n" b"cas mykey 0 0 5 12345\r\nvalue\r\n"
+        )
+        client_sock.sendall(payload)
+
+        response = b""
+        while b"CLIENT_ERROR bad command line format\r\n" not in response:
+            data = client_sock.recv(4096)
+            if not data:
+                break
+            response += data
+        client_sock.close()
+
+        # Ensure strict ordering: STORED -> GETS (VALUE + END) -> CLIENT_ERROR
+        idx_stored = response.find(b"STORED\r\n")
+        idx_value = response.find(b"VALUE mykey")
+        idx_error = response.find(b"CLIENT_ERROR bad command line format")
+        # Look for the GETS terminator specifically AFTER the value
+        idx_end = response.find(b"END\r\n", idx_value)
+
+        assert idx_stored != -1 and idx_value != -1 and idx_error != -1 and idx_end != -1
+        assert (
+            idx_stored < idx_value < idx_end < idx_error
+        ), f"Responses out of order/interleaved: {response}"
+
+        # Final sanity check to ensure the connection/server is still healthy
+        assert memcached_client.set("sanity_check", "alive")
+        assert memcached_client.get("sanity_check") == b"alive"
 
 
 @dfly_args(DEFAULT_ARGS)

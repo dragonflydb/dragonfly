@@ -1,27 +1,23 @@
-import random
-import logging
-import string
-import pytest
 import asyncio
-import time
-import socket
-from threading import Thread
+import logging
 import random
+import socket
 import ssl
-from redis import asyncio as aioredis
-import redis as base_redis
-import hiredis
-from redis.cache import CacheConfig
-
-from redis.exceptions import ConnectionError, ResponseError
+import string
+import time
+from dataclasses import dataclass
+from threading import Thread
 
 import async_timeout
-from dataclasses import dataclass
-from aiohttp import ClientSession
+import pytest
+import redis as base_redis
+from redis import asyncio as aioredis
+from redis.cache import CacheConfig
+from redis.exceptions import ConnectionError, ResponseError
 
-from .utility import tick_timer, assert_eventually
 from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
+from .utility import tick_timer, assert_eventually
 
 BASE_PORT = 1111
 
@@ -393,7 +389,7 @@ will eventually unblock when it disconnects.
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({"proactor_threads": "1", "publish_buffer_limit": "100"})
 async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
@@ -430,7 +426,7 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
         await pub
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @dfly_args({"proactor_threads": "4"})
 async def test_pubsub_busy_connections(df_server: DflyInstance):
     sleep = 60
@@ -1018,7 +1014,7 @@ It should prolong the pause for all current commands.
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_nested_client_pause(async_client: aioredis.Redis):
     async def do_pause():
         await async_client.execute_command("CLIENT", "PAUSE", "1000", "WRITE")
@@ -1651,3 +1647,131 @@ async def test_tls_partial_header_read(
     # Verify server is still alive by making a valid connection
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     assert await client.ping()
+
+
+async def test_blocking_command_pipeline_flush(df_server: DflyInstance):
+    blpop_timeout = 5
+    num_blpops = 3
+    push_after = 1.0
+    max_allowed_delay = 2.0
+    src_key = "__blpop_pipeline_flush_test__"
+
+    pusher = aioredis.Redis(port=df_server.port)
+    await pusher.delete(src_key)
+
+    def encode_resp_command(*args):
+        encoded_args = [str(a).encode() for a in args]
+        header = f"*{len(encoded_args)}\r\n".encode()
+        body = b"".join(f"${len(a)}\r\n".encode() + a + b"\r\n" for a in encoded_args)
+        return header + body
+
+    pipeline_data = encode_resp_command("SET", src_key + ":dummy", "val")
+    pipeline_data += encode_resp_command("PING")
+    pipeline_data += b"".join(
+        encode_resp_command("BLPOP", src_key, blpop_timeout) for _ in range(num_blpops)
+    )
+
+    conn_reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    writer.write(pipeline_data)
+    await writer.drain()
+
+    async def expect_reply(expected: str, timeout=max_allowed_delay):
+        reply = await asyncio.wait_for(conn_reader.readline(), timeout)
+        assert reply == f"{expected}\r\n".encode(), f"expected {expected}, got {reply!r}"
+
+    t0 = time.monotonic()
+    await expect_reply("+OK")
+    await expect_reply("+PONG")
+    total_nonblocking_time = time.monotonic() - t0
+
+    assert (
+        total_nonblocking_time < max_allowed_delay
+    ), f"Non-blocking replies took {total_nonblocking_time:.2f}s, expected < {max_allowed_delay}s."
+
+    async def delayed_push():
+        await asyncio.sleep(push_after)
+        await pusher.lpush(src_key, "hello")
+
+    push_task = asyncio.create_task(delayed_push())
+
+    t0 = time.monotonic()
+    total_timeout = blpop_timeout * num_blpops + 5
+    try:
+        await expect_reply("*2", total_timeout)
+        first_blpop_time = time.monotonic() - t0
+        assert (
+            first_blpop_time < max_allowed_delay
+        ), f"First blocking response took {first_blpop_time:.2f}s, expected < {max_allowed_delay}s"
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+        await push_task
+        await pusher.delete(src_key, src_key + ":dummy")
+        await pusher.aclose()
+
+
+@dfly_args({"proactor_threads": 2, "async_dispatch_quota": 50})
+async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    # Send subscribe and consume the standard 6-line RESP array reply
+    # to completely clean the socket buffer before the flood begins.
+    writer.write(b"SUBSCRIBE starvation_chan\r\n")
+    await writer.drain()
+    for _ in range(6):
+        await reader.readline()
+
+    # Continuous Flood Task with batches of 500 commands (publisher)
+    keep_flooding = True
+
+    async def flood():
+        pub = aioredis.Redis(port=df_server.port)
+        while keep_flooding:
+            pipe = pub.pipeline(transaction=False)
+            for _ in range(500):
+                pipe.publish("starvation_chan", "hello")
+            await pipe.execute()
+            # short sleep to yield the event loop but maintain constant pressure
+            await asyncio.sleep(0.001)
+        await pub.aclose()
+
+    flood_task = asyncio.create_task(flood())
+
+    try:
+        # Wait just 10ms for the first wave to hit the server's queue
+        await asyncio.sleep(0.01)
+
+        # Inject UNSUBSCRIBE + PING into the active flood.
+        # This triggers our quota logic, forcing the server to yield and read the commands from the TCP buffer, preventing input starvation.
+        writer.write(b"UNSUBSCRIBE starvation_chan\r\nPING starvation_survived\r\n")
+        await writer.drain()
+
+        # Count the PubSub messages that arrive before the PING
+        pubsub_messages_before_ping = 0
+        ping_found = False
+        async with async_timeout.timeout(2.0):
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+
+                if b"starvation_survived" in line:
+                    ping_found = True
+                    break
+
+                if b"message" in line:
+                    pubsub_messages_before_ping += 1
+
+        # Assert 1: The PING must arrive before the flood is fully drained.
+        assert ping_found, "PING was starved and timed out!"
+
+        # Assert 2: the quota logic prioritized the pipeline.
+        # If it was truly starving, this would timeout or hit tens of thousands.
+        assert (
+            pubsub_messages_before_ping <= 1000
+        ), f"Starvation detected! Pipeline queued behind {pubsub_messages_before_ping} messages."
+    finally:
+        keep_flooding = False
+        await flood_task
+        writer.close()
+        await writer.wait_closed()

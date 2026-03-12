@@ -135,7 +135,12 @@ template <typename T> optional<T> ReadNumeric(const TmpJson& obj) {
     return nullopt;
   }
 
-  return obj.as<T>();
+  try {
+    return obj.as<T>();
+  } catch (const std::exception& e) {
+    LOG(ERROR) << kInvalidConfigPrefix << "number conversion error: " << e.what();
+    return nullopt;
+  }
 }
 
 optional<SlotRanges> GetClusterSlotRanges(const TmpJson& slots) {

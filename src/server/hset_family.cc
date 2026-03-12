@@ -499,7 +499,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, false, &pv, ts);
+    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
   }
 
   return created;
@@ -786,6 +786,10 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(kInvalidFloatErr);
   }
 
+  if (isnan(dval) || isinf(dval)) {
+    return cmd_cntx->SendError(kNanOrInfDuringIncr);
+  }
+
   IncrByParam param{dval};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1060,6 +1064,57 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HSETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
             << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(HStrLen)
             << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
+}
+
+auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  unsigned char* lp = lpNew(blob.size());
+  if (!ZiplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
+    LOG(ERROR) << "Hash ziplist integrity check failed.";
+    zfree(lp);
+    return LoadBlobResult::kCorrupted;
+  }
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  if (lpBytes(lp) > server.max_listpack_map_bytes) {
+    StringMap* sm = ConvertToStrMap(lp);
+    lpFree(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  } else {
+    lp = lpShrinkToFit(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  }
+
+  return LoadBlobResult::kSuccess;
+}
+
+auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "Hash listpack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* lp = lpNew(blob.size());
+  std::memcpy(lp, blob.data(), blob.size());
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  if (lpBytes(lp) > server.max_listpack_map_bytes) {
+    StringMap* sm = ConvertToStrMap(lp);
+    lpFree(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  } else {
+    lp = lpShrinkToFit(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  }
+
+  return LoadBlobResult::kSuccess;
 }
 
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {

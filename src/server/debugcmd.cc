@@ -24,6 +24,7 @@ extern "C" {
 
 #include <algorithm>
 #include <filesystem>
+#include <numeric>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -40,8 +41,10 @@ extern "C" {
 #include "server/error.h"
 #include "server/main_service.h"
 #include "server/multi_command_squasher.h"
+#include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
+#include "server/string_stats.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -678,6 +681,10 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    per second.",
         "SEGMENTS",
         "    Prints segment info for the current database.",
+        "COMPACT-TABLE threshold",
+        "    Attempts to merge underutilized segments in dash table",
+        "UNIQ-STRS",
+        "    Prints per-object unique string stats and estimated dedup savings across shards.",
         "HELP",
         "    Prints this help.",
     };
@@ -762,6 +769,15 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
   if (subcmd == "SEGMENTS") {
     return Segments(args.subspan(1), cmd_cntx);
   }
+
+  if (subcmd == "COMPACT-TABLE") {
+    return CompactTable(args.subspan(1), cmd_cntx);
+  }
+
+  if (subcmd == "UNIQ-STRS") {
+    return CountUniqueStrings(cmd_cntx);
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cmd_cntx->SendError(reply, kSyntaxErrType);
 }
@@ -898,6 +914,10 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
   }
   if (parser.HasError()) {
     cmd_cntx->SendError(parser.TakeError().MakeReply());
+    return nullopt;
+  }
+  if (options.val_size == 0) {
+    cmd_cntx->SendError("val_size must be positive");
     return nullopt;
   }
   return options;
@@ -1222,12 +1242,14 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
     uint64_t prime_capacity = 0;
     uint64_t expire_count = 0;
     uint64_t key_reads = 0;
+    size_t avg_object_size = 0;
   };
 
   vector<ShardInfo> infos(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     auto sid = shard->shard_id();
-    auto slice_stats = cntx_->ns->GetDbSlice(sid).GetStats();
+    auto& db_slice = cntx_->ns->GetDbSlice(sid);
+    auto slice_stats = db_slice.GetStats();
     auto& stats = infos[sid];
 
     stats.used_memory = shard->UsedMemory();
@@ -1236,6 +1258,7 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
       stats.prime_capacity += db_stats.prime_capacity;
       stats.expire_count += db_stats.expire_count;
     }
+    stats.avg_object_size = db_slice.bytes_per_object();
     stats.key_reads = slice_stats.events.hits + slice_stats.events.misses;
   });
 
@@ -1260,9 +1283,11 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
     ADD_STAT(i, key_count);
     ADD_STAT(i, expire_count);
     ADD_STAT(i, key_reads);
+
     absl::StrAppend(&out, "shard", i,
                     "_prime_utilization: ", double(infos[i].key_count) / infos[i].prime_capacity,
                     "\n");
+    absl::StrAppend(&out, "shard", i, "_avg_object_size: ", infos[i].avg_object_size, "\n");
   }
 
   MAXMIN_STAT(used_memory);
@@ -1593,6 +1618,84 @@ void DebugCmd::Segments(CmdArgList args, CommandContext* cmd_cntx) {
   absl::StrAppend(&result, "Segment Capacity: ", PrimeTable::kSegCapacity, "\n");
   absl::StrAppend(&result, "Segment Size Histogram: \n");
   absl::StrAppend(&result, hist.ToString(), "\n");
+  rb->SendVerbatimString(result);
+}
+
+void DebugCmd::CompactTable(CmdArgList args, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  double threshold = 0.25;
+  if (args.size() > 0) {
+    if (!absl::SimpleAtod(facade::ToSV(args[0]), &threshold)) {
+      return rb->SendError("Invalid threshold value");
+    }
+    if (threshold <= 0.0 || threshold > 1.0) {
+      return rb->SendError("Threshold must be between 0 and 1");
+    }
+  }
+
+  const DbIndex db_idx = cmd_cntx->server_conn_cntx()->db_index();
+  std::vector<size_t> results(shard_set->size());
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    results[shard->shard_id()] = shard->CompactTable(threshold, db_idx);
+  });
+
+  rb->SendLong(std::accumulate(results.begin(), results.end(), 0ul));
+}
+
+void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
+  using PerShardStats = std::array<std::unique_ptr<UniqueStrings>, OBJ_HASH + 1>;
+
+  vector<PerShardStats> all_shards(shard_set->size());
+  auto cb = [&all_shards](PrimeIterator it) {
+    const unsigned obj_type = it->second.ObjType();
+    if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET &&
+        obj_type != OBJ_ZSET) {
+      return;
+    }
+
+    auto& entry = all_shards[EngineShard::tlocal()->shard_id()][obj_type];
+    if (!entry) {
+      entry = std::make_unique<UniqueStrings>();
+    }
+
+    if (obj_type == OBJ_HASH)
+      entry->AddHMap(it->second);
+    else if (obj_type == OBJ_LIST)
+      entry->AddList(it->second);
+    else if (obj_type == OBJ_SET)
+      entry->AddSet(it->second);
+    else if (obj_type == OBJ_ZSET)
+      entry->AddZSet(it->second);
+  };
+
+  TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
+
+  std::array<UniqueStrings, OBJ_HASH + 1> summary;
+  for (const PerShardStats& shard_stat : all_shards) {
+    for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
+      if (shard_stat[obj_type]) {
+        summary[obj_type].Add(*shard_stat[obj_type]);
+      }
+    }
+  }
+
+  string result;
+  StrAppend(&result, "___begin unique string stats___\n\n");
+
+  for (CompactObjType obj_type = OBJ_LIST; obj_type <= OBJ_HASH; ++obj_type) {
+    const UniqueStrings& stats = summary[obj_type];
+    if (stats.total_count == 0) {
+      continue;
+    }
+    StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
+    StrAppend(&result, "________________________________________________________________\n");
+    StrAppend(&result, stats.ToString("Strings"));
+    StrAppend(&result, "\n");
+  }
+
+  StrAppend(&result, "___end unique string stats___\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->SendVerbatimString(result);
 }
 

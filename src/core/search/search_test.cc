@@ -15,6 +15,7 @@
 #include <mimalloc.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory_resource>
 #include <random>
 
@@ -971,7 +972,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   auto metadata = original.GetMetadata();
   ASSERT_EQ(metadata.cur_element_count, num_elements);
 
-  auto nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  std::vector<HnswNodeData> nodes;
+  {
+    auto lock = original.GetReadLock();
+    nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  }
   ASSERT_EQ(nodes.size(), num_elements);
 
   // Verify node data integrity
@@ -1003,7 +1008,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
 
   // Graph links must be identical
-  auto restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  std::vector<HnswNodeData> restored_nodes;
+  {
+    auto lock = restored.GetReadLock();
+    restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  }
   ASSERT_EQ(restored_nodes.size(), nodes.size());
   for (size_t i = 0; i < nodes.size(); i++) {
     EXPECT_EQ(restored_nodes[i].internal_id, nodes[i].internal_id);
@@ -1061,6 +1070,484 @@ INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
                            std::ostringstream name;
                            name << info.param;
                            return name.str();
+                         });
+
+// Test fixture for HNSW deferred operations.
+// Verifies that Add/Remove called while a read lock is held are properly
+// deferred and replayed once the lock is released.
+class HnswDeferredOpsTest : public ::testing::Test {
+ protected:
+  static constexpr size_t kDim = 4;
+  static constexpr size_t kCapacity = 100;
+
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = kDim;
+    params.sim = VectorSimilarity::L2;
+    params.capacity = kCapacity;
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+    index_ = std::make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+  }
+
+  void TearDown() override {
+    index_.reset();
+    InitTLSearchMR(nullptr);
+  }
+
+  MockedDocument MakeDoc(std::initializer_list<float> coords) {
+    return MockedDocument::Map{{"vec", ToBytes(coords)}};
+  }
+
+  // Helper: run KNN for the zero vector and return the set of found GlobalDocIds.
+  absl::flat_hash_set<GlobalDocId> KnnIds(size_t k) {
+    vector<float> q(kDim, 0.0f);
+    auto results = index_->Knn(q.data(), k, std::nullopt);
+    absl::flat_hash_set<GlobalDocId> ids;
+    for (auto& [dist, id] : results)
+      ids.insert(id);
+    return ids;
+  }
+
+  std::unique_ptr<HnswVectorIndex> index_;
+};
+
+TEST_F(HnswDeferredOpsTest, AddWhileReadLocked) {
+  // Hold a read lock (simulating serialization), then add elements.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // These Adds cannot acquire the write lock and must be deferred.
+    index_->Add(0, doc0, "vec");
+    index_->Add(1, doc1, "vec");
+
+    // While the read lock is still held, KNN should not find the deferred docs.
+    auto ids = KnnIds(10);
+    EXPECT_TRUE(ids.empty());
+  }
+
+  // After the read lock is released, deferred ops should replay.
+  // The next operation that touches the index triggers ProcessDeferred.
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(1));
+}
+
+TEST_F(HnswDeferredOpsTest, RemoveWhileReadLocked) {
+  // Pre-populate the index.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+  auto doc2 = MakeDoc({0, 0, 1, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
+  index_->Add(2, doc2, "vec");
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // Remove doc1 while read-locked — should be deferred.
+    index_->Remove(1, doc1, "vec");
+
+    // doc1 is still visible because the remove is deferred.
+    auto ids = KnnIds(10);
+    EXPECT_EQ(ids.size(), 3u);
+  }
+
+  // After releasing the lock, removal should take effect.
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(2));
+  EXPECT_FALSE(ids.contains(1));
+}
+
+TEST_F(HnswDeferredOpsTest, DuplicateDeferredOpsKeepLatest) {
+  // Pre-populate with doc0.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  index_->Add(0, doc0, "vec");
+
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // Add doc1, then remove doc1 — both deferred for the same id.
+    // Only the last operation (remove) should survive.
+    index_->Add(1, doc1, "vec");
+    index_->Remove(1, doc1, "vec");
+  }
+
+  // After lock release, doc1 should not exist (remove was last).
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 1u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_FALSE(ids.contains(1));
+}
+
+TEST_F(HnswDeferredOpsTest, DuplicateDeferredOpsAddOverridesRemove) {
+  // Pre-populate with doc0 and doc1.
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
+
+  auto doc1_new = MakeDoc({0, 0, 1, 0});
+
+  {
+    auto lock = index_->GetReadLock();
+
+    // Remove doc1, then re-add it with new data — the add should win.
+    index_->Remove(1, doc1, "vec");
+    index_->Add(1, doc1_new, "vec");
+  }
+
+  // After lock release, doc1 should still be present with updated data.
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 2u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_TRUE(ids.contains(1));
+}
+
+// Verify that Remove without a read lock also works correctly.
+TEST_F(HnswDeferredOpsTest, RemoveWithoutReadLock) {
+  auto doc0 = MakeDoc({1, 0, 0, 0});
+  auto doc1 = MakeDoc({0, 1, 0, 0});
+  index_->Add(0, doc0, "vec");
+  index_->Add(1, doc1, "vec");
+
+  index_->Remove(1, doc1, "vec");
+
+  auto ids = KnnIds(10);
+  EXPECT_EQ(ids.size(), 1u);
+  EXPECT_TRUE(ids.contains(0));
+  EXPECT_FALSE(ids.contains(1));
+}
+
+class HnswSubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+
+  // Helper to create a simple index with vectors on a line for easy verification
+  unique_ptr<HnswVectorIndex> CreateSimple1DIndex(size_t num_elements, VectorSimilarity sim) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 1;
+    params.sim = sim;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+
+    for (size_t i = 0; i < num_elements; i++) {
+      vector<float> coords = {static_cast<float>(i)};
+      auto doc = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+      index->Add(i, MockedDocument(doc), "vec");
+    }
+
+    return index;
+  }
+
+  // Helper to create a 2D index with unit-circle vectors, for COSINE similarity testing.
+  // Vector i is placed at angle i * (2π / num_elements), giving meaningful cosine distances.
+  unique_ptr<HnswVectorIndex> CreateCircle2DIndex(size_t num_elements, VectorSimilarity sim) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 2;
+    params.sim = sim;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+
+    const float step = 2.0f * static_cast<float>(acos(-1.0)) / static_cast<float>(num_elements);
+    for (size_t i = 0; i < num_elements; i++) {
+      float angle = step * static_cast<float>(i);
+      vector<float> coords = {cosf(angle), sinf(angle)};
+      auto doc = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+      index->Add(i, MockedDocument(doc), "vec");
+    }
+
+    return index;
+  }
+};
+
+TEST_P(HnswSubsetKnnTest, CorrectResults) {
+  // Test that SubsetKnn returns correct top-k from a subset
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(100, sim);
+
+  vector<float> query = {50.0f};
+  vector<GlobalDocId> subset;
+
+  // Create subset: only even numbers from 40 to 60
+  for (size_t i = 40; i <= 60; i += 2) {
+    subset.push_back(i);
+  }
+
+  // Ask for top 5
+  auto results = index->SubsetKnn(query.data(), 5, subset);
+
+  // Should get exactly 5 results
+  ASSERT_EQ(results.size(), 5u);
+
+  // All results should be from the subset
+  for (const auto& [dist, id] : results) {
+    EXPECT_TRUE(std::find(subset.begin(), subset.end(), id) != subset.end())
+        << "Result ID " << id << " not in subset";
+  }
+
+  // For L2 similarity, verify the closest point is 50
+  if (sim == VectorSimilarity::L2) {
+    bool found_50 = false;
+    for (const auto& [dist, id] : results) {
+      if (id == 50) {
+        found_50 = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(found_50) << "For L2, point 50 should be in top 5 closest to query {50}";
+  }
+}
+
+TEST_P(HnswSubsetKnnTest, EmptySubset) {
+  // Test edge case: empty subset
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  vector<GlobalDocId> empty_subset;
+
+  auto results = index->SubsetKnn(query.data(), 5, empty_subset);
+  EXPECT_TRUE(results.empty()) << "SubsetKnn with empty subset should return empty results";
+}
+
+TEST_P(HnswSubsetKnnTest, KEqualsZero) {
+  // Test edge case: k = 0
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  vector<GlobalDocId> subset = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+  auto results = index->SubsetKnn(query.data(), 0, subset);
+  EXPECT_TRUE(results.empty()) << "SubsetKnn with k=0 should return empty results";
+}
+
+TEST_P(HnswSubsetKnnTest, KGreaterThanSubsetSize) {
+  // Test edge case: k > number of valid documents in subset
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  vector<GlobalDocId> subset = {1, 3, 5};  // Only 3 elements
+
+  auto results = index->SubsetKnn(query.data(), 10, subset);  // Ask for 10
+  EXPECT_EQ(results.size(), 3u) << "SubsetKnn should return at most subset.size() results";
+
+  // Verify all 3 are returned
+  vector<GlobalDocId> result_ids;
+  for (const auto& [dist, id] : results) {
+    result_ids.push_back(id);
+  }
+  EXPECT_THAT(result_ids, testing::UnorderedElementsAre(1, 3, 5));
+}
+
+TEST_P(HnswSubsetKnnTest, NonExistentIds) {
+  // Test that non-existent IDs in subset are gracefully ignored
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  // Mix of valid (0-9) and invalid (100-105) IDs
+  vector<GlobalDocId> subset = {100, 4, 101, 5, 102, 6, 103, 104, 105};
+
+  auto results = index->SubsetKnn(query.data(), 3, subset);
+  EXPECT_EQ(results.size(), 3u);
+
+  // Should only return valid IDs: 5, 4, 6 (closest to 5)
+  vector<GlobalDocId> result_ids;
+  for (const auto& [dist, id] : results) {
+    result_ids.push_back(id);
+  }
+  EXPECT_THAT(result_ids, testing::UnorderedElementsAre(4, 5, 6));
+}
+
+TEST_P(HnswSubsetKnnTest, AllDeletedDocuments) {
+  // Test edge case: all documents in subset are marked deleted
+  auto sim = GetParam();
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 1;
+  params.sim = sim;
+  params.capacity = 10;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex index(params, /*copy_vector=*/true);
+
+  // Add and then remove documents
+  vector<MockedDocument> docs;
+  for (size_t i = 0; i < 5; i++) {
+    vector<float> coords = {static_cast<float>(i)};
+    docs.push_back(
+        MockedDocument(MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}}));
+    index.Add(i, docs[i], "vec");
+  }
+
+  // Delete all documents
+  for (size_t i = 0; i < 5; i++) {
+    index.Remove(i, docs[i], "vec");
+  }
+
+  vector<float> query = {2.5f};
+  vector<GlobalDocId> subset = {0, 1, 2, 3, 4};
+
+  auto results = index.SubsetKnn(query.data(), 3, subset);
+  EXPECT_TRUE(results.empty()) << "SubsetKnn should return empty when all docs are deleted";
+}
+
+TEST_P(HnswSubsetKnnTest, MixedDeletedAndValidDocs) {
+  // Test with a mix of deleted and valid documents
+  auto sim = GetParam();
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 1;
+  params.sim = sim;
+  params.capacity = 10;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex index(params, /*copy_vector=*/true);
+
+  // Add documents
+  vector<MockedDocument> docs;
+  for (size_t i = 0; i < 10; i++) {
+    vector<float> coords = {static_cast<float>(i)};
+    docs.push_back(
+        MockedDocument(MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}}));
+    index.Add(i, docs[i], "vec");
+  }
+
+  // Delete even documents
+  for (size_t i = 0; i < 10; i += 2) {
+    index.Remove(i, docs[i], "vec");
+  }
+
+  vector<float> query = {5.0f};
+  // Subset includes both deleted (even) and valid (odd) docs
+  vector<GlobalDocId> subset = {2, 3, 4, 5, 6, 7, 8};
+
+  auto results = index.SubsetKnn(query.data(), 3, subset);
+  EXPECT_EQ(results.size(), 3u);
+
+  // Should only return odd (non-deleted) IDs: 5, 3, 7 (closest to 5)
+  vector<GlobalDocId> result_ids;
+  for (const auto& [dist, id] : results) {
+    result_ids.push_back(id);
+  }
+  EXPECT_THAT(result_ids, testing::UnorderedElementsAre(3, 5, 7));
+}
+
+TEST_P(HnswSubsetKnnTest, CompareWithFilteredKnn) {
+  // Integration test: verify SubsetKnn produces similar results to filtered Knn
+  // SubsetKnn uses brute-force exact search, while Knn uses HNSW approximate search
+  // So results may differ slightly, but should have significant overlap
+  constexpr double kMinOverlapRatio = 0.7;  // 70% minimum overlap threshold
+
+  auto sim = GetParam();
+
+  // COSINE similarity is undefined for 1D positive vectors (all share the same direction,
+  // so all cosine distances equal 0). Use 2D unit-circle vectors instead, where element i
+  // is at angle i * 2π/100, giving each pair a distinct, meaningful cosine distance.
+  unique_ptr<HnswVectorIndex> index;
+  vector<float> query;
+  if (sim == VectorSimilarity::COSINE) {
+    constexpr size_t kNumElements = 100;
+    index = CreateCircle2DIndex(kNumElements, sim);
+    const float step = 2.0f * static_cast<float>(acos(-1.0)) / static_cast<float>(kNumElements);
+    float angle = step * 50.0f;
+    query = {cosf(angle), sinf(angle)};
+  } else {
+    index = CreateSimple1DIndex(100, sim);
+    query = {50.0f};
+  }
+
+  vector<GlobalDocId> subset;
+
+  // Create a small subset (well below typical 8192 threshold)
+  for (size_t i = 40; i <= 60; i++) {
+    subset.push_back(i);
+  }
+
+  size_t k = 10;
+
+  // Get results from SubsetKnn (exact brute-force)
+  auto subset_results = index->SubsetKnn(query.data(), k, subset);
+
+  // Get results from regular filtered Knn (HNSW approximate)
+  auto knn_results = index->Knn(query.data(), k, std::nullopt, subset);
+
+  // Both should return k results (or fewer if subset is smaller)
+  EXPECT_LE(subset_results.size(), k);
+  EXPECT_LE(knn_results.size(), k);
+
+  // Extract IDs from both
+  std::set<GlobalDocId> subset_ids;
+  for (const auto& [dist, id] : subset_results) {
+    subset_ids.insert(id);
+  }
+
+  std::set<GlobalDocId> knn_ids;
+  for (const auto& [dist, id] : knn_results) {
+    knn_ids.insert(id);
+  }
+
+  // Count overlap - since HNSW is approximate, we expect good but not perfect overlap
+  size_t overlap = 0;
+  for (const auto& id : subset_ids) {
+    if (knn_ids.count(id) > 0) {
+      overlap++;
+    }
+  }
+
+  // Expect at least kMinOverlapRatio overlap (HNSW is approximate, so some difference is expected)
+  size_t min_overlap =
+      static_cast<size_t>(std::min(subset_ids.size(), knn_ids.size()) * kMinOverlapRatio);
+  EXPECT_GE(overlap, min_overlap) << "Expected at least " << min_overlap
+                                  << " overlapping results, got " << overlap;
+}
+
+INSTANTIATE_TEST_SUITE_P(SubsetKnnSimilarities, HnswSubsetKnnTest,
+                         testing::Values(VectorSimilarity::L2, VectorSimilarity::COSINE,
+                                         VectorSimilarity::IP),
+                         [](const testing::TestParamInfo<VectorSimilarity>& info) {
+                           switch (info.param) {
+                             case VectorSimilarity::L2:
+                               return "L2";
+                             case VectorSimilarity::COSINE:
+                               return "COSINE";
+                             case VectorSimilarity::IP:
+                               return "IP";
+                             default:
+                               return "Unknown";
+                           }
                          });
 
 TEST_F(SearchTest, GeoSearch) {

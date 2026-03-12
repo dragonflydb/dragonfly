@@ -14,14 +14,12 @@
 namespace dfly {
 namespace journal {
 
-enum class Op : uint8_t { SELECT = 6, EXPIRED = 9, COMMAND = 10, PING = 13, LSN = 15 };
+enum class Op : uint8_t { SELECT = 6, EXPIRED = 9 /* sunset*/, COMMAND = 10, PING = 13, LSN = 15 };
 
 struct EntryBase {
   TxId txid;
   Op opcode;
   DbIndex dbid;
-  uint32_t shard_cnt;  // This field is no longer used by the replica, but we continue to serialize
-                       // and deserialize it to maintain backward compatibility.
   std::optional<SlotId> slot;
   LSN lsn{0};
 };
@@ -44,21 +42,19 @@ struct Entry : public EntryBase {
     }
   };
 
-  Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, std::optional<SlotId> slot_id,
-        Payload pl)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{pl} {
+  Entry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot_id, Payload pl)
+      : EntryBase{txid, opcode, dbid, slot_id}, payload{std::move(pl)} {
   }
 
   Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
-      : EntryBase{0, opcode, dbid, 0, slot_id, 0} {
+      : EntryBase{0, opcode, dbid, slot_id, 0} {
   }
 
-  Entry(journal::Op opcode, LSN lsn) : EntryBase{0, opcode, 0, 0, std::nullopt, lsn} {
+  Entry(journal::Op opcode, LSN lsn) : EntryBase{0, opcode, 0, std::nullopt, lsn} {
   }
 
-  Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
-        std::optional<SlotId> slot_id)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0} {
+  Entry(TxId txid, journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
+      : EntryBase{txid, opcode, dbid, slot_id, 0} {
   }
 
   bool HasPayload() const {

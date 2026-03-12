@@ -793,18 +793,25 @@ async def is_saving(c_client: aioredis.Redis):
     return "saving:1" in (await c_client.execute_command("INFO PERSISTENCE"))
 
 
-def assert_eventually(wrapped=None, *, times=100):
+def assert_eventually(wrapped=None, *, times=100, timeout=None):
     if wrapped is None:
-        return functools.partial(assert_eventually, times=times)
+        return functools.partial(assert_eventually, times=times, timeout=timeout)
 
     @wrapt.decorator
     async def wrapper(wrapped, instance, args, kwargs):
-        for attempt in range(times):
+        max_attempts = times
+        if timeout is not None:  # If timeout is set, we will ignore times and use timeout.
+            start = time.time()
+            max_attempts = 1 << 32  # Effectively infinite
+
+        for attempt in range(max_attempts):
             try:
                 result = await wrapped(*args, **kwargs)
                 return result
-            except AssertionError as e:
-                if attempt == times - 1:
+            except AssertionError:
+                if timeout is not None and (time.time() - start) > timeout:
+                    raise
+                if attempt == max_attempts - 1:
                     raise
                 await asyncio.sleep(0.1)
 
@@ -891,3 +898,69 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     first_r: aioredis.Redis = waiting_for[0]
     logging.error("Replica not finished, role %s", await first_r.role())
     raise RuntimeError("Not all replicas finished in time!")
+
+
+class LogMonitor:
+    """
+    Monitors an instance's INFO log files for a specific pattern in the background.
+
+    Usage:
+        monitor = LogMonitor(instance, "Internal error when loading RDB")
+        monitor.start()
+        # ... do work ...
+        await monitor.stop()       # stops polling
+        monitor.assert_no_match()  # raises AssertionError if pattern was found
+
+    Can also be used with asyncio.wait to fail fast:
+        done, _ = await asyncio.wait(
+            [work_task, monitor.task], return_when=asyncio.FIRST_COMPLETED
+        )
+        if monitor.task in done:
+            monitor.assert_no_match()
+    """
+
+    def __init__(self, instance, pattern: str, poll_interval: float = 0.5):
+        self.instance = instance
+        self.pattern = pattern
+        self.poll_interval = poll_interval
+        self.matched_lines = []
+        self._stop_event = asyncio.Event()
+        self.task = None
+
+    def start(self):
+        self.task = asyncio.create_task(self._poll())
+
+    async def _poll(self):
+        file_positions = {}
+        while not self._stop_event.is_set():
+            for log_path in self.instance.log_files:
+                if "INFO" not in log_path:
+                    continue
+                pos = file_positions.get(log_path, 0)
+                try:
+                    with open(log_path, "r") as f:
+                        f.seek(pos)
+                        new_content = f.read()
+                        file_positions[log_path] = f.tell()
+                except FileNotFoundError:
+                    continue
+                for line in new_content.splitlines():
+                    if self.pattern in line:
+                        self.matched_lines.append(line.strip())
+                        self._stop_event.set()
+                        return
+            await asyncio.sleep(self.poll_interval)
+
+    async def stop(self):
+        self._stop_event.set()
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
+    def assert_no_match(self):
+        assert not self.matched_lines, f"Log pattern '{self.pattern}' found:\n" + "\n".join(
+            self.matched_lines
+        )

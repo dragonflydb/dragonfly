@@ -70,6 +70,15 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
                        << ", removing from key index";
           index_->key_index_.Remove(*doc_id);
         }
+      } else {
+        // New document not in the restored key_index_ (added by journal events during
+        // full sync before the index was created). Use AddNew to allocate a fresh DocId
+        // that won't collide with serialized HNSW node ids from freed slots.
+        auto accessor = GetAccessor(db_cntx, pv);
+        DocId id = index_->key_index_.AddNew(key);
+        if (!index_->indices_->Add(id, *accessor)) {
+          index_->key_index_.Remove(id);
+        }
       }
     } else {
       index_->AddDoc(key, db_cntx, pv);
@@ -98,6 +107,11 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
     index_->RestoreGlobalVectorIndices(index_->base_->name, op_args);
     return;
   }
+
+  // Non-restored path: rebuilding HNSW from scratch. Clear the restoring flag and discard
+  // any pending updates — the full table traversal below will pick up all current documents.
+  index_->is_restoring_vectors_ = false;
+  index_->pending_vector_updates_.clear();
 
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;

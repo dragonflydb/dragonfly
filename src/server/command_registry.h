@@ -7,7 +7,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
-#include <hdr/hdr_histogram.h>
 
 #include <functional>
 #include <optional>
@@ -15,6 +14,8 @@
 #include "base/function2.hpp"
 #include "facade/command_id.h"
 #include "facade/facade_types.h"
+
+struct hdr_histogram;
 
 namespace dfly {
 
@@ -148,6 +149,12 @@ class CommandId : public facade::CommandId {
 
   int8_t interleaved_step() const {
     return interleave_step_;
+  }
+
+  template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, CommandContext*)) && {
+    support_async_ = true;
+    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(args, cntx); };
+    return std::move(*this);
   }
 
   CommandId&& SetHandler(Handler f, bool async_support = false) && {

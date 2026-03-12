@@ -19,6 +19,7 @@ extern "C" {
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/slot_set.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -72,8 +73,6 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
     return;
 
   DbTableStats& stats = db->stats;
-  DCHECK_GE(static_cast<int64_t>(stats.obj_memory_usage) + size, 0)
-      << "Can't decrease " << size << " from " << stats.obj_memory_usage;
 
   stats.AddTypeMemoryUsage(type, size);
 
@@ -145,27 +144,44 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
     return true;
 
   DCHECK_LE(tbl.size(), tbl.capacity());
+  DCHECK_GT(tbl.size(), 0u);
 
   // We take a conservative stance here -
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity) *
-                            GetFlag(FLAGS_table_growth_margin);
+  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity);
 
-  size_t obj_bytes_estimation = db_slice_->bytes_per_object() * table_free_items;
-  bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
-  if (res) {
-    VLOG(1) << "free_items: " << table_free_items
-            << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+  size_t obj_memory_usage = db_slice_->GetDBTable(cntx_.db_index)->stats.obj_memory_usage;
+  size_t avg_obj_size = obj_memory_usage / tbl.size();
+
+  // Catch significant discrepancies in average object size estimation.
+  // Note that this may happen if for example, db0 hosts a lot of small keys,
+  // db1 hosts huge keys etc. The goal of this comparison is to detect these cases and
+  // confirm that discrepancy is justified. Once we gather empirical evidence,
+  // we can remove this check and drop `db_slice_->bytes_per_object()` computation entirely.
+  if (avg_obj_size * 20 < db_slice_->bytes_per_object() ||
+      avg_obj_size > db_slice_->bytes_per_object() * 20) {
+    LOG_EVERY_T(WARNING, 1) << "Avg object size estimation for the table is " << avg_obj_size
+                            << " vs "
+                            << " overall object size estimation " << db_slice_->bytes_per_object();
+  }
+  size_t obj_bytes_estimation =
+      (avg_obj_size * table_free_items) * GetFlag(FLAGS_table_growth_margin);
+
+  bool can_grow = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
+  if (can_grow) {
+    VLOG(1) << "free_items: " << table_free_items << ", obj_bytes: " << avg_obj_size << " vs "
+            << db_slice_->bytes_per_object() << " "
             << " mem_available: " << mem_available;
   } else {
     LOG_EVERY_T(INFO, 1) << "Can't grow, free_items " << table_free_items
-                         << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+                         << ", obj_bytes: " << avg_obj_size << " vs "
+                         << db_slice_->bytes_per_object() << " "
                          << " mem_available: " << mem_available;
   }
 
-  return res;
+  return can_grow;
 }
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
@@ -945,7 +961,9 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
-    if (index == 0) {  // TODO: Async dealloc?
+    if (index == 0) {
+      // TODO: Async dealloc?
+      // TODO: Drop of global HNSW index doesn't respect per-shard ordering
       owner_->search_indices()->DropAllIndices();
     }
 
@@ -1155,11 +1173,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
       table_memory_ += (db.expire.mem_usage() - table_before);
     }
   } else {
-    // we shouldn't have expiration if expire_at_ms is 0.
-    auto fresh_exp_it = db.expire.Find(it->first.AsRef());
-    LOG_IF(DFATAL, IsValid(fresh_exp_it))
-        << "Inconsistent state, entry " << key
-        << " leave stale expiration: " << fresh_exp_it->second.duration_ms();
+    // If the key had an expiry but the new value should have none, clear it.
+    if (IsValid(res.exp_it)) {
+      RemoveExpire(cntx.db_index, res.it);
+      res.exp_it = ExpIterator{};
+    }
   }
 
   return op_result;
@@ -1361,6 +1379,13 @@ uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
   return next_moved_id_;
 }
 
+// Ordering invariant (PIT mode):
+//   When the traversal fiber visits a bucket in BucketSaveCb, earlier-registered snapshots
+//   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
+//   yet. FlushChangeToEarlierCallbacks invokes their OnDbChange callbacks so they serialize the
+//   bucket before the current snapshot stamps it with its own version. Without this, an earlier
+//   snapshot could miss the bucket entirely — its traversal already passed it, and the version
+//   stamp from the current snapshot would cause the earlier snapshot's OnDbChange to skip it.
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 
@@ -1433,13 +1458,19 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   };
 
   unsigned i = 0;
-  for (; i < count / 3; ++i) {
+
+  auto quota_remains = [] {
+    // Break out of traversal if we spent more than 1ms
+    return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
+  };
+
+  for (; i < count / 3 && quota_remains(); ++i) {
     db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
-    for (; i < count; ++i) {
+    for (; i < count && quota_remains(); ++i) {
       db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
     }
   }
@@ -1488,7 +1519,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 
   string tmp;
 
-  bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
+  bool record_keys = owner_->journal() || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {

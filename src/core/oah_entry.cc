@@ -48,90 +48,15 @@ uint32_t OAHEntry::GetExpiry() const {
   return res;
 }
 
-bool OAHEntry::CheckBucketAffiliation(uint32_t bucket_id, uint32_t capacity_log,
-                                      uint32_t shift_log) {
-  assert(!IsVector());
-  if (Empty())
-    return false;
-  uint32_t bucket_id_hash_part = capacity_log > shift_log ? shift_log : capacity_log;
-  uint32_t bucket_mask = (1 << bucket_id_hash_part) - 1;
-  bucket_id &= bucket_mask;
-  auto stored_hash = GetHash();
-  if (!stored_hash) {
-    stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
-  }
-  uint32_t stored_bucket_id = stored_hash >> (kExtHashSize - bucket_id_hash_part);
-  return bucket_id == stored_bucket_id;
-}
-
-uint64_t OAHEntry::CalcExtHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
-  const uint32_t start_hash_bit = capacity_log > shift_log ? capacity_log - shift_log : 0;
-  const uint32_t ext_hash_shift = 64 - start_hash_bit - kExtHashSize;
-  const uint64_t ext_hash = (hash >> ext_hash_shift) & kExtHashMask;
-  return ext_hash;
-}
-
 bool OAHEntry::CheckNoCollisions(const uint64_t ext_hash) {
   auto stored_hash = GetHash();
   return ((stored_hash != ext_hash) & (stored_hash != 0)) | (Empty());
 }
 
-bool OAHEntry::CheckExtendedHash(const uint64_t ext_hash, uint32_t capacity_log,
-                                 uint32_t shift_log) {
-  auto stored_hash = GetHash();
-  if (!stored_hash) {
-    if (IsEntry()) {
-      stored_hash = SetHash(Hash(Key()), capacity_log, shift_log);
-    } else {
-      return false;
-    }
-  }
-  return stored_hash == ext_hash;
-}
-
-// shift_log identify which bucket the element belongs to
-uint64_t OAHEntry::SetHash(uint64_t hash, uint32_t capacity_log, uint32_t shift_log) {
+void OAHEntry::SetExtHash(uint64_t ext_hash) {
   assert(data_);
   assert(!IsVector());
-  const uint64_t result_hash = CalcExtHash(hash, capacity_log, shift_log);
-  const uint64_t ext_hash = result_hash << kExtHashShift;
-  data_ = (data_ & ~kExtHashShiftedMask) | ext_hash;
-  return result_hash;
-}
-
-// return new bucket_id
-uint32_t OAHEntry::Rehash(uint32_t current_bucket_id, uint32_t prev_capacity_log,
-                          uint32_t new_capacity_log, uint32_t shift_log) {
-  assert(!IsVector());
-  auto stored_hash = GetHash();
-
-  const uint32_t logs_diff = new_capacity_log - prev_capacity_log;
-  const uint32_t prev_significant_bits =
-      prev_capacity_log > shift_log ? shift_log : prev_capacity_log;
-  const uint32_t needed_hash_bits = prev_significant_bits + logs_diff;
-
-  if (!stored_hash || needed_hash_bits > kExtHashSize) {
-    auto hash = Hash(Key());
-    SetHash(hash, new_capacity_log, shift_log);
-    return BucketId(hash, new_capacity_log);
-  }
-
-  const uint32_t real_bucket_end = stored_hash >> (kExtHashSize - prev_significant_bits);
-  const uint32_t prev_shift_mask = (1 << prev_significant_bits) - 1;
-  const uint32_t curr_shift = (current_bucket_id - real_bucket_end) & prev_shift_mask;
-  const uint32_t prev_bucket_mask = (1 << prev_capacity_log) - 1;
-  const uint32_t base_bucket_id = (current_bucket_id - curr_shift) & prev_bucket_mask;
-
-  const uint32_t last_bits_mask = (1 << logs_diff) - 1;
-  const uint32_t stored_hash_shift = kExtHashSize - needed_hash_bits;
-  const uint32_t last_bits = (stored_hash >> stored_hash_shift) & last_bits_mask;
-  const uint32_t new_bucket_id = (base_bucket_id << logs_diff) | last_bits;
-
-  ClearHash();  // the cache is invalid after rehash operation
-
-  assert(BucketId(Hash(Key()), new_capacity_log) == new_bucket_id);
-
-  return new_bucket_id;
+  data_ = (data_ & ~kExtHashShiftedMask) | (ext_hash << kExtHashShift);
 }
 
 void OAHEntry::SetExpiry(uint32_t at_sec) {
@@ -142,31 +67,6 @@ void OAHEntry::SetExpiry(uint32_t at_sec) {
   } else {
     *this = OAHEntry(Key(), at_sec);
   }
-}
-
-// TODO refactor, because it's inefficient
-std::optional<uint32_t> OAHEntry::Find(std::string_view str, uint64_t ext_hash,
-                                       uint32_t capacity_log, uint32_t shift_log,
-                                       uint32_t* set_size, size_t* alloc_used, uint32_t time_now) {
-  if (IsEntry()) {
-    ExpireIfNeeded(time_now, set_size, alloc_used);
-    return CheckExtendedHash(ext_hash, capacity_log, shift_log) && Key() == str
-               ? 0
-               : std::optional<uint32_t>();
-  }
-  if (IsVector()) {
-    auto& vec = AsVector();
-    auto raw_arr = vec.Raw();
-    for (size_t i = 0, size = vec.Size(); i < size; ++i) {
-      raw_arr[i].ExpireIfNeeded(time_now, set_size, alloc_used);
-      if (raw_arr[i].CheckExtendedHash(ext_hash, capacity_log, shift_log) &&
-          raw_arr[i].Key() == str) {
-        return i;
-      }
-    }
-  }
-
-  return std::nullopt;
 }
 
 void OAHEntry::ExpireIfNeeded(uint32_t time_now, uint32_t* set_size, size_t* alloc_used) {

@@ -756,6 +756,18 @@ TEST_F(StreamFamilyTest, XPending) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(StreamFamilyTest, XPendingMissingGroup) {
+  auto resp = Run({"xpending", "?"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupEmptyConsumer) {
+  Run({"xadd", "s", "*", "x", "y"});
+  Run({"xgroup", "create", "s", "g", "0"});
+  auto resp = Run({"xreadgroup", "group", "g", "", "streams", "s", ">"});
+  EXPECT_THAT(resp, ErrArg("consumer name can't be empty"));
+}
+
 TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
@@ -1560,6 +1572,33 @@ TEST_F(StreamFamilyTest, XInfoConsumersArityCrash) {
   Run("XGROUP CREATE mystream mygroup $ MKSTREAM");
   auto resp = Run("XINFO CONSUMERS mystream");
   EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(StreamFamilyTest, GroupCreateInvalidIdMemoryTracking) {
+  auto resp = Run({"xgroup", "create", "mystream", "mygroup", "notanumber", "MKSTREAM"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Verify the stream was not created (no orphan stream after the error)
+  resp = Run({"exists", "mystream"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XAddOnOrphanedStreamMemoryTracking) {
+  auto resp = Run({"xgroup", "create", "mystream", "mygroup", "invalid_id", "MKSTREAM"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"xadd", "mystream", "0-0", "field", "value"});
+  EXPECT_THAT(resp, ErrArg("equal or smaller"));
+
+  resp = Run({"exists", "mystream"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XAutoClaimEmptyConsumer) {
+  Run({"xadd", "stream4", "*", "field", "val1"});
+  Run({"xgroup", "create", "stream4", "group2", "0"});
+  auto resp = Run({"xautoclaim", "stream4", "group2", "", "0", "0-0"});
+  EXPECT_THAT(resp, AnyOf(ErrArg(""), ArgType(RespExpr::ARRAY)));
 }
 
 }  // namespace dfly

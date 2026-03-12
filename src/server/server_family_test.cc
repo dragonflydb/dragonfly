@@ -222,14 +222,15 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
 
 // Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
+  Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
 
   // Run EXEC
   {
     Run({"multi"});
     Run({"set", "first", "ok"});
-    Run({"set", "second", "ok"});
-    Run({"get", "third"});
+    Run({"set", "second2", "ok"});
+    Run({"get", "third3"});
     Run({"exec"});
   }
 
@@ -244,7 +245,7 @@ for i, key in ipairs(KEYS) do
 end
 return 'OK';
     )";
-    auto resp = Run({"EVAL", script, "3", "first", "second", "third", "second"});
+    auto resp = Run({"EVAL", script, "3", "first", "second2", "third3", "second2"});
     EXPECT_EQ(resp, "OK");
   }
 
@@ -257,8 +258,9 @@ return 'OK';
       found++;
     } else if (args[0] == "EVAL") {
       const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
-      EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "is_write: 1", "lock_tags: 3",
-                                          "3", "first", "second", "third", "second"}));
+      EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "slow_cmds: 6", "tx_mode: 2",
+                                          "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3",
+                                          "first", "second2", "third3", "second2"}));
       found++;
     }
   }
@@ -704,6 +706,41 @@ TEST_F(ServerFamilyTest, InfoMultipleSectionsInvalid) {
   auto info = resp.GetString();
   EXPECT_NE(info.find("# Replication"), std::string::npos);
   EXPECT_EQ(info.find("# invalidsection"), std::string::npos);
+}
+
+// DEBUG POPULATE with val_size=0 caused SIGFPE (division by zero) in DoPopulateBatch.
+TEST_F(ServerFamilyTest, DebugPopulateZeroValSize) {
+  // val_size=0 with the default element count (1) must not crash the server.
+  auto resp = Run({"DEBUG", "POPULATE", "1", "key", "0"});
+  EXPECT_THAT(resp, ErrArg("val_size must be positive"));
+}
+
+TEST_F(ServerFamilyTest, MemoryArenaSummary) {
+  auto resp = Run({"MEMORY", "ARENA", "SUMMARY"});
+  const auto response = resp.GetString();
+
+  EXPECT_THAT(response, HasSubstr("BlockSize"));
+
+  for (const auto shard_id : std::views::iota(0UL, shard_set->size())) {
+    EXPECT_THAT(response, HasSubstr("Arena statistics for thread " + std::to_string(shard_id)));
+  }
+
+  EXPECT_THAT(response, HasSubstr("Arena statistics for machine"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "X"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("Count"));
 }
 
 }  // namespace dfly

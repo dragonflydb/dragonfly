@@ -4,10 +4,13 @@ import logging
 import re
 import typing
 import math
+import redis
 import redis.asyncio as aioredis
 from dataclasses import dataclass
 import time
 import sys
+
+import numpy as np
 
 try:
     from importlib import resources as impresources
@@ -233,3 +236,217 @@ class Seeder(SeederBase):
             msg = f"{msg}. Total huge entries {huge_entries} added."
 
         logging.debug(msg)
+
+
+class HnswSearchSeeder:
+
+    def __init__(
+        self,
+        index_name="hnsw_idx",
+        prefix="doc:",
+        num_dims=4,
+        num_initial_docs=200,
+        seed=42,
+    ):
+        self.index_name = index_name
+        self.prefix = prefix
+        self.num_dims = num_dims
+        self.num_initial_docs = num_initial_docs
+        self.seed = seed
+
+        self._doc_counter = 0
+        self._stop_event = asyncio.Event()
+
+    def _make_embedding(self):
+        return np.random.uniform(-10, 10, self.num_dims).astype(np.float32)
+
+    async def create_index(self, client: aioredis.Redis):
+        await client.execute_command(
+            "FT.CREATE",
+            self.index_name,
+            "ON",
+            "HASH",
+            "PREFIX",
+            "1",
+            self.prefix,
+            "SCHEMA",
+            "title",
+            "TEXT",
+            "doc_id",
+            "TAG",
+            "embedding",
+            "VECTOR",
+            "HNSW",
+            "6",
+            "TYPE",
+            "FLOAT32",
+            "DIM",
+            str(self.num_dims),
+            "DISTANCE_METRIC",
+            "L2",
+        )
+
+    async def seed_initial_docs(self, client: aioredis.Redis):
+        pipe = client.pipeline(transaction=False)
+        for i in range(self.num_initial_docs):
+            emb = self._make_embedding()
+            pipe.hset(
+                f"{self.prefix}{i}",
+                mapping={
+                    "title": f"Product {i}",
+                    "doc_id": str(i),
+                    "embedding": emb.tobytes(),
+                },
+            )
+        await pipe.execute()
+        self._doc_counter = self.num_initial_docs
+
+    def stop(self):
+        self._stop_event.set()
+
+    async def _search_knn(self, client, query_vec, k=5):
+        """Run a KNN search and return (total_count, set_of_doc_ids)."""
+        r = await client.execute_command(
+            "FT.SEARCH",
+            self.index_name,
+            "*=>[KNN {k} @embedding $vec]".format(k=k),
+            "PARAMS",
+            "2",
+            "vec",
+            query_vec,
+            "LIMIT",
+            "0",
+            str(k),
+        )
+        doc_ids = set(r[i] for i in range(1, len(r), 2))
+        return r[0], doc_ids
+
+    async def _search_knn_filtered(self, client, query_vec, doc_id, k=5):
+        """Run a filtered KNN search for a specific document by its doc_id TAG.
+
+        With a TAG filter, Dragonfly bypasses KNN approximate search and just
+        checks presence in the index, making this a reliable existence check.
+        """
+        doc_key = doc_id if isinstance(doc_id, str) else doc_id.decode()
+        doc_num = doc_key[len(self.prefix) :] if doc_key.startswith(self.prefix) else doc_key
+        r = await client.execute_command(
+            "FT.SEARCH",
+            self.index_name,
+            "@doc_id:{{{id}}}=>[KNN {k} @embedding $vec]".format(id=doc_num, k=k),
+            "PARAMS",
+            "2",
+            "vec",
+            query_vec,
+            "LIMIT",
+            "0",
+            str(k),
+        )
+        return r[0] > 0
+
+    async def verify(self, *clients: aioredis.Redis, num_queries=10):
+        if len(clients) < 2:
+            raise ValueError("Need at least two clients to compare")
+
+        sizes = [await c.dbsize() for c in clients]
+        for i in range(1, len(sizes)):
+            assert (
+                sizes[0] == sizes[i]
+            ), f"dbsize mismatch: client[0]={sizes[0]} vs client[{i}]={sizes[i]}"
+
+        # HNSW is approximate, so KNN results between master and replica may differ.
+        # For any document that appears on one side but not the other, we run a
+        # filtered KNN search using the doc_id TAG. With a filter, Dragonfly skips
+        # approximate KNN and just checks index presence, so this reliably verifies
+        # that the replica has indexed all documents.
+        k = 5
+
+        for q in range(num_queries):
+            query_vec = self._make_embedding().tobytes()
+            results = []
+            for c in clients:
+                total, doc_ids = await self._search_knn(c, query_vec, k)
+                results.append((total, doc_ids))
+
+            assert results[0][0] > 0, "KNN search returned no results on master"
+
+            for i in range(1, len(results)):
+                master_ids = results[0][1]
+                replica_ids = results[i][1]
+
+                # Check documents found on master but not on replica
+                missing_on_replica = master_ids - replica_ids
+                truly_missing = []
+                for doc_id in missing_on_replica:
+                    if not await self._search_knn_filtered(clients[i], query_vec, doc_id, 1):
+                        truly_missing.append(doc_id)
+
+                assert not truly_missing, (
+                    f"Query {q}: documents {truly_missing} found on master but "
+                    f"not indexed on replica (client[{i}]). "
+                    f"Master results: {sorted(master_ids)}, "
+                    f"Replica results: {sorted(replica_ids)}"
+                )
+
+                # Check documents found on replica but not on master
+                missing_on_master = replica_ids - master_ids
+                truly_missing = []
+                for doc_id in missing_on_master:
+                    if not await self._search_knn_filtered(clients[0], query_vec, doc_id, k):
+                        truly_missing.append(doc_id)
+
+                assert not truly_missing, (
+                    f"Query {q}: documents {truly_missing} found on replica "
+                    f"(client[{i}]) but not indexed on master. "
+                    f"Master results: {sorted(master_ids)}, "
+                    f"Replica results: {sorted(replica_ids)}"
+                )
+
+    async def run_traffic(self, client: aioredis.Redis, sleep_interval=0.01):
+        self._stop_event.clear()
+        while not self._stop_event.is_set():
+            op = random.choice(["insert", "update", "delete"])
+            try:
+                if op == "insert":
+                    emb = self._make_embedding()
+                    await client.hset(
+                        f"{self.prefix}{self._doc_counter}",
+                        mapping={
+                            "title": f"Product {self._doc_counter}",
+                            "doc_id": str(self._doc_counter),
+                            "embedding": emb.tobytes(),
+                        },
+                    )
+                    self._doc_counter += 1
+                elif op == "update":
+                    key_id = random.randint(0, max(self._doc_counter - 1, 0))
+                    key = f"{self.prefix}{key_id}"
+                    if not await client.exists(key):
+                        continue
+                    emb = self._make_embedding()
+                    await client.hset(key, mapping={"embedding": emb.tobytes()})
+                elif op == "delete":
+                    key_id = random.randint(0, max(self._doc_counter - 1, 0))
+                    await client.delete(f"{self.prefix}{key_id}")
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
+                await asyncio.sleep(sleep_interval)
+            await asyncio.sleep(sleep_interval)
+
+    async def run_search_queries(self, client: aioredis.Redis, sleep_interval=0.05):
+        while not self._stop_event.is_set():
+            try:
+                query_vec = self._make_embedding().tobytes()
+                await client.execute_command(
+                    "FT.SEARCH",
+                    self.index_name,
+                    "*=>[KNN 5 @embedding $vec]",
+                    "PARAMS",
+                    "2",
+                    "vec",
+                    query_vec,
+                    "LIMIT",
+                    "0",
+                    "5",
+                )
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError):
+                pass
+            await asyncio.sleep(sleep_interval)

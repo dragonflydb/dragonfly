@@ -4,9 +4,10 @@
 
 #include "server/conn_context.h"
 
+#include <atomic>
+
 #include "base/logging.h"
 #include "common/heap_size.h"
-#include "facade/acl_commands_def.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/channel_store.h"
@@ -46,8 +47,11 @@ vector<string> FormatEvalSlowlog(const ConnectionState& state) {
 
   const auto& sinfo = *state.script_info;
   return {
-      sinfo.stats.sha,
+      string{sinfo.stats.sha, sizeof(sinfo.stats.sha)},
       absl::StrCat("num_cmds: ", sinfo.stats.num_commands),
+      absl::StrCat("slow_cmds: ", sinfo.stats.slow_commands.load(memory_order_relaxed)),
+      absl::StrCat("tx_mode: ", int(sinfo.stats.tx_mode)),
+      absl::StrCat("tx_shards: ", int(sinfo.stats.tx_shards)),
       absl::StrCat("is_write: ", !sinfo.read_only),
       absl::StrCat("lock_tags: ", sinfo.lock_tags.size()),
   };
@@ -317,12 +321,17 @@ void CommandContext::RecordLatency(facade::ArgSlice tail_args) const {
   if (!ss->ShouldLogSlowCmd(execution_time_usec))  // It was not a slow command
     return;
 
+  auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
+
+  // Log nested commands of scripts that made it into slowlog
+  if (auto sinfo = cntx->conn_state.script_info.get(); !cid_->MultiControlKind() && sinfo)
+    sinfo->stats.slow_commands.fetch_add(1, memory_order_relaxed);
+
   vector<string> aux_params;
   CmdArgVec aux_slice;
 
   // Rewrite arguments for exec/eval with stats
   if (auto mck = cid_->MultiControlKind(); mck) {
-    auto* cntx = static_cast<dfly::ConnectionContext*>(conn_cntx());
     switch (*mck) {
       case CO::MultiControlKind::EXEC:
         if (cid_->name() == "EXEC")

@@ -308,6 +308,13 @@ def df_server(df_factory: DflyInstanceFactory) -> typing.Generator[DflyInstance,
         client.client_setname("mgr")
         sleep(0.1)
         clients_left = [x for x in client.client_list() if x["name"] != "mgr"]
+
+        # Graceful shutdown, and avoid saving on shutdown if possible
+        try:
+            if instance.proc:
+                client.shutdown(nosave=True)
+        except Exception:
+            pass
     except Exception as e:
         print(e, file=sys.stderr)
 

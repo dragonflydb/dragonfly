@@ -19,6 +19,7 @@
 #include "core/interpreter.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 #include "server/transaction.h"

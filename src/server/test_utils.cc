@@ -221,7 +221,11 @@ void BaseFamilyTest::SetUp() {
 void BaseFamilyTest::TearDown() {
   CHECK_EQ(NumLocked(), 0U);
 
-  connections_.clear();
+  {
+    std::unique_lock conn_lck{mu_};
+    connections_.clear();
+  }
+
   ShutdownService();
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();

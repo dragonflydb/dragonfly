@@ -6,21 +6,23 @@
 
 #include <deque>
 
-#include "base/pod_array.h"
-#include "core/search/base.h"
-#include "io/file.h"
 #include "server/db_slice.h"
-#include "server/execution_state.h"
 #include "server/rdb_save.h"
 #include "server/synchronization.h"
 #include "server/table.h"
-#include "util/fibers/future.h"
+#include "server/tiered_storage.h"
 
 namespace dfly {
+
+class ExecutionState;
 
 namespace journal {
 struct Entry;
 }  // namespace journal
+
+namespace search {
+using DocId = uint32_t;
+}  // namespace search
 
 // ┌────────────────┐   ┌─────────────┐
 // │IterateBucketsFb│   │  OnDbChange │
@@ -64,7 +66,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   };
 
   SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx);
+                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
+                DflyVersion replica_dfly_version);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -120,7 +123,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
-  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
+                           bool push_tracked_tiered_keys);
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
@@ -136,7 +140,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
-  void SerializeExternal(DbIndex db_index, PrimeKey key, const PrimeValue& pv, time_t expire_time,
+  void SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
                          uint32_t mc_flags);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
@@ -145,18 +149,17 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // plumbing and making it safe to move.
   void HandleFlushData(std::string data);
 
-  // Flush data from built in (or custom) serializer and pass it to HandleFlushData.
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
-  size_t FlushSerialized(RdbSerializer* serializer = nullptr /* use serializer_ */);
+  size_t FlushSerialized();
 
-  // An entry whose value must be awaited
-  struct DelayedEntry {
-    DbIndex dbid;
-    PrimeKey key;
-    util::fb2::Future<io::Result<string>> value;
-    time_t expire;
-    uint32_t mc_flags;
-  };
+  // Tuple <db_index, key> is used as a key to uniquely identify tiered entry on shard.
+  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
+
+  // Serialize delayed entries.
+  // If bucket_tiered_keys is provided we should serialize these keys forcefully.
+  // Other entries can be serialized if they are resolved, but we don't wait for them unless force
+  // is true.
+  void PushDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* bucket_tiered_keys);
 
   DbSlice* db_slice_;
   const DbTableArray db_array_;
@@ -164,7 +167,10 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::deque<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+
+  // Delayed entries that are waiting for tiered storage reads to complete before they can be
+  // serialized.
+  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
@@ -183,6 +189,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
@@ -194,6 +201,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t moved_saved = 0;
+    size_t flushed_under_lock = 0;
   } stats_;
 
   ThreadLocalMutex big_value_mu_;

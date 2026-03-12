@@ -19,11 +19,21 @@ unsigned kInitSegmentLog = 3;
 
 void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
   if (type >= memory_usage_by_type.size()) {
-    LOG_FIRST_N(WARNING, 1) << "Encountered unknown type when aggregating per-type memory: "
-                            << type;
-    DCHECK(false) << "Unsupported type " << type;
+    LOG(DFATAL) << "Encountered unknown type when aggregating per-type memory: " << type;
     return;
   }
+
+  DCHECK_GE(obj_memory_usage, memory_usage_by_type[type]);
+
+  if (delta < 0 && memory_usage_by_type[type] < size_t(-delta)) {
+    LOG_EVERY_T(ERROR, 1) << "Encountered underflow memory usage when aggregating per-type memory: "
+                          << obj_memory_usage << " + " << delta << ", type: " << type;
+
+    // Truncate delta to avoid underflow, but keep the memory usage consistent with the sum of
+    // per-type usage.
+    delta = -static_cast<int64_t>(memory_usage_by_type[type]);
+  }
+
   obj_memory_usage += delta;
   memory_usage_by_type[type] += delta;
 }

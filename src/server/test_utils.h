@@ -6,6 +6,8 @@
 
 #include <gmock/gmock.h>
 
+#include <chrono>
+
 #include "facade/dragonfly_connection.h"
 #include "facade/memcache_parser.h"
 #include "facade/resp_expr_test_utils.h"
@@ -13,6 +15,7 @@
 #include "io/io.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "util/proactor_pool.h"
 
@@ -151,7 +154,7 @@ class BaseFamilyTest : public ::testing::Test {
 
   // Wait until condition_cb returns true or timeout reached. Returns condition_cb value
   bool WaitUntilCondition(std::function<bool()> condition_cb,
-                          std::chrono::milliseconds timeout_ms = 100ms);
+                          std::chrono::milliseconds timeout_ms = std::chrono::milliseconds(100));
 
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;

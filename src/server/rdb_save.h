@@ -20,6 +20,7 @@ extern "C" {
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "server/version.h"
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
@@ -97,8 +98,9 @@ class RdbSaver {
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
   // snapshot_id - allows to identify that group of files belongs to the same snapshot
+  // replica_dfly_version - upper bound for conditional serialization of new features.
   explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes,
-                    std::string snapshot_id);
+                    std::string snapshot_id, DflyVersion replica_dfly_version);
 
   ~RdbSaver();
 
@@ -159,16 +161,17 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
   SaveMode save_mode_;
   CompressionMode compression_mode_;
+  DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
   std::string snapshot_id_;
 };
 
 class RdbSerializer;
-class SerializerBase {
+class RdbSerializerBase {
  public:
   enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
-  explicit SerializerBase(CompressionMode compression_mode);
-  virtual ~SerializerBase() = default;
+  explicit RdbSerializerBase(CompressionMode compression_mode);
+  virtual ~RdbSerializerBase() = default;
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
   static std::string DumpValue(const PrimeValue& obj, bool ignore_crc = false);
@@ -240,7 +243,7 @@ class SerializerBase {
   uint64_t serialization_peak_bytes_ = 0;
 };
 
-class RdbSerializer : public SerializerBase {
+class RdbSerializer : public RdbSerializerBase {
  public:
   // ConsumeFun is called when internal buffer exceeds flush_threshold.
   // The callback receives the extracted data.

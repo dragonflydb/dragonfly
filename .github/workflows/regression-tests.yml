@@ -7,6 +7,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'dragonflydb/dragonfly'
     strategy:
       matrix:
         # Test of these containers
@@ -39,16 +40,12 @@ jobs:
           ulimit -a
           env
           lsblk -l
-      - name: Configure & Build
-        run: |
-          # -no-pie to disable address randomization so we could symbolize stacktraces
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
-                -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
 
-          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
-          pwd
-          ls -l ..
+      - name: Build Dragonfly
+        uses: ./.github/actions/builder
+        with:
+          build-type: ${{matrix.build-type}}
+          targets: 'dragonfly'
 
       - name: Authenticate to AWS
         uses: aws-actions/configure-aws-credentials@v5
@@ -73,6 +70,7 @@ jobs:
           path: /tmp/failed/*
 
   lint-test-chart:
+    if: github.repository == 'dragonflydb/dragonfly'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

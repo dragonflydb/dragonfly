@@ -18,9 +18,22 @@ local function process(type)
 
     -- sort to provide consistent order
     table.sort(keys)
-    for _, key in ipairs(keys) do
-        -- hand hash over to callback
-        OUT_HASH = hfunc(key, OUT_HASH)
+
+    if type == 'string' then
+        -- batch with MGET to reduce per-key round trips (important for tiering)
+        local batch_size = 16
+        for i = 1, #keys, batch_size do
+            local batch = {}
+            for j = i, math.min(i + batch_size - 1, #keys) do
+                table.insert(batch, keys[j])
+            end
+            OUT_HASH = dragonfly.ihash(OUT_HASH, false, 'MGET', table.unpack(batch))
+        end
+    else
+        for _, key in ipairs(keys) do
+            -- hand hash over to callback
+            OUT_HASH = hfunc(key, OUT_HASH)
+        end
     end
 end
 

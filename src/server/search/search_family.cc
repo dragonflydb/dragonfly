@@ -6,12 +6,10 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
-#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
-#include <absl/strings/string_view.h>
 
 #include <atomic>
 #include <variant>
@@ -32,6 +30,7 @@
 #include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/search/aggregator.h"
@@ -48,6 +47,10 @@ ABSL_FLAG(size_t, MAXSEARCHRESULTS, 1000000, "Maximum number of results from ft.
 
 ABSL_FLAG(size_t, search_query_string_bytes, 10240,
           "Maximum number of bytes in search query string");
+
+ABSL_FLAG(size_t, subset_knn_search_threshold, 8192,
+          "If prefilter results are below this threshold, we will do exact subset search "
+          "instead of HNSW graph search");
 
 namespace dfly {
 
@@ -1091,11 +1094,17 @@ vector<SearchResult> SearchGlobalHnswIndex(
   // Search HNSW index
   std::vector<std::pair<float, search::GlobalDocId>> knn_results;
 
-  if (prefilter_global_docs_ids)
-    knn_results =
-        index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
-  else
+  if (prefilter_global_docs_ids) {
+    VLOG(1) << "Searching HNSW index with prefilter size: " << prefilter_global_docs_ids->size();
+    if (prefilter_global_docs_ids->size() < absl::GetFlag(FLAGS_subset_knn_search_threshold)) {
+      knn_results = index->SubsetKnn(knn->vec.first.get(), knn->limit, *prefilter_global_docs_ids);
+    } else {
+      knn_results =
+          index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_global_docs_ids);
+    }
+  } else {
     knn_results = index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+  }
 
   std::vector<SerializedSearchDoc> knn_search_serialized_docs;
   knn_search_serialized_docs.reserve(knn_results.size());
@@ -1214,6 +1223,29 @@ vector<SearchResult> SearchGlobalHnswIndex(
   return results;
 }
 
+// Try creating global hnsw indices for given fields and return true on success
+bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
+  std::vector<std::string> created_vector_indices;
+  for (const auto& [field_ident, field_info] : index.schema.fields) {
+    if (!field_info.IsIndexableHnswField())
+      continue;
+
+    const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+
+    bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name,
+                                                              vparams, index.type);
+    if (!success) {
+      // Clean created indices
+      for (const auto& cfname : created_vector_indices)
+        GlobalHnswIndexRegistry::Instance().Remove(idx_name, cfname);
+      return false;
+    }
+
+    created_vector_indices.emplace_back(field_info.short_name);
+  }
+  return true;
+}
+
 }  // namespace
 
 void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1265,20 +1297,12 @@ void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
     CHECK(!req_future.Get());
   }
 
-  auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
-
-  for (const auto& [field_ident, field_info] : idx_ptr->schema.fields) {
-    if (field_info.type == search::SchemaField::VECTOR &&
-        !(field_info.flags & search::SchemaField::NOINDEX)) {
-      const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
-      if (vparams.use_hnsw && !GlobalHnswIndexRegistry::Instance().Create(
-                                  idx_name, field_info.short_name, vparams, idx_ptr->type)) {
-        cmd_cntx->tx()->Conclude();
-        return builder->SendError("Index already exists");
-      }
-    }
+  if (!CreateHnswIndices(idx_name, *parsed_index)) {
+    cmd_cntx->tx()->Conclude();
+    return builder->SendError("Index already exists");
   }
 
+  auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
@@ -1614,11 +1638,15 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
+  const bool knn_has_prefilter = knn && knn->HasPreFilter();
+  bool empty_prefilter_result = true;
+
   // If the query does not contain knn component, or it is a hybrid query
-  if (!knn || (knn && knn->HasPreFilter())) {
+  if (!knn || knn_has_prefilter) {
     cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
-        docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+        docs[es->shard_id()] =
+            index->Search(t->GetOpArgs(es), *params, &search_algo, knn_has_prefilter);
       else
         index_not_found.store(true, memory_order_relaxed);
       return OpStatus::OK;
@@ -1628,12 +1656,13 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(string{index_name} + ": no such index");
 
     for (const auto& res : docs) {
+      empty_prefilter_result &= res.docs.empty();
       if (res.error)
         return cmd_cntx->SendError(*res.error);
     }
   }
 
-  if (knn_node) {
+  if (knn_node && (!knn_has_prefilter || !empty_prefilter_result)) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, knn->field);
     if (!hnsw_index) {
       return builder->SendError(string{index_name} + ": no such global hnsw index");
@@ -1693,7 +1722,7 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
     const ShardId shard_id = es->shard_id();
 
     auto shard_start = absl::Now();
-    search_results[shard_id] = index->Search(t->GetOpArgs(es), *params, &search_algo);
+    search_results[shard_id] = index->Search(t->GetOpArgs(es), *params, &search_algo, false);
     profile_results[shard_id] = {absl::Now() - shard_start};
 
     return OpStatus::OK;

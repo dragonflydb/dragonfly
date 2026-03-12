@@ -21,6 +21,15 @@ bool validate_ascii_fast(const char* src, size_t len);
 void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii);
 void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii);
 
+// Access a single byte in a 7-bit ASCII-packed string without unpacking the entire buffer.
+// These helpers read/write the ASCII byte at logical position `idx` in the unpacked string
+// directly from/into the packed `bin` representation.
+// It's up to caller to verify:
+// `1. idx` must be less than `ascii_len` to avoid out-of-bounds access.
+// 2. `ascii` must be less than 128 (7-bit ASCII) for packing.
+uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx);
+void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t ascii);
+
 // packs ascii string (does not verify) into binary form saving 1 bit per byte on average (12.5%).
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
 void ascii_pack2(const char* ascii, size_t len, uint8_t* bin);
@@ -36,6 +45,13 @@ bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len);
 // maps ascii len to 7-bit packed length. Each 8 bytes are converted to 7 bytes.
 inline constexpr size_t binpacked_len(size_t ascii_len) {
   return (ascii_len * 7 + 7) / 8; /* rounded up */
+}
+
+// converts 7-bit packed length back to ascii length. Note that this conversion
+// is not accurate since it maps 7 bytes to 8 bytes (rounds up), while we may have
+// 7 byte strings converted to 7 byte as well.
+inline constexpr size_t ascii_len(size_t bin_len) {
+  return (bin_len * 8) / 7;
 }
 
 }  // namespace detail

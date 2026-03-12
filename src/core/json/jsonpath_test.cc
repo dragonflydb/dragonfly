@@ -8,6 +8,7 @@
 #include "base/logging.h"
 #include "core/json/driver.h"
 #include "core/json/lexer_impl.h"
+#include "core/mi_memory_resource.h"
 
 namespace flexbuffers {
 bool operator==(const Reference left, const Reference right) {
@@ -91,10 +92,10 @@ class ScannerTest : public ::testing::Test {
  protected:
   void SetUp() override {
     Test::SetUp();
-    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
+    InitTLStatelessAllocMR(&m_);
   }
 
-  ScannerTest() {
+  ScannerTest() : m_(mi_heap_get_backing()) {
     driver_.lexer()->set_debug(1);
   }
 
@@ -113,6 +114,7 @@ class ScannerTest : public ::testing::Test {
     }
   }
 
+  MiMemoryResource m_;
   TestDriver driver_;
 };
 

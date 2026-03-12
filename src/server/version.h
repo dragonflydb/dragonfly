@@ -36,8 +36,14 @@ enum class DflyVersion {
   // - Support partial sync from different master
   VER5,
 
+  // 1.37 <= ver
+  // - Per-shard search index definitions (search-index AUX on every flow)
+  // - HNSW index serialization opcodes (RDB_OPCODE_VECTOR_INDEX, RDB_OPCODE_SHARD_DOC_INDEX)
+  // - hnsw-index-metadata AUX field
+  VER6,
+
   // Always points to the latest version
-  CURRENT_VER = VER5,
+  CURRENT_VER = VER6,
 };
 
 }  // namespace dfly

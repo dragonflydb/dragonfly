@@ -2,6 +2,7 @@ import os
 import platform
 import shutil
 import signal
+import struct
 import tarfile
 import time
 import urllib.request
@@ -13,7 +14,7 @@ import pymemcache
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyInstance
 from .proxy import Proxy
-from .seeder import DebugPopulateSeeder
+from .seeder import DebugPopulateSeeder, HnswSearchSeeder
 from .seeder import Seeder as SeederV2
 from .utility import *
 
@@ -24,8 +25,8 @@ DISCONNECT_CRASH_STABLE_SYNC = 1
 DISCONNECT_NORMAL_STABLE_SYNC = 2
 
 M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.slow]
-M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+M_SLOW = [pytest.mark.large]
+M_STRESS = [pytest.mark.large, pytest.mark.opt_only]
 M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
@@ -315,7 +316,7 @@ master_crash_cases = [
 ]
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(
     df_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
@@ -384,7 +385,7 @@ Test re-connecting replica to different masters.
 rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
 async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, seeder_config):
     replica = df_factory.create(proactor_threads=t_replica)
@@ -419,7 +420,7 @@ async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_mast
         fill_task.cancel()
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_cancel_replication_immediately(df_factory, df_seeder_factory: DflySeederFactory):
     """
     Issue 100 replication commands. This checks that the replication state
@@ -1156,7 +1157,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 """
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.exclude_epoll
 async def test_flushall_in_full_sync(df_factory):
     master = df_factory.create(proactor_threads=4)
@@ -1857,10 +1858,10 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
         try:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
-            # If this ever fails gain, adjust the target_ops
-            # Df is blazingly fast, so by the time we tick a second time on
-            # line 1674, DF already replicated all the data so the assertion
-            # at the end of the test will always fail
+            # Wait for the two nodes to be in sync (stable state replication)
+            await wait_available_async(c_replica)
+
+            # Now start seeding and dropping
             fill_task = asyncio.create_task(seeder.run())
 
             for _ in range(3):
@@ -2015,7 +2016,7 @@ async def test_search_with_stream(df_factory: DflyInstanceFactory):
     ]
 
 
-# @pytest.mark.slow
+# @pytest.mark.large
 async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2218,6 +2219,7 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     assert set(keys_master) == set(keys_replica)
 
 
+@pytest.mark.large
 async def test_saving_replica(df_factory):
     master = df_factory.create(proactor_threads=1)
     replica = df_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}")
@@ -2623,6 +2625,108 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     assert await c_replica.execute_command(f"dbsize") == 0
 
 
+async def test_replicate_search_index_to_old_replica(df_factory: DflyInstanceFactory):
+    """
+    Test that a new master with search indices (including HNSW vector index) can
+    replicate to a v1.35 replica. This verifies backward compatibility of replication
+    when search indices are defined, ensuring the replica receives the data without
+    errors from new RDB AUX fields (search-index, hnsw-index-metadata, HNSW opcodes).
+    """
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.35.1"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+
+    # New master (current version) with search index
+    master = df_factory.create(proactor_threads=2)
+    # Old replica (v1.35)
+    replica = df_factory.create(
+        version=1.35,
+        path=released_dfly_path,
+        proactor_threads=2,
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Create a search index with HNSW vector field on the new master
+    await c_master.execute_command(
+        "FT.CREATE",
+        "test_idx",
+        "ON",
+        "HASH",
+        "PREFIX",
+        "1",
+        "item:",
+        "SCHEMA",
+        "name",
+        "TEXT",
+        "price",
+        "NUMERIC",
+        "SORTABLE",
+        "category",
+        "TAG",
+        "embedding",
+        "VECTOR",
+        "HNSW",
+        "6",
+        "TYPE",
+        "FLOAT32",
+        "DIM",
+        "2",
+        "DISTANCE_METRIC",
+        "L2",
+    )
+
+    # Insert test data with vector embeddings
+    for i in range(100):
+        category = "electronics" if i % 2 == 0 else "clothing"
+        embedding = struct.pack("<2f", float(i), float(i * 2))
+        await c_master.hset(
+            f"item:{i}",
+            mapping={
+                "name": f"Product {i}",
+                "price": str(i * 10),
+                "category": category,
+                "embedding": embedding,
+            },
+        )
+
+    # Verify data and index on master
+    assert await c_master.dbsize() == 100
+    master_idx = c_master.ft("test_idx")
+    text_result = await master_idx.search("Product 50")
+    assert text_result.total >= 1
+
+    # Verify KNN search on master
+    query_vec = struct.pack("<2f", 50.0, 100.0)
+    knn_result = await c_master.execute_command(
+        "FT.SEARCH", "test_idx", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec", query_vec
+    )
+    assert knn_result[0] >= 1
+    assert "item:50" in knn_result
+
+    # Start replication from new master to old replica
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Verify data replicated successfully
+    assert await c_replica.dbsize() == 100
+    assert await c_replica.hget("item:0", "name") == "Product 0"
+    assert await c_replica.hget("item:99", "name") == "Product 99"
+
+    # Verify KNN search works on old replica (index rebuilt from replicated data)
+    knn_result = await c_replica.execute_command(
+        "FT.SEARCH", "test_idx", "*=>[KNN 2 @embedding $vec]", "PARAMS", "2", "vec", query_vec
+    )
+    assert knn_result[0] >= 1
+    assert "item:50" in knn_result
+
+
 async def test_replicating_mc_flags(df_factory):
     master = df_factory.create(memcached_port=11211, proactor_threads=1)
     replica = df_factory.create(
@@ -2720,6 +2824,7 @@ async def test_replica_of_replica(df_factory):
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
 
 
+@pytest.mark.large
 async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     df_factory: DflyInstanceFactory, df_seeder_factory
 ):
@@ -2980,6 +3085,7 @@ async def test_replicaof_inside_multi(df_factory):
     assert MULTI_COMMANDS_TO_ISSUE == num_successes
 
 
+@pytest.mark.large
 async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFactory):
     master = df_factory.create(proactor_threads=1, serialization_max_chunk_size=100000000000)
     replicas = [df_factory.create(proactor_threads=1) for i in range(2)]
@@ -3009,6 +3115,7 @@ async def test_preempt_in_atomic_section_of_heartbeat(df_factory: DflyInstanceFa
     await fill_task
 
 
+@pytest.mark.large
 async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     """
     This test reproduces a bug in the JSON memory tracking.
@@ -3049,7 +3156,7 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@pytest.mark.skip("too heavy")
+@pytest.mark.large
 @pytest.mark.opt_only
 @dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
@@ -3085,6 +3192,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory):
     assert len(lines) == 0
 
 
+@pytest.mark.large
 async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyInstanceFactory):
     proactors = 4
     master = df_factory.create(proactor_threads=proactors, dbfilename="")
@@ -3447,7 +3555,7 @@ async def test_mc_gat_replication(df_factory):
 
 
 @pytest.mark.skip("Fails constantly on CI")
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.parametrize("serialization_max_size", [1, 64000])
 async def test_replication_onmove_flow(df_factory, serialization_max_size):
     master = df_factory.create(
@@ -3505,6 +3613,7 @@ async def test_replication_onmove_flow(df_factory, serialization_max_size):
         assert moved_saved > 0
 
 
+@pytest.mark.large
 @dfly_args({"proactor_threads": 1})
 async def test_big_strings(df_factory):
     master = df_factory.create(
@@ -3558,7 +3667,7 @@ async def test_big_strings(df_factory):
     assert peak_bytes < value_size
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     master = df_factory.create(proactor_threads=4, vmodule="dflycmd=1")
     replicas = [df_factory.create(proactor_threads=2) for _ in range(3)]
@@ -3597,7 +3706,7 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     assert not timeout_logs
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_takeover_timeout_on_unresponsive_master(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=2)
@@ -3764,7 +3873,7 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     assert len(lines) == 0
 
 
-@pytest.mark.slow
+@pytest.mark.large
 async def test_replica_reconnection_leaks_connections(df_factory: DflyInstanceFactory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -3983,8 +4092,7 @@ async def test_replication_replica_larger_dbnum(
 # BF.RESERVE with error_rate=0.00001 and capacity=1e9 creates a single bloom filter
 # of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
 # filter size, which silently overflowed to 0 and broke the RDB stream.
-@pytest.mark.skip("Requires ~12GiB RAM for two instances with 4GiB bloom filter")
-@pytest.mark.slow
+@pytest.mark.large
 async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
@@ -4012,3 +4120,112 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
     await check_all_replicas_finished([c_replica], c_master)
 
     assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
+
+
+async def test_hnsw_search_replication_with_network_disruptions(
+    df_factory: DflyInstanceFactory,
+):
+    """
+    Test HNSW search index replication under continuous traffic and a network disruption.
+
+    Creates a master with an HNSW vector index, starts concurrent write traffic and
+    search queries, replicates through a proxy, and drops the connection at a random
+    moment within the first 10 seconds (may hit full sync or stable sync).
+    """
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    seeder = HnswSearchSeeder(num_initial_docs=500)
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    traffic_task = asyncio.create_task(seeder.run_traffic(c_master))
+    search_task = asyncio.create_task(seeder.run_search_queries(c_master))
+    replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
+    await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+    try:
+        await asyncio.sleep(random.uniform(0, 10))
+        proxy.drop_connection()
+
+        # Give time to detect dropped connection and reconnect
+        await asyncio.sleep(1.0)
+
+        await wait_available_async(c_replica)
+        seeder.stop()
+        await traffic_task
+        await search_task
+        await replica_search_task
+
+        # Log replica FT.INFO for debugging if assertion fails later
+        info = await c_replica.execute_command("FT.INFO", seeder.index_name)
+        logging.info(f"Replica FT.INFO: {info}")
+
+        await check_all_replicas_finished([c_replica], c_master)
+        await seeder.verify(c_master, c_replica)
+
+    finally:
+        seeder.stop()
+        traffic_task.cancel()
+        search_task.cancel()
+        replica_search_task.cancel()
+        await proxy.close(proxy_task)
+
+
+async def test_rm_replication(df_factory: DflyInstanceFactory):
+    """Test that RM command propagates deletions to replica and is rejected on replica."""
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    master.start()
+    replica.start()
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Populate master with keys before replication starts
+    for i in range(20):
+        await c_master.set(f"key:{i}", f"val{i}")
+    for i in range(5):
+        await c_master.set(f"other:{i}", f"val{i}")
+
+    # Set up replication
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Verify replica has all keys
+    assert await c_replica.dbsize() == 25
+    logging.info("Replica has all keys")
+
+    # Run RM on master with a MATCH filter to delete only "key:*" keys
+    cursor = 0
+    while True:
+        result = await c_master.execute_command("RM", cursor, "MATCH", "key:*")
+        cursor = int(result[0])
+        if cursor == 0:
+            break
+
+    # Master should have only "other:*" keys left
+    assert await c_master.dbsize() == 5
+
+    # Wait for replication to propagate
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Replica should reflect deletions
+    assert await c_replica.dbsize() == 5
+    for i in range(5):
+        assert await c_replica.exists(f"other:{i}") == 1
+    for i in range(20):
+        assert await c_replica.exists(f"key:{i}") == 0
+
+    # RM must be rejected on replica (it's a write command)
+    with pytest.raises((aioredis.ResponseError, aioredis.ReadOnlyError)):
+        await c_replica.execute_command("RM", 0)

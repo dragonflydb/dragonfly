@@ -36,6 +36,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/search/vector_utils.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
@@ -46,6 +47,7 @@ extern "C" {
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_families.h"
+#include "server/dflycmd.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/hset_family.h"
@@ -1483,10 +1485,16 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  // We must resolve the command ID (cid) before the guard block.
+  // The following switch statement relies on the command's metadata
+  // (e.g., SupportsAsync()) to evaluate execution preferences,
+  // making this lookup a hard dependency for the logic below.
   string cmd = absl::AsciiStrToUpper(args.Front());
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
   if (cid == nullptr) {
-    DCHECK(async_pref == AsyncPreference::ONLY_SYNC);  // Error will be missed, temporary
+    if (async_pref != AsyncPreference::ONLY_SYNC) {
+      parsed_cmd->SetDeferredReply();
+    }
     parsed_cmd->SendError(ReportUnknownCmd(cmd));
     return DispatchResult::ERROR;
   }
@@ -1500,15 +1508,18 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         return DispatchResult::WOULD_BLOCK;
       [[fallthrough]];
     case AsyncPreference::PREFER_ASYNC:
-      if (!cid->SupportsAsync())
-        break;
-
-      parsed_cmd->SetDeferredReply();
+      if (cid->SupportsAsync())
+        parsed_cmd->SetDeferredReply();
       break;
   };
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
+
+  if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
+    ++ServerState::tlocal()->stats.blocking_commands_in_pipelines;
+    cmd_cntx->conn()->FlushReplies();
+  }
 
   ArgSlice tail_args;
   if (cmd_cntx->IsDeferredReply()) {
@@ -1857,12 +1868,19 @@ DispatchResult Service::DispatchMC(facade::ParsedCommand* parsed_cmd,
       cmd_name = "QUIT";
       break;
     case MemcacheParser::STATS:
+      if (apref == AsyncPreference::ONLY_ASYNC)
+        return DispatchResult::WOULD_BLOCK;
       server_family_.StatsMC(cmd.key(), cmd_ctx);
       return DispatchResult::OK;
     case MemcacheParser::VERSION:
+      if (apref == AsyncPreference::ONLY_ASYNC)
+        return DispatchResult::WOULD_BLOCK;
       cmd_ctx->SendSimpleString("VERSION 1.6.0 DF");
       return DispatchResult::OK;
     default:
+      if (apref != AsyncPreference::ONLY_SYNC) {
+        parsed_cmd->SetDeferredReply();
+      }
       cmd_ctx->SendSimpleString("CLIENT_ERROR bad command line format");
       return DispatchResult::ERROR;
   }
@@ -2253,8 +2271,11 @@ static bool CanRunSingleShardMulti(bool one_shard, Transaction::MultiMode multi_
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            bool read_only, CommandContext* cmd_cntx) {
+  const static size_t kShaSize = 40;
+  static_assert(sizeof(ConnectionState::ScriptInfo::Stats::sha) == kShaSize);
+
   // Sanitizing the input to avoid code injection.
-  if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
+  if (eval_args.sha.size() != kShaSize || !IsSHA(eval_args.sha)) {
     return cmd_cntx->SendError(facade::kScriptNotFound);
   }
 
@@ -2277,7 +2298,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
   sinfo->read_only = read_only;
-  sinfo->stats.sha = eval_args.sha;
+  memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2312,6 +2333,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   };
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
+    sinfo->stats.tx_shards = 1;
     // It might be that there are no declared keys, but there is only a single shard
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
@@ -2362,6 +2384,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       }
     } else {
       scheduled = StartMulti(conn_cntx, script_mode, eval_args.keys);
+      sinfo->stats.tx_shards = tx->GetUniqueShardCnt();
     }
 
     ++ss->stats.eval_io_coordination_cnt;
@@ -2380,6 +2403,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (scheduled)
       tx->UnlockMulti();
   }
+
+  sinfo->stats.tx_mode = script_mode;
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
@@ -2868,8 +2893,9 @@ VarzValue::Map Service::GetVarzStats() {
 
 GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   util::fb2::LockGuard lk(mu_);
+  GlobalState prev = global_state_;
   if (global_state_ != from) {
-    return global_state_;
+    return prev;
   }
 
   VLOG(1) << "Switching state from " << from << " to " << to;
@@ -2883,11 +2909,12 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
       DCHECK(db.IsLoadRefCountZero());
     }
   });
-  return to;
+  return prev;
 }
 
 bool Service::RequestLoadingState() {
-  if (SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING) {
+  GlobalState prev = SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (prev == GlobalState::ACTIVE || prev == GlobalState::LOADING) {
     util::fb2::LockGuard lk(mu_);
     loading_state_counter_++;
     return true;

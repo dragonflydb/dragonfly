@@ -33,6 +33,13 @@ enum class GlobalState : uint8_t {
 
 enum class TimeUnit : uint8_t { SEC, MSEC };
 
+enum class LoadBlobResult : uint8_t {
+  kSuccess,
+  kCorrupted,
+  kOutOfMemory,
+  kEmpty,
+};
+
 enum ExpireFlags {
   EXPIRE_ALWAYS = 0,
   EXPIRE_NX = 1 << 0,  // Set expiry only when key has no expiry
@@ -50,9 +57,5 @@ class CommandContext;
 class Namespace;
 class CommandRegistry;
 class Interpreter;
-
-namespace journal {
-class Journal;
-}  // namespace journal
 
 }  // namespace dfly

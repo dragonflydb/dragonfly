@@ -9,6 +9,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
+#include <hdr/hdr_histogram.h>
 
 #include "base/bits.h"
 #include "base/flags.h"
