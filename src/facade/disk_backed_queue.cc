@@ -112,8 +112,7 @@ void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
 }
 
 void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
-  const size_t k_read_size = 4096;
-  const size_t to_read = std::min({k_read_size, total_backing_bytes_, out.size()});
+  const size_t to_read = std::min(total_backing_bytes_, out.size());
   const size_t offset = next_read_offset_;
 
   // Capture a subset of out for the actual read size
