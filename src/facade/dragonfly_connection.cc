@@ -1338,7 +1338,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
     if (!ExecuteMCBatch())
       return ERROR;
 
-    if (!ReplyMCBatch())
+    if (!ReplyBatch())
       return ERROR;
   } while (commands_parsed && io_buf_.InputLen() > 0);
 
@@ -2378,13 +2378,7 @@ bool Connection::ExecuteMCBatch() {
   return true;
 }
 
-bool Connection::ReplyMCBatch() {
-  if (protocol_ != Protocol::MEMCACHE) {
-    // We do not support async replies for RESP protocol yet.
-    return true;
-  }
-
-  // Loop over finished command and break on first blocked
+bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
   for (auto& cmd = parsed_head_; cmd != parsed_to_execute_;) {
     if (!cmd->CanReply())
@@ -2403,7 +2397,6 @@ bool Connection::ReplyMCBatch() {
     parsed_tail_ = nullptr;
 
   reply_builder_->SetBatchMode(false);
-  // Flush any remaining data in the reply builder.
   reply_builder_->Flush();
   return !reply_builder_->GetError();
 }
@@ -2743,7 +2736,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       if (parsed_head_) {
         if (parsed_head_ == parsed_to_execute_)
           ExecuteMCBatch();
-        ReplyMCBatch();
+        ReplyBatch();
       }
     }
 
@@ -2753,7 +2746,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-      GrowBuffer(is_iobuf_full);
+      CheckIoBufCapacity(is_iobuf_full);
     } else if (parse_status != OK) {
       break;
     }

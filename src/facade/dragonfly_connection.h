@@ -364,8 +364,9 @@ class Connection : public util::Connection {
   // Returns true on successful execution, false on reply builder error.
   bool ExecuteMCBatch();
 
+  // Loop over finished async commands and let them reply.
   // Returns true on successful execution, false on reply builder error.
-  bool ReplyMCBatch();
+  bool ReplyBatch();
 
   // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
