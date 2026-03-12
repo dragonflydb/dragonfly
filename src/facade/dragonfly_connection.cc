@@ -1,4 +1,4 @@
-// Copyright 2025, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 //
 // See LICENSE for licensing terms.
 //
@@ -24,7 +24,6 @@
 #include "base/stl_util.h"
 #include "common/heap_size.h"
 #include "facade/conn_context.h"
-#include "facade/disk_backed_queue.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
@@ -125,9 +124,6 @@ ABSL_FLAG(uint32_t, pipeline_wait_batch_usec, 0,
           " events to come for the connection in case there is only one command in the pipeline. ");
 
 ABSL_FLAG(bool, experimental_io_loop_v2, true, "new io loop");
-
-ABSL_FLAG(size_t, disk_queue_offload_watermark, 0,
-          "Offload backpressure to disk when dispatch queue size crosses the watermark.");
 
 using namespace util;
 using namespace std;
@@ -627,17 +623,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 #endif
 
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
-
-  backpressure_to_disk_watermark_ = absl::GetFlag(FLAGS_disk_queue_offload_watermark);
-  if (backpressure_to_disk_watermark_ > 0) {
-    backing_queue_ = std::make_unique<DiskBackedQueue>(id_);
-    auto ec = backing_queue_->Init();
-    if (ec) {
-      LOG(ERROR) << "Error initializing disk backpressure file for connection " << id_ << ": "
-                 << ec.message();
-      backing_queue_.reset();
-    }
-  }
 
   migration_allowed_to_register_ = false;
 }

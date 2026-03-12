@@ -76,45 +76,6 @@ bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
   return (bytes + total_backing_bytes_) < max_backing_size_;
 }
 
-std::error_code DiskBackedQueue::Push(io::Bytes bytes) {
-  auto ec = file_->Write(bytes, write_offset_, 0);
-  if (ec) {
-    VLOG(2) << "Failed to offload blob of size " << bytes.size()
-            << " to backing with error: " << ec;
-    return ec;
-  }
-
-  write_offset_ += bytes.size();
-  total_backing_bytes_ += bytes.size();
-
-  VLOG(2) << "Offload connection " << this << " backpressure of " << bytes.size();
-  return {};
-}
-
-io::Result<size_t> DiskBackedQueue::Pop(io::MutableBytes out) {
-  const size_t k_read_size = 4096;
-  const size_t to_read = std::min({k_read_size, total_backing_bytes_, out.size()});
-
-  iovec iov{.iov_base = out.data(), .iov_len = to_read};
-  auto result = file_->ReadSome(&iov, 1, next_read_offset_, 0);
-  if (!result) {
-    LOG(ERROR) << "Could not load item at offset " << next_read_offset_ << " of size " << to_read
-               << " from disk with error: " << result.error().value() << " "
-               << result.error().message();
-    return result;
-  }
-
-  next_read_offset_ += *result;
-  total_backing_bytes_ -= *result;
-
-  VLOG(2) << "Loaded item with offset " << next_read_offset_ - *result << " of size " << *result
-          << " for connection " << this;
-
-  MaybePunchHole();
-
-  return {*result};
-}
-
 void DiskBackedQueue::MaybePunchHole() {
   // Punch holes over the aligned region we have fully read past so the OS can reclaim pages.
   // Both offset and length must be multiples of the filesystem block size: XFS returns EINVAL

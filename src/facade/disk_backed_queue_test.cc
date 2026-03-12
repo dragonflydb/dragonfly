@@ -39,36 +39,6 @@ class DiskBackedQueueTest : public testing::Test {
   std::unique_ptr<util::ProactorPool> pp_;
 };
 
-TEST_F(DiskBackedQueueTest, ReadWrite) {
-  pp_->at(0)->Await([]() {
-    DiskBackedQueue backing(1 /* id */);
-    EXPECT_FALSE(backing.Init());
-
-    std::string commands;
-    for (size_t i = 0; i < 100; ++i) {
-      auto cmd = absl::StrCat("SET FOO", i, " BAR");
-      auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(cmd.data()), cmd.size());
-      EXPECT_FALSE(backing.Push(bytes));
-      absl::StrAppend(&commands, cmd);
-    }
-
-    std::string results;
-    while (!backing.Empty()) {
-      LOG(INFO) << "ping";
-      std::string buf(1024, 'c');
-      auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(bytes);
-      EXPECT_TRUE(res);
-      absl::StrAppend(&results, buf.substr(0, *res));
-    }
-
-    EXPECT_EQ(results.size(), commands.size());
-    EXPECT_EQ(results, commands);
-
-    EXPECT_FALSE(backing.Close());
-  });
-}
-
 // Verifies that after reading >= 4096 bytes, punch_hole is called correctly
 // and disk space is reclaimed.
 TEST_F(DiskBackedQueueTest, PunchHoleReleasesSpace) {
@@ -79,17 +49,28 @@ TEST_F(DiskBackedQueueTest, PunchHoleReleasesSpace) {
 
     // Write 3 pages (12288 bytes) so the punch logic is triggered on reads.
     std::string data(12288, 'x');
-    ASSERT_FALSE(
-        backing.Push(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
+    {
+      util::fb2::Done done;
+      backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
+                        [&done](std::error_code ec) {
+                          ASSERT_FALSE(ec);
+                          done.Notify();
+                        });
+      done.Wait();
+    }
 
     // Read all data back in 4096-byte chunks.
     std::string results;
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(out);
-      ASSERT_TRUE(res);
-      results.append(buf.data(), *res);
+      util::fb2::Done done;
+      backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        results.append(buf.data(), *res);
+        done.Notify();
+      });
+      done.Wait();
     }
     EXPECT_EQ(results, data);
 
@@ -114,15 +95,26 @@ TEST_F(DiskBackedQueueTest, PunchHoleAdvancesOffset) {
 
     // Write 8 pages so we can do several reads and check the hole grows.
     std::string data(32768, 'y');
-    ASSERT_FALSE(
-        backing.Push(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
+    {
+      util::fb2::Done done;
+      backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
+                        [&done](std::error_code ec) {
+                          ASSERT_FALSE(ec);
+                          done.Notify();
+                        });
+      done.Wait();
+    }
 
     // Read exactly 4096 bytes (1 page).
     {
       std::string buf(4096, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(out);
-      ASSERT_TRUE(res);
+      util::fb2::Done done;
+      backing.PopAsync(out, [&done](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        done.Notify();
+      });
+      done.Wait();
     }
 
     // After 1 page read the hole should start at 0 and the first non-hole (data) should be at
@@ -150,8 +142,15 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     // Write 10000 bytes (not a multiple of 4096).
     // This is 2 full pages (8192 bytes) + 1808 partial bytes.
     std::string data(10000, 'z');
-    ASSERT_FALSE(
-        backing.Push(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size())));
+    {
+      util::fb2::Done done;
+      backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
+                        [&done](std::error_code ec) {
+                          ASSERT_FALSE(ec);
+                          done.Notify();
+                        });
+      done.Wait();
+    }
 
     // Read 3000 bytes (unaligned, less than 1 page).
     // next_read_offset_ will be 3000, but aligned_end = (3000/4096)*4096 = 0.
@@ -160,9 +159,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     {
       std::string buf(3000, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(out);
-      ASSERT_TRUE(res);
-      results.append(buf.data(), *res);
+      util::fb2::Done done;
+      backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        results.append(buf.data(), *res);
+        done.Notify();
+      });
+      done.Wait();
     }
 
     // Check that no hole exists yet (first 3000 bytes read but not 4096-aligned).
@@ -179,9 +182,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     {
       std::string buf(2000, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(out);
-      ASSERT_TRUE(res);
-      results.append(buf.data(), *res);
+      util::fb2::Done done;
+      backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        results.append(buf.data(), *res);
+        done.Notify();
+      });
+      done.Wait();
     }
 
     // Verify first page is now a hole.
@@ -198,9 +205,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     {
       std::string buf(3500, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(out);
-      ASSERT_TRUE(res);
-      results.append(buf.data(), *res);
+      util::fb2::Done done;
+      backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        results.append(buf.data(), *res);
+        done.Notify();
+      });
+      done.Wait();
     }
 
     // Verify first two pages are holes.
@@ -214,9 +225,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
       auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
-      auto res = backing.Pop(out);
-      ASSERT_TRUE(res);
-      results.append(buf.data(), *res);
+      util::fb2::Done done;
+      backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
+        ASSERT_TRUE(res);
+        results.append(buf.data(), *res);
+        done.Notify();
+      });
+      done.Wait();
     }
     EXPECT_EQ(results, data);
 

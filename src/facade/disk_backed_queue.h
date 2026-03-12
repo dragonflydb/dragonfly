@@ -24,10 +24,6 @@ class DiskBackedQueue {
   // Check if we can offload bytes to backing file.
   bool HasEnoughBackingSpaceFor(size_t bytes) const;
 
-  std::error_code Push(io::Bytes bytes);
-
-  io::Result<size_t> Pop(io::MutableBytes out);
-
   using AsyncPushCallback = std::function<void(std::error_code)>;
 
   void PushAsync(io::Bytes bytes, AsyncPushCallback cb);
