@@ -296,7 +296,7 @@ class DenseSet {
   void* DetachInternal(void* obj, uint32_t cookie) {
     auto [prev, found] = Find(obj, BucketId(obj, cookie), cookie);
     if (found) {
-      return Detach(prev, found);
+      return Delete(prev, found, true);
     }
     return nullptr;
   }
@@ -410,10 +410,8 @@ class DenseSet {
 
   // Deletes the object pointed by ptr and removes it from the set.
   // If ptr is a link then it will be deleted internally.
-  void Delete(DensePtr* prev, DensePtr* ptr);
-
-  // Like Delete but returns the raw object instead of calling ObjDelete.
-  void* Detach(DensePtr* prev, DensePtr* ptr);
+  // If detach is true, returns the raw object instead of calling ObjDelete.
+  void* Delete(DensePtr* prev, DensePtr* ptr, bool detach = false);
 
   // Processes a single bucket during Shrink, relocating elements as needed.
   void ShrinkBucket(size_t bucket_idx);

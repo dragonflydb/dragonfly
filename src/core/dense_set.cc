@@ -688,7 +688,7 @@ auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
   return {0, nullptr, nullptr};
 }
 
-void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
+void* DenseSet::Delete(DensePtr* prev, DensePtr* ptr, bool detach) {
   void* obj = nullptr;
 
   if (ptr->IsObject()) {
@@ -718,39 +718,12 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
 
   obj_malloc_used_ -= ObjectAllocSize(obj);
   --size_;
-  ObjDelete(obj, false);
-}
 
-void* DenseSet::Detach(DensePtr* prev, DensePtr* ptr) {
-  void* obj = nullptr;
-
-  if (ptr->IsObject()) {
-    obj = ptr->Raw();
-    ptr->Reset();
-    if (prev) {
-      DCHECK(prev->IsLink());
-
-      DenseLinkKey* plink = prev->AsLink();
-      DensePtr tmp = DensePtr::From(plink);
-      tmp.SetTtl(prev->HasTtl());
-      DCHECK(ObjectAllocSize(tmp.GetObject()));
-
-      FreeLink(plink);
-      *prev = tmp;
-      DCHECK(!prev->IsLink());
-    }
-  } else {
-    DCHECK(ptr->IsLink());
-
-    DenseLinkKey* link = ptr->AsLink();
-    obj = link->Raw();
-    *ptr = link->next;
-    FreeLink(link);
+  if (detach) {
+    return obj;
   }
-
-  obj_malloc_used_ -= ObjectAllocSize(obj);
-  --size_;
-  return obj;
+  ObjDelete(obj, false);
+  return nullptr;
 }
 
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {

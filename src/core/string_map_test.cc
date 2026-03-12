@@ -279,42 +279,39 @@ TEST_F(StringMapTest, ExtractExisting) {
   sm_->AddOrUpdate("f2", "v2");
   EXPECT_EQ(sm_->UpperBoundSize(), 2u);
 
-  sds entry = sm_->Extract("f1");
-  ASSERT_NE(entry, nullptr);
+  auto entry = sm_->Extract("f1");
+  ASSERT_TRUE(entry);
 
   // Verify the extracted entry has the correct value
-  sds val = StringMap::GetValue(entry);
+  sds val = StringMap::GetValue(entry.get());
   EXPECT_EQ(string_view(val, sdslen(val)), "v1");
 
   // Verify it was removed from the map
   EXPECT_EQ(sm_->UpperBoundSize(), 1u);
   EXPECT_FALSE(sm_->Contains("f1"));
   EXPECT_TRUE(sm_->Contains("f2"));
-
-  // Caller must free via DeleteEntry
-  StringMap::DeleteEntry(entry);
 }
 
 TEST_F(StringMapTest, ExtractNonExisting) {
   sm_->AddOrUpdate("f1", "v1");
-  sds entry = sm_->Extract("no_such_key");
-  EXPECT_EQ(entry, nullptr);
+  auto entry = sm_->Extract("no_such_key");
+  EXPECT_FALSE(entry);
   EXPECT_EQ(sm_->UpperBoundSize(), 1u);
 }
 
-TEST_F(StringMapTest, AddOrUpdateAndExtractNew) {
+TEST_F(StringMapTest, AddOrExchangeNew) {
   // Adding a new field returns nullptr (no previous entry)
-  sds prev = sm_->AddOrUpdateAndExtract("f1", "v1");
+  sds prev = sm_->AddOrExchange("f1", "v1");
   EXPECT_EQ(prev, nullptr);
   EXPECT_TRUE(sm_->Contains("f1"));
   EXPECT_STREQ(sm_->Find("f1")->second, "v1");
 }
 
-TEST_F(StringMapTest, AddOrUpdateAndExtractReplace) {
+TEST_F(StringMapTest, AddOrExchangeReplace) {
   sm_->AddOrUpdate("f1", "old_value");
   EXPECT_EQ(sm_->UpperBoundSize(), 1u);
 
-  sds prev = sm_->AddOrUpdateAndExtract("f1", "new_value");
+  sds prev = sm_->AddOrExchange("f1", "new_value");
   ASSERT_NE(prev, nullptr);
 
   // Verify the extracted entry has the old value
@@ -328,10 +325,10 @@ TEST_F(StringMapTest, AddOrUpdateAndExtractReplace) {
   StringMap::DeleteEntry(prev);
 }
 
-TEST_F(StringMapTest, AddOrUpdateAndExtractWithTtl) {
+TEST_F(StringMapTest, AddOrExchangeWithTtl) {
   sm_->AddOrUpdate("f1", "v1", 100);
 
-  sds prev = sm_->AddOrUpdateAndExtract("f1", "v2", 200);
+  sds prev = sm_->AddOrExchange("f1", "v2", 200);
   ASSERT_NE(prev, nullptr);
 
   sds val = StringMap::GetValue(prev);
@@ -353,11 +350,11 @@ TEST_F(StringMapTest, ExtractMultiple) {
   EXPECT_EQ(sm_->UpperBoundSize(), 20u);
 
   // Extract every other entry
-  vector<sds> extracted;
+  vector<StringMap::SdsEntry> extracted;
   for (unsigned i = 0; i < 20; i += 2) {
-    sds entry = sm_->Extract(to_string(i));
-    ASSERT_NE(entry, nullptr);
-    extracted.push_back(entry);
+    auto entry = sm_->Extract(to_string(i));
+    ASSERT_TRUE(entry);
+    extracted.push_back(std::move(entry));
   }
 
   EXPECT_EQ(sm_->UpperBoundSize(), 10u);
@@ -365,10 +362,6 @@ TEST_F(StringMapTest, ExtractMultiple) {
   // Verify remaining entries
   for (unsigned i = 1; i < 20; i += 2) {
     EXPECT_TRUE(sm_->Contains(to_string(i)));
-  }
-
-  for (sds entry : extracted) {
-    StringMap::DeleteEntry(entry);
   }
 }
 
