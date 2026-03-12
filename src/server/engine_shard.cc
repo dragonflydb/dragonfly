@@ -1024,6 +1024,9 @@ void EngineShard::CacheStats() {
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
 
+  VLOG_EVERY_N(1, 500) << "Entries count " << entries << " "
+                       << "obj_memory: " << obj_memory << ", bytes_per_obj: " << bytes_per_obj;
+
   db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
   last_mem_params_ = {now, used_mem};
 }

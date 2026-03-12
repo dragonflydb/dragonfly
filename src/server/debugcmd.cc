@@ -1242,12 +1242,14 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
     uint64_t prime_capacity = 0;
     uint64_t expire_count = 0;
     uint64_t key_reads = 0;
+    size_t avg_object_size = 0;
   };
 
   vector<ShardInfo> infos(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     auto sid = shard->shard_id();
-    auto slice_stats = cntx_->ns->GetDbSlice(sid).GetStats();
+    auto& db_slice = cntx_->ns->GetDbSlice(sid);
+    auto slice_stats = db_slice.GetStats();
     auto& stats = infos[sid];
 
     stats.used_memory = shard->UsedMemory();
@@ -1256,6 +1258,7 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
       stats.prime_capacity += db_stats.prime_capacity;
       stats.expire_count += db_stats.expire_count;
     }
+    stats.avg_object_size = db_slice.bytes_per_object();
     stats.key_reads = slice_stats.events.hits + slice_stats.events.misses;
   });
 
@@ -1280,9 +1283,11 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
     ADD_STAT(i, key_count);
     ADD_STAT(i, expire_count);
     ADD_STAT(i, key_reads);
+
     absl::StrAppend(&out, "shard", i,
                     "_prime_utilization: ", double(infos[i].key_count) / infos[i].prime_capacity,
                     "\n");
+    absl::StrAppend(&out, "shard", i, "_avg_object_size: ", infos[i].avg_object_size, "\n");
   }
 
   MAXMIN_STAT(used_memory);
