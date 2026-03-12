@@ -231,6 +231,7 @@ jobs:
 
       - name: Authenticate to AWS
         uses: aws-actions/configure-aws-credentials@v5
+        continue-on-error: true
         with:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1

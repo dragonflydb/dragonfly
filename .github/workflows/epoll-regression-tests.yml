@@ -39,6 +39,7 @@ jobs:
           cat /proc/cpuinfo
           ulimit -a
           env
+          python3 -V
 
       - name: Build Dragonfly
         uses: ./.github/actions/builder
