@@ -18,6 +18,7 @@
 #include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
@@ -1429,13 +1430,17 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
     return OpStatus::OK;
   };
 
-  auto result = co_await cmd::SingleHop(cb);
+  // Waiter objects needs to be used to keep tx alive in its scope for ReorderShardResults
+  cmd::SingleHopWaiter waiter{cmd_cntx, cb};
+  auto result = co_await waiter;
   CHECK_EQ(OpStatus::OK, result);
 
   // wait for all tiered reads to finish and check for errors
   tiering_bc->Wait();
-  if (auto err = std::move(tiering_err).Destroy(); err)
-    co_return facade::ErrorReply{err.message()};
+  if (auto err = std::move(tiering_err).Destroy(); err) {
+    cmd_cntx->rb()->SendError(err.message());
+    co_return std::nullopt;
+  }
 
   size_t arg_len = args.size();
 
@@ -1443,10 +1448,11 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
   ReorderShardResults(absl::MakeSpan(mget_resp.get(), shard_set->size()), cmd_cntx->tx(),
                       absl::MakeSpan(mget_results.get(), arg_len));
 
+  SinkReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
   if (cmd_cntx->mc_command()) {
     auto* mc_builder = static_cast<MCReplyBuilder*>(cmd_cntx->rb());
     facade::MCRender mc_render{cmd_cntx->mc_command()->cmd_flags};
-    for (size_t i = 0; i < cmd_cntx->size(); ++i) {
+    for (size_t i = 0; i < arg_len; ++i) {
       const auto& entry = mget_results[i];
       if (entry) {
         mc_builder->SendValue(cmd_cntx->mc_command()->cmd_flags, cmd_cntx->at(i), entry->value, 0,
@@ -1476,7 +1482,7 @@ cmd::CmdR CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 // Implements the memcache GAT command. The expected input is
-// GAT key [keys...]§§
+// GAT key [keys...]
 // The expiry argument is stored in mc_command()->expire_ts
 cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
   if (!cmd_cntx->mc_command()) {

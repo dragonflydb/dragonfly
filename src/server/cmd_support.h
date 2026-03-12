@@ -168,6 +168,10 @@ struct CmdR::Coro {
   template <typename... Ts> Coro(CommandContext* cmd_cntx, const Ts&... ts) : cmd_cntx{cmd_cntx} {
   }
 
+  auto& await_transform(SingleHopWaiter& waiter) const {
+    return waiter;
+  }
+
   auto await_transform(SingleHopSentinel callback) const {
     return SingleHopWaiter{cmd_cntx, callback};
   }
