@@ -311,8 +311,7 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(unsigned max_busy_cycles);
-  ParserStatus ParseMemcache();
+  ParserStatus ParseRedis(unsigned max_busy_cycles, bool enqueue_only = false);
 
   void OnBreakCb(int32_t mask);
 
@@ -360,6 +359,11 @@ class Connection : public util::Connection {
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
   bool ParseMCBatch();
+
+  bool ParseRedisBatch();
+
+  // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
+  ParserStatus ParseLoop();
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.

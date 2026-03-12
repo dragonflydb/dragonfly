@@ -27,6 +27,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
+#include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"
@@ -1095,7 +1096,7 @@ void Connection::ConnectionFlow() {
       parse_status = ParseRedis(10000);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = ParseLoop();
     }
   }
 
@@ -1255,7 +1256,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
+Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool enqueue_only) {
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
@@ -1295,7 +1296,10 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
         LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
-      DispatchSingle(has_more, dispatch_sync, dispatch_async);
+      if (enqueue_only)
+        dispatch_async();
+      else
+        DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
@@ -1330,10 +1334,13 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   return ERROR;
 }
 
-auto Connection::ParseMemcache() -> ParserStatus {
+auto Connection::ParseLoop() -> ParserStatus {
+  auto parse_func =
+      protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
+
   bool commands_parsed = false;
   do {
-    commands_parsed = ParseMCBatch();
+    commands_parsed = (this->*parse_func)();
 
     if (!ExecuteBatch())
       return ERROR;
@@ -1448,7 +1455,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
       parse_status = ParseRedis(max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = ParseLoop();
     }
 
     if (reply_builder_->GetError()) {
@@ -2259,6 +2266,10 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
+bool Connection::ParseRedisBatch() {
+  return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
+}
+
 bool Connection::ParseMCBatch() {
   CHECK(io_buf_.InputLen() > 0);
 
@@ -2731,8 +2742,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (io_buf_.InputLen() > 0) {
-      DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = ParseLoop();
     } else {
       parse_status = NEED_MORE;
 
