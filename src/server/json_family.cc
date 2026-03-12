@@ -517,14 +517,16 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
 
   const bool is_new_key = it_res->is_new;
 
+  // AddOrFind for Add case has type == OBJ_STRING.
+  // We either added a new key (is_new_key is true) or found a pre-existing (string).
+  // For both cases we must reset the object before we set up the JsonAutoUpdater.
+  // *note* that ShardJsonFromString is called twice. This *parses and allocates* the
+  // same JSON object twice and might impact performance of large json strings.
   if (type != OBJ_JSON) {
-    // TODO -- this is a performance regression. If json_str is large, we parse it here
-    // then again  later after we set up the JsonAutoUpdater. The issue here is that we
-    // need to deallocate before we create the updater but after we parse the string. Yet,
-    // parsing requires the updater to be created first(see its comments).
     if (!ShardJsonFromString(json_str)) {
       if (is_new_key) {
-        // Delete the key if it's new
+        // Delete the key if it was created during this operation to avoid
+        // an orphan (leftover empty key).
         auto& db_slice = op_args.GetDbSlice();
         db_slice.DelMutable(op_args.db_cntx, std::move(*it_res));
       }
@@ -1212,7 +1214,6 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
 
   updater.SetJsonSize();
 
-  // SetString(op_args, key, j.as_string());
   return total_deletions;
 }
 
