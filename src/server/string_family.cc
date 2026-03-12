@@ -1410,7 +1410,7 @@ void ReorderShardResults(absl::Span<MGetResponse> mget_resp, const Transaction* 
 }
 
 cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
-                      const DbSlice::ExpireParams* gat_params) {
+                      std::optional<DbSlice::ExpireParams> gat_params) {
   DCHECK_GE(args.size(), 1U);
 
   MemcacheCmdFlags cmd_flags;
@@ -1424,9 +1424,9 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
 
   unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
+  auto gat_ptr = gat_params ? &*gat_params : nullptr;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] =
-        OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_params);
+    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
     return OpStatus::OK;
   };
 
@@ -1478,7 +1478,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, CmdArgList args,
 }
 
 cmd::CmdR CmdMGet(CmdArgList args, CommandContext* cmd_cntx) {
-  return MGetGeneric(cmd_cntx, args, nullptr);
+  return MGetGeneric(cmd_cntx, args, std::nullopt);
 }
 
 // Implements the memcache GAT command. The expected input is
@@ -1490,9 +1490,9 @@ cmd::CmdR CmdGAT(CmdArgList args, CommandContext* cmd_cntx) {
     return cmd::kAborted;
   }
   int64_t expire_ts = cmd_cntx->mc_command()->expire_ts;
-  const DbSlice::ExpireParams expire_params{
+  DbSlice::ExpireParams expire_params{
       .value = expire_ts, .absolute = true, .persist = expire_ts == 0};
-  return MGetGeneric(cmd_cntx, args, &expire_params);
+  return MGetGeneric(cmd_cntx, args, expire_params);
 }
 
 void CmdMSet(CmdArgList args, CommandContext* cmd_cntx) {
