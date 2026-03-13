@@ -2415,7 +2415,7 @@ void GenericFamily::Dump(CmdArgList args, CommandContext* cmd_cntx) {
     auto reply = [data = std::move(*result)](RedisReplyBuilder* rb) { rb->SendBulkString(data); };
     cmd_cntx->ReplyWith(std::move(reply));
   } else {
-    cmd_cntx->SendNull();
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendNull();
   }
 }
 
@@ -2606,7 +2606,7 @@ void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
       return cmd_cntx->ReplyWith(std::move(replier));
     }
   }
-  cmd_cntx->SendNull();
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendNull();
 }
 
 using CI = CommandId;
