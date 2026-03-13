@@ -353,7 +353,7 @@ struct BasicSearch {
   }
 
   void SearchVectorRangeFlat(FlatVectorIndex* vec_index, const AstVectorRangeNode& node) {
-    auto all_docs = vec_index->GetAllDocsWithNonNullValues();
+    const auto& all_docs = indices_->GetAllDocs();
     auto [dim, sim] = vec_index->Info();
     for (DocId doc : all_docs) {
       float dist = VectorDistance(node.vec.first.get(), vec_index->Get(doc), dim, sim);
@@ -450,6 +450,7 @@ struct BasicSearch {
     // used by knn
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
            holds_alternative<AstGeoNode>(node.Variant()) ||
+           holds_alternative<AstVectorRangeNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     if (profile_builder_)
@@ -757,11 +758,6 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
 
 void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
-}
-
-bool SearchAlgorithm::IsVectorRangeQuery() const {
-  DCHECK(query_);
-  return std::holds_alternative<AstVectorRangeNode>(*query_);
 }
 
 const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {

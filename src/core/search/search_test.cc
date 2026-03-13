@@ -715,7 +715,7 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
 
-  // Use i+1 to avoid zero vector for doc 0 (GetAllDocsWithNonNullValues skips zero vectors)
+  // Use i+1 so doc positions are 1..5 (query radius 1.5 from pos 2.0 catches docs 0,1,2)
   for (size_t i = 0; i < 5; i++) {
     MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
     indices.Add(i, doc);
@@ -726,7 +726,7 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   params["vec"] = ToBytes({2.0f});
 
   algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: vector_distance}", &params);
-  ASSERT_TRUE(algo.IsVectorRangeQuery());
+  ASSERT_NE(nullptr, algo.GetVectorRangeNode());
   EXPECT_STREQ("vector_distance", algo.GetVectorRangeNode()->score_alias.c_str());
 
   auto result = algo.Search(&indices);

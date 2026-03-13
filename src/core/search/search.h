@@ -218,8 +218,6 @@ class SearchAlgorithm {
 
   std::unique_ptr<AstNode> PopKnnNode();
 
-  bool IsVectorRangeQuery() const;
-
   const AstVectorRangeNode* GetVectorRangeNode() const;
 
   void EnableProfiling();
