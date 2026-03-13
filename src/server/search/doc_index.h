@@ -342,7 +342,9 @@ class ShardDocIndex {
 
   void AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                  PrimeValue* pv);
-  void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+  // Returns true when all HNSW removes executed synchronously (write lock acquired,
+  // deferred queue drained). False means at least one was deferred.
+  bool RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       const PrimeValue& pv);
 
   // Rebuild global vector indices from restored key index, updating vector data
@@ -401,6 +403,17 @@ class ShardDocIndex {
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
 
+  // Preserve old field data for HNSW indices with external vector storage.
+  // Extracts and keeps alive the old sds entries so deferred HNSW removal
+  // can still dereference pointers into them. Only called when
+  // RemoveDocFromGlobalVectorIndex was deferred (couldn't acquire write lock).
+  // When modified_fields is empty, preserves all HNSW-indexed fields.
+  void PreserveFieldData(PrimeValue& pv, absl::Span<const std::string_view> modified_fields);
+
+  void ClearPreservedData() {
+    preserved_field_data_.clear();
+  }
+
  private:
   std::shared_ptr<const DocIndex> base_;
   std::optional<search::FieldIndices> indices_;
@@ -414,6 +427,12 @@ class ShardDocIndex {
   // Drained by RestoreGlobalVectorIndices after the graph is fully restored.
   absl::flat_hash_set<std::string> pending_vector_updates_;
   bool is_restoring_vectors_ = false;
+
+  // Old field data kept alive until deferred HNSW removal completes.
+  // Populated by PreserveFieldData, cleared when the write lock is acquired.
+  // Note: grows unboundedly during long serialization windows (one entry per deferred remove).
+  using PreservedEntry = std::unique_ptr<void, void (*)(void*)>;
+  std::vector<PreservedEntry> preserved_field_data_;
 };
 
 // Stores shard doc indices by name on a specific shard.
@@ -445,7 +464,17 @@ class ShardDocIndices {
 
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
-  void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+
+  // Remove doc from all matching indices. When the HNSW write lock can't be
+  // acquired (e.g., serialization holds a read lock), external vector data is
+  // preserved so deferred HNSW ops can still dereference vector pointers.
+  // pv is non-const because preservation swaps sds entries in StringMap.
+  void RemoveDoc(std::string_view key, const DbContext& db_cnt, PrimeValue& pv,
+                 absl::Span<const std::string_view> modified_fields = {});
+
+  // Clear preserved field data on all indices. Called after HNSW serialization
+  // finishes and read locks are released, so deferred ops can drain normally.
+  void ClearAllPreservedData();
 
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices

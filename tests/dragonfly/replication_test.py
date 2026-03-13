@@ -4233,13 +4233,19 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
 
 
 @pytest.mark.parametrize(
-    "master_threads, replica_threads",
-    [[3, 4], [4, 4], [4, 3]],
+    "master_threads, replica_threads, num_dims",
+    [
+        pytest.param(3, 4, 4, id="3t-4t-copied"),
+        pytest.param(4, 4, 4, id="4t-4t-copied"),
+        pytest.param(4, 3, 4, id="4t-3t-copied"),
+        pytest.param(4, 4, 256, id="4t-4t-external"),
+    ],
 )
 async def test_hnsw_search_replication_with_network_disruptions(
     df_factory: DflyInstanceFactory,
     master_threads: int,
     replica_threads: int,
+    num_dims: int,
 ):
     """
     Test HNSW search index replication under continuous traffic and a network disruption.
@@ -4247,6 +4253,9 @@ async def test_hnsw_search_replication_with_network_disruptions(
     Creates a master with an HNSW vector index, starts concurrent write traffic and
     search queries, replicates through a proxy, and drops the connection at a random
     moment within the first 10 seconds (may hit full sync or stable sync).
+
+    When num_dims=256, vector data is 1024 bytes (>= default max_listpack_map_bytes),
+    forcing StringMap encoding and external HNSW vector pointers (copy_vector=false).
     """
     master = df_factory.create(proactor_threads=master_threads)
     replica = df_factory.create(proactor_threads=replica_threads)
@@ -4255,9 +4264,19 @@ async def test_hnsw_search_replication_with_network_disruptions(
     c_master = master.client()
     c_replica = replica.client()
 
-    seeder = HnswSearchSeeder(num_initial_docs=500)
+    num_docs = 100 if num_dims >= 256 else 500
+    seeder = HnswSearchSeeder(num_initial_docs=num_docs, num_dims=num_dims)
     await seeder.create_index(c_master)
     await seeder.seed_initial_docs(c_master)
+
+    # For external vector mode, verify the hash encoding is hashtable (StringMap).
+    # This confirms copy_vector=false, i.e. HNSW stores raw pointers into sds entries.
+    if num_dims >= 256:
+        encoding = await c_master.object("encoding", f"{seeder.prefix}0")
+        assert encoding == "hashtable", (
+            f"Expected hashtable encoding for {num_dims * 4}-byte vectors, got {encoding}. "
+            f"External mode requires dim*4 >= max_listpack_map_bytes (default 1024)."
+        )
 
     proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
     await proxy.start()

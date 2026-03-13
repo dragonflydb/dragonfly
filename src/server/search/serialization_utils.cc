@@ -6,6 +6,7 @@
 
 #include "base/logging.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
@@ -104,6 +105,20 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
     // Flush after completing entire index to avoid splitting HNSW data across compressed blobs.
     // The HNSW loader expects all nodes for an index to be readable in one pass.
     push_fun_();
+  }
+
+  // All read locks released — drain deferred ops so all removes complete,
+  // then clear preserved field data on all shards while still holding the
+  // write locks. Holding write locks ensures no new Remove can be deferred
+  // (MRMW allows concurrent writers, so Removes execute synchronously).
+  if (!all_indices.empty()) {
+    std::vector<std::unique_ptr<search::MRMWMutexLock>> write_locks;
+    write_locks.reserve(all_indices.size());
+    for (const auto& [index_key, index] : all_indices) {
+      write_locks.push_back(index->DrainPendingOps());
+    }
+    shard_set->RunBriefInParallel(
+        [](EngineShard* es) { es->search_indices()->ClearAllPreservedData(); });
   }
 }
 #endif

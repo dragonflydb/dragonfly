@@ -106,18 +106,20 @@ struct HnswlibAdapter {
   }
 
   // Removes a point from the index. If the write lock cannot be acquired, the
-  // operation is deferred.
-  void Remove(GlobalDocId id) {
+  // operation is deferred. Returns true when the operation was executed
+  // synchronously (write lock acquired, deferred queue drained).
+  bool Remove(GlobalDocId id) {
     {
       MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
       if (lock.locked()) {
         ProcessDeferred();
         DoRemove(id);
-        return;
+        return true;
       }
     }
     AddDeferredOp(id, DeferredOp(false, nullptr, 0, false));
     TryProcessDeferred();
+    return false;
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
@@ -375,6 +377,14 @@ struct HnswlibAdapter {
   }
 
  public:
+  // Block until the write lock is acquired and all deferred ops are drained.
+  // Returns the held write lock so the caller can keep it alive.
+  std::unique_ptr<MRMWMutexLock> DrainPendingOps() {
+    auto lock = std::make_unique<MRMWMutexLock>(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    ProcessDeferred();
+    return lock;
+  }
+
   // Restore HNSW graph structure from serialized nodes with metadata
   void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
@@ -581,12 +591,12 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(float* ta
   return adapter_->RangeSearch(target, radius);
 }
 
-void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
-  adapter_->Remove(id);
+bool HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
+  return adapter_->Remove(id);
 }
 
-void HnswVectorIndex::Remove(GlobalDocId id) {
-  adapter_->Remove(id);
+bool HnswVectorIndex::Remove(GlobalDocId id) {
+  return adapter_->Remove(id);
 }
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
@@ -635,6 +645,10 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
 
 std::unique_ptr<MRMWMutexLock> HnswVectorIndex::GetReadLock() const {
   return adapter_->GetReadLock();
+}
+
+std::unique_ptr<MRMWMutexLock> HnswVectorIndex::DrainPendingOps() {
+  return adapter_->DrainPendingOps();
 }
 
 }  // namespace dfly::search
