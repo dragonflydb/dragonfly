@@ -124,21 +124,11 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString("OK");
   }
 
-  // TODO: remove
   void SendLong(long val);
-  void SendNull();
-  void SendEmptyArray();
-
-  // TODO: remove
   template <typename F> void ReplyWith(F&& func) {
+    assert(!is_deferred_reply_);
     using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
-    if (is_deferred_reply_) {
-      reply_ = [func = std::forward<F>(func)](SinkReplyBuilder* builder) {
-        func(static_cast<RbType>(builder));
-      };
-    } else {
-      func(static_cast<RbType>(rb_));
-    }
+    func(static_cast<RbType>(rb_));
   }
 
   // Below are main commands for the async api and all assume that the command defers replies
