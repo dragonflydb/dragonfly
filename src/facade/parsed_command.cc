@@ -10,6 +10,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
+#include "facade/reply_payload.h"
 
 namespace facade {
 
@@ -124,15 +125,25 @@ void ParsedCommand::SendEmptyArray() {
 bool ParsedCommand::CanReply() const {
   DCHECK(is_deferred_reply_);
   dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0 /* not monostate */; },
-                      [](const AsyncTask& task) { return task.blocker->IsCompleted(); }};
+                      [](const SuspendedCommand& task) { return task.blocker->IsCompleted(); }};
   return std::visit(ov, reply_);
 }
 
 void ParsedCommand::SendReply() {
-  dfly::Overloaded ov{
-      [this](payload::Payload& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
-      [this](AsyncTask& task) { return task.replier(rb_); }};
-  return std::visit(ov, reply_);
+  auto payload_handler = [this](payload::Payload& pl) {
+    CapturingReplyBuilder::Apply(std::move(pl), rb_);
+  };
+  auto task_handler = [](SuspendedCommand& task) {
+    DCHECK(task.coro.done());
+    task.coro.resume();
+  };
+  std::visit(dfly::Overloaded{task_handler, payload_handler}, reply_);
+  reply_ = payload::Payload{std::monostate{}};  // Reset reply
+}
+
+ParsedCommand::SuspendedCommand::~SuspendedCommand() {
+  if (coro)
+    coro.destroy();
 }
 
 }  // namespace facade
