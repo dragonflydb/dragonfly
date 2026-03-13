@@ -690,8 +690,7 @@ OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view ke
   vector<long> res;
   res.reserve(fields.size());
 
-  for (size_t i = 0; i < fields.size(); i++) {
-    string_view field = facade::ToSV(fields[i]);
+  for (auto field : fields) {
     int32_t exp_time = HSetFamily::FieldExpireTime(db_cntx, pv, field);
     if (exp_time <= 0) {
       // -3 from FieldExpireTime means field not found -> HTTL returns -2
