@@ -80,6 +80,7 @@ struct ProfileBuilder {
         [](const AstGeoNode& n) {
           return absl::StrCat("Geo{", n.lat, " ", n.lon, " ", n.radius, " ", n.unit, "}");
         },
+        [](const AstVectorRangeNode& n) { return absl::StrCat("VectorRange{r=", n.radius, "}"); },
     };
     return visit(node_info, node.Variant());
   }
@@ -351,6 +352,54 @@ struct BasicSearch {
     knn_distances_.resize(prefix_size);
   }
 
+  void SearchVectorRangeFlat(FlatVectorIndex* vec_index, const AstVectorRangeNode& node) {
+    const auto& all_docs = indices_->GetAllDocs();
+    auto [dim, sim] = vec_index->Info();
+    for (DocId doc : all_docs) {
+      float dist = VectorDistance(node.vec.first.get(), vec_index->Get(doc), dim, sim);
+      if (dist <= static_cast<float>(node.radius)) {
+        knn_scores_.emplace_back(doc, dist);
+      }
+    }
+  }
+
+  // [@field:[VECTOR_RANGE r vec]=>{$YIELD_DISTANCE_AS: alias}]:
+  // Return all docs within distance radius, storing distances in knn_scores_
+  IndexResult Search(const AstVectorRangeNode& node, string_view active_field) {
+    DCHECK(active_field.empty());
+
+    auto* vec_index = GetIndex<BaseVectorIndex>(node.field);
+    if (!vec_index)
+      return IndexResult{};
+
+    if (node.vec.second == 0)
+      return IndexResult{};
+
+    if (node.radius < 0 || std::isnan(node.radius)) {
+      error_ = absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", node.radius);
+      return IndexResult{};
+    }
+
+    if (auto [dim, _] = vec_index->Info(); dim != node.vec.second) {
+      error_ = absl::StrCat("Wrong vector index dimensions, got: ", node.vec.second,
+                            ", expected: ", dim);
+      return IndexResult{};
+    }
+
+    knn_scores_.clear();
+
+    // HNSW fields are not stored in FieldIndices::indices_, so GetIndex<BaseVectorIndex> above
+    // returns nullptr for HNSW before we reach this point.
+    // HNSW range search support is planned separately (see hnsw_index.h).
+    if (auto* flat_index = dynamic_cast<FlatVectorIndex*>(vec_index); flat_index)
+      SearchVectorRangeFlat(flat_index, node);
+
+    vector<DocId> out(knn_scores_.size());
+    for (size_t i = 0; i < knn_scores_.size(); i++)
+      out[i] = knn_scores_[i].first;
+    return IndexResult{std::move(out)};
+  }
+
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
   IndexResult Search(const AstKnnNode& knn, string_view active_field) {
     DCHECK(active_field.empty());
@@ -401,6 +450,7 @@ struct BasicSearch {
     // used by knn
     DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
            holds_alternative<AstGeoNode>(node.Variant()) ||
+           holds_alternative<AstVectorRangeNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     if (profile_builder_)
@@ -708,6 +758,10 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
 
 void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
+}
+
+const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {
+  return get_if<AstVectorRangeNode>(query_.get());
 }
 
 }  // namespace dfly::search
