@@ -654,6 +654,88 @@ TEST_F(SearchTest, MatchNumericRangeWithCommas) {
 
 class KnnTest : public SearchTest {};
 
+class VectorRangeTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+    InitSimSIMD();
+  }
+};
+
+TEST_F(VectorRangeTest, FlatRange1D) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Place 10 points on a line: 1, 2, ..., 10 (avoid zero vector for doc 0)
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Query at 5.0 with radius 1.5 → points at pos 4,5,6 → doc ids 3,4,5
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
+  }
+
+  // Exact match at pos 4.0 with radius 0 → only doc 3
+  {
+    params["vec"] = ToBytes({4.0f});
+    algo.Init("@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3));
+  }
+
+  // Large radius → all 10 points
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_EQ(result.ids.size(), 10u);
+  }
+
+  // Empty result when radius is too small
+  {
+    params["vec"] = ToBytes({5.5f});
+    algo.Init("@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_TRUE(result.ids.empty());
+  }
+}
+
+TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Use i+1 to avoid zero vector for doc 0 (GetAllDocsWithNonNullValues skips zero vectors)
+  for (size_t i = 0; i < 5; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({2.0f});
+
+  algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: vector_distance}", &params);
+  ASSERT_TRUE(algo.IsVectorRangeQuery());
+  EXPECT_STREQ("vector_distance", algo.GetVectorRangeNode()->score_alias.c_str());
+
+  auto result = algo.Search(&indices);
+  // Positions 1,2,3 (docs 0,1,2) are within L2 distance 1.5 from query pos 2.0
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1, 2));
+  // knn_scores should contain distances for all matched docs
+  EXPECT_EQ(result.knn_scores.size(), 3u);
+}
+
 TEST_F(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};

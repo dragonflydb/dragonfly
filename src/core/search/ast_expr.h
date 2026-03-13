@@ -142,10 +142,31 @@ struct AstKnnNode {
   bool HasPreFilter() const;
 };
 
+// Applies vector range search: returns all docs with distance(vec, doc_vec) <= radius
+struct AstVectorRangeNode {
+  AstVectorRangeNode() = default;
+  AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec, std::string score_alias);
+
+  AstVectorRangeNode(const AstVectorRangeNode&) = delete;
+  AstVectorRangeNode& operator=(const AstVectorRangeNode&) = delete;
+
+  AstVectorRangeNode(AstVectorRangeNode&&) noexcept = default;
+  AstVectorRangeNode& operator=(AstVectorRangeNode&&) noexcept = default;
+
+  friend std::ostream& operator<<(std::ostream& stream, const AstVectorRangeNode& /*node*/) {
+    return stream;
+  }
+
+  std::string field;
+  double radius;
+  OwnedFtVector vec;
+  std::string score_alias;
+};
+
 using NodeVariants =
     std::variant<std::monostate, AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode,
                  AstSuffixNode, AstInfixNode, AstRangeNode, AstNegateNode, AstLogicalNode,
-                 AstFieldNode, AstTagsNode, AstKnnNode, AstGeoNode>;
+                 AstFieldNode, AstTagsNode, AstKnnNode, AstGeoNode, AstVectorRangeNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

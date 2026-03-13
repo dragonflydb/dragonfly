@@ -22,6 +22,7 @@ namespace dfly::search {
 struct AstNode;
 struct TextIndex;
 struct AstKnnNode;
+struct AstVectorRangeNode;
 
 // Optional FILTER
 struct OptionalNumericFilter : public OptionalFilterBase {
@@ -216,6 +217,10 @@ class SearchAlgorithm {
   AstKnnNode* GetKnnNode() const;
 
   std::unique_ptr<AstNode> PopKnnNode();
+
+  bool IsVectorRangeQuery() const;
+
+  const AstVectorRangeNode* GetVectorRangeNode() const;
 
   void EnableProfiling();
 
