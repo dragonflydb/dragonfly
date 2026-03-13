@@ -50,7 +50,7 @@ std::error_code DiskBackedQueue::Init() {
 }
 
 DiskBackedQueue::~DiskBackedQueue() {
-  DCHECK_EQ(in_flight_callbacks_, 0);
+  DCHECK_EQ(in_flight_callbacks_, 0ul);
 }
 
 std::error_code DiskBackedQueue::Close() {
@@ -99,6 +99,7 @@ void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
   ++in_flight_callbacks_;
 
   file_->WriteAsync(bytes, offset, [this, size, cb = std::move(cb)](int res) {
+    --in_flight_callbacks_;
     if (res < 0) {
       std::error_code ec{-res, std::system_category()};
       VLOG(2) << "Failed to offload blob of size " << size << " to backing with error: " << ec;
@@ -110,7 +111,6 @@ void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
     total_backing_bytes_ += size;
     VLOG(2) << "Offload connection " << this << " backpressure of " << size;
     cb({});
-    --in_flight_callbacks_;
   });
 }
 
@@ -123,6 +123,7 @@ void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
   io::MutableBytes read_buf = out.subspan(0, to_read);
 
   file_->ReadAsync(read_buf, offset, [this, to_read, offset, cb = std::move(cb)](int res) {
+    --in_flight_callbacks_;
     if (res < 0) {
       std::error_code ec{-res, std::system_category()};
       LOG(ERROR) << "Could not load item at offset " << offset << " of size " << to_read
@@ -141,7 +142,6 @@ void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
     MaybePunchHole();
 
     cb(bytes_read);
-    --in_flight_callbacks_;
   });
 }
 
