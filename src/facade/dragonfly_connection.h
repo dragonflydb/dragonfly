@@ -278,6 +278,9 @@ class Connection : public util::Connection {
   std::variant<std::error_code, ParserStatus> IoLoop();
 
   void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+
+  void CheckIoBufCapacity(bool is_iobuf_full);
+
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
 
@@ -308,8 +311,7 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(unsigned max_busy_cycles);
-  ParserStatus ParseMemcache();
+  ParserStatus ParseRedis(unsigned max_busy_cycles, bool enqueue_only = false);
 
   void OnBreakCb(int32_t mask);
 
@@ -358,12 +360,21 @@ class Connection : public util::Connection {
   // parsing is pending more input).
   bool ParseMCBatch();
 
-  // Returns true on successful execution, false on reply builder error.
-  bool ExecuteMCBatch();
+  bool ParseRedisBatch();
 
-  // Returns true on successful execution, false on reply builder error.
-  bool ReplyMCBatch();
+  // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
+  ParserStatus ParseLoop();
 
+  // Loop over enqueued async commands and enqueue them for async execution.
+  // If async execution is not possible, handle them in synchronous mode one by one.
+  // Returns true on successful execution, false on reply builder error.
+  bool ExecuteBatch();
+
+  // Loop over finished async commands and let them reply.
+  // Returns true on successful execution, false on reply builder error.
+  bool ReplyBatch();
+
+  // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
 
