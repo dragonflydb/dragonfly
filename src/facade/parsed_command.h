@@ -124,7 +124,6 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString("OK");
   }
 
-  // TODO: remove
   void SendLong(long val);
   template <typename F> void ReplyWith(F&& func) {
     assert(!is_deferred_reply_);

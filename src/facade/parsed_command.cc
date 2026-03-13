@@ -85,8 +85,11 @@ void ParsedCommand::SendError(const facade::ErrorReply& error) {
 }
 
 void ParsedCommand::SendSimpleString(std::string_view str) {
-  DCHECK(!is_deferred_reply_);
-  rb_->SendSimpleString(str);
+  if (!is_deferred_reply_) {
+    rb_->SendSimpleString(str);
+  } else {
+    reply_ = payload::make_simple_or_noreply(str);
+  }
 }
 
 void ParsedCommand::SendLong(long val) {
