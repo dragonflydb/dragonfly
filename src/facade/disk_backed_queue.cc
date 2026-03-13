@@ -50,6 +50,7 @@ std::error_code DiskBackedQueue::Init() {
 }
 
 DiskBackedQueue::~DiskBackedQueue() {
+  DCHECK_EQ(in_flight_callbacks_, 0);
 }
 
 std::error_code DiskBackedQueue::Close() {
@@ -95,6 +96,7 @@ void DiskBackedQueue::MaybePunchHole() {
 void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
   const size_t offset = write_offset_;
   const size_t size = bytes.size();
+  ++in_flight_callbacks_;
 
   file_->WriteAsync(bytes, offset, [this, size, cb = std::move(cb)](int res) {
     if (res < 0) {
@@ -108,12 +110,14 @@ void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
     total_backing_bytes_ += size;
     VLOG(2) << "Offload connection " << this << " backpressure of " << size;
     cb({});
+    --in_flight_callbacks_;
   });
 }
 
 void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
   const size_t to_read = std::min(total_backing_bytes_, out.size());
   const size_t offset = next_read_offset_;
+  ++in_flight_callbacks_;
 
   // Capture a subset of out for the actual read size
   io::MutableBytes read_buf = out.subspan(0, to_read);
@@ -137,6 +141,7 @@ void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
     MaybePunchHole();
 
     cb(bytes_read);
+    --in_flight_callbacks_;
   });
 }
 

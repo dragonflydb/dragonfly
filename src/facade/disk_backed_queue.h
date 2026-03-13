@@ -56,6 +56,7 @@ class DiskBackedQueue {
 
   // same as connection id. Used to uniquely identify the backed file
   const size_t id_ = 0;
+  size_t in_flight_callbacks_ = 0;
 };
 
 }  // namespace facade
