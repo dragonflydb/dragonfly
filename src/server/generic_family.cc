@@ -2075,7 +2075,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
       if (elem_result == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(elem_result.status());
       else
-        return cmd_cntx->SendEmptyArray();
+        return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendEmptyArray();
     }
 
     raw_elements.swap(elem_result->first);
@@ -2116,7 +2116,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
         return cmd_cntx->SendError(sort_status);
       if (sort_status == OpStatus::INVALID_NUMERIC_RESULT)
         return cmd_cntx->SendError("One or more scores can't be converted into double");
-      return cmd_cntx->SendEmptyArray();
+      return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendEmptyArray();
     }
 
     SortVisitor visitor{params, source_type, cmd_cntx, std::move(raw_elements)};

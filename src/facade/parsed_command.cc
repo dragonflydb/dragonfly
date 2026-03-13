@@ -69,10 +69,7 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) {
 
 void ParsedCommand::SendError(facade::OpStatus status) {
   if (!is_deferred_reply_) {
-    if (status == OpStatus::OK)
-      rb_->SendSimpleString("OK");
-    else
-      rb_->SendError(StatusToMsg(status));
+    rb_->SendError(status);
   } else {
     if (status == OpStatus::OK)
       reply_ = payload::SimpleString{"OK"};
@@ -88,37 +85,20 @@ void ParsedCommand::SendError(const facade::ErrorReply& error) {
 }
 
 void ParsedCommand::SendSimpleString(std::string_view str) {
-  if (!is_deferred_reply_) {
-    rb_->SendSimpleString(str);
-  } else {
-    reply_ = payload::make_simple_or_noreply(str);
-  }
+  DCHECK(!is_deferred_reply_);
+
+  rb_->SendSimpleString(str);
 }
 
 void ParsedCommand::SendLong(long val) {
-  if (is_deferred_reply_) {
-    reply_ = long(val);
-  } else {
-    rb_->SendLong(val);
-  }
+  DCHECK(!is_deferred_reply_);
+  rb_->SendLong(val);
 }
 
 void ParsedCommand::SendNull() {
-  if (is_deferred_reply_) {
-    reply_ = payload::Null{};
-  } else {
-    DCHECK(mc_cmd_ == nullptr);  // RESP only
-    static_cast<RedisReplyBuilder*>(rb_)->SendNull();
-  }
-}
-
-void ParsedCommand::SendEmptyArray() {
-  if (is_deferred_reply_) {
-    reply_ = make_unique<payload::CollectionPayload>(0, CollectionType::ARRAY);
-  } else {
-    DCHECK(mc_cmd_ == nullptr);  // RESP only
-    static_cast<RedisReplyBuilder*>(rb_)->SendEmptyArray();
-  }
+  DCHECK(!is_deferred_reply_);
+  DCHECK(mc_cmd_ == nullptr);  // RESP only
+  static_cast<RedisReplyBuilder*>(rb_)->SendNull();
 }
 
 bool ParsedCommand::CanReply() const {
