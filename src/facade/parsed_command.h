@@ -127,7 +127,6 @@ class ParsedCommand : public cmn::BackedArguments {
   // TODO: remove
   void SendLong(long val);
   void SendNull();
-  void SendEmptyArray();
 
   // TODO: remove
   template <typename F> void ReplyWith(F&& func) {
