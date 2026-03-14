@@ -50,8 +50,8 @@ constexpr size_t kAlignSize = 8u;
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
-    // DCHECK(false) << "Can't decrease " << size << " from " << -update;
-    LOG_EVERY_N(ERROR, 30) << "Can't decrease " << size << " from " << -update;
+    DCHECK(false) << "Can't decrease " << size << " from " << -update;
+    LOG_EVERY_T(ERROR, 30) << "Can't decrease " << size << " from " << -update;
   }
   return result;
 }
@@ -893,7 +893,14 @@ void CompactObj::SetJson(JsonType&& j) {
 void CompactObj::SetJsonSize(int64_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    u_.json_obj.cons.bytes_used = UpdateSize(u_.json_obj.cons.bytes_used, size);
+    int64_t result = static_cast<int64_t>(u_.json_obj.cons.bytes_used) + size;
+    if (result < 1) {
+      LOG_EVERY_T(ERROR, 20) << "JSON size underflow: " << u_.json_obj.cons.bytes_used << " + "
+                             << size << " = " << result;
+      u_.json_obj.cons.bytes_used = 1;
+    } else {
+      u_.json_obj.cons.bytes_used = static_cast<size_t>(result);
+    }
   }
 }
 
