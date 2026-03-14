@@ -997,9 +997,8 @@ async def test_cluster_blocking_command(df_server):
     await c_master.lpush("keep-local", "WORKS")
 
     assert (await v1) == ("keep-local", "WORKS")
-    with pytest.raises(aioredis.ResponseError) as e_info:
+    with pytest.raises(MovedError) as e_info:
         await v2
-    assert "MOVED" in str(e_info.value)
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1032,13 +1031,13 @@ async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
     logging.debug("remove finished migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    with pytest.raises(aioredis.ResponseError) as set_e_info:
+    with pytest.raises(MovedError) as set_e_info:
         await set_task
-    assert f"MOVED 3037 127.0.0.1:{instances[1].port}" == str(set_e_info.value)
+    assert f"3037 127.0.0.1:{instances[1].port}" == str(set_e_info.value)
 
-    with pytest.raises(aioredis.ResponseError) as list_e_info:
+    with pytest.raises(MovedError) as list_e_info:
         await list_task
-    assert f"MOVED 7141 127.0.0.1:{instances[1].port}" == str(list_e_info.value)
+    assert f"7141 127.0.0.1:{instances[1].port}" == str(list_e_info.value)
 
 
 @pytest.mark.parametrize("set_cluster_node_id", [True, False])
@@ -1168,8 +1167,8 @@ async def test_cluster_native_client(
     for c in c_replicas:
         try:
             assert await c.get("key0")
-        except redis.exceptions.ResponseError as e:
-            assert e.args[0].startswith("MOVED")
+        except MovedError as e:
+            pass
 
     # Push new config
     config = f"""
@@ -2791,9 +2790,10 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
-    with pytest.raises(aioredis.ResponseError) as e_info:
+    with pytest.raises(MovedError) as e_info:
         await nodes[0].client.get("x")
-    assert f"MOVED 16287 127.0.0.1:{instances[1].port}" == str(e_info.value)
+
+    assert f"16287 127.0.0.1:{instances[1].port}" == str(e_info.value)
 
     nodes[0].migrations = []
     # cancel migration for the source node to get the original data from it
@@ -3316,7 +3316,6 @@ async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: Dfl
 
     with pytest.raises(aioredis.ResponseError) as e_info:
         await blpop_task
-        assert "MOVED" in str(e_info.value)
 
     assert await c_nodes[1].type("list") == "none"
 
