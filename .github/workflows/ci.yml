@@ -13,33 +13,31 @@ concurrency:
 
 jobs:
   pre-commit:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
-            python-version: '3.x'
-            check-latest: true
-      - name: Install dependencies
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-          python -m pip install pre-commit
-          lsblk -l
-          echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
-          echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
-      - name: Run pre-commit checks
-        run: |
-          source venv/bin/activate
-          pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
-        shell: bash
+          python-version: '3.12'
+          cache: 'pip'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: >-
+            --show-diff-on-failure --color=always
+            --from-ref ${{ github.event.pull_request.base.sha }}
+            --to-ref ${{ github.event.pull_request.head.sha }}
   build:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20-gcc14", "alpine-dev:latest"]
+        container: ["ubuntu-dev:24", "alpine-dev:latest"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -172,7 +170,7 @@ jobs:
           path: /tmp/*INFO*
 
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:20-gcc14'
+        if: matrix.container == 'ubuntu-dev:24'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
@@ -204,7 +202,7 @@ jobs:
       contents: read
 
     container:
-      image: ghcr.io/romange/ubuntu-dev:20-gcc14
+      image: ghcr.io/romange/ubuntu-dev:24
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /var/crash:/var/crash
