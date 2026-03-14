@@ -77,6 +77,9 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
+  // gate on stream_journal to make sure RDB save path does not send tagged chunks
+  send_tagged_chunks_ = stream_journal && replica_dfly_version_ >= DflyVersion::VER7;
+
   auto db_cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
     OnDbChange(db_index, req);
   };

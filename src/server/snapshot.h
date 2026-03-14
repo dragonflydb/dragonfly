@@ -190,6 +190,7 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   bool use_background_mode_ = false;
   bool use_snapshot_version_ = true;
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
+  bool send_tagged_chunks_ = false;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
