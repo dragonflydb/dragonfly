@@ -2,6 +2,7 @@ import dataclasses
 import os
 import threading
 import time
+import shutil
 import subprocess
 import random
 import aiohttp
@@ -534,6 +535,21 @@ class RedisServer:
             else:
                 command.append(f"--{key} {value}")
 
+        binary = command[0]
+        resolved = shutil.which(binary)
+        if resolved is None:
+            # List /usr/bin to check if binaries are accessible
+            try:
+                usr_bin_files = [f for f in os.listdir("/usr/bin") if "redis" in f or "valkey" in f]
+            except OSError as e:
+                usr_bin_files = f"error listing /usr/bin: {e}"
+            logging.error(
+                f"Binary '{binary}' not found in PATH. "
+                f"PATH={os.environ.get('PATH', '')}, "
+                f"redis/valkey binaries in /usr/bin: {usr_bin_files}"
+            )
+        else:
+            logging.info(f"Starting RedisServer: binary={binary} ({resolved})")
         self.proc = subprocess.Popen(command)
         logging.debug(self.proc.args)
 

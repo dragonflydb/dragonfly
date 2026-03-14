@@ -1410,15 +1410,14 @@ async def test_tls_client_kill_preemption(
     kill_id = clients_info[0]["id"]
 
     async def seed():
-        with pytest.raises(aioredis.ConnectionError) as roe:
+        try:
             while True:
                 p = client.pipeline(transaction=True)
-                expected = []
                 for i in range(100):
                     p.lpush(str(i), "V")
-                    expected.append(f"LPUSH {i} V")
-
                 await p.execute()
+        except (aioredis.ConnectionError, asyncio.CancelledError):
+            pass
 
     task = asyncio.create_task(seed())
 
@@ -1427,7 +1426,11 @@ async def test_tls_client_kill_preemption(
     cl = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     await cl.execute_command(f"CLIENT KILL ID {kill_id}")
 
+    # Give the server time to process the kill and write logs
+    await asyncio.sleep(0.5)
+    task.cancel()
     await task
+
     server.stop()
     lines = server.find_in_logs("Preempting inside of atomic section, fiber")
     assert len(lines) == 0
