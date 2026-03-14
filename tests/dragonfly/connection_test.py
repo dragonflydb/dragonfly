@@ -13,6 +13,7 @@ import pytest
 import redis as base_redis
 from redis import asyncio as aioredis
 from redis.cache import CacheConfig
+from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError, ResponseError
 
 from . import dfly_args
@@ -1397,10 +1398,15 @@ async def test_client_detached_crash(df_factory):
 async def test_tls_client_kill_preemption(
     with_ca_tls_server_args, with_ca_tls_client_args, df_factory
 ):
+    from redis.retry import Retry
+    from redis.backoff import NoBackoff
+
     server = df_factory.create(proactor_threads=4, port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
 
-    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    client = server.client(
+        single_connection_client=True, retry=Retry(NoBackoff(), 0), **with_ca_tls_client_args
+    )
     assert await client.dbsize() == 0
 
     # Get the list of clients
@@ -1410,15 +1416,14 @@ async def test_tls_client_kill_preemption(
     kill_id = clients_info[0]["id"]
 
     async def seed():
-        with pytest.raises(aioredis.ConnectionError) as roe:
+        try:
             while True:
                 p = client.pipeline(transaction=True)
-                expected = []
                 for i in range(100):
                     p.lpush(str(i), "V")
-                    expected.append(f"LPUSH {i} V")
-
                 await p.execute()
+        except (aioredis.ConnectionError, asyncio.CancelledError):
+            pass
 
     task = asyncio.create_task(seed())
 
@@ -1427,7 +1432,21 @@ async def test_tls_client_kill_preemption(
     cl = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     await cl.execute_command(f"CLIENT KILL ID {kill_id}")
 
+    # Ensure that the killed client actually disconnects before we cancel the worker task.
+    for _ in range(100):
+        try:
+            await client.ping()
+        except aioredis.ConnectionError:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail("Killed client did not disconnect")
+
+    # Give the server time to process the kill and write logs
+    await asyncio.sleep(0.5)
+    task.cancel()
     await task
+
     server.stop()
     lines = server.find_in_logs("Preempting inside of atomic section, fiber")
     assert len(lines) == 0
