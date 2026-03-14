@@ -340,7 +340,10 @@ struct BasicSearch {
     auto cb = [&](auto* set) {
       auto [dim, sim] = vec_index->Info();
       for (DocId matched_doc : *set) {
-        float dist = VectorDistance(knn.vec.first.get(), vec_index->Get(matched_doc), dim, sim);
+        const float* vec = vec_index->Get(matched_doc);
+        if (!vec)
+          continue;
+        float dist = VectorDistance(knn.vec.first.get(), vec, dim, sim);
         knn_distances_.emplace_back(dist, matched_doc);
       }
     };
@@ -356,7 +359,10 @@ struct BasicSearch {
     const auto& all_docs = indices_->GetAllDocs();
     auto [dim, sim] = vec_index->Info();
     for (DocId doc : all_docs) {
-      float dist = VectorDistance(node.vec.first.get(), vec_index->Get(doc), dim, sim);
+      const float* vec = vec_index->Get(doc);
+      if (!vec)
+        continue;
+      float dist = VectorDistance(node.vec.first.get(), vec, dim, sim);
       if (dist <= static_cast<float>(node.radius)) {
         knn_scores_.emplace_back(doc, dist);
       }

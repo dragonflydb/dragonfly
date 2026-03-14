@@ -736,6 +736,50 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   EXPECT_EQ(result.knn_scores.size(), 3u);
 }
 
+TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // incorrectly skips zero vectors. The zero vector [0.0,...,0.0] is a valid embedding.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // doc 0: zero vector [0.0, 0.0] — valid embedding, must not be skipped
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({0.0f, 0.0f})}}});
+  // doc 1: non-zero vector [1.0, 0.0]
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({1.0f, 0.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Both docs must appear — zero vector is NOT null
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1));
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryRemovedDocNotMatched) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // iterates entries_ directly and does NOT respect all_ids_. After Remove(), the doc's
+  // slot in entries_ is still non-zero, so the removed doc incorrectly appears in results.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({2.0f})}}});
+  indices.Add(2, MockedDocument{Map{{"pos", ToBytes({3.0f})}}});
+
+  // Remove doc 1
+  MockedDocument doc1{Map{{"pos", ToBytes({2.0f})}}};
+  indices.Remove(1, doc1);
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Doc 1 was removed, only docs 0 and 2 should appear
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 2));
+}
+
 TEST_F(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
