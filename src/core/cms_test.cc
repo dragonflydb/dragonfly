@@ -46,10 +46,10 @@ TEST(CMSBasic, IncrBySmall) {
 
 // Inspired by fakeredis test_cms_create: initbyprob computes correct dimensions.
 TEST(CMSBasic, InitByProb) {
-  CMS cms(CMS::ErrorRateTag{}, 0.01, 0.01, PMR_NS::get_default_resource());
+  CMS cms = CMS::CreateByProb(0.01, 0.01, PMR_NS::get_default_resource());
 
   // width = ceil(e / 0.01) = ceil(271.8..) = 272
-  EXPECT_EQ(cms.width(), static_cast<uint32_t>(std::ceil(M_E / 0.01)));
+  EXPECT_EQ(cms.width(), static_cast<uint32_t>(std::ceil(std::exp(1.0) / 0.01)));
   // depth = ceil(ln(1/0.01)) = ceil(4.605..) = 5
   EXPECT_EQ(cms.depth(), static_cast<uint32_t>(std::ceil(std::log(100.0))));
   EXPECT_EQ(cms.Query("anything"), 0);
