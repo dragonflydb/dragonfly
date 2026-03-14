@@ -21,6 +21,7 @@
 #include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "tagged_chunk.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
