@@ -127,8 +127,13 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
 size_t CmdSerializer::SerializeDelayedEntries(bool force,
                                               absl::flat_hash_set<std::string>* tiered_keys) {
   size_t serialized = 0;
+  using DelayedEntryNode = decltype(delayed_entries_)::node_type;
+  std::vector<DelayedEntryNode> ready_entries;
+  ready_entries.reserve(delayed_entries_.size());
+
   for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    auto& entry = it->second;
+    const auto& [key, entry] = *it;
+
     // Skip unresolved entries unless force is true
     if (!force && !entry->value.IsResolved()) {
       ++it;
@@ -136,24 +141,29 @@ size_t CmdSerializer::SerializeDelayedEntries(bool force,
     }
 
     // If tiered_keys filter is provided, only serialize matching keys
-    // Compare the string key from the map with the keys in tiered_keys set
-    if (tiered_keys && !tiered_keys->contains(it->first)) {
+    if (tiered_keys && !tiered_keys->contains(key)) {
       ++it;
       continue;
     }
+
+    // Extract before blocking on the future so no delayed_entries_ iterator survives a yield.
+    auto current = it++;
+    ready_entries.push_back(delayed_entries_.extract(current));
+  }
+
+  for (auto& node : ready_entries) {
+    auto& entry = node.mapped();
 
     // Get the value from the future (blocks if not resolved and force=true)
     auto res = entry->value.Get();
     if (!res.has_value()) {
       LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
-      it++;
       continue;
     }
 
     // Serialize the entry and remove it from delayed_entries_
     PrimeValue pv{*res};
     serialized += SerializeEntry(entry->key.ToString(), entry->key, pv, entry->expire);
-    delayed_entries_.erase(it++);
   }
   return serialized;
 }

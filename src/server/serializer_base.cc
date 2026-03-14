@@ -14,8 +14,23 @@ SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
 SerializerBase::~SerializerBase() {
 }
 
+// Ordering invariant (both modes):
+//   For any key K, the replica must receive K's baseline value strictly before any journal entry
+//   that mutates K. This is required for baseline-dependent journal entries (e.g., HSET, LPUSH)
+//   which cannot be replayed without the prior value.
+//
+// PIT mode: enforced by serialize-before-mutate. OnDbChange serializes the bucket before the
+//   mutation commits; ConsumeJournalChange runs after the mutation on the same fiber, so the
+//   baseline is always first. big_value_mu_ prevents interleaving with the traversal fiber's
+//   SerializeBucket (which can preempt via consume_fun_).
+//
+// Non-PIT mode: OnDbChange only acquires big_value_mu_ as a barrier — no serialization. The
+//   mutex prevents journaling mutations from slipping in the middle of bucket serialization
+//   on the traversal fiber — see ConsumeJournalChange for details. OnMoved handles items
+//   displaced across the traversal cursor.
 uint64_t SerializerBase::RegisterChangeListener() {
   DCHECK(db_slice_);
+  db_array_ = db_slice_->databases();
   auto cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
     HandleChangeReq(db_index, req);
   };
@@ -73,7 +88,7 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
 
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(bid);
-  DoSerializeBucket(db_index, it);
+  stats_.keys_serialized += DoSerializeBucket(db_index, it);
   FinishBucketIteration(bid, {});
   ++stats_.buckets_on_change;
 }
