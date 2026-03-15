@@ -49,6 +49,7 @@ class BackedArguments {
   }
 
   auto view(size_t from = 0) const {
+    assert(from <= size());
     return std::views::iota(from, size()) |
            std::views::transform([this](size_t i) { return at(i); });
   }

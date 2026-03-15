@@ -32,22 +32,13 @@ struct EntryPayloadVisitor {
 
 // Extract payload from entry in string form.
 std::string ExtractPayload(ParsedEntry& entry) {
-  std::string out = absl::StrJoin(entry.cmd.view(), " ");
-
-  if (!out.empty())
-    out.pop_back();
-
-  return out;
+  return absl::StrJoin(entry.cmd.view(), " ");
 }
 
 std::string ExtractPayload(Entry& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
   visitor(entry.payload);
-
-  if (!out.empty())
-    out.pop_back();
-
   return out;
 }
 
