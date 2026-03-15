@@ -129,6 +129,7 @@ class AclFamily final {
                                       {"CONNECTION", CONNECTION},
                                       {"TRANSACTION", TRANSACTION},
                                       {"SCRIPTING", SCRIPTING},
+                                      // Uncomment when CMS family is added {"CMS", CMS},
                                       {"BLOOM", BLOOM},
                                       {"FT_SEARCH", FT_SEARCH},
                                       {"SEARCH", FT_SEARCH},  // Alias for FT_SEARCH
