@@ -14,6 +14,7 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
+#include "facade/disk_backed_queue.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
@@ -340,6 +341,11 @@ class Connection : public util::Connection {
   void DecreaseConnStats();
   void BreakOnce(uint32_t ev_mask);
 
+  // Disk-backed queue helpers for pipeline backpressure offloading.
+  void InitDiskQueueIfNeeded();
+  void PushToDiskSync(io::Bytes bytes);
+  size_t PopFromDiskSync(io::MutableBytes buf);
+
   // The read buffer with read data that needs to be parsed and processed.
   // For io_uring bundles we may have available_bytes larger than slice.size()
   // which means that there are more buffers available to read.
@@ -511,6 +517,15 @@ class Connection : public util::Connection {
   };
 
   bool request_shutdown_ = false;
+
+  // Disk-backed queue for offloading raw socket bytes when pipeline queue is over limit.
+  // Initialized lazily on first use.
+  std::unique_ptr<DiskBackedQueue> disk_queue_;
+
+  // Set by DispatchSingle when disk offloading is preferred over blocking.
+  // ParseRedis checks this flag to stop parsing early, leaving the remaining
+  // io_buf_ bytes for IoLoop to push to disk.
+  bool disk_offload_requested_ = false;
 };
 
 }  // namespace facade

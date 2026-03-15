@@ -36,6 +36,9 @@ class DiskBackedQueue {
   // Check if backing file is empty, i.e. backing file has 0 bytes.
   bool Empty() const;
 
+  // Total bytes currently buffered on disk (not yet consumed).
+  size_t TotalBytes() const;
+
   std::error_code Close();
 
  private:
