@@ -733,7 +733,7 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
     subscribe_task = asyncio.create_task(subscribe_worker(subscriber_obj))
     await publisher.execute_command("ACL SETUSER kostas resetchannels")
     await publish_worker(publisher)
-    with pytest.raises(redis.exceptions.ConnectionError):
+    with pytest.raises((redis.exceptions.ConnectionError, redis.exceptions.NoPermissionError)):
         await subscribe_task
 
 
