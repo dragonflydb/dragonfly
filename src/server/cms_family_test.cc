@@ -201,4 +201,21 @@ TEST_F(CmsFamilyTest, InfoAfterMerges) {
   EXPECT_THAT(resp, ErrArg("CMS: key does not exist"));
 }
 
+TEST_F(CmsFamilyTest, Serialization) {
+  Run("cms.initbydim cms 1000 5");
+  Run("cms.incrby cms foo 5 bar 3 baz 9");
+
+  auto resp = Run("cms.query cms foo bar baz");
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
+
+  Run("debug reload");
+
+  resp = Run("cms.query cms foo bar baz");
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
+
+  resp = Run("cms.info cms");
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("width", IntArg(1000), "depth", IntArg(5), "count", IntArg(17))));
+}
+
 }  // namespace dfly
