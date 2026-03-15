@@ -165,7 +165,9 @@ class ParsedCommand : public cmn::BackedArguments {
     SuspendedCommand(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro)
         : blocker{blocker}, coro{coro} {
     }
-    SuspendedCommand& operator=(const SuspendedCommand& other) = default;
+
+    SuspendedCommand(SuspendedCommand&& other) = default;
+    SuspendedCommand& operator=(SuspendedCommand&& other) = default;
 
     // To destroy the coroutine when cancelling (as the handle is non owning)
     ~SuspendedCommand();

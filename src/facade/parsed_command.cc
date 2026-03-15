@@ -110,11 +110,12 @@ void ParsedCommand::SendReply() {
     CapturingReplyBuilder::Apply(std::move(pl), rb_);
   };
   auto task_handler = [](SuspendedCommand& task) {
-    DCHECK(task.coro.done());
+    DCHECK(task.coro);
     task.coro.resume();
+    task.coro = {};
   };
   std::visit(dfly::Overloaded{task_handler, payload_handler}, reply_);
-  reply_ = payload::Payload{std::monostate{}};  // Reset reply
+  reply_ = std::monostate{};  // Reset reply
 }
 
 ParsedCommand::SuspendedCommand::~SuspendedCommand() {
