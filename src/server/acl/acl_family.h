@@ -129,7 +129,7 @@ class AclFamily final {
                                       {"CONNECTION", CONNECTION},
                                       {"TRANSACTION", TRANSACTION},
                                       {"SCRIPTING", SCRIPTING},
-                                      // Uncomment when CMS family is added {"CMS", CMS},
+                                      {"CMS", CMS},
                                       {"BLOOM", BLOOM},
                                       {"FT_SEARCH", FT_SEARCH},
                                       {"SEARCH", FT_SEARCH},  // Alias for FT_SEARCH
@@ -144,7 +144,7 @@ class AclFamily final {
       "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTEDSET",  "LIST",        "HASH",
       "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
       "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
-      "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
+      "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "CMS",
       "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
 
   // We need this to act as a const member, since the initialization of const data members
