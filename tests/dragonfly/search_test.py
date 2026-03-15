@@ -7,7 +7,11 @@ import copy
 
 import numpy as np
 from redis.commands.search.field import TextField, NumericField, TagField, VectorField, GeoField
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+
+try:
+    from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+except ModuleNotFoundError:
+    from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
 from . import dfly_args

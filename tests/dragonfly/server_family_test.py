@@ -4,6 +4,8 @@ import aiohttp
 from prometheus_client.samples import Sample
 from pymemcache import Client
 
+from redis.exceptions import ResponseError
+
 from . import dfly_args
 from .instance import DflyInstance
 from .utility import *
@@ -77,11 +79,14 @@ async def test_get_databases(async_client: aioredis.Redis):
     assert dbnum == {"databases": "16"}
 
 
-@pytest.mark.exclude_epoll  # Failing test. It should be turned on as soon as it is fixed.
 async def test_client_kill(df_factory):
     with df_factory.create(port=1111, admin_port=1112) as instance:
-        client = aioredis.Redis(port=instance.port)
-        admin_client = aioredis.Redis(port=instance.admin_port)
+        instance: DflyInstance
+        from redis.backoff import NoBackoff
+        from redis.asyncio.retry import Retry
+
+        client = instance.client(retry=Retry(NoBackoff(), 0))
+        admin_client = instance.admin_client()
         await admin_client.ping()
 
         # This creates `client_conn` as a non-auto-reconnect client
@@ -90,13 +95,13 @@ async def test_client_kill(df_factory):
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
             # Can't kill admin from regular connection
-            with pytest.raises(Exception) as e_info:
+            with pytest.raises(ResponseError) as e_info:
                 await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
             await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
             assert len(await admin_client.execute_command("CLIENT LIST")) == 1
-            with pytest.raises(Exception) as e_info:
+            with pytest.raises(redis.exceptions.ConnectionError) as e_info:
                 await client_conn.ping()
 
 
