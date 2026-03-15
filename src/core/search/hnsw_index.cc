@@ -152,6 +152,15 @@ struct HnswlibAdapter {
     return QueueToVec(world_.subsetKnnSearch(target, k, docs));
   }
 
+  // Returns all documents within the given radius, with their distances.
+  // Uses dynamic-range exploration (searchRange) to correctly handle cases where
+  // the entry point is farther than radius.
+  vector<pair<float, GlobalDocId>> RangeSearch(float* target, float radius) {
+    TryProcessDeferred();
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return world_.searchRange(target, radius);
+  }
+
   HnswIndexMetadata GetMetadata() const {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     HnswIndexMetadata metadata;
@@ -563,6 +572,11 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::SubsetKnn(
     float* target, size_t k, const std::vector<GlobalDocId>& docs) const {
   return adapter_->SubsetKnn(target, k, docs);
+}
+
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(float* target,
+                                                                       float radius) const {
+  return adapter_->RangeSearch(target, radius);
 }
 
 void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
