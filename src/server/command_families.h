@@ -16,6 +16,7 @@ void RegisterBitopsFamily(CommandRegistry*);
 void RegisterGeoFamily(CommandRegistry*);
 void RegisterHllFamily(CommandRegistry*);
 void RegisterBloomFamily(CommandRegistry*);
+void RegisterCmsFamily(CommandRegistry*);
 void RegisterJsonFamily(CommandRegistry*);
 
 }  // namespace dfly
