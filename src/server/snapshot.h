@@ -4,9 +4,6 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
-
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
 #include "server/synchronization.h"
@@ -132,6 +129,13 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
+
+  // Push serializer's internal buffer.
+  // Push regardless of buffer size if force is true.
+  // Return true if pushed. Can block. Is called from the snapshot thread.
+  bool PushSerialized(bool force);
+  void SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
+                         uint32_t mc_flags);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
