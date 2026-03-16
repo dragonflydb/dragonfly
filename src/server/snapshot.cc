@@ -264,23 +264,24 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
 
-  for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
+  for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
     if (!cntx_->IsRunning())
       return;
 
-    if (!db_array_[db_indx])
+    if (!db_array_[snapshot_db_indx])
       continue;
 
-    PrimeTable* pt = &db_array_[db_indx]->prime;
-    VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
+    PrimeTable* pt = &db_array_[snapshot_db_indx]->prime;
+    VLOG(1) << "Start traversing " << pt->size() << " items for index " << snapshot_db_indx;
 
     do {
       if (!cntx_->IsRunning()) {
         return;
       }
 
-      snapshot_cursor_ = pt->TraverseBuckets(
-          snapshot_cursor_, [this, db_indx](auto it) { return BucketSaveCb(db_indx, it); });
+      snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
+        return BucketSaveCb(snapshot_db_indx, it);
+      });
 
       if (use_background_mode_) {
         // Yielding for background fibers has low overhead if the time slice isn't used up.

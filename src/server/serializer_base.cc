@@ -15,20 +15,15 @@ SerializerBase::SerializerBase(DbSlice* slice)
 SerializerBase::~SerializerBase() {
 }
 
-// Ordering invariant (both modes):
+// Ordering invariant:
 //   For any key K, the replica must receive K's baseline value strictly before any journal entry
-//   that mutates K. This is required for baseline-dependent journal entries (e.g., HSET, LPUSH)
-//   which cannot be replayed without the prior value.
+//   that mutates K.
 //
-// PIT mode: enforced by serialize-before-mutate. OnDbChange serializes the bucket before the
-//   mutation commits; ConsumeJournalChange runs after the mutation on the same fiber, so the
-//   baseline is always first. big_value_mu_ prevents interleaving with the traversal fiber's
-//   SerializeBucket (which can preempt via consume_fun_).
-//
-// Non-PIT mode: OnDbChange only acquires big_value_mu_ as a barrier — no serialization. The
-//   mutex prevents journaling mutations from slipping in the middle of bucket serialization
-//   on the traversal fiber — see ConsumeJournalChange for details. OnMoved handles items
-//   displaced across the traversal cursor.
+// RegisterChangeListener registers the DbSlice callback that routes mutations through
+//   SerializerBase::OnChange. ConsumeJournalChange runs later on the
+//   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
+//   from interleaving with the traversal fiber's bucket serialization, which may preempt while
+//   emitting large values.
 uint64_t SerializerBase::RegisterChangeListener() {
   DCHECK(db_slice_);
   db_array_ = db_slice_->databases();

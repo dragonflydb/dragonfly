@@ -100,11 +100,10 @@ class SerializerBase {
   // --- Change callbacks ---
 
   // Called when an existing bucket is about to be mutated.
-  // Default: if unvisited, stamps version, MarkBucketSerializing, DoSerializeBucketOnChange,
-  // then marks the bucket as covered.  If the bucket is already in a transient state,
-  // increments change_during_serialization and returns.  big_value_mu_ still serves as the
-  // ordering barrier, preventing a mutating callback from interleaving with an in-progress
-  // bucket serialization.
+  // Default: if unvisited, stamps version, MarkBucketSerializing, DoSerializeBucket,
+  //          FinishBucketIteration.
+  //          If in-flight, increments change_during_serialization (mutex barrier
+  //          preserves the existing serialization behaviour).
   // Holds big_value_mu_ while running.
   virtual void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
 
