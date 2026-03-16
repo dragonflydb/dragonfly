@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+FROM ghcr.io/romange/ubuntu-dev:20-gcc14 AS builder
+
+ARG TARGETPLATFORM
+
+WORKDIR /build
+COPY tools/docker/fetch_release.sh /tmp/
+COPY releases/dragonfly-* /tmp/
+
+RUN /tmp/fetch_release.sh ${TARGETPLATFORM}
+
+# Move the healthcheck binary — fails intentionally if not present.
+# Releases built before distroless support (pre-v?.?.?) do not include it.
+RUN PSHORT=${TARGETPLATFORM#linux/} && \
+    if [ "${PSHORT}" = "amd64" ]; then SUFFIX=x86_64; else SUFFIX=aarch64; fi && \
+    mv /tmp/dragonfly-healthcheck-${SUFFIX} /build/dragonfly-healthcheck
+
+# Copy libz from builder since distroless does not ship it.
+RUN LIBZ=$(ldconfig -p | awk '/libz\.so\.1 /{print $NF; exit}') && \
+    install -D -m755 "$(realpath $LIBZ)" "/build/syslibs$LIBZ"
+
+FROM gcr.io/distroless/cc-debian12
+
+COPY --from=builder /build/dragonfly /usr/local/bin/dragonfly
+COPY --from=builder /build/dragonfly-healthcheck /usr/local/bin/dragonfly-healthcheck
+COPY --from=builder /build/syslibs/ /
+
+VOLUME /data
+WORKDIR /data
+
+HEALTHCHECK --start-period=30s --interval=15s --timeout=5s --retries=3 \
+  CMD ["/usr/local/bin/dragonfly-healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/dragonfly"]
+
+EXPOSE 6379
+
+CMD ["--logtostderr"]
