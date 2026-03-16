@@ -98,6 +98,9 @@ async def test_mixed_append(async_client: aioredis.Redis):
     assert res == [10 * k for k in key_range]
 
 
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
 @dfly_args(
     {
         "proactor_threads": 2,
@@ -177,6 +180,9 @@ async def test_replication(
         assert False, "Inconsistency detected, but key not determined"
 
 
+@pytest.mark.large
+@pytest.mark.exclude_epoll
+@pytest.mark.opt_only
 @dfly_args(
     {
         **BASIC_ARGS,

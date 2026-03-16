@@ -89,7 +89,7 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
 
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(bid);
-  stats_.keys_serialized += DoSerializeBucketOnChange(db_index, it);
+  DoSerializeBucketOnChange(db_index, it);
   FinishBucketIteration(bid, {});
   ++stats_.buckets_on_change;
 }
