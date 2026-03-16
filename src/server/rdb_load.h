@@ -64,7 +64,7 @@ class RdbLoaderBase {
   struct RdbCMS {
     uint32_t width, depth;
     int64_t count;
-    std::string counter_data;
+    std::vector<int64_t> counters;
   };
 
   using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,

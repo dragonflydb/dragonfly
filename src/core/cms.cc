@@ -26,14 +26,6 @@ CMS::CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr)
       counters_(static_cast<size_t>(width) * depth, 0, PMR_NS::polymorphic_allocator<int64_t>(mr)) {
 }
 
-CMS::CMS(uint32_t width, uint32_t depth, int64_t total_count, const int64_t* data, size_t count,
-         PMR_NS::memory_resource* mr)
-    : width_(width),
-      depth_(depth),
-      count_(total_count),
-      counters_(data, data + count, PMR_NS::polymorphic_allocator<int64_t>(mr)) {
-}
-
 CMS::CMS(CMS&& other) noexcept
     : width_(other.width_),
       depth_(other.depth_),
@@ -109,6 +101,13 @@ bool CMS::MergeFrom(const CMS& other, int64_t weight) {
 void CMS::Reset() {
   std::fill(counters_.begin(), counters_.end(), 0);
   count_ = 0;
+}
+
+void CMS::Load(int64_t total_count, const int64_t* data, size_t count) {
+  count_ = total_count;
+  for (size_t i = 0; i < count; ++i) {
+    counters_[i] = static_cast<int64_t>(data[i]);
+  }
 }
 
 size_t CMS::MallocUsed() const {

@@ -8,7 +8,7 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
-//  Custom types: Range 30-39 is used by DF RDB types.
+//  Custom types: Range 30-35 is used by DF RDB types.
 constexpr uint8_t RDB_TYPE_JSON = 30;
 constexpr uint8_t RDB_TYPE_HASH_WITH_EXPIRY = 31;
 constexpr uint8_t RDB_TYPE_SET_WITH_EXPIRY = 32;

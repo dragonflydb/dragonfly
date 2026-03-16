@@ -20,10 +20,6 @@ class CMS {
   // depth: number of rows (hash functions)
   CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr);
 
-  // Create a CMS from raw counter data.
-  CMS(uint32_t width, uint32_t depth, int64_t total_count, const int64_t* data, size_t count,
-      PMR_NS::memory_resource* mr);
-
   CMS(const CMS&) = delete;
   CMS& operator=(const CMS&) = delete;
 
@@ -56,6 +52,9 @@ class CMS {
   // Reset all counters and total count to zero.
   void Reset();
 
+  // Load serialized counter state. data must have exactly NumCounters() elements.
+  void Load(int64_t total_count, const int64_t* data, size_t count);
+
   // Accessors for CMS properties
   uint32_t width() const {
     return width_;
@@ -73,9 +72,8 @@ class CMS {
   // Memory usage in bytes
   size_t MallocUsed() const;
 
-  // For serialization - returns the raw counter data
-  size_t CounterBytes() const {
-    return counters_.size() * sizeof(int64_t);
+  size_t NumCounters() const {
+    return counters_.size();
   }
 
   const int64_t* Data() const {

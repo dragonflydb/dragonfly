@@ -293,10 +293,8 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
-  const auto* counters = reinterpret_cast<const int64_t*>(src.counter_data.data());
-  size_t counter_count = src.counter_data.size() / sizeof(int64_t);
-  CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, src.count, counters, counter_count,
-                                         CompactObj::memory_resource());
+  CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, CompactObj::memory_resource());
+  cms->Load(src.count, src.counters.data(), src.counters.size());
   pv_->SetCMS(cms);
 }
 
@@ -1835,16 +1833,27 @@ auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
 io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   RdbCMS res;
 
-  uint64_t width, depth, count;
+  uint64_t width, depth, count, num_counters;
   SET_OR_UNEXPECT(LoadLen(nullptr), width);
   SET_OR_UNEXPECT(LoadLen(nullptr), depth);
   SET_OR_UNEXPECT(LoadLen(nullptr), count);
+  SET_OR_UNEXPECT(LoadLen(nullptr), num_counters);
 
   res.width = width;
   res.depth = depth;
   res.count = count;
 
-  SET_OR_UNEXPECT(FetchGenericString(), res.counter_data);
+  size_t byte_len = num_counters * sizeof(uint64_t);
+  auto ec = EnsureRead(byte_len);
+  if (ec)
+    return make_unexpected(ec);
+
+  res.counters.resize(num_counters);
+  std::vector<uint64_t> raw(num_counters);
+  mem_buf_->ReadAndConsume(byte_len, raw.data());
+  for (size_t i = 0; i < num_counters; ++i) {
+    res.counters[i] = absl::little_endian::Load64(&raw[i]);
+  }
 
   return OpaqueObj{std::move(res), RDB_TYPE_CMS};
 }
