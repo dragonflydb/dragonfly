@@ -1852,7 +1852,7 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   std::vector<uint64_t> raw(num_counters);
   mem_buf_->ReadAndConsume(byte_len, raw.data());
   for (size_t i = 0; i < num_counters; ++i) {
-    res.counters[i] = absl::little_endian::Load64(&raw[i]);
+    res.counters[i] = static_cast<int64_t>(base::LE::LoadT<uint64_t>(&raw[i]));
   }
 
   return OpaqueObj{std::move(res), RDB_TYPE_CMS};
