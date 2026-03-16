@@ -133,29 +133,29 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
-  // Push serializer's internal buffer.
-  // Push regardless of buffer size if force is true.
-  // Return true if pushed. Can block. Is called from the snapshot thread.
-  bool PushSerialized(bool force);
-  void SerializeExternal(DbIndex db_index, std::string_view key, const PrimeValue& pv,
-                         time_t expire_time, uint32_t mc_flags);
-
-  // Serialize delayed tiered entries. If force is true, blocks until resolved.
-  // If tiered_keys is provided (non-empty), only serializes entries whose keys are in the set.
-  // Can block.
-  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
-  void PushDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* bucket_tiered_keys);
-
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
+  // The data has already been extracted from the serializer and is owned here, ensuring correct
+  // plumbing and making it safe to move.
   void HandleFlushData(std::string data);
 
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
 
+  // Tuple <db_index, key> is used as a key to uniquely identify tiered entry on shard.
+  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
+
+  // Serialize delayed entries.
+  // If bucket_tiered_keys is provided we should serialize these keys forcefully.
+  // Other entries can be serialized if they are resolved, but we don't wait for them unless force
+  // is true.
+  void PushDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* bucket_tiered_keys);
+
   PrimeTable::Cursor snapshot_cursor_;
 
   std::unique_ptr<RdbSerializer> serializer_;
+  // Delayed entries that are waiting for tiered storage reads to complete before they can be
+  // serialized.
   absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
   // Used for sanity checks.
