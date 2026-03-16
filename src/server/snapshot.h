@@ -9,6 +9,7 @@
 
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
+#include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
 
@@ -120,13 +121,14 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
 
-  // SerializerBase override: serialize a single bucket, returns entries serialized.
-  // Caller stamps the bucket version and drives the state machine transitions.
-  unsigned DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it) override;
+  // Serialize single bucket.
+  // Returns number of serialized entries.
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
+                           bool push_tracked_tiered_keys);
 
-  // SerializerBase override: serializes bucket then force-flushes delayed tiered entries
-  // for all keys in the bucket to preserve baseline-before-journal ordering.
-  void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) override;
+  unsigned DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it) override;
+  unsigned DoSerializeBucketOnChange(DbIndex db_index,
+                                     PrimeTable::bucket_iterator bucket_it) override;
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
@@ -142,7 +144,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // If tiered_keys is provided (non-empty), only serializes entries whose keys are in the set.
   // Can block.
   using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
-  void PushDelayedEntries(bool force, absl::flat_hash_set<TieredDelayEntryKey>* tiered_keys);
+  void PushDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* bucket_tiered_keys);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
@@ -155,11 +157,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   std::unique_ptr<RdbSerializer> serializer_;
   absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
-
-  // Accumulates the tiered keys found during DoSerializeBucket calls.
-  // OnChange reads this after the base call to force-flush the relevant delayed entries
-  // under big_value_mu_ before any journal mutation can interleave.
-  absl::flat_hash_set<TieredDelayEntryKey> tiered_keys_on_change_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;

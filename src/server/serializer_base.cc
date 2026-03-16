@@ -8,7 +8,8 @@
 
 namespace dfly {
 
-SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
+SerializerBase::SerializerBase(DbSlice* slice)
+    : db_slice_(slice), db_array_(slice ? slice->databases() : DbTableArray{}) {
 }
 
 SerializerBase::~SerializerBase() {
@@ -72,6 +73,11 @@ void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
   bucket_states_.erase(it);
 }
 
+unsigned SerializerBase::DoSerializeBucketOnChange(DbIndex db_index,
+                                                   PrimeTable::bucket_iterator it) {
+  return DoSerializeBucket(db_index, it);
+}
+
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
   std::lock_guard guard(big_value_mu_);
 
@@ -88,7 +94,7 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
 
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(bid);
-  stats_.keys_serialized += DoSerializeBucket(db_index, it);
+  stats_.keys_serialized += DoSerializeBucketOnChange(db_index, it);
   FinishBucketIteration(bid, {});
   ++stats_.buckets_on_change;
 }

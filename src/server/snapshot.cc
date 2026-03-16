@@ -345,24 +345,49 @@ bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator i
   return false;
 }
 
-unsigned SliceSnapshot::DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
+unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                        bool push_tiered) {
   // Version is already stamped by the caller (BucketSaveCb or SerializerBase::OnChange).
   DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
-  // Always called under big_value_mu_, so clearing here is safe.
-  // OnChange will read this set after the base call returns to force-flush tiered keys.
-  tiered_keys_on_change_.clear();
+  // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
+
   unsigned result = 0;
+
+  std::vector<TieredDelayEntryKey> bucket_tiered_keys;
+  const bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
+  const bool track_tiered_keys = push_tiered && tiering_enabled;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
+    // Track tiered keys to push them with priority after the loop, but only for callbacks.
+    if (track_tiered_keys && it->second.IsExternal()) {
+      bucket_tiered_keys.emplace_back(db_index, it->first.ToString());
+    }
+  }
+
+  if (tiering_enabled) {
+    // Push tracked tiered keys forcefully. If there are too many delayed entries
+    // accumulated we should also push them forcefully.
+    const size_t kMaxDelayedEntries = 512;
+    PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
+                       track_tiered_keys ? &bucket_tiered_keys : nullptr);
   }
 
   serialize_bucket_running_ = false;
   return result;
+}
+
+unsigned SliceSnapshot::DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
+  return SerializeBucket(db_index, it, false);
+}
+
+unsigned SliceSnapshot::DoSerializeBucketOnChange(DbIndex db_index,
+                                                  PrimeTable::bucket_iterator it) {
+  return SerializeBucket(db_index, it, true);
 }
 
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
@@ -455,57 +480,52 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::PushDelayedEntries(bool force,
-                                       absl::flat_hash_set<TieredDelayEntryKey>* tiered_keys) {
-  using DelayedEntryNode = decltype(delayed_entries_)::node_type;
-  std::vector<DelayedEntryNode> ready_entries;
+                                       std::vector<TieredDelayEntryKey>* bucket_tiered_keys) {
+  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
 
-  // First, directly extract entries matching the provided key filter (O(k)).
-  if (tiered_keys) {
-    for (const auto& key : *tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        ready_entries.push_back(delayed_entries_.extract(it));
-    }
-  }
+  // Serializes a single delayed entry. Resolves the tiered read future, write the
+  // key/value and removes the entry from the map.
+  auto serialize_entry = [this](DelayedEntryIt it) {
+    auto& entry = it->second;
+    auto value = entry->value.Get();
 
-  // Then drain remaining resolved entries (or all if force=true).
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    auto current = it++;
-    ready_entries.push_back(delayed_entries_.extract(current));
-  }
-
-  for (auto& node : ready_entries) {
-    auto& entry = node.mapped();
-    auto res = entry->value.Get();  // blocks if not resolved and force=true
-    if (!res.has_value()) {
+    if (!value.has_value()) {
       cntx_->ReportError(make_error_code(errc::io_error),
                          absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
     }
 
-    PrimeValue pv{*res};
-    auto save_res =
-        serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
-    CHECK(save_res);
+    PrimeValue pv{*value};
+    auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
+    CHECK(res);
 
-    // Flush accumulated data to avoid holding too much in the buffer.
-    PushSerialized(force);
+    delayed_entries_.erase(it);
+
+    // If we have serialized enough data we should push it to avoid building
+    // up a large blob in memory.
+    PushSerialized(false);
+  };
+
+  // When tiered_keys are provided, we should serialize the entries matching the keys.
+  if (bucket_tiered_keys) {
+    for (const auto& key : *bucket_tiered_keys) {
+      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
+        serialize_entry(it);
+    }
   }
-}
 
-void SliceSnapshot::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  SerializerBase::OnChange(db_index, it);
-
-  // DoSerializeBucket (called by the base under big_value_mu_) cleared and re-populated
-  // tiered_keys_on_change_ with the tiered keys of this bucket. Force-flush them under
-  // big_value_mu_ so ConsumeJournalChange cannot interleave before the baseline is sent.
-  if (!tiered_keys_on_change_.empty()) {
-    std::lock_guard guard(big_value_mu_);
-    PushDelayedEntries(true, &tiered_keys_on_change_);
+  // Serialize the delayed entries that are resolved, or all if force it true.
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved()) {
+      ++it;
+      continue;
+    }
+    serialize_entry(it++);
   }
+
+  // If we need to serialize all entries (force=true), we should push
+  // leftover serialized data after the loop.
+  PushSerialized(force);
 }
 
 void SliceSnapshot::SerializeExternal(DbIndex db_index, std::string_view key, const PrimeValue& pv,
@@ -516,7 +536,6 @@ void SliceSnapshot::SerializeExternal(DbIndex db_index, std::string_view key, co
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, PrimeKey{key}, std::move(future),
                                                     expire_time, mc_flags);
   delayed_entries_.emplace(TieredDelayEntryKey{db_index, std::string(key)}, std::move(entry));
-  tiered_keys_on_change_.emplace(db_index, key);
   ++type_freq_map_[RDB_TYPE_STRING];
 }
 

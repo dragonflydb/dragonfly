@@ -91,13 +91,20 @@ class SerializerBase {
   // Called while big_value_mu_ is held.
   virtual unsigned DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) = 0;
 
+  // Serialize a single bucket from the OnChange path.  Defaults to DoSerializeBucket().
+  // Subclasses can override when the callback path must preserve behavior that differs
+  // from the main traversal (for example, forcing delayed tiered entries for the bucket
+  // to be flushed before releasing big_value_mu_).
+  virtual unsigned DoSerializeBucketOnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
+
   // --- Change callbacks ---
 
   // Called when an existing bucket is about to be mutated.
-  // Default: if unvisited, stamps version, MarkBucketSerializing, DoSerializeBucket,
-  //          FinishBucketIteration.
-  //          If in-flight, increments change_during_serialization (mutex barrier
-  //          preserves the existing serialization behaviour).
+  // Default: if unvisited, stamps version, MarkBucketSerializing, DoSerializeBucketOnChange,
+  // then marks the bucket as covered.  If the bucket is already in a transient state,
+  // increments change_during_serialization and returns.  big_value_mu_ still serves as the
+  // ordering barrier, preventing a mutating callback from interleaving with an in-progress
+  // bucket serialization.
   // Holds big_value_mu_ while running.
   virtual void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
 
