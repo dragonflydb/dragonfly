@@ -117,9 +117,9 @@ void CMS::Reset() {
   count_ = 0;
 }
 
-void CMS::Load(int64_t total_count, const int64_t* data, size_t count) {
-  count_ = total_count;
-  std::copy_n(data, count, counters_);
+void CMS::Load(int64_t total_incr_count, const int64_t* data, size_t size) {
+  count_ = total_incr_count;
+  std::copy_n(data, size, counters_);
 }
 
 }  // namespace dfly
