@@ -15,19 +15,14 @@ namespace dfly {
 /// Count-Min Sketch implementation compatible with Redis CMS commands.
 class CMS {
  public:
-  // Tag type to disambiguate CMS construction by error rate and probability.
-  struct ErrorRateTag {};
-
   // Create a CMS with given width and depth dimensions.
   // width: number of counters per row
   // depth: number of rows (hash functions)
   CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr);
 
-  // Create a CMS from error rate and probability parameters.
-  // error: relative error (e.g. 0.01 for 1%), must be in (0, 1).
-  // probability: probability of exceeding the error, must be in (0, 1).
-  // width = ceil(e / error), depth = ceil(ln(1 / probability)).
-  CMS(ErrorRateTag, double error, double probability, PMR_NS::memory_resource* mr);
+  // Create a CMS from raw counter data.
+  CMS(uint32_t width, uint32_t depth, int64_t total_count, const int64_t* data, size_t count,
+      PMR_NS::memory_resource* mr);
 
   CMS(const CMS&) = delete;
   CMS& operator=(const CMS&) = delete;
@@ -35,7 +30,16 @@ class CMS {
   CMS(CMS&& other) noexcept;
   CMS& operator=(CMS&& other) noexcept;
 
-  ~CMS();
+  ~CMS() = default;
+
+  // Tag type to disambiguate CMS construction by error rate and probability.
+  struct ErrorRateTag {};
+
+  // Create a CMS from error rate and probability parameters.
+  // error: relative error (e.g. 0.01 for 1%), must be in (0, 1).
+  // probability: probability of exceeding the error, must be in (0, 1).
+  // width = ceil(e / error), depth = ceil(ln(1 / probability)).
+  CMS(ErrorRateTag, double error, double probability, PMR_NS::memory_resource* mr);
 
   // Increment the count for an item by the given value.
   // Returns the new estimated count for the item.
@@ -48,6 +52,9 @@ class CMS {
   // The other CMS must have the same dimensions.
   // Returns false if dimensions don't match.
   bool MergeFrom(const CMS& other, int64_t weight = 1);
+
+  // Reset all counters and total count to zero.
+  void Reset();
 
   // Accessors for CMS properties
   uint32_t width() const {
@@ -64,20 +71,22 @@ class CMS {
   }
 
   // Memory usage in bytes
-  size_t MallocUsed() const {
-    return size() * sizeof(int64_t);
+  size_t MallocUsed() const;
+
+  // For serialization - returns the raw counter data
+  size_t CounterBytes() const {
+    return counters_.size() * sizeof(int64_t);
+  }
+
+  const int64_t* Data() const {
+    return counters_.data();
   }
 
  private:
-  size_t size() const {
-    return static_cast<size_t>(width_) * depth_;
-  }
-
   uint32_t width_;
   uint32_t depth_;
-  PMR_NS::memory_resource* mr_ = nullptr;
   int64_t count_ = 0;  // Total count of all IncrBy operations
-  int64_t* counters_ = nullptr;
+  std::vector<int64_t, PMR_NS::polymorphic_allocator<int64_t>> counters_;
 };
 
 }  // namespace dfly

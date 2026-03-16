@@ -2288,6 +2288,7 @@ bool Connection::ParseMCBatch() {
       // We can not just reply directly to parse error, as we may have pipelined commands before.
       // Fill the reply_payload into parsed_tail_ with the error and continue parsing.
       memcache_parser_->Reset();
+      // TODO(vlad): Use Proper SendError calls instead of SendSimpleString and error building
       auto client_error = [](string_view msg) { return absl::StrCat("CLIENT_ERROR ", msg); };
 
       parsed_tail_->SetDeferredReply();
