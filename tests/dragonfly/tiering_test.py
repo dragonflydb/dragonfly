@@ -13,6 +13,7 @@ from .utility import (
     wait_for_replicas_state,
     check_all_replicas_finished,
     LogMonitor,
+    compare_master_replica_keys,
 )
 from .instance import DflyInstance, DflyInstanceFactory
 
@@ -106,7 +107,6 @@ async def test_mixed_append(async_client: aioredis.Redis):
         "proactor_threads": 2,
         "tiered_prefix": "/tmp/tiered/backing_master",
         "maxmemory": "512MB",
-        "cache_mode": True,
         "tiered_offload_threshold": "0.6",
         "tiered_upload_threshold": "0.2",
         "tiered_storage_write_depth": 1500,
@@ -126,7 +126,6 @@ async def test_replication(
     # Start replica
     replica = df_factory.create(
         proactor_threads=2,
-        cache_mode=True,
         maxmemory="512MB",
         tiered_prefix="/tmp/tiered/backing_replica",
         tiered_offload_threshold="0.5",
@@ -173,11 +172,8 @@ async def test_replication(
     )
 
     if len(set(hashes)) != 1:
-        for key in keys:
-            key_master = await async_client.get(key)
-            key_replica = await replica_client.get(key)
-            assert key_master == key_replica
-        assert False, "Inconsistency detected, but key not determined"
+        await compare_master_replica_keys(async_client, replica_client)
+        assert False, "Inconsistency detected. Key doesn't exits on master side."
 
 
 @pytest.mark.large
