@@ -59,7 +59,7 @@ runs:
       shell: bash
       run: |
         cd ${GITHUB_WORKSPACE}/tests
-        pip3 install -r dragonfly/requirements.txt
+        pip3 install --break-system-packages -r dragonfly/requirements.txt
 
     - name: Run S3 snapshot tests with MinIO
       if: inputs.s3-bucket != ''

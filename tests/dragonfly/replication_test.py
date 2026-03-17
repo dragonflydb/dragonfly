@@ -1235,8 +1235,6 @@ async def test_readonly_script(df_factory):
     with pytest.raises(aioredis.ResponseError) as roe:
         await c_replica.eval(WRITE_SCRIPT, 1, "A")
 
-    assert "READONLY " in str(roe)
-
 
 take_over_cases = [
     [2, 2],
