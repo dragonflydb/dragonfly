@@ -45,7 +45,7 @@ enum class DflyVersion {
   // Sends tagged chunks to replicas to differentiate between journal and baseline data.
   VER7,
   // Always points to the latest version
-  CURRENT_VER = VER6,
+  CURRENT_VER = VER7,
 };
 
 }  // namespace dfly

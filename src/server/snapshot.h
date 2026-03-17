@@ -208,6 +208,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
 
   SnapshotDataConsumerInterface* consumer_;
   ExecutionState* cntx_;
+
+  bool send_tagged_chunks_ = false;
 };
 
 }  // namespace dfly

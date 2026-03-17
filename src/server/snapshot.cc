@@ -78,6 +78,10 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
+  if (replica_dfly_version_ >= DflyVersion::VER7 && stream_journal) {
+    send_tagged_chunks_ = true;
+  }
+
   auto db_cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
     OnDbChange(db_index, req);
   };
@@ -434,6 +438,13 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 void SliceSnapshot::HandleFlushData(std::string data) {
   if (data.empty())
     return;
+
+  if (send_tagged_chunks_) {
+    const uint32_t payload_size = data.size();
+    data.insert(0, 8, '\0');
+    absl::little_endian::Store32(data.data(), static_cast<uint32_t>(ChunkHeaderTag::Baseline));
+    absl::little_endian::Store32(data.data() + 4, payload_size);
+  }
 
   if (big_value_mu_.is_locked()) {
     ++stats_.flushed_under_lock;
