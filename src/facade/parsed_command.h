@@ -166,8 +166,15 @@ class ParsedCommand : public cmn::BackedArguments {
         : blocker{blocker}, coro{coro} {
     }
 
-    SuspendedCommand(SuspendedCommand&& other) = default;
-    SuspendedCommand& operator=(SuspendedCommand&& other) = default;
+    SuspendedCommand(SuspendedCommand&& other) noexcept
+        : blocker{other.blocker}, coro{std::exchange(other.coro, {})} {
+    }
+
+    SuspendedCommand& operator=(SuspendedCommand&& other) noexcept {
+      blocker = other.blocker;
+      coro = std::exchange(other.coro, {});
+      return *this;
+    }
 
     // To destroy the coroutine when cancelling (as the handle is non owning)
     ~SuspendedCommand();

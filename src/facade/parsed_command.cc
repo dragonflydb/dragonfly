@@ -115,12 +115,13 @@ void ParsedCommand::SendReply() {
     task.coro = {};
   };
   std::visit(dfly::Overloaded{task_handler, payload_handler}, reply_);
-  reply_ = std::monostate{};  // Reset reply
 }
 
 ParsedCommand::SuspendedCommand::~SuspendedCommand() {
-  if (coro)
+  if (coro) {
     coro.destroy();
+    coro = {};
+  }
 }
 
 }  // namespace facade
