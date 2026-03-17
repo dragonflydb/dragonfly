@@ -695,7 +695,7 @@ void Connection::OnPostMigrateThread() {
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
-  if (HasPendingMessages()) {
+  if (HasPendingMessages() && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
   }
 
