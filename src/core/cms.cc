@@ -10,6 +10,8 @@
 #include <cmath>
 #include <limits>
 
+#include "base/logging.h"
+
 namespace dfly {
 namespace {
 
@@ -118,6 +120,7 @@ void CMS::Reset() {
 }
 
 void CMS::Load(int64_t total_incr_count, const int64_t* data, size_t size) {
+  DCHECK_EQ(size, NumCounters());
   count_ = total_incr_count;
   std::copy_n(data, size, counters_);
 }

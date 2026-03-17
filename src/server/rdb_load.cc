@@ -1843,16 +1843,13 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   res.depth = depth;
   res.count = count;
 
-  size_t byte_len = num_counters * sizeof(uint64_t);
-  auto ec = EnsureRead(byte_len);
-  if (ec)
-    return make_unexpected(ec);
-
   res.counters.resize(num_counters);
-  std::vector<uint64_t> raw(num_counters);
-  mem_buf_->ReadAndConsume(byte_len, raw.data());
   for (size_t i = 0; i < num_counters; ++i) {
-    res.counters[i] = static_cast<int64_t>(base::LE::LoadT<uint64_t>(&raw[i]));
+    uint64_t raw;
+    auto ec = FetchBuf(sizeof(raw), &raw);
+    if (ec)
+      return make_unexpected(ec);
+    res.counters[i] = static_cast<int64_t>(base::LE::LoadT<uint64_t>(&raw));
   }
 
   return OpaqueObj{std::move(res), RDB_TYPE_CMS};
