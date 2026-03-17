@@ -677,8 +677,6 @@ std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
   size_t num_counters = cms->NumCounters();
   const int64_t* data = cms->Data();
 
-  RETURN_ON_ERR(SaveLen(num_counters));
-
   // Serialize counters as little-endian 64-bit values
   std::vector<uint64_t> buf(num_counters);
   for (size_t i = 0; i < num_counters; ++i) {

@@ -52,7 +52,7 @@ class CMS {
   void Reset();
 
   // Load serialized counter state. data must have exactly NumCounters() elements.
-  void Load(int64_t total_incr_count, const int64_t* data, size_t size);
+  void Load(int64_t total_incr_count, const int64_t* data);
 
   // Accessors for CMS properties
   uint32_t width() const {

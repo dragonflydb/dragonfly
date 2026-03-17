@@ -63,7 +63,7 @@ class RdbLoaderBase {
 
   struct RdbCMS {
     uint32_t width, depth;
-    int64_t count;
+    int64_t total_incr_count;
     std::vector<int64_t> counters;
   };
 

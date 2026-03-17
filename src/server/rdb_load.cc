@@ -294,7 +294,8 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
   CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, CompactObj::memory_resource());
-  cms->Load(src.count, src.counters.data(), src.counters.size());
+  DCHECK_EQ(src.counters.size(), cms->NumCounters());
+  cms->Load(src.total_incr_count, src.counters.data());
   pv_->SetCMS(cms);
 }
 
@@ -1833,16 +1834,11 @@ auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
 io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   RdbCMS res;
 
-  uint64_t width, depth, count, num_counters;
-  SET_OR_UNEXPECT(LoadLen(nullptr), width);
-  SET_OR_UNEXPECT(LoadLen(nullptr), depth);
-  SET_OR_UNEXPECT(LoadLen(nullptr), count);
-  SET_OR_UNEXPECT(LoadLen(nullptr), num_counters);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.depth);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
 
-  res.width = width;
-  res.depth = depth;
-  res.count = count;
-
+  const size_t num_counters = res.width * res.depth;
   res.counters.resize(num_counters);
   for (size_t i = 0; i < num_counters; ++i) {
     uint64_t raw;

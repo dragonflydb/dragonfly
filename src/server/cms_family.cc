@@ -463,7 +463,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
 
       for (const auto& cms_data : result.value()) {
         CMS temp_cms(cms_data.width, cms_data.depth, CompactObj::memory_resource());
-        temp_cms.Load(cms_data.count, cms_data.counters.data(), cms_data.counters.size());
+        temp_cms.Load(cms_data.count, cms_data.counters.data());
 
         if (!dest_cms->MergeFrom(temp_cms, merge_args.weights[cms_data.src_index])) {
           write_result = OpStatus::INVALID_VALUE;
