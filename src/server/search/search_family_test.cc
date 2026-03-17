@@ -4387,4 +4387,31 @@ TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
 }
 
+TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
+  // DIM=1 FLOAT32 expects exactly 4 bytes per value.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Insert values with wrong byte lengths (6 and 7 bytes instead of 4).
+  Run({"HSET", "k1", "pos", "AAAAAAA"});  // 7 bytes
+  Run({"HSET", "k2", "pos", "AQAAAA"});   // 6 bytes
+  Run({"HSET", "k3", "pos", "AgAAAA"});   // 6 bytes
+
+  // FT.SEARCH must not crash when serializing the wrong-sized vector fields.
+  auto resp = Run({"FT.SEARCH", "idx", "*", "PARAMS", "2", "vec", "AQAAAA", "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+
+  // Same scenario with 10-byte values and multiple keys.
+  Run({"FT.CREATE", "idx2", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  Run({"HSET", "a1", "v", "aaaaaaaaaa"});  // 10 bytes
+  Run({"HSET", "a2", "v", "bbbbbbbbbb"});
+  Run({"HSET", "a3", "v", "cccccccccc"});
+  Run({"HSET", "a4", "v", "dddddddddd"});
+  Run({"HSET", "a5", "v", "eeeeeeeeee"});
+
+  resp = Run({"FT.SEARCH", "idx2", "*", "PARAMS", "2", "vec", "aaaaaaaaaa", "LIMIT", "0", "100"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+}
+
 }  // namespace dfly
