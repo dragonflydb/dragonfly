@@ -723,15 +723,6 @@ cmd::CmdR ExtendGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-// Wrapper to call SetCmd::Set in ScheduleSingleHop
-OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
-                    const CommandContext& ctx) {
-  bool explicit_journal = ctx.cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-  return ctx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
-    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
-  });
-}
-
 cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) {
   bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
 
@@ -1295,7 +1286,6 @@ cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
-  auto* builder = cmd_cntx->rb();
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
