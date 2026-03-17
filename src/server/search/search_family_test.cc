@@ -4414,4 +4414,46 @@ TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
   EXPECT_THAT(resp, Not(ErrArg("")));
 }
 
+TEST_F(SearchFamilyTest, SortBySkipsDocsWithoutSortField) {
+  // KeepTopKSorted skips docs that don't have the sort field, returning fewer sort scores
+  // than result.ids.size(). The loop then accesses sort_scores[i] out-of-bounds.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "valid:1", "val", "123"});
+  Run({"HSET", "valid:2", "val", "456"});
+  Run({"HSET", "valid:3", "val", "789"});
+
+  // These docs are indexed (no prefix restriction) but lack the sort field.
+  // They appear in '*' search results but are skipped by KeepTopKSorted.
+  for (int i = 0; i < 97; i++)
+    Run({"HSET", absl::StrCat("nofield:", i), "txt", "garbage"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", "val", "LIMIT", "0", "100"});
+  auto vec = resp.GetVec();
+
+  // Extract doc keys from the response (indices 1, 3, 5, ...).
+  vector<string> keys;
+  for (size_t i = 1; i < vec.size(); i += 2)
+    keys.push_back(vec[i].GetString());
+
+  EXPECT_THAT(keys, ElementsAre("valid:1", "valid:2", "valid:3"));
+}
+
+TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
+  // Regression test: HSET with inf/nan values on a NUMERIC field used to crash with
+  // DCHECK(std::isfinite(value)) in RangeTree::Add, because absl::SimpleAtod accepts
+  // "inf", "-inf", "nan" etc. as valid doubles.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "doc:1", "val", "inf"});
+  Run({"HSET", "doc:2", "val", "-inf"});
+  Run({"HSET", "doc:3", "val", "+inf"});
+  Run({"HSET", "doc:4", "val", "nan"});
+  Run({"HSET", "doc:5", "val", "42"});  // finite — must still be indexed
+
+  // Non-finite docs are not in the numeric index; only doc:5 should match the range query.
+  auto resp = Run({"FT.SEARCH", "idx", "@val:[-inf +inf]"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
+}
+
 }  // namespace dfly
