@@ -1180,7 +1180,7 @@ void CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1189,10 +1189,11 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
     return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
-void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1204,9 +1205,12 @@ void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
+// NOTE: CmdDigest cannot be converted to coroutine because it uses .Get() inside the callback,
+// which blocks and violates the single co_await rule.
 void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
@@ -1247,6 +1251,8 @@ void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+// NOTE: CmdGetSet cannot be converted to coroutine because SetGeneric uses ScheduleSingleHop
+// (not ScheduleSingleHopT), which doesn't return a value that can be awaited.
 void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
@@ -1260,7 +1266,7 @@ void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
 }
 
-void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
@@ -1272,14 +1278,15 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-      RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+      if (auto err = parser.TakeError(); err)
+        co_return err.MakeReply();
 
       if (defined) {
-        return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
+        co_return facade::ErrorReply{kSyntaxErr, kSyntaxErrType};
       }
 
       if (int_arg <= 0) {
-        return cmd_cntx->SendError(InvalidExpireTime("getex"));
+        co_return facade::ErrorReply{InvalidExpireTime("getex")};
       }
 
       exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
@@ -1290,7 +1297,7 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
     } else {
-      return builder->SendError(kSyntaxErr);
+      co_return facade::ErrorReply{kSyntaxErr};
     }
   }
 
@@ -1323,7 +1330,8 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
 cmd::CmdR CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1559,45 +1567,49 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
-void CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
-void CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
-  auto* builder = cmd_cntx->rb();
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   if (start < 0) {
-    return builder->SendError("offset is out of range");
+    co_return facade::ErrorReply{"offset is out of range"};
   }
 
   if (size_t min_size = start + value.size(); min_size > kMaxStrLen) {
-    return builder->SendError("string exceeds maximum allowed size");
+    co_return facade::ErrorReply{"string exceeds maximum allowed size"};
   }
 
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{builder}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
@@ -1613,30 +1625,29 @@ void CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   // Allow max burst in number of tokens
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
-    return rb->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
 
   // Emit count of tokens per period
   uint64_t count;
   const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
-    return rb->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
 
   // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
-    return rb->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
 
   // Apply quantity of tokens now
@@ -1645,40 +1656,39 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
     const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      return rb->SendError(kInvalidIntErr);
+      co_return facade::ErrorReply{kInvalidIntErr};
     }
   }
 
   if (max_burst > INT64_MAX - 1) {
-    return rb->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
   const int64_t limit = max_burst + 1;
 
   if (period > UINT64_MAX / kSecondToNanoSecond || count == 0 ||
       period * kSecondToNanoSecond / count > INT64_MAX) {
-    return rb->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
 
   const int64_t emission_interval_ns = period * kSecondToNanoSecond / count;
 
   if (emission_interval_ns == 0) {
-    return rb->SendError("zero rates are not supported");
+    co_return facade::ErrorReply{"zero rates are not supported"};
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+    co_return facade::ErrorReply{kInvalidIntErr};
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
     return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity);
   };
 
-  Transaction* trans = cmd_cntx->tx();
-  OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
+  OpResult<array<int64_t, 5>> result = co_await cmd::SingleHopT(cb);
 
   if (result) {
     RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1703,20 +1713,21 @@ void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmd_cntx->SendError(kWrongTypeErr);
+        cmd_cntx->rb()->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmd_cntx->SendError(kInvalidIntErr);
+        cmd_cntx->rb()->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmd_cntx->SendError(kOutOfMemory);
+        cmd_cntx->rb()->SendError(kOutOfMemory);
         break;
       default:
-        cmd_cntx->SendError(result.status());
+        cmd_cntx->rb()->SendError(result.status());
         break;
     }
   }
+  co_return std::nullopt;
 }
 
 }  // namespace
@@ -1742,21 +1753,21 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
       << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
-      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
-      << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
+      << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
-      << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
-             GetEx)
+      << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}
+             .SetAsyncHandler(CmdGetEx)
       << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
-      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
-      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
-      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-      << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
-      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-             ClThrottle)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdStrLen)
+      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)
+      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)  // Alias for GetRange
+      << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
+      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}
+             .SetAsyncHandler(CmdClThrottle)
       << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
              .SetAsyncHandler(CmdGAT);
 }
