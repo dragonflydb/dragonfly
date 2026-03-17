@@ -1131,16 +1131,17 @@ cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   string_view cmd_name = cmd_cntx->cid()->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   if (exp_int < 1)
-    return cmd_cntx->SendError(InvalidExpireTime(cmd_name));
+    co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
   DbSlice::ExpireParams expiry{
       .value = exp_int,
@@ -1151,15 +1152,23 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t now_ms = GetCurrentTimeMs();
   auto [_, abs_ms] = expiry.Calculate(now_ms, false);
   if (abs_ms < 0)
-    return cmd_cntx->SendError(InvalidExpireTime("set"));
+    co_return facade::ErrorReply{InvalidExpireTime("set")};
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
   sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-  cmd_cntx->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
+
+  bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
+  };
+
+  OpStatus status = co_await cmd::SingleHop(cb);
+  cmd_cntx->rb()->SendError(status);
+  co_return std::nullopt;
 }
 
-void CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -1168,16 +1177,26 @@ void CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   if (cmd_cntx->mc_command())
     sparams.memcache_flags = cmd_cntx->mc_command()->flags;
 
-  switch (SetGeneric(sparams, key, value, *cmd_cntx)) {
+  bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
+  };
+
+  OpStatus status = co_await cmd::SingleHop(cb);
+  switch (status) {
     case OpStatus::OK:
-      return cmd_cntx->SendLong(1);  // Successfully set the value
+      cmd_cntx->rb()->SendLong(1);  // Successfully set the value
+      break;
     case OpStatus::OUT_OF_MEMORY:
-      return cmd_cntx->SendError(kOutOfMemory);
+      cmd_cntx->rb()->SendError(kOutOfMemory);
+      break;
     case OpStatus::SKIPPED:
-      return cmd_cntx->SendLong(0);  // Existed, zero updates performed
+      cmd_cntx->rb()->SendLong(0);  // Existed, zero updates performed
+      break;
     default:
       LOG(FATAL) << "Invalid result";
   }
+  co_return std::nullopt;
 }
 
 cmd::CmdR CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1209,8 +1228,6 @@ cmd::CmdR CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-// NOTE: CmdDigest cannot be converted to coroutine because it uses .Get() inside the callback,
-// which blocks and violates the single co_await rule.
 void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&key](Transaction* tx, EngineShard* es) -> OpResult<string> {
@@ -1251,19 +1268,25 @@ void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-// NOTE: CmdGetSet cannot be converted to coroutine because SetGeneric uses ScheduleSingleHop
-// (not ScheduleSingleHopT), which doesn't return a value that can be awaited.
-void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   optional<StringResult> prev;
   SetCmd::SetParams sparams{.prev_val = &prev};
 
-  if (OpStatus status = SetGeneric(sparams, key, value, *cmd_cntx); status != OpStatus::OK)
-    return cmd_cntx->SendError(status);
+  bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
+  };
 
-  GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+  OpStatus status = co_await cmd::SingleHop(cb);
+  if (status != OpStatus::OK) {
+    cmd_cntx->rb()->SendError(status);
+  } else {
+    GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+  }
+  co_return std::nullopt;
 }
 
 cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1625,29 +1648,30 @@ cmd::CmdR CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-cmd::CmdR CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
+void CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   constexpr uint64_t kSecondToNanoSecond = 1000000000;
   const string_view key = ArgS(args, 0);
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   // Allow max burst in number of tokens
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Emit count of tokens per period
   uint64_t count;
   const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return rb->SendError(kInvalidIntErr);
   }
 
   // Apply quantity of tokens now
@@ -1656,39 +1680,40 @@ cmd::CmdR CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
     const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      co_return facade::ErrorReply{kInvalidIntErr};
+      return rb->SendError(kInvalidIntErr);
     }
   }
 
   if (max_burst > INT64_MAX - 1) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return rb->SendError(kInvalidIntErr);
   }
   const int64_t limit = max_burst + 1;
 
   if (period > UINT64_MAX / kSecondToNanoSecond || count == 0 ||
       period * kSecondToNanoSecond / count > INT64_MAX) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return rb->SendError(kInvalidIntErr);
   }
 
   const int64_t emission_interval_ns = period * kSecondToNanoSecond / count;
 
   if (emission_interval_ns == 0) {
-    co_return facade::ErrorReply{"zero rates are not supported"};
+    return rb->SendError("zero rates are not supported");
   }
 
   if (emission_interval_ns > INT64_MAX / limit) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   if (quantity != 0 && static_cast<uint64_t>(emission_interval_ns) > INT64_MAX / quantity) {
-    co_return facade::ErrorReply{kInvalidIntErr};
+    return cmd_cntx->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
     return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ns, quantity);
   };
 
-  OpResult<array<int64_t, 5>> result = co_await cmd::SingleHopT(cb);
+  Transaction* trans = cmd_cntx->tx();
+  OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -1713,21 +1738,20 @@ cmd::CmdR CmdClThrottle(CmdArgList args, CommandContext* cmd_cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cmd_cntx->rb()->SendError(kWrongTypeErr);
+        cmd_cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        cmd_cntx->rb()->SendError(kInvalidIntErr);
+        cmd_cntx->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        cmd_cntx->rb()->SendError(kOutOfMemory);
+        cmd_cntx->SendError(kOutOfMemory);
         break;
       default:
-        cmd_cntx->rb()->SendError(result.status());
+        cmd_cntx->SendError(result.status());
         break;
     }
   }
-  co_return std::nullopt;
 }
 
 }  // namespace
@@ -1741,9 +1765,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
   *registry
       << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetAsyncHandler(
              CmdSet)
-      << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
-      << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
-      << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
+      << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.SetAsyncHandler(
+             CmdSetExGeneric)
+      << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.SetAsyncHandler(
+             CmdSetExGeneric)
+      << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdSetNx)
       << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
@@ -1758,7 +1784,7 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
       << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}
              .SetAsyncHandler(CmdGetEx)
-      << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
+      << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdGetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
@@ -1766,8 +1792,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)
       << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)  // Alias for GetRange
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
-      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}
-             .SetAsyncHandler(CmdClThrottle)
+      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
+             ClThrottle)
       << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
              .SetAsyncHandler(CmdGAT);
 }
