@@ -7,7 +7,11 @@ import copy
 
 import numpy as np
 from redis.commands.search.field import TextField, NumericField, TagField, VectorField, GeoField
-from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+
+try:
+    from redis.commands.search.indexDefinition import IndexDefinition, IndexType
+except ModuleNotFoundError:
+    from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
 from . import dfly_args
@@ -542,7 +546,7 @@ def test_redis_om(df_server):
 
     client = redis.Redis(port=df_server.port, decode_responses=True)
 
-    class TestCar(redis_om.HashModel):
+    class TestCar(redis_om.HashModel, index=True):
         producer: str = redis_om.Field(index=True)
         description: str = redis_om.Field(index=True, full_text_search=True)
         speed: int = redis_om.Field(index=True, sortable=True)

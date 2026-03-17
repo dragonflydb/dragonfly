@@ -28,6 +28,8 @@ from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
+# Suppress "Unclosed ClusterNode" warnings from redis-py topology refreshes (not actionable)
+logging.getLogger("asyncio").addFilter(lambda r: "Unclosed ClusterNode" not in r.getMessage())
 
 DATABASE_INDEX = 0
 BASE_LOG_DIR = "/tmp/dragonfly_logs/"
