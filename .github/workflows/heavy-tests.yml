@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20-gcc14"]
+        container: ["ubuntu-dev:24"]
         proactor: [Uring]
         build-type: [Release]
         runner: [CI-LARGE-86, CI-LARGE-ARM]
