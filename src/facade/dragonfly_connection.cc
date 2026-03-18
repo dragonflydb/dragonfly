@@ -2760,8 +2760,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         UpdateDispatchStats(msg, false /* subtract */);
       }
 
-      // TODO: Properly handle backpressure unblocking and flusing
+      // TODO: Possibly don't flush unconditionally - optimize it
       reply_builder_->Flush();
+      if (auto ec = reply_builder_->GetError(); ec)
+        return ec;
+
+      // TODO: Properly handle backpressure
       GetQueueBackpressure().pubsub_ec.notifyAll();
       continue;
     }
