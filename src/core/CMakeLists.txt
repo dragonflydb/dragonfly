@@ -34,7 +34,7 @@ add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc cms.cc de
 cxx_link(dfly_core base dfly_search_core dfly_page_usage fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
     TRDP::lua lua_modules
-    OpenSSL::Crypto TRDP::dconv TRDP::lz4 TRDP::hdr_histogram)
+    OpenSSL::Crypto TRDP::dconv TRDP::lz4 TRDP::zstd TRDP::hdr_histogram)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)

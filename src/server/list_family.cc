@@ -65,6 +65,9 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
 ABSL_FLAG(unsigned, list_tiering_threshold, 0,
           "Tiering threshold for lists. Default - no tiering.");
+ABSL_FLAG(uint32_t, list_experimental_zstd_dict_threshold, 0,
+          "Minimum list malloc usage in bytes before attempting ZSTD dictionary compression. "
+          "0 disables. Experimental: compression is synchronous and may block the thread.");
 
 namespace dfly {
 
@@ -212,6 +215,10 @@ class ListWrapper {
 
   void Erase(long start, long count) {
     VisitMut([&](auto& list) { list.Erase(start, count); });
+  }
+
+  auto& impl() {
+    return impl_;
   }
 
   void Launder(PrimeValue* pv) {
@@ -468,6 +475,12 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   }
   lw.Launder(&res.it->second);
   len = lw.Size();
+
+  if (uint32_t threshold = GetFlag(FLAGS_list_experimental_zstd_dict_threshold); threshold > 0) {
+    if (auto** ql = std::get_if<QList*>(&lw.impl())) {
+      (*ql)->CompressWithZstdDict(threshold);
+    }
+  }
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";

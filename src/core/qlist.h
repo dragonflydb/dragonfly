@@ -19,6 +19,7 @@
 #define QUICKLIST_NODE_ENCODING_RAW 1
 #define QUICKLIST_NODE_ENCODING_LZF 2
 #define QLIST_NODE_ENCODING_LZ4 3
+#define QLIST_NODE_ENCODING_ZSTD 4
 
 /* quicklist node container formats */
 #define QUICKLIST_NODE_CONTAINER_PLAIN 1
@@ -39,7 +40,7 @@ inline bool ShouldStoreAsListPack(size_t size) {
 class QList {
  public:
   enum Where : uint8_t { TAIL, HEAD };
-  enum COMPR_METHOD : uint8_t { LZF = 0, LZ4 = 1 };
+  enum COMPR_METHOD : uint8_t { LZF = 0, LZ4 = 1, ZSTD_DICT = 2 };
 
   /* Node is a 40 byte struct describing a listpack for a quicklist.
    * We use bit fields keep the Node at 40 bytes.
@@ -58,13 +59,13 @@ class QList {
     size_t sz : 48;    /* entry size in bytes */
     size_t count : 16; /* count of items in listpack */
 
-    uint16_t encoding : 2;           /* RAW==1 or LZF==2 */
+    uint16_t encoding : 3;           /* RAW==1, LZF==2, LZ4==3, ZSTD==4 */
     uint16_t container : 2;          /* PLAIN==1 or PACKED==2 */
     uint16_t recompress : 1;         /* was this node previous compressed? */
     uint16_t attempted_compress : 1; /* node can't compress; too small */
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
-    uint16_t reserved1 : 8;          /* reserved for future use */
+    uint16_t reserved1 : 7;          /* reserved for future use */
 
     uint16_t reserved2; /* more bits to steal for future usage */
     uint32_t reserved3; /* more bits to steal for future usage */
@@ -229,6 +230,13 @@ class QList {
 
   void SetTieringParams(const TieringParams& params);
 
+  // Synchronously trains a ZSTD dictionary from all node data and compresses
+  // interior nodes using the shared dictionary. No-op if malloc_size_ < threshold_bytes
+  // or if data is estimated to be incompressible.
+  void CompressWithZstdDict(size_t threshold_bytes);
+
+  bool HasZstdDict() const;
+
   struct Stats {
     uint64_t compression_attempts = 0;
 
@@ -248,6 +256,8 @@ class QList {
     uint64_t total_node_reads = 0;
     uint64_t offload_requests = 0;
     uint64_t onload_requests = 0;
+
+    uint64_t zstd_dict_compressions = 0;
 
     Stats& operator+=(const Stats& other);
   };
@@ -302,6 +312,9 @@ class QList {
   unsigned reserved2_ : 12;
   uint32_t num_offloaded_nodes_ = 0;
   std::unique_ptr<TieringParams> tiering_params_;
+
+  struct ZstdDictState;
+  std::unique_ptr<ZstdDictState> zstd_dict_;
 };
 
 }  // namespace dfly
