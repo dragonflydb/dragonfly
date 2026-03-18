@@ -150,9 +150,7 @@ async def test_tiered_replication_strings_with_append(df_factory: DflyInstanceFa
     fill_tasks = [asyncio.create_task(fill_job()) for _ in range(3)]
 
     # Start replication
-    logging.info(f"Starting replication {master.port} -> {replica.port}")
     await replica_client.replicaof("localhost", master.port)
-    logging.info("Waiting for replica to sync")
 
     # Wait for replication to finish
     try:
