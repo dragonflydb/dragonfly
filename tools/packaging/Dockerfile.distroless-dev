@@ -20,17 +20,30 @@ RUN build-release/dragonfly --version
 RUN LIBZ=$(ldconfig -p | awk '/libz\.so\.1 /{print $NF; exit}') && \
     install -D -m755 "$(realpath $LIBZ)" "/build/syslibs$LIBZ"
 
+# Download microcheck health-check binaries (httpcheck for plain HTTP, httpscheck for TLS).
+FROM alpine AS healthcheck-dl
+ARG TARGETARCH
+RUN ARCH="${TARGETARCH}"; \
+    [ "${ARCH}" = "arm64" ] && ARCH="arm64-v8"; \
+    wget -q -O /tmp/microcheck.tar.gz \
+      "https://github.com/tarampampam/microcheck/releases/download/v1.3.0/linux-${ARCH}.tar.gz" && \
+    tar -xzf /tmp/microcheck.tar.gz -C /tmp && \
+    install -m755 /tmp/httpcheck /tmp/httpscheck /usr/local/bin/
+
 FROM gcr.io/distroless/cc-debian12
 
 COPY --from=builder /build/build-release/dragonfly /usr/local/bin/dragonfly
-COPY --from=builder /build/build-release/dragonfly-healthcheck /usr/local/bin/dragonfly-healthcheck
+COPY --from=healthcheck-dl /usr/local/bin/httpcheck /usr/local/bin/httpcheck
+COPY --from=healthcheck-dl /usr/local/bin/httpscheck /usr/local/bin/httpscheck
 COPY --from=builder /build/syslibs/ /
 
 VOLUME /data
 WORKDIR /data
 
+# Use httpcheck for plain HTTP (default). For TLS deployments, override with:
+#   CMD ["/usr/local/bin/httpscheck", "https://localhost:6379/healthz"]
 HEALTHCHECK --start-period=30s --interval=15s --timeout=5s --retries=3 \
-  CMD ["/usr/local/bin/dragonfly-healthcheck"]
+  CMD ["/usr/local/bin/httpcheck", "http://localhost:6379/healthz"]
 
 ENTRYPOINT ["/usr/local/bin/dragonfly"]
 

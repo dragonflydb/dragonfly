@@ -44,7 +44,7 @@ configure:
 
 build:
 	cd $(RELEASE_DIR); \
-	ninja dfly_bench dragonfly dragonfly-healthcheck && ldd dragonfly
+	ninja dfly_bench dragonfly && ldd dragonfly
 
 package:
 	cd $(RELEASE_DIR); \
@@ -55,13 +55,7 @@ package:
 		--compress-debug-sections \
 		dragonfly \
 		$(RELEASE_NAME); \
-	objcopy \
-		--remove-section=".debug_*" \
-		--remove-section="!.debug_line" \
-		--compress-debug-sections \
-		dragonfly-healthcheck \
-		dragonfly-healthcheck-$(BUILD_ARCH); \
-	tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) dragonfly-healthcheck-$(BUILD_ARCH) ../LICENSE.md; \
+	tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) ../LICENSE.md; \
 	objcopy \
 		--remove-section=".debug_*" \
 		--remove-section="!.debug_line" \

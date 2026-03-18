@@ -14,10 +14,6 @@ add_executable(dragonfly dfly_main.cc version_monitor.cc)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 cxx_link(dragonfly base dragonfly_lib)
 
-# Minimal health-check helper for distroless containers (no dragonfly_lib dependency).
-add_executable(dragonfly-healthcheck dfly_healthcheck.cc)
-target_link_libraries(dragonfly-healthcheck)
-
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
