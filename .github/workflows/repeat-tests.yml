@@ -6,7 +6,11 @@ on:
       branch:
         description: "The branch on which tests will be repeated"
         type: string
-        required: true
+        required: false
+      commit:
+        description: "A specific commit SHA to test (takes precedence over branch)"
+        type: string
+        required: false
       count:
         description: "The number of times the tests will be repeated"
         type: number
@@ -62,7 +66,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: true
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.commit || inputs.branch }}
 
       - name: Print environment info
         run: |
