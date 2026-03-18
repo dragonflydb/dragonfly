@@ -79,7 +79,8 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   }
 }
 
-void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment, util::fb2::UringBuf buf) {
+void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment,
+                      util::fb2::RegisteredSlice buf) {
   auto id = ToOwned(id_ref);
   unsigned version = ++pending_stash_counter_;
   pending_stash_ver_[id] = version;
