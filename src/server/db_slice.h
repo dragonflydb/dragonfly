@@ -34,14 +34,8 @@ struct DbStats : public DbTableStats {
   // number of active keys.
   size_t key_count = 0;
 
-  // number of keys that have expiry deadline.
-  size_t expire_count = 0;
-
   // total number of slots in prime dictionary (key capacity).
   size_t prime_capacity = 0;
-
-  // total number of slots in prime dictionary (key capacity).
-  size_t expire_capacity = 0;
 
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
@@ -312,18 +306,13 @@ class DbSlice {
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
                                          const ExpireParams& params);
 
-  // Adds expiry information.
+  // Adds expiry on a key. If the key already has expiry, updates it.
   void AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
-  // Removes the corresponing expiry information if exists.
-  // Returns true if expiry existed (and removed).
+  // Removes expiry from a key. Returns true if expiry existed and was removed.
   bool RemoveExpire(DbIndex db_ind, const Iterator& main_it);
 
-  // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
-  // Does not change expiry if at != 0 and expiry already exists.
-  bool UpdateExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
-
-  // false if no action was taken, true if the mc flag was set or removed.
+  // Returns false if no action was taken, true if the mc flag was set or removed.
   bool SetMCFlag(DbIndex db_ind, const PrimeKey& key, uint32_t flag);
 
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -390,7 +379,7 @@ class DbSlice {
   }
 
   std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
-    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime, &db_arr_[id]->expire);
+    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime, nullptr);
   }
 
   // Returns existing keys count in the db.

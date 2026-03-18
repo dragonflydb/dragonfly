@@ -356,7 +356,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
-  auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
+  auto [prime_table, _unused_expire] = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
   uint64_t attempts = 0;
@@ -848,8 +848,8 @@ void EngineShard::RetireExpiredAndEvict() {
       continue;
 
     db_cntx.db_index = i;
-    auto [pt, expt] = db_slice.GetTables(i);
-    if (!expt->Empty()) {
+    auto [pt, _unused_expt] = db_slice.GetTables(i);
+    if (pt->size() > 0) {
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
       deleted_bytes += stats.deleted_bytes;
