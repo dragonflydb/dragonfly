@@ -30,6 +30,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/topk.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -202,6 +203,8 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       return RDB_TYPE_JSON;
     case OBJ_SBF:
       return absl::GetFlag(FLAGS_rdb_sbf_chunked) ? RDB_TYPE_SBF2 : RDB_TYPE_SBF;
+    case OBJ_TOPK:
+      return RDB_TYPE_TOPK;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -353,6 +356,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_SBF) {
     return SaveSBFObject(pv);
+  }
+
+  if (obj_type == OBJ_TOPK) {
+    return SaveTOPKObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -656,6 +663,35 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
       flush_state = FlushState::kFlushEndEntry;
     PushToConsumerIfNeeded(flush_state);
   }
+
+  return {};
+}
+
+std::error_code RdbSerializer::SaveTOPKObject(const PrimeValue& pv) {
+  TOPK* topk = pv.GetTOPK();
+  auto data = topk->Serialize();
+
+  RETURN_ON_ERR(SaveLen(0));  // Options (reserved)
+  RETURN_ON_ERR(SaveLen(data.k));
+  RETURN_ON_ERR(SaveLen(data.width));
+  RETURN_ON_ERR(SaveLen(data.depth));
+
+  // Save decay as 8-byte double (little-endian)
+  string decay_bytes(8, '\0');
+  absl::little_endian::Store64(decay_bytes.data(), *reinterpret_cast<const uint64_t*>(&data.decay));
+  RETURN_ON_ERR(SaveString(decay_bytes));
+
+  // Save heap items (top-k list)
+  RETURN_ON_ERR(SaveLen(data.heap_items.size()));
+  for (const auto& item : data.heap_items) {
+    RETURN_ON_ERR(SaveString(item.item));
+    RETURN_ON_ERR(SaveLen(item.count));
+  }
+
+  // Save counter array
+  string_view counter_data(reinterpret_cast<const char*>(data.counters.data()),
+                           data.counters.size() * sizeof(uint32_t));
+  RETURN_ON_ERR(SaveString(counter_data));
 
   return {};
 }

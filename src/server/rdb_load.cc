@@ -34,6 +34,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/topk.h"
 #include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -169,7 +170,7 @@ string ModuleTypeName(uint64_t module_id) {
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
-         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2;
+         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_TOPK;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -192,6 +193,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
   void operator()(const RdbSBF& src);
+  void operator()(const RdbTOPK& src);
 
   std::error_code ec() const {
     return ec_;
@@ -288,6 +290,33 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
   pv_->SetSBF(sbf);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
+  TOPK* topk = CompactObj::AllocateMR<TOPK>(src.k, src.width, src.depth, src.decay,
+                                            CompactObj::memory_resource());
+
+  // Deserialize the data
+  TOPK::SerializedData data;
+  data.k = src.k;
+  data.width = src.width;
+  data.depth = src.depth;
+  data.decay = src.decay;
+
+  // Convert heap items from pairs to TopKItem structs
+  for (const auto& [item_str, count] : src.heap_items) {
+    data.heap_items.push_back({item_str, count});
+  }
+
+  // Convert counter data
+  if (!src.counter_data.empty()) {
+    const uint32_t* counter_ptr = reinterpret_cast<const uint32_t*>(src.counter_data.data());
+    size_t counter_count = src.counter_data.size() / sizeof(uint32_t);
+    data.counters.assign(counter_ptr, counter_ptr + counter_count);
+  }
+
+  topk->Deserialize(data);
+  pv_->SetTOPK(topk);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1217,6 +1246,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_SBF2:
       iores = ReadSBF2();
       break;
+    case RDB_TYPE_TOPK:
+      iores = ReadTOPK();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -1817,6 +1849,49 @@ auto RdbLoaderBase::ReadSBF() -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
   return ReadSBFImpl(true);
+}
+
+auto RdbLoaderBase::ReadTOPK() -> io::Result<OpaqueObj> {
+  RdbTOPK res;
+  uint64_t options;
+  SET_OR_UNEXPECT(LoadLen(nullptr), options);
+  if (options != 0)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  uint64_t k, width, depth;
+  SET_OR_UNEXPECT(LoadLen(nullptr), k);
+  SET_OR_UNEXPECT(LoadLen(nullptr), width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), depth);
+
+  res.k = k;
+  res.width = width;
+  res.depth = depth;
+
+  // Load decay as 8-byte double
+  std::string decay_bytes;
+  SET_OR_UNEXPECT(FetchGenericString(), decay_bytes);
+  if (decay_bytes.size() != 8) {
+    return Unexpected(errc::invalid_encoding);
+  }
+  uint64_t decay_bits = absl::little_endian::Load64(decay_bytes.data());
+  res.decay = *reinterpret_cast<const double*>(&decay_bits);
+
+  // Load heap items
+  uint64_t heap_size;
+  SET_OR_UNEXPECT(LoadLen(nullptr), heap_size);
+  res.heap_items.reserve(heap_size);
+  for (uint64_t i = 0; i < heap_size; ++i) {
+    std::string item;
+    SET_OR_UNEXPECT(FetchGenericString(), item);
+    uint64_t count;
+    SET_OR_UNEXPECT(LoadLen(nullptr), count);
+    res.heap_items.emplace_back(std::move(item), count);
+  }
+
+  // Load counter data
+  SET_OR_UNEXPECT(FetchGenericString(), res.counter_data);
+
+  return OpaqueObj{std::move(res), RDB_TYPE_TOPK};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
