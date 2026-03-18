@@ -28,6 +28,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cms.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
@@ -169,7 +170,7 @@ string ModuleTypeName(uint64_t module_id) {
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
-         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2;
+         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -192,6 +193,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
   void operator()(const RdbSBF& src);
+  void operator()(const RdbCMS& src);
 
   std::error_code ec() const {
     return ec_;
@@ -288,6 +290,13 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
   pv_->SetSBF(sbf);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
+  CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, CompactObj::memory_resource());
+  DCHECK_EQ(src.counters.size(), cms->NumCounters());
+  cms->Load(src.total_incr_count, src.counters.data());
+  pv_->SetCMS(cms);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1217,6 +1226,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_SBF2:
       iores = ReadSBF2();
       break;
+    case RDB_TYPE_CMS:
+      iores = ReadCMS();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -1817,6 +1829,26 @@ auto RdbLoaderBase::ReadSBF() -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
   return ReadSBFImpl(true);
+}
+
+io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
+  RdbCMS res;
+
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.depth);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
+
+  const size_t num_counters = res.width * res.depth;
+  res.counters.resize(num_counters);
+  for (size_t i = 0; i < num_counters; ++i) {
+    uint64_t raw;
+    auto ec = FetchBuf(sizeof(raw), &raw);
+    if (ec)
+      return make_unexpected(ec);
+    res.counters[i] = static_cast<int64_t>(base::LE::LoadT<uint64_t>(&raw));
+  }
+
+  return OpaqueObj{std::move(res), RDB_TYPE_CMS};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {

@@ -1077,4 +1077,19 @@ TEST_F(RdbTest, RDBIgnoreExpiryFlag) {
   EXPECT_EQ(ttl2, -1);
 }
 
+TEST_F(RdbTest, CmsSerialization) {
+  Run("cms.initbydim cms 1000 5");
+  Run("cms.incrby cms foo 5 bar 3 baz 9");
+
+  auto resp = Run("cms.query cms foo bar baz");
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
+
+  Run("save df cms");
+  Run("flushall");
+  EXPECT_EQ(Run("dfly load cms-summary.dfs"), "OK");
+
+  resp = Run("cms.query cms foo bar baz");
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
+}
+
 }  // namespace dfly

@@ -6,6 +6,8 @@
 
 #include <absl/strings/str_cat.h>
 
+#include "facade/facade_types.h"
+
 namespace facade {
 
 std::string ServiceInterface::ContextInfo::Format() const {
@@ -29,6 +31,10 @@ std::string ServiceInterface::ContextInfo::Format() const {
   if (index)
     absl::StrAppend(&res, " flags=", buf);
   return res;
+}
+
+DispatchResult ServiceInterface::DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode) {
+  return DispatchCommand(ParsedArgs{*cmd}, cmd, mode);
 }
 
 }  // namespace facade

@@ -49,7 +49,6 @@ FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view valu
   if (type == search::SchemaField::NUMERIC) {
     auto value_as_double = search::ParseNumericField(value);
     if (!value_as_double) {  // temporary convert to double
-      LOG(DFATAL) << "Failed to convert " << value << " to double";
       return std::nullopt;
     }
     return value_as_double.value();
@@ -57,7 +56,6 @@ FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view valu
   if (type == search::SchemaField::VECTOR) {
     auto opt_vector = search::BytesToFtVectorSafe(value);
     if (!opt_vector) {
-      LOG(DFATAL) << "Failed to convert " << value << " to vector";
       return std::nullopt;
     }
     auto& [ptr, size] = opt_vector.value();

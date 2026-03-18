@@ -10,6 +10,8 @@
 #include <cmath>
 #include <limits>
 
+#include "base/logging.h"
+
 namespace dfly {
 namespace {
 
@@ -21,38 +23,44 @@ uint32_t Offset(uint64_t h1, uint64_t h2, uint32_t row, uint32_t width) {
 }  // namespace
 
 CMS::CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr)
-    : width_(width),
-      depth_(depth),
-      counters_(static_cast<size_t>(width) * depth, 0, PMR_NS::polymorphic_allocator<int64_t>(mr)) {
+    : width_(width), depth_(depth), mr_(mr) {
+  size_t len = NumCounters();
+  counters_ = static_cast<int64_t*>(mr_->allocate(len * sizeof(int64_t), alignof(int64_t)));
+  std::fill_n(counters_, len, 0);
 }
 
-CMS::CMS(uint32_t width, uint32_t depth, int64_t total_count, const int64_t* data, size_t count,
-         PMR_NS::memory_resource* mr)
-    : width_(width),
-      depth_(depth),
-      count_(total_count),
-      counters_(data, data + count, PMR_NS::polymorphic_allocator<int64_t>(mr)) {
+CMS::~CMS() {
+  if (counters_) {
+    mr_->deallocate(counters_, NumCounters() * sizeof(int64_t), alignof(int64_t));
+  }
 }
 
 CMS::CMS(CMS&& other) noexcept
     : width_(other.width_),
       depth_(other.depth_),
+      mr_(other.mr_),
       count_(other.count_),
-      counters_(std::move(other.counters_)) {
+      counters_(other.counters_) {
   other.width_ = 0;
   other.depth_ = 0;
   other.count_ = 0;
+  other.counters_ = nullptr;
 }
 
 CMS& CMS::operator=(CMS&& other) noexcept {
   if (this != &other) {
+    if (counters_) {
+      mr_->deallocate(counters_, NumCounters() * sizeof(int64_t), alignof(int64_t));
+    }
     width_ = other.width_;
     depth_ = other.depth_;
+    mr_ = other.mr_;
     count_ = other.count_;
-    counters_ = std::move(other.counters_);
+    counters_ = other.counters_;
     other.width_ = 0;
     other.depth_ = 0;
     other.count_ = 0;
+    other.counters_ = nullptr;
   }
   return *this;
 }
@@ -98,7 +106,7 @@ bool CMS::MergeFrom(const CMS& other, int64_t weight) {
     return false;
   }
 
-  for (size_t i = 0; i < counters_.size(); ++i) {
+  for (size_t i = 0; i < NumCounters(); ++i) {
     counters_[i] += other.counters_[i] * weight;
   }
 
@@ -107,12 +115,13 @@ bool CMS::MergeFrom(const CMS& other, int64_t weight) {
 }
 
 void CMS::Reset() {
-  std::fill(counters_.begin(), counters_.end(), 0);
+  std::fill_n(counters_, NumCounters(), 0);
   count_ = 0;
 }
 
-size_t CMS::MallocUsed() const {
-  return counters_.size() * sizeof(int64_t);
+void CMS::Load(int64_t total_incr_count, const int64_t* data) {
+  count_ = total_incr_count;
+  std::copy_n(data, NumCounters(), counters_);
 }
 
 }  // namespace dfly
