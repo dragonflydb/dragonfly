@@ -383,7 +383,7 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
       }
 
       const CMS* cms = src_res.value()->second.GetCMS();
-      size_t counter_count = cms->CounterBytes() / sizeof(int64_t);
+      size_t counter_count = cms->NumCounters();
       cms_list.emplace_back(src_idx, key, cms->width(), cms->depth(), cms->total_count(),
                             cms->Data(), counter_count);
     }
@@ -462,8 +462,8 @@ void CmdMerge(CmdArgList args, CommandContext* cmd_cntx) {
         continue;
 
       for (const auto& cms_data : result.value()) {
-        CMS temp_cms(cms_data.width, cms_data.depth, cms_data.count, cms_data.counters.data(),
-                     cms_data.counters.size(), CompactObj::memory_resource());
+        CMS temp_cms(cms_data.width, cms_data.depth, CompactObj::memory_resource());
+        temp_cms.Load(cms_data.count, cms_data.counters.data());
 
         if (!dest_cms->MergeFrom(temp_cms, merge_args.weights[cms_data.src_index])) {
           write_result = OpStatus::INVALID_VALUE;
