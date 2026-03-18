@@ -836,7 +836,8 @@ void Connection::HandleRequests() {
       http_conn.ReleaseSocket();
     } else {  // non-http
       // ioloop_v2 not supported for TLS & redis connections yet.
-      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
+      ioloop_v2_ =
+          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
 
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
