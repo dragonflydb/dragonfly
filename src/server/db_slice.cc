@@ -771,13 +771,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
-  PrimeKey co_key{key};
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();
 
   try {
-    it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
+    it = db.prime.InsertNew(key, PrimeValue{}, evp);
   } catch (bad_alloc& e) {
     LOG_EVERY_T(WARNING, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
                             << " reclaimed: " << reclaimed << " offset: " << memory_offset;

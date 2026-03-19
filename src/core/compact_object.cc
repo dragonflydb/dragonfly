@@ -1446,17 +1446,24 @@ size_t CompactObj::MallocUsed(bool slow) const {
   return 0;
 }
 
-bool CompactObj::operator==(const CompactObj& o) const {
+// TODO: we need this operator ONLY because we search in prime-table based on the ExpireKey
+// which is a reference to the CompactKey. Therefore operator== currently works
+// specifically for this particular use-case.
+// So once we remove the expire table, we can remove this operator too.
+// In addition - we MUST remove AsRef/IsRef api as well as it will break
+// once we start using SetTtl/ClearTtl methods. All in all, we will free up two additional bits.
+bool CompactKey::operator==(const CompactKey& o) const {
   DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
 
-  uint8_t m1 = encoding_;
-  uint8_t m2 = o.encoding_;
-  // TODO: Dangerous with dynamic encoding rules as equal values can have different encodings
-  if (m1 != m2)
+  // Cross-tag/encoding comparison: fall back to decoded string comparison for OBJ_STRING.
+  // This handles e.g. SDS_TTL_TAG vs ROBJ_TAG/inline/INT_TAG with same logical content.
+  if (taglen_ != o.taglen_ || encoding_ != o.encoding_) {
+    if (ObjType() == OBJ_STRING && o.ObjType() == OBJ_STRING) {
+      std::string tmp;
+      return *this == o.GetSlice(&tmp);
+    }
     return false;
-
-  if (taglen_ != o.taglen_)
-    return false;
+  }
 
   if (taglen_ == ROBJ_TAG)
     return u_.r_obj.Equal(o.u_.r_obj);
@@ -1467,9 +1474,8 @@ bool CompactObj::operator==(const CompactObj& o) const {
   if (taglen_ == SMALL_TAG)
     return u_.small_str.Equal(o.u_.small_str);
 
-  if (taglen_ == SDS_TTL_TAG) {
+  if (taglen_ == SDS_TTL_TAG)
     return u_.sds_ttl.view() == o.u_.sds_ttl.view();
-  }
 
   DCHECK(IsInline() && o.IsInline());
 
@@ -1790,6 +1796,8 @@ CompactObjType ObjTypeFromString(std::string_view sv) {
 }
 
 void CompactKey::SetTtl(int64_t abs_ms) {
+  DCHECK(!IsRef() && !IsExternal());
+
   // Already SDS_TTL_TAG — update TTL in place.
   if (taglen_ == SDS_TTL_TAG) {
     u_.sds_ttl.ttl_ms = abs_ms;
@@ -1829,6 +1837,7 @@ void CompactKey::SetTtl(int64_t abs_ms) {
 void CompactKey::ClearTtl() {
   if (taglen_ != SDS_TTL_TAG)
     return;
+  DCHECK(!IsRef() && !IsExternal());
 
   string decoded;
   GetString(&decoded);

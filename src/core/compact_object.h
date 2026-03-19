@@ -209,22 +209,6 @@ class CompactObj {
   uint64_t HashCode() const;
   static uint64_t HashCode(std::string_view str);
 
-  bool operator==(const CompactObj& o) const;
-
-  bool operator==(std::string_view sl) const;
-
-  bool operator!=(std::string_view sl) const {
-    return !(*this == sl);
-  }
-
-  friend bool operator!=(const CompactObj& lhs, const CompactObj& rhs) {
-    return !(lhs == rhs);
-  }
-
-  friend bool operator==(std::string_view sl, const CompactObj& o) {
-    return o.operator==(sl);
-  }
-
   bool HasFlag() const {
     return mask_bits_.mc_flag;
   }
@@ -562,16 +546,6 @@ class CompactObj {
   uint8_t encoding_ : 2;  // Encoding of string values
 };
 
-inline bool CompactObj::operator==(std::string_view sv) const {
-  if (encoding_)
-    return CmpEncoded(sv);
-
-  if (IsInline()) {
-    return std::string_view{u_.inline_str, taglen_} == sv;
-  }
-  return CmpNonInline(sv);
-}
-
 struct CompactKey : public CompactObj {
   CompactKey() : CompactObj(true) {
   }
@@ -606,7 +580,38 @@ struct CompactKey : public CompactObj {
 
   // Read the embedded TTL. Precondition: HasExpire() is true and tag is SDS_TTL_TAG.
   int64_t GetTtl() const;
+
+  CompactKey& operator=(std::string_view sv) noexcept {
+    SetString(sv);
+    return *this;
+  }
+
+  bool operator==(const CompactKey& o) const;
+
+  bool operator==(std::string_view sl) const;
+
+  bool operator!=(std::string_view sl) const {
+    return !(*this == sl);
+  }
+
+  friend bool operator!=(const CompactKey& lhs, const CompactKey& rhs) {
+    return !(lhs == rhs);
+  }
+
+  friend bool operator==(std::string_view sl, const CompactKey& o) {
+    return o.operator==(sl);
+  }
 };
+
+inline bool CompactKey::operator==(std::string_view sv) const {
+  if (encoding_)
+    return CmpEncoded(sv);
+
+  if (IsInline()) {
+    return std::string_view{u_.inline_str, taglen_} == sv;
+  }
+  return CmpNonInline(sv);
+}
 
 struct CompactValue : public CompactObj {
   CompactValue() : CompactObj(false) {

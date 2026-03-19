@@ -3,6 +3,7 @@
 //
 #include "core/compact_object.h"
 
+#include <absl/functional/overload.h>
 #include <absl/strings/str_cat.h>
 #include <gtest/gtest.h>
 #include <mimalloc.h>
@@ -118,6 +119,7 @@ class CompactObjectTest : public ::testing::Test {
   }
 
   CompactValue cobj_;
+  CompactKey ckey_;
   string tmp_;
 };
 
@@ -260,7 +262,7 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactValue obj{s};
+  CompactKey obj{s};
 
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
@@ -282,12 +284,12 @@ TEST_F(CompactObjectTest, InlineAsciiEncoded) {
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cobj_.SetString("0");
-  EXPECT_EQ(0, cobj_.TryGetInt());
-  EXPECT_EQ(1, cobj_.Size());
-  EXPECT_EQ(cobj_, "0");
-  EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
-  EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
+  ckey_.SetString("0");
+  EXPECT_EQ(0, ckey_.TryGetInt());
+  EXPECT_EQ(1, ckey_.Size());
+  EXPECT_EQ(ckey_, "0");
+  EXPECT_EQ("0", ckey_.GetSlice(&tmp_));
+  EXPECT_EQ(OBJ_STRING, ckey_.ObjType());
 }
 
 TEST_F(CompactObjectTest, Expire) {
@@ -428,6 +430,27 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
   {
     CompactKey key("hello");
     key.SetTtl(5000);
+  }
+
+  // 11. Cross-tag operator== (SDS_TTL_TAG vs inline/INT_TAG).
+  {
+    CompactKey a("hello");
+    CompactKey b("hello");
+    b.SetTtl(999);
+    // b is SDS_TTL_TAG, a is inline — must compare equal as OBJ_STRING.
+    EXPECT_TRUE(a == b);
+    EXPECT_TRUE(b == a);
+
+    CompactKey c("42");
+    CompactKey d("42");
+    d.SetTtl(1);
+    EXPECT_TRUE(c == d);
+    EXPECT_TRUE(d == c);
+
+    // Different content must not compare equal.
+    CompactKey e("world");
+    e.SetTtl(1);
+    EXPECT_FALSE(a == e);
   }
 }
 
@@ -895,6 +918,7 @@ TEST_F(CompactObjectTest, Huffman) {
   HuffmanEncoder encoder;
   BuildEncoderAB(&encoder);
   string bindata = encoder.Export();
+
   for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
     ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
     for (unsigned i = 30; i < 2048; i += 10) {
@@ -914,7 +938,8 @@ TEST_F(CompactObjectTest, Huffman) {
       string actual;
       cobj.GetString(&actual);
       EXPECT_EQ(data, actual);
-      EXPECT_EQ(cobj, data);
+      visit(absl::Overload{[&](CompactKey& co) { EXPECT_EQ(co, data); }, [&](CompactValue& co) {}},
+            obj_backing);
     }
   }
 }
