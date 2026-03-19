@@ -300,6 +300,137 @@ TEST_F(CompactObjectTest, Expire) {
   EXPECT_TRUE(key.HasExpire());
 }
 
+TEST_F(CompactObjectTest, SdsTtlTag) {
+  // 1. Inline key + SetTtl
+  {
+    CompactKey key("hello");
+    ASSERT_TRUE(key.IsInline());
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(1000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(1000, key.GetTtl());
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_TRUE(key == string_view("hello"));
+    EXPECT_EQ(5, key.Size());
+    EXPECT_EQ(OBJ_STRING, key.ObjType());
+
+    string slice;
+    EXPECT_EQ("hello", key.GetSlice(&slice));
+    EXPECT_GT(key.MallocUsed(), 0u);
+  }
+
+  // 2. INT_TAG key + SetTtl
+  {
+    CompactKey key("42");
+    ASSERT_TRUE(key.TryGetInt().has_value());
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(2000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(2000, key.GetTtl());
+    EXPECT_TRUE(key == string_view("42"));
+    EXPECT_EQ(hash_before, key.HashCode());
+    // No longer INT_TAG — TryGetInt should return nullopt.
+    EXPECT_FALSE(key.TryGetInt().has_value());
+  }
+
+  // 3. SMALL_TAG key + SetTtl
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    CompactKey key(s);
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(3000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(3000, key.GetTtl());
+    EXPECT_TRUE(key == string_view(s));
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_EQ(s.size(), key.Size());
+  }
+
+  // 4. ROBJ_TAG key + SetTtl
+  {
+    string s(512, 'z');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = static_cast<char>(128 + (i % 128));
+    CompactKey key(s);
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(4000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(4000, key.GetTtl());
+    EXPECT_TRUE(key == string_view(s));
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_EQ(s.size(), key.Size());
+  }
+
+  // 5. TTL update in-place
+  {
+    CompactKey key("hello");
+    key.SetTtl(1000);
+    EXPECT_EQ(1000, key.GetTtl());
+
+    key.SetTtl(2000);
+    EXPECT_EQ(2000, key.GetTtl());
+    EXPECT_TRUE(key == string_view("hello"));
+  }
+
+  // 6. ClearTtl (inline recovery)
+  {
+    CompactKey key("hello");
+    key.SetTtl(1000);
+    EXPECT_TRUE(key.HasExpire());
+
+    key.ClearTtl();
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key.IsInline());
+    EXPECT_TRUE(key == string_view("hello"));
+  }
+
+  // 7. ClearTtl (INT recovery)
+  {
+    CompactKey key("42");
+    key.SetTtl(1000);
+    EXPECT_TRUE(key.HasExpire());
+
+    key.ClearTtl();
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key.TryGetInt().has_value());
+    EXPECT_EQ(42, key.TryGetInt().value());
+  }
+
+  // 8. ClearTtl (SMALL recovery)
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    CompactKey key(s);
+    key.SetTtl(1000);
+    key.ClearTtl();
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key == string_view(s));
+  }
+
+  // 9. Move semantics
+  {
+    CompactKey a("test");
+    a.SetTtl(100);
+    CompactKey b(std::move(a));
+    EXPECT_TRUE(b.HasExpire());
+    EXPECT_EQ(100, b.GetTtl());
+    EXPECT_TRUE(b == string_view("test"));
+  }
+
+  // 10. Free/destructor — just verify no leaks (TearDown catches them).
+  {
+    CompactKey key("hello");
+    key.SetTtl(5000);
+  }
+}
+
 TEST_F(CompactObjectTest, MediumString) {
   string tmp(511, 'b');
 
