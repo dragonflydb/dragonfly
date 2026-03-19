@@ -415,6 +415,7 @@ void TOPK::Deserialize(const SerializedData& data) {
   DCHECK_EQ(data.k, k_);
   DCHECK_EQ(data.width, width_);
   DCHECK_EQ(data.depth, depth_);
+  DCHECK_EQ(data.decay, decay_);
 
   // Clear existing data
   min_heap_.clear();

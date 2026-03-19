@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 
 #include <cmath>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -723,6 +724,18 @@ TEST(TOPKDeathTest, DeserializeDimensionMismatchCrashes) {
   bad.decay = 0.9;
   bad.counters.resize(500, 0);
   EXPECT_DEBUG_DEATH(topk.Deserialize(bad), "data.k == k_");
+}
+
+// Deserializing data with a mismatched decay violates DCHECK_EQ(data.decay, decay_).
+TEST(TOPKDeathTest, DeserializeDecayMismatchCrashes) {
+  TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.9);
+  TOPK::SerializedData bad;
+  bad.k = 5;
+  bad.width = 100;
+  bad.depth = 5;
+  bad.decay = 0.5;  // Mismatch: object was constructed with decay=0.9.
+  bad.counters.resize(500, 0);
+  EXPECT_DEBUG_DEATH(topk.Deserialize(bad), "data.decay == decay_");
 }
 #endif
 

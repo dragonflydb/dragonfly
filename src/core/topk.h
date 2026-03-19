@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -49,6 +50,12 @@ class TOPKTest;
 // design safely overestimates counts (which is acceptable for Top-K bounds)
 // while simplifying PMR memory layout and RDB serialization.
 //
+// TODO: Full PMR Integration for String Ownership
+// Currently, min_heap_ and counters_ use the provided memory_resource, ensuring the
+// dominant allocations are tracked. However, the std::string keys inside HeapItem
+// and the absl::flat_hash_map use the default heap.
+// Future optimization: Wrap flat_hash_map with a PMR allocator and upgrade
+// HeapItem to use PMR_NS::string with proper uses_allocator construction.
 class TOPK {
   friend class TOPKTest;
 
