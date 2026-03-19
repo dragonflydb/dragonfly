@@ -849,8 +849,19 @@ void EngineShard::RetireExpiredAndEvict() {
 
     db_cntx.db_index = i;
     auto [pt, _unused_expt] = db_slice.GetTables(i);
-    if (pt->size() > 0) {
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+    uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
+    if (expire_count > 0) {
+      // Scale traversal count to compensate for TTL key dilution in the prime table.
+      // Since we now scan the prime table (not a dedicated expire table), most entries
+      // may not have TTLs. We need more bucket traversals to check the same number of
+      // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
+      unsigned db_ttl_delete_target = ttl_delete_target;
+
+      if (pt->size() >= expire_count * 2) {
+        unsigned ratio = std::min(pt->size() / expire_count, 7UL);
+        db_ttl_delete_target = ttl_delete_target * ratio;
+      }
+      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
       deleted_bytes += stats.deleted_bytes;
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));

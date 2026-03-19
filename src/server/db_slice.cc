@@ -1377,22 +1377,24 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   std::string stash;
 
+  unsigned checked = 0;
   auto cb = [&](PrimeTable::iterator it) {
+    result.traversed++;
+
     if (!it->first.HasExpire())
       return;
+
+    checked++;
 
     string_view key = it->first.GetSlice(&stash);
     if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
       return;
 
-    result.traversed++;
     int64_t ttl = it->first.GetExpireTime() - cntx.time_now_ms;
     if (ttl <= 0) {
       result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
       ExpireIfNeeded(cntx, it);
       ++result.deleted;
-    } else {
-      result.survivor_ttl_sum += ttl;
     }
   };
 
@@ -1407,8 +1409,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
   }
 
-  // continue traversing only if we had strong deletion rate based on the first sample.
-  if (result.deleted * 4 > result.traversed) {
+  // Continue traversing if we had a strong deletion rate among checked TTL keys.
+  if (result.deleted * 4 > checked) {
     for (; i < count && quota_remains(); ++i) {
       db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
     }
