@@ -66,6 +66,9 @@ std::string* StringDecoder::Write() {
   return value_.GetMutable();
 }
 
+SerializedMapDecoder::~SerializedMapDecoder() {
+}
+
 std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
   return std::make_unique<SerializedMapDecoder>();
 }

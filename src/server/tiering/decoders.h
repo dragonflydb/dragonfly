@@ -78,6 +78,8 @@ struct StringDecoder : public Decoder {
 
 // Decodes SerializedMaps
 struct SerializedMapDecoder : public Decoder {
+  ~SerializedMapDecoder();  // because of forward declared types
+
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;

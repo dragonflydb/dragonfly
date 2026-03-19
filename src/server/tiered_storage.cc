@@ -210,19 +210,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-<<<<<<< HEAD
-<<<<<<< HEAD
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
-=======
-<<<<<<< HEAD
-      CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
-=======
-      CompactObj::ExternalRep rep = EstimateSerializedSize(*pv)->second;
->>>>>>> 77a24f54 (feat(tiering): Serialize hashes)
->>>>>>> 8e41a4d3 (feat(tiering): Serialize hashes)
-=======
-      CompactObj::ExternalRep rep = DetermineSerializationParams(*pv).second;
->>>>>>> b76c9a44 (more than POc)
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);

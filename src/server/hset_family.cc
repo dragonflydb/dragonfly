@@ -258,7 +258,8 @@ template <typename F> auto ExecuteW(Transaction* tx, F&& f) {
         hw.Launder(*res);
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{}, std::move(read_cb));
+      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
+                                 std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -502,7 +503,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
       fut.Resolve(created);
     };
 
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv, D{},
+    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
                                           std::move(read_cb));
     return CbVariant<uint32_t>{std::move(fut)};
   }
@@ -562,13 +563,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-<<<<<<< HEAD
     StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
-=======
-    auto bp = ts->TryStash(op_args.db_cntx.db_index, key, &pv, true);
-    if (bp && op_sp.backpressure)
-      *op_sp.backpressure = std::move(*bp);
->>>>>>> b76c9a44 (more than POc)
   }
 
   return CbVariant<uint32_t>{created};
@@ -672,12 +667,8 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
-<<<<<<< HEAD
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-=======
-  auto delayed_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
->>>>>>> b76c9a44 (more than POc)
   if (result) {
     rb->SendLong(*result);
   } else {
@@ -706,11 +697,7 @@ void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
       deleted += hw.Erase(s);
     return deleted;
   };
-<<<<<<< HEAD
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb)));
-=======
-  HSetReplies{cmd_cntx->rb()}.Send(ExecuteW(cmd_cntx->tx, std::move(cb)));
->>>>>>> b76c9a44 (more than POc)
+  HSetReplies{cmd_cntx}.Send(ExecuteW(cmd_cntx->tx(), std::move(cb)));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1020,15 +1007,11 @@ void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
     return OpSet(t->GetOpArgs(shard), key, args, params);
   };
 
-<<<<<<< HEAD
-  OpResult<uint32_t> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-=======
-  auto delayed_result = cmd_cntx->tx->ScheduleSingleHopT(std::move(cb));
+  auto delayed_result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   OpResult<uint32_t> result = Unwrap(std::move(delayed_result));
 
   if (tiered_backpressure)
     tiered_backpressure->GetFor(10ms);
->>>>>>> b76c9a44 (more than POc)
 
   if (result && cmd == "HSET") {
     rb->SendLong(*result);
@@ -1043,11 +1026,7 @@ void CmdHSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args.subspan(1), OpSetParams{.skip_if_exists = true});
   };
-<<<<<<< HEAD
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
-=======
-  HSetReplies{cmd_cntx->rb()}.Send(Unwrap(cmd_cntx->tx->ScheduleSingleHopT(cb)));
->>>>>>> b76c9a44 (more than POc)
+  HSetReplies{cmd_cntx}.Send(Unwrap(cmd_cntx->tx()->ScheduleSingleHopT(cb)));
 }
 
 void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {

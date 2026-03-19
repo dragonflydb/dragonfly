@@ -561,7 +561,7 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
   // Start offloading
   SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
   UpdateFromFlags();
-  auto wait_offloaded = [=] {
+  auto wait_offloaded = [this] {
     auto metrics = GetMetrics();
     size_t sum =
         metrics.db_stats[0].tiered_entries + metrics.tiered_stats.small_bins_filling_entries_cnt;
