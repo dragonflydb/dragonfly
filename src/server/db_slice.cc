@@ -771,13 +771,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
-  PrimeKey co_key{key};
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();
 
   try {
-    it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
+    it = db.prime.InsertNew(key, PrimeValue{}, evp);
   } catch (bad_alloc& e) {
     LOG_EVERY_T(WARNING, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
                             << " reclaimed: " << reclaimed << " offset: " << memory_offset;
@@ -1044,19 +1043,29 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, const Iterator& it, uint64_t at) {
   return false;
 }
 
-void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
+bool DbSlice::SetMCFlag(DbIndex db_ind, const PrimeKey& key, uint32_t flag) {
+  DCHECK(!key.IsRef());
+
   auto& db = *db_arr_[db_ind];
-  if (flag == 0) {
-    db.mcflag.Erase(key);
-  } else {
-    auto [it, _] = db.mcflag.Insert(std::move(key), flag);
+  string scratch;
+  if (flag == 0 && !db.mcflag.Empty()) {
+    auto mcit = db.mcflag.Find(key.GetSlice(&scratch));
+    if (mcit != db.mcflag.end()) {
+      db.mcflag.Erase(mcit);
+      return true;
+    }
+  } else if (flag != 0) {
+    auto [it, _] = db.mcflag.Insert(key.GetSlice(&scratch), flag);
     it->second = flag;
+    return true;
   }
+  return false;
 }
 
 uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   auto& db = *db_arr_[db_ind];
-  auto it = db.mcflag.Find(key);
+  string scratch;
+  auto it = db.mcflag.Find(key.GetSlice(&scratch));
   if (it.is_done()) {
     LOG(DFATAL) << "Internal error, inconsistent state, mcflag should be present but not found "
                 << key.ToString();
@@ -1844,7 +1853,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   }
 
   if (del_it->second.HasFlag()) {
-    if (table->mcflag.Erase(del_it->first) == 0) {
+    if (!SetMCFlag(table->index, del_it->first, 0)) {
       LOG(DFATAL) << "Internal error, inconsistent state, mcflag should be present but not found "
                   << del_it->first.ToString();
     }

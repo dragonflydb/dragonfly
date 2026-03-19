@@ -2703,7 +2703,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   updater.it->first.SetSticky(item->is_sticky);
   if (item->has_mc_flags) {
     updater.it->second.SetFlag(true);
-    db_slice->SetMCFlag(db_cntx.db_index, updater.it->first.AsRef(), item->mc_flags);
+    db_slice->SetMCFlag(db_cntx.db_index, updater.it->first, item->mc_flags);
   }
 
   if (!override_existing_keys_ && !updater.is_new) {

@@ -9,6 +9,7 @@
 
 #include <variant>
 
+#include "base/function2.hpp"
 #include "server/tiering/common.h"
 #include "server/tiering/decoders.h"
 #include "server/tiering/disk_storage.h"
@@ -62,7 +63,7 @@ class OpManager {
   }
 
   // Stash value to be offloaded. It is opaque to OpManager.
-  void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::UringBuf buf);
+  void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::RegisteredSlice buf);
 
   // PrepareStash + Stash via function
   std::error_code PrepareAndStash(

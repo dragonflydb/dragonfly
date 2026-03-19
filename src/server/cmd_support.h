@@ -6,6 +6,7 @@
 
 #include <absl/functional/function_ref.h>
 
+#include <concepts>
 #include <coroutine>
 #include <variant>
 
@@ -18,125 +19,37 @@
 
 namespace dfly::cmd {
 
-// Pointer to blocker to wait for before replying
-using BlockResult = util::fb2::EmbeddedBlockingCounter*;
-
-// No execution was performed, the command is ready to reply
-struct JustReplySentinel {};
-
-// Request to perform a single hop
+// Awaitable sentinel for the single hop of a transaction. Used instead of the
+// actual awaitable to allow Promise to inject context implicitly and make command code simple.
 using SingleHopSentinel = Transaction::RunnableType;
-SingleHopSentinel SingleHop(auto&& f) {
+
+// Awaitable in command context for the single hop of a transaction with return value
+template <typename RT> using SingleHopSentinelT = absl::FunctionRef<RT(Transaction*, EngineShard*)>;
+
+// Perform single hop. Returns awaitable that resolves to resulting OpStatus
+SingleHopSentinel SingleHop(const auto& f) {
   return f;
 }
 
-template <typename RT> using SingleHopSentinelT = absl::FunctionRef<RT(Transaction*, EngineShard*)>;
-
-auto SingleHopT(auto&& f) -> SingleHopSentinelT<decltype(f(nullptr, nullptr))> {
-  return {f};
+// Perform single hop. Returns awaitable that resolves to return value.
+auto SingleHopT(const auto& f) -> SingleHopSentinelT<decltype(f(nullptr, nullptr))> {
+  return f;
 }
 
-// Handler for dispatching hops, must be part of a context
-struct HopCoordinator {
-  // Perform single hop. Callback must be kept alive until end!
-  BlockResult SingleHop(CommandContext* cntx, Transaction::RunnableType cb);
-
-  boost::intrusive_ptr<Transaction> tx_keepalive_;
-};
-
-// Base interface for async context
-struct AsyncContextInterface {
-  virtual ~AsyncContextInterface() = default;
-  using PrepareResult = std::variant<facade::ErrorReply, JustReplySentinel, BlockResult>;
-
-  // Prepare command. Must return either an error, JustReplySentinel (immediate reply),
-  // or BlockResult (scheduled operation)
-  virtual PrepareResult Prepare(ArgSlice args, CommandContext* cntx) = 0;
-
-  // Reply after scheduled operation was performed
-  virtual void Reply(facade::SinkReplyBuilder*) = 0;
-
-  static void RunSync(AsyncContextInterface* async_cntx, ArgSlice, CommandContext*);
-  static void RunAsync(std::unique_ptr<AsyncContextInterface> async_cntx, ArgSlice,
-                       CommandContext*);
-};
-
-// Basic implementation of AsyncContext providing limited interface for single hop commands.
-// Uses CRTP with `Derived` template to provide type-dependent helper functions
-template <typename Derived>
-struct SimpleContext : public AsyncContextInterface, private HopCoordinator {
-  // Automatic runner function that is async agnostic
-  static void Run(ArgSlice args, CommandContext* cmd_cntx) {
-    using ACI = AsyncContextInterface;
-    static_assert(std::is_base_of_v<ACI, Derived>);
-
-    if (cmd_cntx->IsDeferredReply()) {
-      auto* async_cntx = new Derived{};
-      async_cntx->Init(cmd_cntx);
-      ACI::RunAsync(std::unique_ptr<AsyncContextInterface>{async_cntx}, args, cmd_cntx);
-    } else {
-      Derived async_cntx{};
-      async_cntx.Init(cmd_cntx);
-      ACI::RunSync(&async_cntx, args, cmd_cntx);
-    }
-  }
-
-  // Wrapper function to shard callback to call different signatures
-  OpStatus operator()(Transaction* t, EngineShard* es) const {
-    const auto& c = *static_cast<const Derived*>(this);
-    return c(t->GetShardArgs(es->shard_id()), t->GetOpArgs(es));
-  }
-
- private:
-  void Init(CommandContext* cmd_cntx) {
-    this->cmd_cntx = cmd_cntx;
-  }
-
- protected:
-  // Default prepare implementation that schedules a single hop
-  PrepareResult Prepare(ArgSlice args, CommandContext* cntx) override {
-    return SingleHop();
-  }
-
-  // Run single hop. Restricted to member operator call to ensure lifetime safety
-  BlockResult SingleHop() {
-    return HopCoordinator::SingleHop(cmd_cntx, *this);
-  }
-
-  // Don't run transaction, just Reply()
-  JustReplySentinel JustReply() {
-    return JustReplySentinel{};
-  }
-
-  CommandContext* cmd_cntx;
-};
-
-#define ASYNC_CMD(Name) struct Cmd##Name : public ::dfly::cmd::SimpleContext<Cmd##Name>
-
-// Return type of async command
-struct CmdR {
-  struct Coro;
-  using promise_type = Coro;
-};
-
-static constexpr CmdR kAborted{};
-
-// Implements of co_await for a single hop callback
-struct SingleHopWaiter : HopCoordinator {
-  SingleHopWaiter(CommandContext* cntx, Transaction::RunnableType callback)
-      : HopCoordinator{}, cmd_cntx{cntx}, callback{callback} {
-  }
-
+// Awaitable object for waiting for the single hop of a transaction to finish.
+// Avoids coroutine suspending in synchronous mode, doing a fiber suspend instead.
+// In asynchronous mode it registers the promise / blocker on the context.
+struct SingleHopWaiter {
   bool await_ready() noexcept;
   void await_suspend(std::coroutine_handle<> handle) const noexcept;
   facade::OpStatus await_resume() const noexcept;
 
   CommandContext* cmd_cntx;
-  BlockResult blocker = nullptr;
   Transaction::RunnableType callback;
+  boost::intrusive_ptr<Transaction> tx_keepalive_ = nullptr;
 };
 
-// Implements of co_await for a single hop callback with returing OpResult<T>
+// Extension of SingleHopWaiter capturing the return value of the callback
 template <typename RT> struct SingleHopWaiterT : public SingleHopWaiter {
   static_assert(std::is_base_of_v<facade::OpResultBase, RT>);
 
@@ -158,7 +71,15 @@ template <typename RT> struct SingleHopWaiterT : public SingleHopWaiter {
   mutable RT result;
 };
 
-// Underlying driver (promise) of async
+// Return type of async command. No actual use as of now
+struct CmdR {
+  struct Coro;
+  using promise_type = Coro;
+};
+
+constexpr CmdR kAborted = {};
+
+// Underlying driver (promise) of coroutine that defines its context
 struct CmdR::Coro {
   // Coroutine created of a top level command
   Coro(facade::CmdArgList arg, CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
@@ -168,6 +89,7 @@ struct CmdR::Coro {
   template <typename... Ts> Coro(CommandContext* cmd_cntx, const Ts&... ts) : cmd_cntx{cmd_cntx} {
   }
 
+  // Use it waiter directly cases when it needs to stay in scope to keep the transaction alive
   auto& await_transform(SingleHopWaiter& waiter) const {
     return waiter;
   }
