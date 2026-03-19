@@ -199,7 +199,7 @@ size_t TOPK::GetCounterIndex(std::string_view item, uint32_t row) const {
   return idx;
 }
 
-uint32_t TOPK::GetMinCount(std::string_view item) const {
+uint32_t TOPK::Count(std::string_view item) const {
   uint32_t min_count = std::numeric_limits<uint32_t>::max();
 
   for (uint32_t row = 0; row < depth_; ++row) {
@@ -211,6 +211,8 @@ uint32_t TOPK::GetMinCount(std::string_view item) const {
 }
 
 std::optional<std::string> TOPK::IncrementInternal(std::string_view item, uint32_t increment) {
+  uint32_t min_count = std::numeric_limits<uint32_t>::max();
+
   // Update counters using HeavyKeeper logic
   for (uint32_t row = 0; row < depth_; ++row) {
     size_t idx = GetCounterIndex(item, row);
@@ -226,11 +228,11 @@ std::optional<std::string> TOPK::IncrementInternal(std::string_view item, uint32
           std::min(static_cast<uint64_t>(counters_[idx]) + increment,
                    static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())));
     }
-  }
 
-  // Count-Min Sketch property: The minimum counter across all rows is the
-  // most accurate, as it has suffered the fewest hash collisions.
-  uint32_t min_count = GetMinCount(item);
+    // Count-Min Sketch property: The minimum counter across all rows is the
+    // most accurate, as it has suffered the fewest hash collisions.
+    min_count = std::min(min_count, counters_[idx]);
+  }
 
   return UpdateHeap(item, min_count);
 }
@@ -262,8 +264,11 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
 }
 
 std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
-  // Fast path: O(K) cache-friendly linear scan over contiguous memory.
-  // For small K, this is faster than paying the overhead of a hash map lookup.
+  // Fast path: O(K) linear scan.
+  // For small K, this avoids hash map overhead. Short keys benefit from SSO
+  // (Small String Optimization), keeping memory contiguous and cache-friendly.
+  // TODO: Benchmark to find the crossover point where larger K OR long strings (SSO not applicable)
+  // justify re-introducing a hash map.
   for (size_t i = 0; i < min_heap_.size(); ++i) {
     if (min_heap_[i].key == item) {
       uint32_t old_count = min_heap_[i].count;

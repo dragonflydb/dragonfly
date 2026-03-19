@@ -111,9 +111,7 @@ class TOPK {
 
   // Estimates the frequency count for an item using the underlying sketch.
   // Returns the minimum counter value across all hash rows (Count-Min Sketch estimate).
-  [[nodiscard]] uint32_t Count(std::string_view item) const {
-    return GetMinCount(item);
-  }
+  [[nodiscard]] uint32_t Count(std::string_view item) const;
 
   // Retrieves the complete list of current Top-K high-frequency items.
   //
@@ -187,9 +185,6 @@ class TOPK {
 
   // Exponential decay logic
   [[nodiscard]] bool ShouldDecay(uint32_t current_count) const;
-
-  // Get the minimum count for an item across all hash table rows
-  [[nodiscard]] uint32_t GetMinCount(std::string_view item) const;
 
   // Updates the min-heap with the new count for the given item.
   // Returns the evicted item's key if the heap is at capacity and a new item displaces an existing
