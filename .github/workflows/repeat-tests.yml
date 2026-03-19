@@ -40,6 +40,14 @@ on:
         required: false
         type: string
         default: ""
+      build_type:
+        description: "Build type: Debug or Release"
+        required: false
+        type: choice
+        options:
+          - Debug
+          - Release
+        default: "Debug"
 
 jobs:
   build:
@@ -47,7 +55,7 @@ jobs:
       matrix:
         container: ["ubuntu-dev:20-gcc14"]
         proactor: [Uring]
-        build-type: [Debug]
+        build-type: ["${{ inputs.build_type || 'Debug' }}"]
         runner: [ubuntu-latest]
 
     runs-on: ${{ matrix.runner }}
