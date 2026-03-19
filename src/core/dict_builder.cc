@@ -173,11 +173,10 @@ double EstimateCompressibility(absl::Span<const std::pair<const uint8_t*, size_t
   }
 
   if (total_dmers == 0) {
-    return 0.0;
+    return 1.0;  // No d-mers - we consider it incompressible
   }
 
   double estimate = EstimateHllCardinality(registers.get());
-
   double ratio = estimate / static_cast<double>(total_dmers);
   return std::min(ratio, 1.0);
 }
