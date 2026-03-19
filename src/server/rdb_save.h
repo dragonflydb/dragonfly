@@ -279,6 +279,10 @@ class RdbSerializer : public RdbSerializerBase {
   size_t GetTempBufferSize() const override;
   std::error_code SendEofAndChecksum();
 
+  void SetTagEntries(bool tag_entries) {
+    send_tagged_entries_ = tag_entries;
+  }
+
  private:
   // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
@@ -303,6 +307,7 @@ class RdbSerializer : public RdbSerializerBase {
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
+  bool send_tagged_entries_ = false;
 };
 
 }  // namespace dfly

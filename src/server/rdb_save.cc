@@ -299,6 +299,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
       absl::little_endian::Store32(buf + buf_size, mc_flags);
       buf_size += 4;
     }
+
     if (auto ec = WriteRaw(Bytes{buf, buf_size}); ec)
       return make_unexpected(ec);
   }
