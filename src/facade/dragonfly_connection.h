@@ -424,7 +424,9 @@ class Connection : public util::Connection {
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
-  io::IoBuf io_buf_;  // used in io loop and parsers
+  io::IoBuf
+      io_buf_;  // parser input: fed exclusively from disk pops (or socket_buf_ when disk empty)
+  io::IoBuf socket_buf_;  // recv target: new TCP bytes always land here
   std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
