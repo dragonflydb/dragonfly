@@ -14,6 +14,7 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
+#include "facade/disk_backed_queue.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
@@ -336,6 +337,12 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
+  // Lazily initialises disk_queue_. Returns false on error and disk_queue_ stays null.
+  bool InitDiskQueueIfNeeded();
+
+  void HandleSocketBackpressure(size_t offload_threshold);
+  void DrainDiskQueue(size_t offload_threshold);
+
   void IncreaseConnStats();
   void DecreaseConnStats();
   void BreakOnce(uint32_t ev_mask);
@@ -406,6 +413,12 @@ class Connection : public util::Connection {
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
+
+  // Disk-backed offload queue for IoLoopV2 pipeline backpressure.
+  // Lazily created when the parsed command queue exceeds the offload threshold.
+  std::unique_ptr<DiskBackedQueue> disk_queue_;
+  bool disk_push_in_flight_ = false;
+  bool disk_pop_in_flight_ = false;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
