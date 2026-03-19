@@ -96,7 +96,7 @@ add_library(dragonfly_lib
             ${DF_CLUSTER_SRCS}
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc
-            sharding.cc cmd_support.cc)
+            sharding.cc cmd_support.cc tagged_chunk.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
@@ -160,6 +160,7 @@ helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(tagged_chunk_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test

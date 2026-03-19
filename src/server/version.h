@@ -42,8 +42,10 @@ enum class DflyVersion {
   // - hnsw-index-metadata AUX field
   VER6,
 
+  // Sends tagged chunks to replicas to differentiate between journal and baseline data.
+  VER7,
   // Always points to the latest version
-  CURRENT_VER = VER6,
+  CURRENT_VER = VER7,
 };
 
 }  // namespace dfly
