@@ -468,8 +468,8 @@ class CompactObj {
   static_assert(sizeof(ExternalPtr) == 16);
 
   struct SdsTtlString {
-    char* sds_ptr;   // SDS string (length via sdslen)
-    int64_t ttl_ms;  // absolute expiry in ms
+    char* sds_ptr;    // SDS string (length via sdslen)
+    uint64_t exp_ms;  // absolute expiry time in ms
 
     std::string_view view() const;
   } __attribute__((packed));
@@ -572,14 +572,16 @@ struct CompactKey : public CompactObj {
     mask_bits_.expire = e;
   }
 
-  // Embed TTL directly in the key by converting to SDS_TTL_TAG.
-  void SetTtl(int64_t abs_ms);
+  // Embed expire time directly in the key by converting to SDS_TTL_TAG.
+  void SetExpireTime(uint64_t abs_ms);
 
-  // Remove embedded TTL and convert back to optimal string form.
-  void ClearTtl();
+  // Remove embedded expire time and convert back to optimal string form.
+  bool ClearExpireTime();
 
-  // Read the embedded TTL. Precondition: HasExpire() is true and tag is SDS_TTL_TAG.
-  int64_t GetTtl() const;
+  // Read the embedded expire time.
+  // Returns 0 if there is no embedded expire time, otherwise
+  // returns the absolute expire time in ms.
+  uint64_t GetExpireTime() const;
 
   CompactKey& operator=(std::string_view sv) noexcept {
     SetString(sv);

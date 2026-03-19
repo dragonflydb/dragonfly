@@ -898,8 +898,9 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   it_upd->post_updater.ReduceHeapUsage();
 
   // Update flags
+  // TODO: avoid calling SetMCFlag if flags are not changed
   prime_value.SetFlag(params.memcache_flags != 0);
-  db_slice.SetMCFlag(op_args_.db_cntx.db_index, key.AsRef(), params.memcache_flags);
+  db_slice.SetMCFlag(op_args_.db_cntx.db_index, key, params.memcache_flags);
 
   // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
   RemoveKeyFromIndexesIfNeeded(it_upd->it.key(), op_args_.db_cntx, prime_value, shard);
@@ -930,7 +931,7 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
 
   if (params.memcache_flags) {
     it->second.SetFlag(true);
-    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
+    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first, params.memcache_flags);
   }
 
   if (params.flags & SET_STICK) {
