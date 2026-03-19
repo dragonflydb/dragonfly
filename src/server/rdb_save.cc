@@ -23,6 +23,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cms.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
 #include "core/search/hnsw_index.h"
@@ -202,18 +203,20 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       return RDB_TYPE_JSON;
     case OBJ_SBF:
       return absl::GetFlag(FLAGS_rdb_sbf_chunked) ? RDB_TYPE_SBF2 : RDB_TYPE_SBF;
+    case OBJ_CMS:
+      return RDB_TYPE_CMS;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
 }
 
-SerializerBase::SerializerBase(CompressionMode compression_mode)
+RdbSerializerBase::RdbSerializerBase(CompressionMode compression_mode)
     : compression_mode_(compression_mode), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
 
 RdbSerializer::RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun,
                              size_t flush_threshold)
-    : SerializerBase(compression_mode),
+    : RdbSerializerBase(compression_mode),
       consume_fun_(std::move(consume_fun)),
       flush_threshold_(flush_threshold) {
 }
@@ -353,6 +356,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_SBF) {
     return SaveSBFObject(pv);
+  }
+
+  if (obj_type == OBJ_CMS) {
+    return SaveCMSObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -660,6 +667,27 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
   return {};
 }
 
+std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
+  CMS* cms = pv.GetCMS();
+
+  RETURN_ON_ERR(SaveLen(cms->width()));
+  RETURN_ON_ERR(SaveLen(cms->depth()));
+  RETURN_ON_ERR(SaveLen(cms->total_count()));
+
+  size_t num_counters = cms->NumCounters();
+  const int64_t* data = cms->Data();
+
+  // Serialize counters as little-endian 64-bit values
+  std::vector<uint64_t> buf(num_counters);
+  for (size_t i = 0; i < num_counters; ++i) {
+    absl::little_endian::Store64(&buf[i], static_cast<uint64_t>(data[i]));
+  }
+  RETURN_ON_ERR(
+      WriteRaw(Bytes{reinterpret_cast<const uint8_t*>(buf.data()), buf.size() * sizeof(uint64_t)}));
+
+  return {};
+}
+
 /* Save a long long value as either an encoded string or a string. */
 error_code RdbSerializer::SaveLongLongAsString(int64_t value) {
   uint8_t buf[32];
@@ -813,7 +841,7 @@ error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
   return WriteRaw(Bytes{tmp_buf.data(), total_size});
 }
 
-error_code SerializerBase::SendFullSyncCut() {
+error_code RdbSerializerBase::SendFullSyncCut() {
   VLOG(1) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
@@ -825,19 +853,19 @@ error_code SerializerBase::SendFullSyncCut() {
   return WriteRaw(buf);
 }
 
-std::error_code SerializerBase::WriteOpcode(uint8_t opcode) {
+std::error_code RdbSerializerBase::WriteOpcode(uint8_t opcode) {
   return WriteRaw(::io::Bytes{&opcode, 1});
 }
 
-size_t SerializerBase::GetBufferCapacity() const {
+size_t RdbSerializerBase::GetBufferCapacity() const {
   return mem_buf_.Capacity();
 }
 
-size_t SerializerBase::GetTempBufferSize() const {
+size_t RdbSerializerBase::GetTempBufferSize() const {
   return tmp_buf_.size();
 }
 
-error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
+error_code RdbSerializerBase::WriteRaw(const io::Bytes& buf) {
   mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
   memcpy(dest.data(), buf.data(), buf.size());
@@ -845,7 +873,7 @@ error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-string SerializerBase::Flush(SerializerBase::FlushState flush_state) {
+string RdbSerializerBase::Flush(RdbSerializerBase::FlushState flush_state) {
   auto bytes = PrepareFlush(flush_state);
   if (bytes.empty())
     return {};
@@ -864,7 +892,7 @@ string SerializerBase::Flush(SerializerBase::FlushState flush_state) {
 }
 
 string RdbSerializer::Flush(FlushState flush_state) {
-  string res = SerializerBase::Flush(flush_state);
+  string res = RdbSerializerBase::Flush(flush_state);
 
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
@@ -909,8 +937,8 @@ void AppendFooter(bool ignore_crc, string* dest) {
 }
 }  // namespace
 
-string SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
-                                 bool ignore_crc) {
+string RdbSerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
+                                    bool ignore_crc) {
   CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
   if (serializer_used_compression_mode != CompressionMode::NONE) {
     serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
@@ -926,7 +954,7 @@ string SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& ob
   CHECK(!ec);
   ec = serializer->SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  string res = serializer->Flush(SerializerBase::FlushState::kFlushMidEntry);
+  string res = serializer->Flush(RdbSerializerBase::FlushState::kFlushMidEntry);
   CHECK(!res.empty());             // make sure that fully was successful
   AppendFooter(ignore_crc, &res);  // version and crc
   CHECK_GT(res.size(), 10u);
@@ -935,16 +963,16 @@ string SerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& ob
   return res;
 }
 
-string SerializerBase::DumpValue(const PrimeValue& obj, bool ignore_crc) {
+string RdbSerializerBase::DumpValue(const PrimeValue& obj, bool ignore_crc) {
   RdbSerializer serializer(GetDefaultCompressionMode());
   return DumpValue(&serializer, obj, ignore_crc);
 }
 
-size_t SerializerBase::SerializedLen() const {
+size_t RdbSerializerBase::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-io::Bytes SerializerBase::PrepareFlush(SerializerBase::FlushState flush_state) {
+io::Bytes RdbSerializerBase::PrepareFlush(RdbSerializerBase::FlushState flush_state) {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
     return {};
@@ -963,7 +991,7 @@ io::Bytes SerializerBase::PrepareFlush(SerializerBase::FlushState flush_state) {
   return mem_buf_.InputBuffer();
 }
 
-error_code SerializerBase::WriteJournalEntry(std::string_view serialized_entry) {
+error_code RdbSerializerBase::WriteJournalEntry(std::string_view serialized_entry) {
   VLOG(2) << "WriteJournalEntry";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
@@ -971,7 +999,7 @@ error_code SerializerBase::WriteJournalEntry(std::string_view serialized_entry) 
   return error_code{};
 }
 
-error_code SerializerBase::SaveString(string_view val) {
+error_code RdbSerializerBase::SaveString(string_view val) {
   /* Try integer encoding */
   if (val.size() <= 11) {
     uint8_t buf[16];
@@ -1011,13 +1039,13 @@ error_code SerializerBase::SaveString(string_view val) {
   return error_code{};
 }
 
-error_code SerializerBase::SaveLen(size_t len) {
+error_code RdbSerializerBase::SaveLen(size_t len) {
   uint8_t buf[16];
   unsigned enclen = WritePackedUInt(len, buf);
   return WriteRaw(Bytes{buf, enclen});
 }
 
-error_code SerializerBase::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
+error_code RdbSerializerBase::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
   /* Data compressed! Let's save it on disk */
   uint8_t opcode = (RDB_ENCVAL << 6) | RDB_ENC_LZF;
   RETURN_ON_ERR(WriteOpcode(opcode));
@@ -1406,7 +1434,7 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
 
 error_code RdbSaver::Impl::FlushSerializer() {
   last_write_time_ns_ = absl::GetCurrentTimeNanos();
-  string blob = serializer()->Flush(SerializerBase::FlushState::kFlushMidEntry);
+  string blob = serializer()->Flush(RdbSerializerBase::FlushState::kFlushMidEntry);
   error_code ec;
   if (!blob.empty()) {
     ec = sink_->Write(io::Buffer(blob));
@@ -1718,7 +1746,7 @@ int64_t RdbSaver::GetLastWriteTime() const {
   return impl_->last_write_ts();
 }
 
-void SerializerBase::AllocateCompressorOnce() {
+void RdbSerializerBase::AllocateCompressorOnce() {
   if (compressor_impl_) {
     return;
   }
@@ -1731,7 +1759,7 @@ void SerializerBase::AllocateCompressorOnce() {
   }
 }
 
-void SerializerBase::CompressBlob() {
+void RdbSerializerBase::CompressBlob() {
   if (!compression_stats_) {
     compression_stats_.emplace(CompressionStats{});
   }
@@ -1791,10 +1819,10 @@ void SerializerBase::CompressBlob() {
 }
 
 size_t RdbSerializer::GetTempBufferSize() const {
-  return SerializerBase::GetTempBufferSize() + tmp_str_.size();
+  return RdbSerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
-void RdbSerializer::PushToConsumerIfNeeded(SerializerBase::FlushState flush_state) {
+void RdbSerializer::PushToConsumerIfNeeded(RdbSerializerBase::FlushState flush_state) {
   if (consume_fun_ && SerializedLen() > flush_threshold_) {
     string blob = Flush(flush_state);
     DCHECK(!blob.empty());  // SerializedLen() > 0.

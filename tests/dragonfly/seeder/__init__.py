@@ -272,6 +272,8 @@ class HnswSearchSeeder:
             "SCHEMA",
             "title",
             "TEXT",
+            "doc_id",
+            "TAG",
             "embedding",
             "VECTOR",
             "HNSW",
@@ -292,6 +294,7 @@ class HnswSearchSeeder:
                 f"{self.prefix}{i}",
                 mapping={
                     "title": f"Product {i}",
+                    "doc_id": str(i),
                     "embedding": emb.tobytes(),
                 },
             )
@@ -300,6 +303,45 @@ class HnswSearchSeeder:
 
     def stop(self):
         self._stop_event.set()
+
+    async def _search_knn(self, client, query_vec, k=5):
+        """Run a KNN search and return (total_count, set_of_doc_ids)."""
+        r = await client.execute_command(
+            "FT.SEARCH",
+            self.index_name,
+            "*=>[KNN {k} @embedding $vec]".format(k=k),
+            "PARAMS",
+            "2",
+            "vec",
+            query_vec,
+            "LIMIT",
+            "0",
+            str(k),
+        )
+        doc_ids = set(r[i] for i in range(1, len(r), 2))
+        return r[0], doc_ids
+
+    async def _search_knn_filtered(self, client, query_vec, doc_id, k=5):
+        """Run a filtered KNN search for a specific document by its doc_id TAG.
+
+        With a TAG filter, Dragonfly bypasses KNN approximate search and just
+        checks presence in the index, making this a reliable existence check.
+        """
+        doc_key = doc_id if isinstance(doc_id, str) else doc_id.decode()
+        doc_num = doc_key[len(self.prefix) :] if doc_key.startswith(self.prefix) else doc_key
+        r = await client.execute_command(
+            "FT.SEARCH",
+            self.index_name,
+            "@doc_id:{{{id}}}=>[KNN {k} @embedding $vec]".format(id=doc_num, k=k),
+            "PARAMS",
+            "2",
+            "vec",
+            query_vec,
+            "LIMIT",
+            "0",
+            str(k),
+        )
+        return r[0] > 0
 
     async def verify(self, *clients: aioredis.Redis, num_queries=10):
         if len(clients) < 2:
@@ -311,31 +353,53 @@ class HnswSearchSeeder:
                 sizes[0] == sizes[i]
             ), f"dbsize mismatch: client[0]={sizes[0]} vs client[{i}]={sizes[i]}"
 
-        # Verify HNSW search works and returns consistent results on all clients.
-        # For now we suppose that results should be 100% the same on all clients,
-        # in the future we can relax this assertion and check for some overlap in results instead,
-        # as HNSW is not deterministic and can return different results on different runs
-        for _ in range(num_queries):
+        # HNSW is approximate, so KNN results between master and replica may differ.
+        # For any document that appears on one side but not the other, we run a
+        # filtered KNN search using the doc_id TAG. With a filter, Dragonfly skips
+        # approximate KNN and just checks index presence, so this reliably verifies
+        # that the replica has indexed all documents.
+        k = 5
+
+        for q in range(num_queries):
             query_vec = self._make_embedding().tobytes()
             results = []
             for c in clients:
-                r = await c.execute_command(
-                    "FT.SEARCH",
-                    self.index_name,
-                    "*=>[KNN 5 @embedding $vec]",
-                    "PARAMS",
-                    "2",
-                    "vec",
-                    query_vec,
-                    "LIMIT",
-                    "0",
-                    "5",
-                )
-                doc_ids = sorted(r[i] for i in range(1, len(r), 2))
-                results.append((r[0], doc_ids))
+                total, doc_ids = await self._search_knn(c, query_vec, k)
+                results.append((total, doc_ids))
+
+            assert results[0][0] > 0, "KNN search returned no results on master"
+
             for i in range(1, len(results)):
-                assert results[0] == results[i]
-            assert results[0][0] > 0, "KNN search returned no results"
+                master_ids = results[0][1]
+                replica_ids = results[i][1]
+
+                # Check documents found on master but not on replica
+                missing_on_replica = master_ids - replica_ids
+                truly_missing = []
+                for doc_id in missing_on_replica:
+                    if not await self._search_knn_filtered(clients[i], query_vec, doc_id, 1):
+                        truly_missing.append(doc_id)
+
+                assert not truly_missing, (
+                    f"Query {q}: documents {truly_missing} found on master but "
+                    f"not indexed on replica (client[{i}]). "
+                    f"Master results: {sorted(master_ids)}, "
+                    f"Replica results: {sorted(replica_ids)}"
+                )
+
+                # Check documents found on replica but not on master
+                missing_on_master = replica_ids - master_ids
+                truly_missing = []
+                for doc_id in missing_on_master:
+                    if not await self._search_knn_filtered(clients[0], query_vec, doc_id, k):
+                        truly_missing.append(doc_id)
+
+                assert not truly_missing, (
+                    f"Query {q}: documents {truly_missing} found on replica "
+                    f"(client[{i}]) but not indexed on master. "
+                    f"Master results: {sorted(master_ids)}, "
+                    f"Replica results: {sorted(replica_ids)}"
+                )
 
     async def run_traffic(self, client: aioredis.Redis, sleep_interval=0.01):
         self._stop_event.clear()
@@ -348,6 +412,7 @@ class HnswSearchSeeder:
                         f"{self.prefix}{self._doc_counter}",
                         mapping={
                             "title": f"Product {self._doc_counter}",
+                            "doc_id": str(self._doc_counter),
                             "embedding": emb.tobytes(),
                         },
                     )

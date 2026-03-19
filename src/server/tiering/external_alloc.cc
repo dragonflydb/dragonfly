@@ -350,6 +350,7 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
     if (!page)
       return -int64_t(kSegmentSize);
 
+    DVLOG(2) << "Allocated page: for bin " << bin_idx << " class " << static_cast<int>(pc);
     free_pages_[bin_idx] = page;
     page->Init(pc, bin_idx);
   }

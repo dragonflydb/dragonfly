@@ -32,6 +32,9 @@ class ZSetFamily {
   struct Bound {
     double val;
     bool is_open = false;
+    Bound() = default;
+    Bound(double v, bool open) : val(v), is_open(open) {
+    }
   };
 
   using ScoreInterval = std::pair<Bound, Bound>;
@@ -39,6 +42,9 @@ class ZSetFamily {
   struct LexBound {
     std::string_view val;
     enum Type : uint8_t { PLUS_INF, MINUS_INF, OPEN, CLOSED } type = CLOSED;
+    LexBound() = default;
+    LexBound(std::string_view v, Type t) : val(v), type(t) {
+    }
   };
 
   using LexInterval = std::pair<LexBound, LexBound>;

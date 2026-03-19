@@ -73,6 +73,14 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
   this->filter = make_unique<AstNode>(std::move(filter));
 }
 
+AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, OwnedFtVector vec,
+                                       std::string score_alias)
+    : field{field.substr(1)},
+      radius{radius},
+      vec{std::move(vec)},
+      score_alias{std::move(score_alias)} {
+}
+
 bool AstKnnNode::HasPreFilter() const {
   // If we have pre filter knn query should not hold filter variable. It will be
   // moved to SearchAlgorithm::query_ variable.

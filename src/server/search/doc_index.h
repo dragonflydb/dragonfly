@@ -240,9 +240,15 @@ class ShardDocIndex {
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
+
+    // Like Add but always allocates a fresh DocId, never reusing free_ids_.
+    // Used during restored CursorLoop to avoid colliding with HNSW node ids.
+    DocId AddNew(std::string_view key);
+
     void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+    bool IsValid(DocId id) const;
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
 
@@ -276,7 +282,7 @@ class ShardDocIndex {
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
-                      search::SearchAlgorithm* search_algo) const;
+                      search::SearchAlgorithm* search_algo, bool is_knn_prefilter) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
   std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,

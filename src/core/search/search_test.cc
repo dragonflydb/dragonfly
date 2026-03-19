@@ -654,6 +654,132 @@ TEST_F(SearchTest, MatchNumericRangeWithCommas) {
 
 class KnnTest : public SearchTest {};
 
+class VectorRangeTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+    InitSimSIMD();
+  }
+};
+
+TEST_F(VectorRangeTest, FlatRange1D) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Place 10 points on a line: 1, 2, ..., 10 (avoid zero vector for doc 0)
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Query at 5.0 with radius 1.5 → points at pos 4,5,6 → doc ids 3,4,5
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
+  }
+
+  // Exact match at pos 4.0 with radius 0 → only doc 3
+  {
+    params["vec"] = ToBytes({4.0f});
+    algo.Init("@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3));
+  }
+
+  // Large radius → all 10 points
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_EQ(result.ids.size(), 10u);
+  }
+
+  // Empty result when radius is too small
+  {
+    params["vec"] = ToBytes({5.5f});
+    algo.Init("@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_TRUE(result.ids.empty());
+  }
+}
+
+TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Use i+1 so doc positions are 1..5 (query radius 1.5 from pos 2.0 catches docs 0,1,2)
+  for (size_t i = 0; i < 5; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({2.0f});
+
+  algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: vector_distance}", &params);
+  ASSERT_NE(nullptr, algo.GetVectorRangeNode());
+  EXPECT_STREQ("vector_distance", algo.GetVectorRangeNode()->score_alias.c_str());
+
+  auto result = algo.Search(&indices);
+  // Positions 1,2,3 (docs 0,1,2) are within L2 distance 1.5 from query pos 2.0
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1, 2));
+  // knn_scores should contain distances for all matched docs
+  EXPECT_EQ(result.knn_scores.size(), 3u);
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // incorrectly skips zero vectors. The zero vector [0.0,...,0.0] is a valid embedding.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // doc 0: zero vector [0.0, 0.0] — valid embedding, must not be skipped
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({0.0f, 0.0f})}}});
+  // doc 1: non-zero vector [1.0, 0.0]
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({1.0f, 0.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Both docs must appear — zero vector is NOT null
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1));
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryRemovedDocNotMatched) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // iterates entries_ directly and does NOT respect all_ids_. After Remove(), the doc's
+  // slot in entries_ is still non-zero, so the removed doc incorrectly appears in results.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({2.0f})}}});
+  indices.Add(2, MockedDocument{Map{{"pos", ToBytes({3.0f})}}});
+
+  // Remove doc 1
+  MockedDocument doc1{Map{{"pos", ToBytes({2.0f})}}};
+  indices.Remove(1, doc1);
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Doc 1 was removed, only docs 0 and 2 should appear
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 2));
+}
+
 TEST_F(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};

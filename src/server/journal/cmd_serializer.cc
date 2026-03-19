@@ -162,7 +162,6 @@ void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_vi
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command
                        0,                     // db index
-                       1,                     // shard count
                        0,                     // slot-id, but it is ignored at this level
                        journal::Entry::Payload(cmd, ArgSlice(args)));
 
@@ -283,7 +282,7 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
 
   // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
   // = true when we are sure that all shards ignore crc during migration process
-  std::string value_dump = SerializerBase::DumpValue(serializer_.get(), pv, false);
+  std::string value_dump = RdbSerializerBase::DumpValue(serializer_.get(), pv, false);
   args.push_back(value_dump);
 
   args.push_back("ABSTTL");  // Means expire string is since epoch

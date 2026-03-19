@@ -28,6 +28,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cms.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
@@ -169,7 +170,7 @@ string ModuleTypeName(uint64_t module_id) {
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
-         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2;
+         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -192,6 +193,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
   void operator()(const RdbSBF& src);
+  void operator()(const RdbCMS& src);
 
   std::error_code ec() const {
     return ec_;
@@ -288,6 +290,13 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
   pv_->SetSBF(sbf);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
+  CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, CompactObj::memory_resource());
+  DCHECK_EQ(src.counters.size(), cms->NumCounters());
+  cms->Load(src.total_incr_count, src.counters.data());
+  pv_->SetCMS(cms);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1217,6 +1226,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_SBF2:
       iores = ReadSBF2();
       break;
+    case RDB_TYPE_CMS:
+      iores = ReadCMS();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -1817,6 +1829,26 @@ auto RdbLoaderBase::ReadSBF() -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
   return ReadSBFImpl(true);
+}
+
+io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
+  RdbCMS res;
+
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.depth);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
+
+  const size_t num_counters = res.width * res.depth;
+  res.counters.resize(num_counters);
+  for (size_t i = 0; i < num_counters; ++i) {
+    uint64_t raw;
+    auto ec = FetchBuf(sizeof(raw), &raw);
+    if (ec)
+      return make_unexpected(ec);
+    res.counters[i] = static_cast<int64_t>(base::LE::LoadT<uint64_t>(&raw));
+  }
+
+  return OpaqueObj{std::move(res), RDB_TYPE_CMS};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
@@ -2667,20 +2699,26 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     return;
   }
 
-  DbSlice::ItAndUpdater& res = *op_res;
-  res.it->first.SetSticky(item->is_sticky);
+  DbSlice::ItAndUpdater& updater = *op_res;
+  updater.it->first.SetSticky(item->is_sticky);
   if (item->has_mc_flags) {
-    res.it->second.SetFlag(true);
-    db_slice->SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
+    updater.it->second.SetFlag(true);
+    db_slice->SetMCFlag(db_cntx.db_index, updater.it->first.AsRef(), item->mc_flags);
   }
 
-  if (!override_existing_keys_ && !res.is_new) {
+  if (!override_existing_keys_ && !updater.is_new) {
     LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind << " of type "
-                 << res.it->second.ObjType();
+                 << updater.it->second.ObjType();
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
-    StashPrimeValue(db_cntx.db_index, item->key, false, &res.it->second, ts);
+    // Finalize the AutoUpdater before stashing. The stash callback may complete
+    // (e.g. during the SleepFor yield below) and transform the PrimeValue to external,
+    // changing MallocUsed(). If the AutoUpdater ran after that, it would compute a
+    // bogus negative memory delta and crash in AccountObjectMemory.
+    auto it = updater.it;
+    updater.post_updater.Run();
+    StashPrimeValue(db_cntx.db_index, item->key, &it->second, ts, nullptr);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
@@ -2695,13 +2733,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   DCHECK(!db_slice.IsCacheMode());
 
-  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
-
   for (const auto* item : ib) {
-    if (dry_run) {
-      continue;
-    }
-
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
       return;
@@ -2725,6 +2757,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   SET_OR_RETURN(ReadKey(), key);
   last_key_loaded_ = key;
 
+  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
   bool streamed = false;
   do {
     // If there is a cached Item in the free pool, take it, otherwise allocate
@@ -2750,6 +2783,9 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
       pending_read_.reserve = 0;
       continue;
     }
+
+    if (dry_run)
+      continue;
 
     item->load_config.finalize = pending_read_.remaining == 0;
     if (!item->load_config.finalize) {
@@ -2891,6 +2927,7 @@ error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
 
 error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
                                          string_view field_name, uint64_t elements_number) {
+#ifdef WITH_SEARCH
   // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
   if (!hnsw_index) {
@@ -2909,6 +2946,9 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
     LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   }
   return {};
+#else
+  return SkipVectorIndex(index_key, elements_number);
+#endif
 }
 
 error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_number) {

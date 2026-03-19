@@ -1349,9 +1349,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return immediate(expand_result.error());
   }
 
-  auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << new_state << " in progress, ignored";
+  auto prev_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (prev_state != GlobalState::ACTIVE) {
+    LOG(WARNING) << prev_state << " in progress, ignored";
     return {};
   }
 
@@ -3781,9 +3781,9 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, CommandContext* cmd_cntx,
     const GlobalState gstate = ServerState::tlocal()->gstate();
     if (gstate == GlobalState::TAKEN_OVER) {
       service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
-    } else if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-               new_state != GlobalState::LOADING) {
-      LOG(WARNING) << new_state << " in progress, ignored";
+    } else if (auto prev_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+               prev_state != GlobalState::ACTIVE) {
+      LOG(WARNING) << prev_state << " in progress, ignored";
       cmd_cntx->SendError("Invalid state");
       return;
     }

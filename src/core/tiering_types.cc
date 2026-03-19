@@ -27,4 +27,12 @@ auto FragmentRef::GetDescr(const CompactValue* pv) -> SerializationDescr {
   };
 }
 
+TieredCoolRecord* FragmentRef::GetCoolRecord() const {
+  return std::visit(
+      [](auto* pv) -> TieredCoolRecord* {
+        return pv->IsExternal() && pv->IsCool() ? pv->GetCool().record : nullptr;
+      },
+      val_);
+}
+
 }  // namespace dfly::tiering

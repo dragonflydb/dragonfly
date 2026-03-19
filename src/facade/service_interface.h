@@ -49,6 +49,7 @@ class ServiceInterface {
   }
 
   virtual DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference) = 0;
+  DispatchResult DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode);
 
   virtual DispatchManyResult DispatchManyCommands(std::function<ParsedArgs()> arg_gen,
                                                   unsigned count, SinkReplyBuilder* builder,

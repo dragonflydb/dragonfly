@@ -295,6 +295,26 @@ TEST_F(SearchParserTest, Numeric) {
   NEXT_EQ(TOK_TERM, string, "22");
 }
 
+TEST_F(SearchParserTest, VectorRange) {
+  // Full vector range query tokenization
+  SetInput("@vector:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist}");
+  NEXT_EQ(TOK_FIELD, string, "@vector");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LBRACKET);
+  NEXT_TOK(TOK_VECTOR_RANGE);
+}
+
+TEST_F(SearchParserTest, VectorRangeParse) {
+  QueryParams params;
+  params["radius"] = "1";
+  // 4 bytes = one float dimension
+  params["vec"] = std::string(4, '\0');
+  SetParams(&params);
+
+  // Basic syntax parses without error
+  EXPECT_EQ(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: dist}"));
+}
+
 TEST_F(SearchParserTest, KNN) {
   SetInput("*=>[KNN 1 @vector field_vec]");
   NEXT_TOK(TOK_STAR);

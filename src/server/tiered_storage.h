@@ -52,6 +52,8 @@ struct TieredDelayedEntry {
   uint32_t mc_flags;
 };
 
+using BackPressureFuture = std::optional<util::fb2::Future<bool>>;
+
 #ifdef WITH_TIERING
 
 // Manages offloaded values
@@ -83,13 +85,13 @@ class TieredStorage : public TieredStorageBase {
   // Returns StashDescriptor if a value should be stashed.
   std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment_ref) const;
 
-  // Stash value, returns optional future for backpressure
+  // Stash value, returns optional future for backpressure is not null.
   // if `provide_bp` is set and conditions are met.
-  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
-                                               const StashDescriptor& blobs, bool provide_bp);
+  void Stash(DbIndex dbid, std::string_view key, const StashDescriptor& blobs,
+             BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
-  void Delete(DbIndex dbid, PrimeValue* value);
+  void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
   // Cancel pending stash for the fragment, must have HasStashPending() true.
   void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
@@ -126,8 +128,8 @@ class TieredStorage : public TieredStorageBase {
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  PrimeValue DeleteCool(tiering::TieredColdRecord* record);
-  tiering::TieredColdRecord* PopCool();
+  PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
+  tiering::TieredCoolRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
 
@@ -137,7 +139,7 @@ class TieredStorage : public TieredStorageBase {
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 
-  using CoolQueue = ::boost::intrusive::list<tiering::TieredColdRecord>;
+  using CoolQueue = ::boost::intrusive::list<tiering::TieredCoolRecord>;
   CoolQueue cool_queue_;
 
   struct {
@@ -190,9 +192,10 @@ template <typename T>
 TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                                        std::function<T(std::string*)> modf, TieredStorage* ts);
 
-std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
-                                                       bool provide_bp, PrimeValue* pv,
-                                                       TieredStorage* ts);
+// Stash value if it meets criteria. If the value was stashed and `backpressure` is not nullptr,
+// assign/set the backpressure future to `*backpressure`.
+void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
+                     BackPressureFuture* backpressure);
 #else
 
 class TieredStorage : public TieredStorageBase {
@@ -232,9 +235,8 @@ class TieredStorage : public TieredStorageBase {
     return {};
   }
 
-  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
-                                               const StashDescriptor& blobs, bool provide_bp) {
-    return {};
+  void Stash(DbIndex dbid, std::string_view key, const StashDescriptor& blobs,
+             BackPressureFuture* backpressure) {
   }
 
   void Delete(DbIndex dbid, PrimeValue* value) {
@@ -304,10 +306,8 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
   return {};
 }
 
-inline std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
-                                                              bool provide_bp, PrimeValue* pv,
-                                                              TieredStorage* ts) {
-  return {};
+inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
+                            BackPressureFuture* backpressure) {
 }
 
 #endif  // WITH_TIERING

@@ -12,6 +12,7 @@
 #include "server/error.h"
 #include "server/tiering/common.h"
 #include "server/tiering/external_alloc.h"
+#include "util/fibers/uring_file.h"
 #include "util/fibers/uring_proactor.h"
 
 using namespace ::dfly::tiering::literals;
@@ -28,25 +29,27 @@ using namespace ::util::fb2;
 
 namespace {
 
-UringBuf AllocateTmpBuf(size_t size) {
+constexpr unsigned kHeapSliceId = UINT_MAX;
+
+RegisteredSlice AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
-  VLOG(1) << "Fallback to temporary allocation: " << size;
+  VLOG(2) << "Fallback to temporary allocation: " << size;
 
   uint8_t* buf = new (align_val_t(kPageSize)) uint8_t[size];
-  return UringBuf{{buf, size}, nullopt};
+  return RegisteredSlice{{buf, size}, kHeapSliceId};
 }
 
-void DestroyTmpBuf(UringBuf buf) {
-  DCHECK(!buf.buf_idx);
+void DestroyTmpBuf(RegisteredSlice buf) {
+  DCHECK_EQ(buf.buf_idx, kHeapSliceId);
   ::operator delete[](buf.bytes.data(), align_val_t(kPageSize));
 }
 
-void ReturnBuf(UringBuf buf) {
+void ReturnBuf(RegisteredSlice buf) {
   DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
 
-  if (buf.buf_idx)
-    up->ReturnBuffer(buf);
+  if (buf.buf_idx != kHeapSliceId)
+    up->ReturnRegisteredSlice(buf);
   else
     DestroyTmpBuf(buf);
 }
@@ -64,6 +67,9 @@ template <typename... Ts> error_code DoFiberCall(void (SubmitEntry::*c)(Ts...), 
 }  // anonymous namespace
 
 DiskStorage::DiskStorage(size_t max_size) : max_size_(max_size) {
+}
+
+DiskStorage::~DiskStorage() {
 }
 
 error_code DiskStorage::Open(string_view path) {
@@ -121,7 +127,7 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   DCHECK_EQ(segment.offset % kPageSize, 0u);
 
   size_t len = segment.length;
-  UringBuf buf = PrepareBuf(len);
+  RegisteredSlice buf = PrepareBuf(len);
   auto io_cb = [this, cb = std::move(cb), buf, len](int io_res) {
     if (io_res < 0) {
       cb(nonstd::make_unexpected(error_code{-io_res, system_category()}));
@@ -133,8 +139,8 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   };
 
   pending_ops_++;
-  if (buf.buf_idx)
-    backing_file_->ReadFixedAsync(buf.bytes, segment.offset, *buf.buf_idx, std::move(io_cb));
+  if (buf.buf_idx != kHeapSliceId)
+    backing_file_->ReadFixedAsync(buf.bytes, segment.offset, buf.buf_idx, std::move(io_cb));
   else
     backing_file_->ReadAsync(buf.bytes, segment.offset, std::move(io_cb));
 }
@@ -146,14 +152,16 @@ void DiskStorage::MarkAsFree(DiskSegment segment) {
   alloc_.Free(segment.offset, segment.length);
 }
 
-io::Result<std::pair<size_t, UringBuf>> DiskStorage::PrepareStash(size_t length) {
+io::Result<std::pair<size_t, RegisteredSlice>> DiskStorage::PrepareStash(size_t length) {
   using namespace nonstd;
 
   int64_t offset = alloc_.Malloc(length);
   if (offset >= 0)
     return std::make_pair(offset, PrepareBuf(length));
 
-  // If we don't have enough space, request grow and return to avoid blocking
+  // If we don't have "enough space", request grow and return to avoid blocking.
+  // Note that `alloc_.Malloc` may fail even if we have enough space due to fragmentation,
+  // as internally it uses different 256MB segments for different block sizes.
   if (offset < 0) {
     auto ec = RequestGrow(-offset);
     return make_unexpected(ec ? ec : make_error_code(errc::operation_would_block));
@@ -166,8 +174,8 @@ io::Result<std::pair<size_t, UringBuf>> DiskStorage::PrepareStash(size_t length)
   return std::make_pair(offset, PrepareBuf(length));
 }
 
-void DiskStorage::Stash(DiskSegment segment, UringBuf buf, StashCb cb) {
-  auto io_cb = [this, cb, buf, segment](int io_res) {
+void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
+  auto io_cb = [this, cb = std::move(cb), buf, segment](int io_res) {
     if (io_res < 0) {
       MarkAsFree(segment);
       cb(error_code{-io_res, std::system_category()});
@@ -180,8 +188,8 @@ void DiskStorage::Stash(DiskSegment segment, UringBuf buf, StashCb cb) {
 
   pending_ops_++;
   size_t offset = segment.offset;
-  if (buf.buf_idx)
-    backing_file_->WriteFixedAsync(buf.bytes, offset, *buf.buf_idx, std::move(io_cb));
+  if (buf.buf_idx != kHeapSliceId)
+    backing_file_->WriteFixedAsync(buf.bytes, offset, buf.buf_idx, std::move(io_cb));
   else
     backing_file_->WriteAsync(buf.bytes, offset, std::move(io_cb));
 
@@ -201,6 +209,8 @@ DiskStorage::Stats DiskStorage::GetStats() const {
 }
 
 error_code DiskStorage::RequestGrow(off_t grow_size) {
+  VLOG(1) << "Requesting grow by " << grow_size << " current capacity: " << alloc_.capacity();
+
   DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);
   if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_))
     return make_error_code(errc::file_too_large);
@@ -228,11 +238,11 @@ error_code DiskStorage::RequestGrow(off_t grow_size) {
   return {};
 }
 
-UringBuf DiskStorage::PrepareBuf(size_t size) {
+RegisteredSlice DiskStorage::PrepareBuf(size_t size) {
   DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
 
-  if (auto borrowed = up->RequestBuffer(size); borrowed) {
+  if (auto borrowed = up->RequestRegisteredSlice(size); borrowed) {
     ++reg_buf_alloc_cnt_;
     return *borrowed;
   }

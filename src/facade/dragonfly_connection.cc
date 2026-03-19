@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 //
 // See LICENSE for licensing terms.
 //
@@ -27,6 +27,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
+#include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"
@@ -724,9 +725,33 @@ void Connection::HandleRequests() {
 
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    // Must be done atomically before the premption point in Accept so that at any
-    // point in time, the socket_ is defined.
-    uint8_t buf[2];
+    // Early TLS connection filter
+    //
+    // Before entering the expensive OpenSSL handshake we pre-read the 5-byte TLS Record Layer
+    // header on the raw TCP socket. This serves two purposes:
+    //
+    //  1. Wrong-client detection:
+    //     Clients that forgot to enable TLS (e.g. a plaintext Redis client connecting to the TLS
+    //     port) will not send a valid TLS Record Layer header.  We detect this immediately and
+    //     reply with a human-readable "-ERR" message before disconnecting, instead of letting
+    //     OpenSSL produce a cryptic handshake failure.
+    //
+    //  2. Zombie-connection rejection:
+    //     Zombie connections —— open a TCP socket but never send any data.  By demanding at least
+    //     the 5-byte header before allocating any SSL state, we drop these cheaply on the raw
+    //     socket instead of tying up an OpenSSL context and handshake state machine that will never
+    //     complete.
+    //
+    // The pre-read header bytes are injected into the TlsSocket via InitSSL(), which writes them
+    // into OpenSSL's internal BIO so that Accept() can drive the normal handshake from there.
+    //
+    // Reminder: TLS Record Layer header structure (universal across TLS 1.0 – 1.3):
+    // - Byte 0: ContentType (0x16 = Handshake)
+    // - Bytes 1–2: ProtocolVersion. While the minor version varies (0x01 for TLS 1.0,
+    //   0x03 for TLS 1.2/1.3), the major version is consistently 0x03 for all
+    //   modern TLS versions.
+    // - Bytes 3–4: Length (uint16 BE) — payload length, max 2^14 = 16384
+    uint8_t buf[5];  // universal TLS Record Header size is 5 bytes
     auto read_sz = socket_->Read(io::MutableBytes(buf));
     if (!read_sz || *read_sz < sizeof(buf)) {
       auto msg = read_sz ? absl::StrCat(*read_sz, " < ", sizeof(buf)) : read_sz.error().message();
@@ -735,10 +760,16 @@ void Connection::HandleRequests() {
       conn_stats.tls_accept_disconnects++;
       return;
     }
-    if (buf[0] != 0x16 || buf[1] != 0x03) {
+
+    // Byte 0: ContentType must be 0x16 (Handshake).
+    // Byte 1: major ProtocolVersion — always 0x03 for TLS 1.0 through TLS 1.3.
+    // Byte 2: minor ProtocolVersion — 0x01 (TLS 1.0), 0x02 (TLS 1.1), 0x03 (TLS 1.2/1.3).
+    //         SSL 3.0 (0x00) is deprecated (RFC 7568) and rejected.
+    if ((buf[0] != 0x16) || (buf[1] != 0x03) || (buf[2] < 0x01) || (buf[2] > 0x03)) {
       VLOG(1) << "Bad TLS header "
               << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
-                              absl::Hex(buf[1], absl::kZeroPad2));
+                              absl::Hex(buf[1], absl::kZeroPad2),
+                              absl::Hex(buf[2], absl::kZeroPad2));
       std::ignore =
           socket_->Write(io::Buffer("-ERR Bad TLS header, double check "
                                     "if you enabled TLS for your client.\r\n"));
@@ -746,6 +777,8 @@ void Connection::HandleRequests() {
       return;
     }
 
+    // Must be done atomically before the preemption point in Accept so that at any
+    // point in time, the socket_ is defined.
     {
       FiberAtomicGuard fg;
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
@@ -1063,7 +1096,7 @@ void Connection::ConnectionFlow() {
       parse_status = ParseRedis(10000);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = ParseLoop();
     }
   }
 
@@ -1223,7 +1256,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
+Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool enqueue_only) {
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
@@ -1263,7 +1296,10 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
         LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
-      DispatchSingle(has_more, dispatch_sync, dispatch_async);
+      if (enqueue_only)
+        dispatch_async();
+      else
+        DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
@@ -1298,15 +1334,18 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles) {
   return ERROR;
 }
 
-auto Connection::ParseMemcache() -> ParserStatus {
+auto Connection::ParseLoop() -> ParserStatus {
+  auto parse_func =
+      protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
+
   bool commands_parsed = false;
   do {
-    commands_parsed = ParseMCBatch();
+    commands_parsed = (this->*parse_func)();
 
-    if (!ExecuteMCBatch())
+    if (!ExecuteBatch())
       return ERROR;
 
-    if (!ReplyMCBatch())
+    if (!ReplyBatch())
       return ERROR;
   } while (commands_parsed && io_buf_.InputLen() > 0);
 
@@ -1416,7 +1455,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
       parse_status = ParseRedis(max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = ParseLoop();
     }
 
     if (reply_builder_->GetError()) {
@@ -2227,6 +2266,10 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
+bool Connection::ParseRedisBatch() {
+  return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
+}
+
 bool Connection::ParseMCBatch() {
   CHECK(io_buf_.InputLen() > 0);
 
@@ -2256,6 +2299,7 @@ bool Connection::ParseMCBatch() {
       // We can not just reply directly to parse error, as we may have pipelined commands before.
       // Fill the reply_payload into parsed_tail_ with the error and continue parsing.
       memcache_parser_->Reset();
+      // TODO(vlad): Use Proper SendError calls instead of SendSimpleString and error building
       auto client_error = [](string_view msg) { return absl::StrCat("CLIENT_ERROR ", msg); };
 
       parsed_tail_->SetDeferredReply();
@@ -2278,7 +2322,7 @@ bool Connection::ParseMCBatch() {
   return true;
 }
 
-bool Connection::ExecuteMCBatch() {
+bool Connection::ExecuteBatch() {
   auto& conn_stats = tl_facade_stats->conn_stats;
   auto advance_head = [this]() -> ParsedCommand* {
     auto* cmd = parsed_head_;
@@ -2286,6 +2330,9 @@ bool Connection::ExecuteMCBatch() {
     ReleaseParsedCommand(cmd, parsed_head_ != nullptr /* is_pipelined */);
     return parsed_head_;
   };
+
+  auto dispatch = protocol_ == Protocol::MEMCACHE ? &ServiceInterface::DispatchMC
+                                                  : &ServiceInterface::DispatchCommandSimple;
 
   // Execute sequentially all parsed commands.
   for (auto& cmd = parsed_to_execute_; cmd != nullptr;) {
@@ -2310,7 +2357,7 @@ bool Connection::ExecuteMCBatch() {
     if (!ioloop_v2_)  // only v2 loop supports any async commands so far
       mode = AsyncPreference::ONLY_SYNC;
 
-    auto dispatch_res = service_->DispatchMC(cmd, mode);
+    auto dispatch_res = (service_->*dispatch)(cmd, mode);
 
     // Enforce the pipeline invariant between the IO loop (producer) and AsyncFiber (consumer).
     // To prevent stream corruption, the command state must satisfy ONE of these rules:
@@ -2346,13 +2393,7 @@ bool Connection::ExecuteMCBatch() {
   return true;
 }
 
-bool Connection::ReplyMCBatch() {
-  if (protocol_ != Protocol::MEMCACHE) {
-    // We do not support async replies for RESP protocol yet.
-    return true;
-  }
-
-  // Loop over finished command and break on first blocked
+bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
   for (auto& cmd = parsed_head_; cmd != parsed_to_execute_;) {
     if (!cmd->CanReply())
@@ -2371,7 +2412,6 @@ bool Connection::ReplyMCBatch() {
     parsed_tail_ = nullptr;
 
   reply_builder_->SetBatchMode(false);
-  // Flush any remaining data in the reply builder.
   reply_builder_->Flush();
   return !reply_builder_->GetError();
 }
@@ -2599,20 +2639,53 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
   }
 }
 
+void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
+  auto& conn_stats = tl_facade_stats->conn_stats;
+  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
+
+  size_t capacity = io_buf_.Capacity();
+  if (capacity < max_io_buf_len) {
+    size_t parser_hint = 0;
+    if (redis_parser_)
+      parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
+
+    // If we got a partial request and we managed to parse its
+    // length, make sure we have space to store it instead of
+    // increasing space incrementally.
+    // (Note: The buffer object is only working in power-of-2 sizes,
+    // so there's no danger of accidental O(n^2) behavior.)
+    if (parser_hint > capacity) {
+      UpdateIoBufCapacity(io_buf_, &conn_stats,
+                          [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
+    }
+
+    // If we got a partial request because iobuf was full, grow it up to
+    // a reasonable limit to save on Recv() calls.
+    if (is_iobuf_full && capacity < max_io_buf_len / 2) {
+      // Last io used most of the io_buf to the end.
+      UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
+        io_buf_.Reserve(capacity * 2);  // Valid growth range.
+      });
+    }
+
+    if (io_buf_.AppendLen() == 0U) {
+      // it can happen with memcached but not for RedisParser, because RedisParser fully
+      // consumes the passed buffer
+      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
+                               << ", consider to increase max_client_iobuf_len flag";
+    }
+  }
+}
+
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   DCHECK(memcache_parser_) << "Not supported for redis yet";
-  auto& conn_stats = tl_facade_stats->conn_stats;
-
-  size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
-  // Return early because RegisterOnRecv() should not be called if the socket
-  // is not open. Both migrations and replication hit this flow upon cancellations.
-  if (!peer->IsOpen()) {
+  // Don't proceed with RegisterOnRecv() if socket is closed (possible cancellation)
+  if (!peer->IsOpen())
     return ParserStatus::OK;
-  }
 
   if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
 #ifdef __linux__
@@ -2631,9 +2704,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
-  // TODO: restructure due to bad OnCompletion interface
+  // Waiter that is passed to the current async command head to be notified on completion
   auto ioevent_cb = [this]() { io_event_.notify(); };
-  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};
+  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};  // takes callback by reference
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
 
   do {
@@ -2670,15 +2743,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (io_buf_.InputLen() > 0) {
-      DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
+      parse_status = ParseLoop();
     } else {
       parse_status = NEED_MORE;
 
       if (parsed_head_) {
         if (parsed_head_ == parsed_to_execute_)
-          ExecuteMCBatch();
-        ReplyMCBatch();
+          ExecuteBatch();
+        ReplyBatch();
       }
     }
 
@@ -2688,39 +2760,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-
-      size_t capacity = io_buf_.Capacity();
-      if (capacity < max_io_buf_len) {
-        size_t parser_hint = 0;
-        if (redis_parser_)
-          parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
-
-        // If we got a partial request and we managed to parse its
-        // length, make sure we have space to store it instead of
-        // increasing space incrementally.
-        // (Note: The buffer object is only working in power-of-2 sizes,
-        // so there's no danger of accidental O(n^2) behavior.)
-        if (parser_hint > capacity) {
-          UpdateIoBufCapacity(io_buf_, &conn_stats,
-                              [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
-        }
-
-        // If we got a partial request because iobuf was full, grow it up to
-        // a reasonable limit to save on Recv() calls.
-        if (is_iobuf_full && capacity < max_io_buf_len / 2) {
-          // Last io used most of the io_buf to the end.
-          UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
-            io_buf_.Reserve(capacity * 2);  // Valid growth range.
-          });
-        }
-
-        if (io_buf_.AppendLen() == 0U) {
-          // it can happen with memcached but not for RedisParser, because RedisParser fully
-          // consumes the passed buffer
-          LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
-                                   << ", consider to increase max_client_iobuf_len flag";
-        }
-      }
+      CheckIoBufCapacity(is_iobuf_full);
     } else if (parse_status != OK) {
       break;
     }

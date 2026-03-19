@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -109,15 +110,30 @@ class StringMap : public DenseSet {
     using IteratorBase::SetExpiryTime;
   };
 
-  // otherwise updates its value and returns false.
+  // Adds a new field or updates its value. Returns true if added, false if updated.
   bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX,
                    bool keepttl = false);
+
+  // Like AddOrUpdate but on update returns the previous sds entry
+  // instead of deleting it. Caller must free the returned entry via DeleteEntry().
+  // Returns nullptr if a new field was added.
+  sds AddOrExchange(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX,
+                    bool keepttl = false);
 
   // Returns true if field was added
   // false, if already exists. In that case no update is done.
   bool AddOrSkip(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
 
   bool Erase(std::string_view s1);
+
+  using SdsEntry = std::unique_ptr<char, void (*)(sds)>;
+
+  // Removes and returns the sds entry for the given key without freeing it.
+  // Returns nullptr if the key was not found.
+  SdsEntry Extract(std::string_view s1);
+
+  // Frees a StringMap sds entry (key + embedded value).
+  static void DeleteEntry(sds entry);
 
   bool Contains(std::string_view s1) const;
 

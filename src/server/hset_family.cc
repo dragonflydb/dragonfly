@@ -499,7 +499,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, false, &pv, ts);
+    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
   }
 
   return created;
@@ -667,6 +667,67 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
   };
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  switch (result.status()) {
+    case OpStatus::OK:
+      return rb->SendLongArr(absl::MakeConstSpan(result.value()));
+    case OpStatus::KEY_NOTFOUND:
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+    default:
+      return cmd_cntx->SendError(result.status());
+  };
+}
+
+OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view key,
+                              CmdArgList fields) {
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  const DbContext& db_cntx = t->GetDbContext();
+  auto it_res = db_slice.FindReadOnly(db_cntx, key, OBJ_HASH);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  const PrimeValue& pv = (*it_res)->second;
+  vector<long> res;
+  res.reserve(fields.size());
+
+  for (auto field : fields) {
+    int32_t exp_time = HSetFamily::FieldExpireTime(db_cntx, pv, field);
+    if (exp_time <= 0) {
+      // -3 from FieldExpireTime means field not found -> HTTL returns -2
+      // -1 means no expiry -> stays -1
+      res.push_back(exp_time == -3 ? -2 : exp_time);
+    } else {
+      res.push_back(int32_t(exp_time - MemberTimeSeconds(db_cntx.time_now_ms)));
+    }
+  }
+
+  return res;
+}
+
+void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+  if (!parser.Check("FIELDS"sv)) {
+    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                               kSyntaxErrType);
+  }
+
+  uint32_t numFields = parser.Next<uint32_t>();
+
+  CmdArgList fields = parser.Tail();
+  if (fields.size() != numFields) {
+    return rb->SendError("The `numfields` parameter must match the number of arguments",
+                         kSyntaxErrType);
+  }
+
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpHTtl(t, shard, key, fields); };
   OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   switch (result.status()) {
@@ -1057,6 +1118,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
                    HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
+            << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
             << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)

@@ -166,12 +166,12 @@ class RdbSaver {
 };
 
 class RdbSerializer;
-class SerializerBase {
+class RdbSerializerBase {
  public:
   enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
-  explicit SerializerBase(CompressionMode compression_mode);
-  virtual ~SerializerBase() = default;
+  explicit RdbSerializerBase(CompressionMode compression_mode);
+  virtual ~RdbSerializerBase() = default;
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
   static std::string DumpValue(const PrimeValue& obj, bool ignore_crc = false);
@@ -243,7 +243,7 @@ class SerializerBase {
   uint64_t serialization_peak_bytes_ = 0;
 };
 
-class RdbSerializer : public SerializerBase {
+class RdbSerializer : public RdbSerializerBase {
  public:
   // ConsumeFun is called when internal buffer exceeds flush_threshold.
   // The callback receives the extracted data.
@@ -289,6 +289,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamObject(const PrimeValue& obj);
   std::error_code SaveJsonObject(const PrimeValue& pv);
   std::error_code SaveSBFObject(const PrimeValue& pv);
+  std::error_code SaveCMSObject(const PrimeValue& pv);
 
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);

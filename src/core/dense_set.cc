@@ -688,7 +688,7 @@ auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
   return {0, nullptr, nullptr};
 }
 
-void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
+void* DenseSet::Delete(DensePtr* prev, DensePtr* ptr, bool detach) {
   void* obj = nullptr;
 
   if (ptr->IsObject()) {
@@ -718,7 +718,12 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
 
   obj_malloc_used_ -= ObjectAllocSize(obj);
   --size_;
+
+  if (detach) {
+    return obj;
+  }
   ObjDelete(obj, false);
+  return nullptr;
 }
 
 DenseSet::ChainVectorIterator DenseSet::GetRandomChain() {
