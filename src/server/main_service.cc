@@ -2786,13 +2786,22 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   if (!should_skip_auth) {
     base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
                                                 std::string_view password) {
-      if (path == "/metrics")
+      if (path == "/metrics" || path == "/healthz")
         return true;
       const bool pass_verified = pass.empty() ? true : password == pass;
       return username == "default" && pass_verified;
     });
   }
   server_family_.ConfigureMetrics(base);
+
+  base->RegisterCb("/healthz", [](const http::QueryArgs&, HttpContext* send) {
+    const bool healthy = ServerState::tlocal()->gstate() == GlobalState::ACTIVE;
+    http::StringResponse resp =
+        http::MakeStringResponse(healthy ? h2::status::ok : h2::status::service_unavailable);
+    http::SetMime(http::kTextMime, &resp);
+    resp.body() = healthy ? "OK\n" : "Service Unavailable\n";
+    return send->Invoke(std::move(resp));
+  });
 
   if (GetFlag(FLAGS_expose_http_api)) {
     base->RegisterCb("/api",
