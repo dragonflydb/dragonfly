@@ -238,57 +238,11 @@ std::optional<std::string> TOPK::Add(std::string_view item) {
   return IncrementInternal(item, 1);
 }
 
-std::vector<std::optional<std::string>> TOPK::AddMultiple(
-    const std::vector<std::string_view>& items) {
-  std::vector<std::optional<std::string>> result;
-  result.reserve(items.size());
-
-  for (const auto& item : items) {
-    result.push_back(Add(item));
-  }
-
-  return result;
-}
-
 std::optional<std::string> TOPK::IncrBy(std::string_view item, uint32_t increment) {
   if (increment < 1) {
     return std::nullopt;
   }
   return IncrementInternal(item, increment);
-}
-
-std::vector<std::optional<std::string>> TOPK::IncrByMultiple(
-    const std::vector<std::pair<std::string_view, uint32_t>>& items) {
-  std::vector<std::optional<std::string>> result;
-  result.reserve(items.size());
-
-  for (const auto& [item, incr] : items) {
-    result.push_back(IncrBy(item, incr));
-  }
-
-  return result;
-}
-
-std::vector<int> TOPK::Query(const std::vector<std::string_view>& items) const {
-  std::vector<int> result;
-  result.reserve(items.size());
-
-  for (const auto& item : items) {
-    result.push_back(IsInHeap(item) ? 1 : 0);
-  }
-
-  return result;
-}
-
-std::vector<uint32_t> TOPK::Count(const std::vector<std::string_view>& items) const {
-  std::vector<uint32_t> result;
-  result.reserve(items.size());
-
-  for (const auto& item : items) {
-    result.push_back(GetMinCount(item));
-  }
-
-  return result;
 }
 
 std::vector<TOPK::TopKItem> TOPK::List() const {

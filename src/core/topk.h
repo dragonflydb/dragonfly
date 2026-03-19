@@ -97,14 +97,6 @@ class TOPK {
   //          if no eviction occurred.
   std::optional<std::string> Add(std::string_view item);
 
-  // Batch equivalent of Add().
-  //
-  // Input: A vector of items to insert into the sketch.
-  // Returns: A vector of results mapping 1:1 to the input items. Each element
-  //          contains either the evicted item resulting from that specific
-  //          insertion, or std::nullopt.
-  std::vector<std::optional<std::string>> AddMultiple(const std::vector<std::string_view>& items);
-
   // Increments an item's estimated frequency by a specific, arbitrary amount.
   //
   // Precondition: 'increment' must be strictly greater than 0.
@@ -112,29 +104,16 @@ class TOPK {
   //          item to be displaced from the Top-K min-heap, or std::nullopt.
   std::optional<std::string> IncrBy(std::string_view item, uint32_t increment);
 
-  // Batch equivalent of IncrBy().
-  //
-  // Input: A vector of pairs containing the item and its respective increment amount.
-  // Returns: A vector of results mapping 1:1 to the input pairs. Each element
-  //          contains either the evicted item resulting from that specific
-  //          increment, or std::nullopt.
-  std::vector<std::optional<std::string>> IncrByMultiple(
-      const std::vector<std::pair<std::string_view, uint32_t>>& items);
+  // Queries whether an item currently resides in the Top-K min-heap.
+  [[nodiscard]] bool Query(std::string_view item) const {
+    return IsInHeap(item);
+  }
 
-  // Queries whether a batch of items currently resides in the Top-K min-heap.
-  //
-  // Input: A vector of strings (items) to check against the Top-K list.
-  // Output: A vector of integers mapping 1:1 to the input vector.
-  //         The i-th element of the output will be 1 if items[i] is
-  //         currently a Top-K high-frequency item, and 0 otherwise.
-  [[nodiscard]] std::vector<int> Query(const std::vector<std::string_view>& items) const;
-
-  // Estimates the frequency count for a batch of items using the underlying sketch.
-  //
-  // Input: A vector of strings (items) to query.
-  // Output: A vector of unsigned integers mapping 1:1 to the input vector,
-  //         representing the lowest uncorrupted counter value for each item.
-  [[nodiscard]] std::vector<uint32_t> Count(const std::vector<std::string_view>& items) const;
+  // Estimates the frequency count for an item using the underlying sketch.
+  // Returns the minimum counter value across all hash rows (Count-Min Sketch estimate).
+  [[nodiscard]] uint32_t Count(std::string_view item) const {
+    return GetMinCount(item);
+  }
 
   // Retrieves the complete list of current Top-K high-frequency items.
   //

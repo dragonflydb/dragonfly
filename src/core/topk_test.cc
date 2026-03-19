@@ -96,7 +96,7 @@ TEST(TOPKBasic, MoveAssignmentTransfersOwnership) {
 }
 
 // ---------------------------------------------------------------------------
-// Add / AddMultiple
+// Add
 // ---------------------------------------------------------------------------
 
 // Add exactly K distinct items; List() should return exactly K items with no evictions.
@@ -141,46 +141,6 @@ TEST_F(TOPKTest, AddDoesNotEvictWhenNewItemScoreTooLow) {
   EXPECT_FALSE(evicted.has_value());
 }
 
-// AddMultiple returns a vector with exactly as many elements as the input, 1:1.
-TEST_F(TOPKTest, AddMultipleReturnsOneToOneMapping) {
-  vector<string_view> items = {"a", "b", "c", "d"};
-  auto results = topk_.AddMultiple(items);
-  EXPECT_EQ(results.size(), items.size());
-}
-
-// In a batch add, an eviction at a specific index is correctly reported.
-TEST_F(TOPKTest, AddMultiplePropagatesEvictions) {
-  // Fill the heap (K=5). All items have count=1.
-  for (uint32_t i{}; i < topk_.K(); ++i) {
-    topk_.Add(absl::StrCat("fill", i));
-  }
-
-  // Pump items 1 through 4 to high counts (100).
-  // This guarantees "fill0" (count 1) is absolutely sitting at the root of the min-heap.
-  for (uint32_t i{1}; i < topk_.K(); ++i) {
-    topk_.IncrBy(absl::StrCat("fill", i), 100);
-  }
-
-  // Create batch that forces an eviction exactly on the 3rd operation
-  vector<string_view> batch = {
-      "fill1",    // Already in heap (count 100 -> 101). No eviction.
-      "new_guy",  // New item. Count becomes 1. Does not beat "fill0" (count 1). No eviction.
-      "new_guy",  // New item again! Count becomes 2. Beats "fill0". EVICTS "fill0"!
-      "fill2"     // Already in heap (count 100 -> 101). No eviction.
-  };
-
-  auto results = topk_.AddMultiple(batch);
-
-  // Assert the exact sequence of events
-  // The 3rd item should contain the exact string of the evicted key
-  ASSERT_EQ(results.size(), 4u);
-  EXPECT_FALSE(results[0].has_value());
-  EXPECT_FALSE(results[1].has_value());
-  ASSERT_TRUE(results[2].has_value());
-  EXPECT_EQ(results[2].value(), "fill0");
-  EXPECT_FALSE(results[3].has_value());
-}
-
 // Adding the same item repeatedly increases its count in the heap.
 // Because decay=0.0 and there are no collisions, the count must be exactly 100.
 TEST_F(TOPKTest, AddSameItemRepeatedlyIncreasesCount) {
@@ -200,16 +160,16 @@ TEST_F(TOPKTest, AddSameItemRepeatedlyIncreasesCount) {
 }
 
 // ---------------------------------------------------------------------------
-// IncrBy / IncrByMultiple
+// IncrBy
 // ---------------------------------------------------------------------------
 
 // IncrBy with increment=0 must return nullopt and not modify state.
 TEST_F(TOPKTest, IncrByZeroReturnsNullopt) {
   topk_.Add("existing");
-  auto before = topk_.Count({"existing"});
+  auto before = topk_.Count("existing");
   auto result = topk_.IncrBy("existing", 0);
   EXPECT_EQ(result, nullopt);
-  auto after = topk_.Count({"existing"});
+  auto after = topk_.Count("existing");
   EXPECT_EQ(before, after);
 }
 
@@ -221,7 +181,7 @@ TEST(TOPKBasic, IncrByOneBehavesLikeAdd) {
   a.Add("x");
   b.IncrBy("x", 1);
 
-  EXPECT_EQ(a.Count({"x"})[0], b.Count({"x"})[0]);
+  EXPECT_EQ(a.Count("x"), b.Count("x"));
 }
 
 // A single IncrBy with a large increment should immediately promote the item into the heap,
@@ -233,56 +193,42 @@ TEST_F(TOPKTest, IncrByLargeValueCausesImmediateEviction) {
   auto evicted = topk_.IncrBy("newcomer", 10000);
   EXPECT_TRUE(evicted.has_value());
 
-  auto qr = topk_.Query({"newcomer"});
-  EXPECT_EQ(qr[0], 1);
+  EXPECT_TRUE(topk_.Query("newcomer"));
 }
 
 // IncrBy on an item already in the heap should increase its count without eviction.
 TEST_F(TOPKTest, IncrByExistingHeapItemUpdatesCount) {
   topk_.IncrBy("item_a", 50);
-  auto count_before = topk_.Count({"item_a"})[0];
+  auto count_before = topk_.Count("item_a");
 
   auto evicted = topk_.IncrBy("item_a", 100);
   EXPECT_EQ(evicted, nullopt);
 
-  auto count_after = topk_.Count({"item_a"})[0];
+  auto count_after = topk_.Count("item_a");
   EXPECT_GT(count_after, count_before);
-}
-
-// IncrByMultiple returns a result vector with exactly as many elements as the input.
-TEST_F(TOPKTest, IncrByMultipleReturnsOneToOneMapping) {
-  vector<pair<string_view, uint32_t>> items = {{"a", 1}, {"b", 2}, {"c", 3}};
-  auto results = topk_.IncrByMultiple(items);
-  EXPECT_EQ(results.size(), items.size());
 }
 
 // ---------------------------------------------------------------------------
 // Query
 // ---------------------------------------------------------------------------
 
-// All K items currently in the heap should return 1 from Query.
+// All K items currently in the heap should return true from Query.
 TEST_F(TOPKTest, QueryReturnsTrueForHeapItems) {
-  vector<string> keys;
   for (uint32_t i{}; i < topk_.K(); ++i) {
-    keys.push_back(absl::StrCat("key", i));
-    topk_.Add(keys.back());
-  }
-  vector<string_view> views(keys.begin(), keys.end());
-  auto results = topk_.Query(views);
-  for (size_t i{}; i < results.size(); ++i) {
-    EXPECT_EQ(results[i], 1) << "key" << i << " should be in heap";
+    string key = absl::StrCat("key", i);
+    topk_.Add(key);
+    EXPECT_TRUE(topk_.Query(key)) << key << " should be in heap";
   }
 }
 
-// Items that were never inserted should return 0 from Query.
+// Items that were never inserted should return false from Query.
 TEST_F(TOPKTest, QueryReturnsFalseForNonHeapItems) {
-  auto results = topk_.Query({"never_seen", "also_absent", "nope"});
-  for (int r : results) {
-    EXPECT_EQ(r, 0);
-  }
+  EXPECT_FALSE(topk_.Query("never_seen"));
+  EXPECT_FALSE(topk_.Query("also_absent"));
+  EXPECT_FALSE(topk_.Query("nope"));
 }
 
-// An item that was once in the heap but got evicted should return 0 from Query.
+// An item that was once in the heap but got evicted should return false from Query.
 TEST_F(TOPKTest, QueryReturnsFalseForEvictedItems) {
   // Add our target victim. Count = 1.
   string victim = "low0";
@@ -294,23 +240,20 @@ TEST_F(TOPKTest, QueryReturnsFalseForEvictedItems) {
   }
 
   // Verify the victim is currently in the heap.
-  EXPECT_EQ(topk_.Query({victim})[0], 1);
+  EXPECT_TRUE(topk_.Query(victim));
 
   // Evict by adding a massive item.
-  // Because "low0" (count 1) is strictly smaller than the others (count 50),
-  // it is mathematically guaranteed to be the one evicted.
   topk_.IncrBy("massive", 10000);
 
-  // Strictly assert that the victim is gone. No "if" statements!
-  EXPECT_EQ(topk_.Query({victim})[0], 0);
+  // Strictly assert that the victim is gone.
+  EXPECT_FALSE(topk_.Query(victim));
 }
 
-// Mixed batch: some items in heap, some not. Verify correct 0/1 pattern.
+// Mixed: item in heap vs item not in heap.
 TEST_F(TOPKTest, QueryMixedBatch) {
   topk_.IncrBy("inheap", 100);
-  auto results = topk_.Query({"inheap", "notheap"});
-  EXPECT_EQ(results[0], 1);
-  EXPECT_EQ(results[1], 0);
+  EXPECT_TRUE(topk_.Query("inheap"));
+  EXPECT_FALSE(topk_.Query("notheap"));
 }
 
 // ---------------------------------------------------------------------------
@@ -319,23 +262,20 @@ TEST_F(TOPKTest, QueryMixedBatch) {
 
 // Items never inserted should return count 0.
 TEST_F(TOPKTest, CountReturnsZeroForUnseen) {
-  auto counts = topk_.Count({"never_added", "also_missing"});
-  for (auto c : counts) {
-    EXPECT_EQ(c, 0u);
-  }
+  EXPECT_EQ(topk_.Count("never_added"), 0u);
+  EXPECT_EQ(topk_.Count("also_missing"), 0u);
 }
 
 // Items that have been added should return a count >= 1.
 TEST_F(TOPKTest, CountReturnsNonZeroForSeenItems) {
   topk_.Add("seen");
-  auto counts = topk_.Count({"seen"});
-  EXPECT_GE(counts[0], 1u);
+  EXPECT_GE(topk_.Count("seen"), 1u);
 }
 
 // The count from Count() for a heap item should match the count reported in List().
 TEST_F(TOPKTest, CountForHeapItemMatchesListCount) {
   topk_.IncrBy("match_me", 50);
-  auto count_val = topk_.Count({"match_me"})[0];
+  auto count_val = topk_.Count("match_me");
   auto list = topk_.List();
 
   bool found = false;
@@ -421,7 +361,7 @@ TEST(TOPKBasic, ProbabilityAboveTableSizeNoCrash) {
   }
 
   // Just verify the state isn't corrupted (count is still around 5000)
-  EXPECT_GT(topk.Count({"big"})[0], 4000u);
+  EXPECT_GT(topk.Count("big"), 4000u);
 }
 
 // For an extremely large count with a small decay, probability drops to effectively zero.
@@ -431,13 +371,13 @@ TEST(TOPKBasic, VeryHighCountApproachesZero) {
   // path should return 0.0, meaning no decay fires for counts above the table range.
   TOPK topk(PMR_NS::get_default_resource(), 3, 10, 3, 0.5);
   topk.IncrBy("stable", 10000);
-  auto count_before = topk.Count({"stable"})[0];
+  auto count_before = topk.Count("stable");
   // Adding more items should not decay "stable"'s counter because the decay
   // probability for such high counts is effectively zero.
   for (int i{}; i < 100; ++i) {
     topk.Add(absl::StrCat("other", i));
   }
-  auto count_after = topk.Count({"stable"})[0];
+  auto count_after = topk.Count("stable");
   // Count may increase from hash collisions but should never decrease.
   EXPECT_GE(count_after, count_before);
 }
@@ -447,9 +387,9 @@ TEST(TOPKBasic, VeryHighCountApproachesZero) {
 TEST(TOPKBasic, ZeroDecayNeverDecays) {
   TOPK topk(PMR_NS::get_default_resource(), 3, 50, 3, 0.0);
   topk.IncrBy("mono", 100);
-  auto count1 = topk.Count({"mono"})[0];
+  auto count1 = topk.Count("mono");
   topk.IncrBy("mono", 50);
-  auto count2 = topk.Count({"mono"})[0];
+  auto count2 = topk.Count("mono");
   EXPECT_GE(count2, count1);
   EXPECT_EQ(count2, 150u);
 }
@@ -468,7 +408,7 @@ TEST(TOPKBasic, DecayOneAlwaysDecays) {
 
   // Because decay is 100%, the counter just oscillates between 0 and 1.
   // It is mathematically impossible for it to exceed 1.
-  EXPECT_LE(topk.Count({"suppressed"})[0], 1u);
+  EXPECT_LE(topk.Count("suppressed"), 1u);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,8 +472,8 @@ TEST_F(TOPKTest, SerializeRoundTripPreservesCounters) {
   TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
-  EXPECT_EQ(topk_.Count({"foo"})[0], restored.Count({"foo"})[0]);
-  EXPECT_EQ(topk_.Count({"bar"})[0], restored.Count({"bar"})[0]);
+  EXPECT_EQ(topk_.Count("foo"), restored.Count("foo"));
+  EXPECT_EQ(topk_.Count("bar"), restored.Count("bar"));
 }
 
 // After Deserialize(), subsequent Add() calls work correctly and evictions are reported.
@@ -549,7 +489,7 @@ TEST_F(TOPKTest, DeserializeRebuildsValidHeapProperty) {
   // The restored heap is full (K items). A heavy new item should evict the minimum.
   auto evicted = restored.IncrBy("post_restore_big", 10000);
   EXPECT_TRUE(evicted.has_value());
-  EXPECT_EQ(restored.Query({"post_restore_big"})[0], 1);
+  EXPECT_TRUE(restored.Query("post_restore_big"));
 }
 
 // Serializing a fresh TOPK produces empty heap_items and a zero-filled counters vector.
@@ -687,11 +627,11 @@ TEST(TOPKBasic, DeserializeRestoresHeapProperty) {
 TEST_F(TOPKTest, CounterSaturationPreventsOverflow) {
   const uint32_t max_val = numeric_limits<uint32_t>::max();
   topk_.IncrBy("max_item", max_val);
-  EXPECT_EQ(topk_.Count({"max_item"})[0], max_val);
+  EXPECT_EQ(topk_.Count("max_item"), max_val);
 
   // Adding more must not wrap the counter back to a small number.
   topk_.IncrBy("max_item", 100);
-  EXPECT_EQ(topk_.Count({"max_item"})[0], max_val);
+  EXPECT_EQ(topk_.Count("max_item"), max_val);
 }
 
 // ---------------------------------------------------------------------------
