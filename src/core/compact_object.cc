@@ -1451,7 +1451,8 @@ size_t CompactObj::MallocUsed(bool slow) const {
 // specifically for this particular use-case.
 // So once we remove the expire table, we can remove this operator too.
 // In addition - we MUST remove AsRef/IsRef api as well as it will break
-// once we start using SetTtl/ClearTtl methods. All in all, we will free up two additional bits.
+// once we start using SetExpireTime/ClearExpireTime methods.
+// All in all, we will free up two additional bits.
 bool CompactKey::operator==(const CompactKey& o) const {
   DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
 
@@ -1795,12 +1796,12 @@ CompactObjType ObjTypeFromString(std::string_view sv) {
   return kInvalidCompactObjType;
 }
 
-void CompactKey::SetTtl(int64_t abs_ms) {
+void CompactKey::SetExpireTime(uint64_t abs_ms) {
   DCHECK(!IsRef() && !IsExternal());
 
   // Already SDS_TTL_TAG — update TTL in place.
   if (taglen_ == SDS_TTL_TAG) {
-    u_.sds_ttl.ttl_ms = abs_ms;
+    u_.sds_ttl.exp_ms = abs_ms;
     return;
   }
 
@@ -1825,18 +1826,18 @@ void CompactKey::SetTtl(int64_t abs_ms) {
     new_sds = sdsnewlen(view.data(), view.size());
     u_.r_obj.Free(tl.local_mr);
   } else {
-    LOG(FATAL) << "Unexpected tag for SetTtl: " << int(taglen_);
+    LOG(FATAL) << "Unexpected tag for SetExpireTime: " << int(taglen_);
   }
 
   u_.sds_ttl.sds_ptr = new_sds;
-  u_.sds_ttl.ttl_ms = abs_ms;
+  u_.sds_ttl.exp_ms = abs_ms;
   taglen_ = SDS_TTL_TAG;
   mask_bits_.expire = 1;
 }
 
-void CompactKey::ClearTtl() {
+bool CompactKey::ClearExpireTime() {
   if (taglen_ != SDS_TTL_TAG)
-    return;
+    return false;
   DCHECK(!IsRef() && !IsExternal());
 
   string decoded;
@@ -1846,11 +1847,14 @@ void CompactKey::ClearTtl() {
   mask_bits_.expire = 0;
 
   SetString(decoded);
+  return true;
 }
 
-int64_t CompactKey::GetTtl() const {
-  DCHECK_EQ(taglen_, SDS_TTL_TAG);
-  return u_.sds_ttl.ttl_ms;
+uint64_t CompactKey::GetExpireTime() const {
+  if (taglen_ != SDS_TTL_TAG)
+    return 0;
+  DCHECK(!IsRef() && !IsExternal());
+  return u_.sds_ttl.exp_ms;
 }
 
 size_t CompactObj::StrEncoding::DecodedSize(string_view blob) const {

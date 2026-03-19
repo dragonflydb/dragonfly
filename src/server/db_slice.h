@@ -323,7 +323,9 @@ class DbSlice {
   // Does not change expiry if at != 0 and expiry already exists.
   bool UpdateExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at);
 
-  void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
+  // false if no action was taken, true if the mc flag was set or removed.
+  bool SetMCFlag(DbIndex db_ind, const PrimeKey& key, uint32_t flag);
+
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
