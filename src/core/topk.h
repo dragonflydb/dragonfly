@@ -97,11 +97,11 @@ class TOPK {
   //          if no eviction occurred.
   std::optional<std::string> Add(std::string_view item);
 
-  // Increments an item's estimated frequency by a specific, arbitrary amount.
+  // Increments an item's estimated frequency by a specific amount.
   //
-  // Precondition: 'increment' must be strictly greater than 0.
-  // Returns: The string of the evicted item if this operation caused a resident
-  //          item to be displaced from the Top-K min-heap, or std::nullopt.
+  // If 'increment' is 0, this operation is a safe no-op and returns std::nullopt.
+  // Otherwise, returns the string of the evicted item if this operation caused
+  // a resident item to be displaced from the Top-K min-heap, or std::nullopt.
   std::optional<std::string> IncrBy(std::string_view item, uint32_t increment);
 
   // Queries whether an item currently resides in the Top-K min-heap.
