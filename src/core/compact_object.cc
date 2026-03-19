@@ -34,6 +34,7 @@ extern "C" {
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "core/tiering_types.h"
+#include "core/topk.h"
 
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json object defragmentation");
@@ -753,6 +754,10 @@ size_t CompactObj::Size() const {
         return u_.json_obj.cons.json_ptr->size();
     case SBF_TAG:
       return u_.sbf->current_size();
+    case CMS_TAG:
+      return 0;
+    case TOPK_TAG:
+      return u_.topk->Size();
     default:
       LOG(DFATAL) << "Should not reach " << int(taglen_);
       return 0;
@@ -826,6 +831,10 @@ CompactObjType CompactObj::ObjType() const {
 
   if (taglen_ == CMS_TAG) {
     return OBJ_CMS;
+  }
+
+  if (taglen_ == TOPK_TAG) {
+    return OBJ_TOPK;
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
@@ -960,6 +969,20 @@ CMS* CompactObj::GetCMS() const {
   return u_.cms;
 }
 
+void CompactObj::SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay) {
+  if (taglen_ == TOPK_TAG) {
+    *u_.topk = TOPK(memory_resource(), k, width, depth, decay);
+  } else {
+    SetMeta(TOPK_TAG);
+    u_.topk = AllocateMR<TOPK>(memory_resource(), k, width, depth, decay);
+  }
+}
+
+TOPK* CompactObj::GetTOPK() const {
+  DCHECK_EQ(TOPK_TAG, taglen_);
+  return u_.topk;
+}
+
 void CompactObj::SetString(std::string_view str) {
   CHECK(!IsExternal());
   encoding_ = NONE_ENC;
@@ -1091,14 +1114,14 @@ bool CompactObj::HasAllocated() const {
     return false;
 
   DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG ||
-         taglen_ == CMS_TAG || taglen_ == SDS_TTL_TAG);
+         taglen_ == CMS_TAG || taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG);
   return true;
 }
 
 bool CompactObj::TagAllowsEmptyValue() const {
   const auto type = ObjType();
   return type == OBJ_JSON || type == OBJ_STREAM || type == OBJ_STRING || type == OBJ_SBF ||
-         type == OBJ_CMS || type == OBJ_SET;
+         type == OBJ_CMS || type == OBJ_TOPK || type == OBJ_SET;
 }
 
 void __attribute__((noinline)) CompactObj::GetString(string* res) const {
@@ -1397,6 +1420,8 @@ void CompactObj::Free() {
     }
   } else if (taglen_ == SBF_TAG) {
     DeleteMR<SBF>(u_.sbf);
+  } else if (taglen_ == TOPK_TAG) {
+    DeleteMR<TOPK>(u_.topk);
   } else if (taglen_ == CMS_TAG) {
     DeleteMR<CMS>(u_.cms);
   } else if (taglen_ == SDS_TTL_TAG) {
@@ -1440,6 +1465,10 @@ size_t CompactObj::MallocUsed(bool slow) const {
 
   if (taglen_ == SDS_TTL_TAG) {
     return sdsAllocSize(u_.sds_ttl.sds_ptr);
+  }
+
+  if (taglen_ == TOPK_TAG) {
+    return u_.topk->MallocUsed();
   }
 
   LOG(DFATAL) << "should not reach";
@@ -1774,7 +1803,8 @@ constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] = {
     {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},     {OBJ_SET, "set"sv},
     {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},     {OBJ_STREAM, "stream"sv},
     {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
-    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}, {OBJ_CMS, "CMSk-TYPE"sv}};
+    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}, {OBJ_CMS, "CMSk-TYPE"sv},
+    {OBJ_TOPK, "TopK-TYPE"sv}};
 
 std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {
