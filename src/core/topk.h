@@ -86,8 +86,8 @@ class TOPK {
 
   // Represents an item in the Top-K list with its estimated count
   struct TopKItem {
-    std::string item;
     uint32_t count;
+    std::string item;
   };
 
   // Inserts a single item into the Top-K sketch, incrementing its estimated frequency by 1.

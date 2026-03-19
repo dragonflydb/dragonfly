@@ -253,7 +253,7 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
   result.reserve(min_heap_.size());
 
   for (const auto& heap_item : min_heap_) {
-    result.push_back({heap_item.key, heap_item.count});
+    result.push_back({heap_item.count, heap_item.key});
   }
 
   // Sort by count (descending) for output
@@ -338,7 +338,7 @@ TOPK::SerializedData TOPK::Serialize() const {
   // Serialize heap items
   data.heap_items.reserve(min_heap_.size());
   for (const auto& heap_item : min_heap_) {
-    data.heap_items.push_back({heap_item.key, heap_item.count});
+    data.heap_items.push_back({heap_item.count, heap_item.key});
   }
 
   // Serialize counter array

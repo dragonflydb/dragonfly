@@ -35,6 +35,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/topk.h"
 #include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -170,7 +171,8 @@ string ModuleTypeName(uint64_t module_id) {
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
-         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS;
+         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS ||
+         type == RDB_TYPE_TOPK;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -194,6 +196,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const unique_ptr<LoadTrace>& ptr);
   void operator()(const RdbSBF& src);
   void operator()(const RdbCMS& src);
+  void operator()(const RdbTOPK& src);
 
   std::error_code ec() const {
     return ec_;
@@ -290,6 +293,32 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
   pv_->SetSBF(sbf);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
+  TOPK* topk = CompactObj::AllocateMR<TOPK>(CompactObj::memory_resource(), src.k, src.width,
+                                            src.depth, src.decay);
+
+  TOPK::SerializedData data;
+  data.k = src.k;
+  data.width = src.width;
+  data.depth = src.depth;
+  data.decay = src.decay;
+
+  // Convert heap items from pairs to TopKItem structs
+  for (const auto& [item_str, count] : src.heap_items) {
+    data.heap_items.push_back({count, item_str});
+  }
+
+  // Convert counter data
+  if (!src.counters_buffer.empty()) {
+    const uint32_t* counter_ptr = reinterpret_cast<const uint32_t*>(src.counters_buffer.data());
+    size_t counter_count = src.counters_buffer.size() / sizeof(uint32_t);
+    data.counters.assign(counter_ptr, counter_ptr + counter_count);
+  }
+
+  topk->Deserialize(data);
+  pv_->SetTOPK(topk);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
@@ -1226,6 +1255,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_SBF2:
       iores = ReadSBF2();
       break;
+    case RDB_TYPE_TOPK:
+      iores = ReadTOPK();
+      break;
     case RDB_TYPE_CMS:
       iores = ReadCMS();
       break;
@@ -1831,14 +1863,81 @@ auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
   return ReadSBFImpl(true);
 }
 
+auto RdbLoaderBase::ReadTOPK() -> io::Result<OpaqueObj> {
+  RdbTOPK res;
+  uint64_t options;
+
+  // Currently options is a reserved field and set to 0.
+  SET_OR_UNEXPECT(LoadLen(nullptr), options);
+  if (options != 0)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  uint64_t k, width, depth;
+  SET_OR_UNEXPECT(LoadLen(nullptr), k);
+  SET_OR_UNEXPECT(LoadLen(nullptr), width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), depth);
+
+  // Validate parameters fit in uint32_t to prevent silent truncation and potential OOM
+  if (k > UINT32_MAX || width > UINT32_MAX || depth > UINT32_MAX)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  // Safely check for multiplication overflow BEFORE multiplying
+  if (depth > 0 && width > (UINT64_MAX / depth))
+    return Unexpected(errc::rdb_file_corrupted);
+
+  res.k = static_cast<uint32_t>(k);
+  res.width = static_cast<uint32_t>(width);
+  res.depth = static_cast<uint32_t>(depth);
+  SET_OR_UNEXPECT(FetchBinaryDouble(), res.decay);
+
+  // Load heap items
+  uint64_t heap_size;
+  SET_OR_UNEXPECT(LoadLen(nullptr), heap_size);
+
+  // Validate heap size doesn't exceed k (max items we track)
+  if (heap_size > k)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  res.heap_items.reserve(heap_size);
+  for (uint64_t i{}; i < heap_size; ++i) {
+    std::string item;
+    SET_OR_UNEXPECT(FetchGenericString(), item);
+    uint64_t count;
+    SET_OR_UNEXPECT(LoadLen(nullptr), count);
+
+    // Validate count fits in uint32_t to prevent silent truncation
+    if (count > UINT32_MAX)
+      return Unexpected(errc::rdb_file_corrupted);
+
+    res.heap_items.emplace_back(std::move(item), static_cast<uint32_t>(count));
+  }
+
+  // Load counter data
+  SET_OR_UNEXPECT(FetchGenericString(), res.counters_buffer);
+
+  return OpaqueObj{std::move(res), RDB_TYPE_TOPK};
+}
+
 io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   RdbCMS res;
 
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.width);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.depth);
+  uint64_t width, depth;
+  SET_OR_UNEXPECT(LoadLen(nullptr), width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), depth);
+
+  // Validate parameters fit in uint32_t to prevent silent truncation and potential OOM
+  if (width > UINT32_MAX || depth > UINT32_MAX)
+    return Unexpected(errc::rdb_file_corrupted);
+
   SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
 
-  const size_t num_counters = res.width * res.depth;
+  // Safely check for multiplication overflow BEFORE multiplying
+  if (depth > 0 && width > (SIZE_MAX / depth))
+    return Unexpected(errc::rdb_file_corrupted);
+
+  res.width = static_cast<uint32_t>(width);
+  res.depth = static_cast<uint32_t>(depth);
+  const size_t num_counters = static_cast<size_t>(width) * depth;
   res.counters.resize(num_counters);
   for (size_t i = 0; i < num_counters; ++i) {
     uint64_t raw;
