@@ -9,10 +9,20 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
 #include "base/random.h"
 
 namespace dfly {
 
+// INTERNAL USE ONLY: This class is an optimized, O(1) probabilistic hot-key tracker designed
+// specifically to run on the database's hot path (e.g., tracking hot keys for DEBUG HTKEYS).
+// It cannot and should not be used for user-facing Redis TOPK commands. It intentionally
+// omits a Min-Heap (preventing instant eviction reporting), does not support arbitrary
+// increments, and does not use PMR allocators (which are required for strict memory
+// tracking and RDB serialization of user data).
+//
+// For the public Redis TOPK module API, use the `TOPK` class defined in `core/topk.h`.
+//
 // TopKeys is a utility class that helps determine the most frequently used keys.
 // Based on: HeavyKeeper paper,  https://www.usenix.org/conference/atc18/presentation/gong
 //
@@ -32,6 +42,7 @@ namespace dfly {
 class TopKeys {
   TopKeys(const TopKeys&) = delete;
   TopKeys& operator=(const TopKeys&) = delete;
+
  public:
   struct Options {
     // HeavyKeeper options
