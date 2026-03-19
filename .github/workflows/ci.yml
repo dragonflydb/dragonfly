@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -164,7 +164,7 @@ jobs:
 
       - name: Upload unit logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: unit_logs
           path: /tmp/*INFO*
@@ -182,7 +182,7 @@ jobs:
 
       - name: Upload regression logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: regression_logs
           path: /tmp/failed/*
@@ -230,7 +230,7 @@ jobs:
       - name: Authenticate to AWS
         # Runs if it's NOT a PR, OR if the PR originates from the same repository (not a fork)
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1
@@ -247,7 +247,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: large-tests-arm-logs
           path: /tmp/failed/*
