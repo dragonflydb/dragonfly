@@ -65,6 +65,13 @@ class HnswVectorIndex {
   std::vector<std::pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
                                                        const std::vector<GlobalDocId>& docs) const;
 
+  // Returns all documents within radius, with their distances.
+  std::vector<std::pair<float, GlobalDocId>> RangeQuery(float* target, float radius) const;
+
+  size_t GetDim() const {
+    return dim_;
+  }
+
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
 
