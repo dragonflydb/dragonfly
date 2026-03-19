@@ -118,6 +118,7 @@ class CompactObj {
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
 
+ protected:
   // 0-16 is reserved for inline lengths of string type.
   enum TagEnum : uint8_t {
     INT_TAG = 17,
@@ -127,6 +128,7 @@ class CompactObj {
     JSON_TAG = 21,
     SBF_TAG = 22,
     CMS_TAG = 23,
+    SDS_TTL_TAG = 24,
   };
 
   // String encoding types.
@@ -206,22 +208,6 @@ class CompactObj {
 
   uint64_t HashCode() const;
   static uint64_t HashCode(std::string_view str);
-
-  bool operator==(const CompactObj& o) const;
-
-  bool operator==(std::string_view sl) const;
-
-  bool operator!=(std::string_view sl) const {
-    return !(*this == sl);
-  }
-
-  friend bool operator!=(const CompactObj& lhs, const CompactObj& rhs) {
-    return !(lhs == rhs);
-  }
-
-  friend bool operator==(std::string_view sl, const CompactObj& o) {
-    return o.operator==(sl);
-  }
 
   bool HasFlag() const {
     return mask_bits_.mc_flag;
@@ -435,6 +421,11 @@ class CompactObj {
     return taglen_;
   }
 
+ private:
+  // Returns a string_view corresponding to the serialized encoded blob.
+  // If opt_dest is provided, it may be used to decode directly into the destination buffer.
+  std::string_view GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const;
+
  protected:
   void EncodeString(std::string_view str);
 
@@ -475,6 +466,14 @@ class CompactObj {
     };
   } __attribute__((packed));
   static_assert(sizeof(ExternalPtr) == 16);
+
+  struct SdsTtlString {
+    char* sds_ptr;   // SDS string (length via sdslen)
+    int64_t ttl_ms;  // absolute expiry in ms
+
+    std::string_view view() const;
+  } __attribute__((packed));
+
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
@@ -511,6 +510,7 @@ class CompactObj {
     CMS* cms __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
+    SdsTtlString sds_ttl;
 
     U() : r_obj() {
     }
@@ -546,16 +546,6 @@ class CompactObj {
   uint8_t encoding_ : 2;  // Encoding of string values
 };
 
-inline bool CompactObj::operator==(std::string_view sv) const {
-  if (encoding_)
-    return CmpEncoded(sv);
-
-  if (IsInline()) {
-    return std::string_view{u_.inline_str, taglen_} == sv;
-  }
-  return CmpNonInline(sv);
-}
-
 struct CompactKey : public CompactObj {
   CompactKey() : CompactObj(true) {
   }
@@ -581,7 +571,47 @@ struct CompactKey : public CompactObj {
   void SetExpire(bool e) {
     mask_bits_.expire = e;
   }
+
+  // Embed TTL directly in the key by converting to SDS_TTL_TAG.
+  void SetTtl(int64_t abs_ms);
+
+  // Remove embedded TTL and convert back to optimal string form.
+  void ClearTtl();
+
+  // Read the embedded TTL. Precondition: HasExpire() is true and tag is SDS_TTL_TAG.
+  int64_t GetTtl() const;
+
+  CompactKey& operator=(std::string_view sv) noexcept {
+    SetString(sv);
+    return *this;
+  }
+
+  bool operator==(const CompactKey& o) const;
+
+  bool operator==(std::string_view sl) const;
+
+  bool operator!=(std::string_view sl) const {
+    return !(*this == sl);
+  }
+
+  friend bool operator!=(const CompactKey& lhs, const CompactKey& rhs) {
+    return !(lhs == rhs);
+  }
+
+  friend bool operator==(std::string_view sl, const CompactKey& o) {
+    return o.operator==(sl);
+  }
 };
+
+inline bool CompactKey::operator==(std::string_view sv) const {
+  if (encoding_)
+    return CmpEncoded(sv);
+
+  if (IsInline()) {
+    return std::string_view{u_.inline_str, taglen_} == sv;
+  }
+  return CmpNonInline(sv);
+}
 
 struct CompactValue : public CompactObj {
   CompactValue() : CompactObj(false) {

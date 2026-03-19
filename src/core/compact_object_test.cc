@@ -3,6 +3,7 @@
 //
 #include "core/compact_object.h"
 
+#include <absl/functional/overload.h>
 #include <absl/strings/str_cat.h>
 #include <gtest/gtest.h>
 #include <mimalloc.h>
@@ -118,6 +119,7 @@ class CompactObjectTest : public ::testing::Test {
   }
 
   CompactValue cobj_;
+  CompactKey ckey_;
   string tmp_;
 };
 
@@ -260,7 +262,7 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactValue obj{s};
+  CompactKey obj{s};
 
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
@@ -282,12 +284,12 @@ TEST_F(CompactObjectTest, InlineAsciiEncoded) {
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cobj_.SetString("0");
-  EXPECT_EQ(0, cobj_.TryGetInt());
-  EXPECT_EQ(1, cobj_.Size());
-  EXPECT_EQ(cobj_, "0");
-  EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
-  EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
+  ckey_.SetString("0");
+  EXPECT_EQ(0, ckey_.TryGetInt());
+  EXPECT_EQ(1, ckey_.Size());
+  EXPECT_EQ(ckey_, "0");
+  EXPECT_EQ("0", ckey_.GetSlice(&tmp_));
+  EXPECT_EQ(OBJ_STRING, ckey_.ObjType());
 }
 
 TEST_F(CompactObjectTest, Expire) {
@@ -298,6 +300,158 @@ TEST_F(CompactObjectTest, Expire) {
   EXPECT_EQ(OBJ_ENCODING_INT, key.Encoding());
   EXPECT_EQ(2, key.Size());
   EXPECT_TRUE(key.HasExpire());
+}
+
+TEST_F(CompactObjectTest, SdsTtlTag) {
+  // 1. Inline key + SetTtl
+  {
+    CompactKey key("hello");
+    ASSERT_TRUE(key.IsInline());
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(1000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(1000, key.GetTtl());
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_TRUE(key == string_view("hello"));
+    EXPECT_EQ(5, key.Size());
+    EXPECT_EQ(OBJ_STRING, key.ObjType());
+
+    string slice;
+    EXPECT_EQ("hello", key.GetSlice(&slice));
+    EXPECT_GT(key.MallocUsed(), 0u);
+  }
+
+  // 2. INT_TAG key + SetTtl
+  {
+    CompactKey key("42");
+    ASSERT_TRUE(key.TryGetInt().has_value());
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(2000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(2000, key.GetTtl());
+    EXPECT_TRUE(key == string_view("42"));
+    EXPECT_EQ(hash_before, key.HashCode());
+    // No longer INT_TAG — TryGetInt should return nullopt.
+    EXPECT_FALSE(key.TryGetInt().has_value());
+  }
+
+  // 3. SMALL_TAG key + SetTtl
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    CompactKey key(s);
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(3000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(3000, key.GetTtl());
+    EXPECT_TRUE(key == string_view(s));
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_EQ(s.size(), key.Size());
+  }
+
+  // 4. ROBJ_TAG key + SetTtl
+  {
+    string s(512, 'z');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = static_cast<char>(128 + (i % 128));
+    CompactKey key(s);
+    uint64_t hash_before = key.HashCode();
+
+    key.SetTtl(4000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(4000, key.GetTtl());
+    EXPECT_TRUE(key == string_view(s));
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_EQ(s.size(), key.Size());
+  }
+
+  // 5. TTL update in-place
+  {
+    CompactKey key("hello");
+    key.SetTtl(1000);
+    EXPECT_EQ(1000, key.GetTtl());
+
+    key.SetTtl(2000);
+    EXPECT_EQ(2000, key.GetTtl());
+    EXPECT_TRUE(key == string_view("hello"));
+  }
+
+  // 6. ClearTtl (inline recovery)
+  {
+    CompactKey key("hello");
+    key.SetTtl(1000);
+    EXPECT_TRUE(key.HasExpire());
+
+    key.ClearTtl();
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key.IsInline());
+    EXPECT_TRUE(key == string_view("hello"));
+  }
+
+  // 7. ClearTtl (INT recovery)
+  {
+    CompactKey key("42");
+    key.SetTtl(1000);
+    EXPECT_TRUE(key.HasExpire());
+
+    key.ClearTtl();
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key.TryGetInt().has_value());
+    EXPECT_EQ(42, key.TryGetInt().value());
+  }
+
+  // 8. ClearTtl (SMALL recovery)
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    CompactKey key(s);
+    key.SetTtl(1000);
+    key.ClearTtl();
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key == string_view(s));
+  }
+
+  // 9. Move semantics
+  {
+    CompactKey a("test");
+    a.SetTtl(100);
+    CompactKey b(std::move(a));
+    EXPECT_TRUE(b.HasExpire());
+    EXPECT_EQ(100, b.GetTtl());
+    EXPECT_TRUE(b == string_view("test"));
+  }
+
+  // 10. Free/destructor — just verify no leaks (TearDown catches them).
+  {
+    CompactKey key("hello");
+    key.SetTtl(5000);
+  }
+
+  // 11. Cross-tag operator== (SDS_TTL_TAG vs inline/INT_TAG).
+  {
+    CompactKey a("hello");
+    CompactKey b("hello");
+    b.SetTtl(999);
+    // b is SDS_TTL_TAG, a is inline — must compare equal as OBJ_STRING.
+    EXPECT_TRUE(a == b);
+    EXPECT_TRUE(b == a);
+
+    CompactKey c("42");
+    CompactKey d("42");
+    d.SetTtl(1);
+    EXPECT_TRUE(c == d);
+    EXPECT_TRUE(d == c);
+
+    // Different content must not compare equal.
+    CompactKey e("world");
+    e.SetTtl(1);
+    EXPECT_FALSE(a == e);
+  }
 }
 
 TEST_F(CompactObjectTest, MediumString) {
@@ -764,6 +918,7 @@ TEST_F(CompactObjectTest, Huffman) {
   HuffmanEncoder encoder;
   BuildEncoderAB(&encoder);
   string bindata = encoder.Export();
+
   for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
     ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
     for (unsigned i = 30; i < 2048; i += 10) {
@@ -783,7 +938,8 @@ TEST_F(CompactObjectTest, Huffman) {
       string actual;
       cobj.GetString(&actual);
       EXPECT_EQ(data, actual);
-      EXPECT_EQ(cobj, data);
+      visit(absl::Overload{[&](CompactKey& co) { EXPECT_EQ(co, data); }, [&](CompactValue& co) {}},
+            obj_backing);
     }
   }
 }
