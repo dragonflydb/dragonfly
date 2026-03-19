@@ -464,12 +464,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
     const int64_t new_tat_ms =
         (new_tat_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
     if (res) {
-      if (IsValid(res->exp_it)) {
-        res->exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
-      } else {
-        db_slice.AddExpire(op_args.db_cntx.db_index, res->it, new_tat_ms);
-      }
-
+      db_slice.AddExpire(op_args.db_cntx.db_index, res->it, new_tat_ms);
       res->it->second.SetInt(new_tat_ns);
     } else {
       PrimeValue pv;
@@ -599,8 +594,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
     // Note - correct behavior is to return TTL before it was updated by GAT,
     // but this is complex to implement so we return the updated TTL.
     if (it->first.HasExpire() && cmd_flags.return_ttl) {
-      auto exp_it = db_slice.GetDBTable(t->GetDbIndex())->expire.Find(it->first);
-      int64_t expire_time_ms = db_slice.ExpireTime(exp_it->second);
+      int64_t expire_time_ms = it->first.GetExpireTime();
       int64_t ttl_ms = expire_time_ms - t->GetDbContext().time_now_ms;
       resp.ttl_sec = ttl_ms > 0 ? static_cast<uint32_t>((ttl_ms + 999) / 1000) : 0;
     }
@@ -876,14 +870,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
-    if (at_ms) {  // Command has an expiry paramater.
-      if (IsValid(it_upd->exp_it)) {
-        // Updated existing expiry information.
-        it_upd->exp_it->second = db_slice.FromAbsoluteTime(at_ms);
-      } else {
-        // Add new expiry information.
-        db_slice.AddExpire(op_args_.db_cntx.db_index, it_upd->it, at_ms);
-      }
+    if (at_ms) {
+      db_slice.AddExpire(op_args_.db_cntx.db_index, it_upd->it, at_ms);
     } else {
       db_slice.RemoveExpire(op_args_.db_cntx.db_index, it_upd->it);
     }

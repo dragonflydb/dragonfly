@@ -475,8 +475,9 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   OpResult<string> res = DumpToString(src_key_, it->second, t->GetOpArgs(shard));
   if (res.ok()) {
     optional rdb_version = GetRdbVersion(*res);
-    serialized_value_ = SerializedValue{std::move(*res), rdb_version,
-                                        GetExpireTime(db_slice, exp_it), it->first.IsSticky()};
+    int64_t exp_time = it->first.GetExpireTime();
+    serialized_value_ =
+        SerializedValue{std::move(*res), rdb_version, exp_time, it->first.IsSticky()};
   } else {
     serialized_value_ = res.status();
   }
@@ -573,12 +574,8 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
   if (!IsValid(res.it)) {
     return OpStatus::KEY_NOTFOUND;
   } else {
-    if (IsValid(res.exp_it)) {
-      // The SKIPPED not really used, just placeholder for error
-      return db_slice.UpdateExpire(op_args.db_cntx.db_index, res.it, 0) ? OpStatus::OK
-                                                                        : OpStatus::SKIPPED;
-    }
-    return OpStatus::SKIPPED;  // fall though - key does not have expiry
+    bool cleared = db_slice.RemoveExpire(op_args.db_cntx.db_index, res.it);
+    return cleared ? OpStatus::OK : OpStatus::SKIPPED;
   }
 }
 
@@ -691,7 +688,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
           << db_slice.DbSize(op_args.db_cntx.db_index);
 
   PrimeTable::Cursor cur{*cursor};
-  auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
+  auto* prime_table = db_slice.GetTables(op_args.db_cntx.db_index).first;
 
   const auto start_cycles = base::CycleClock::Now();
 
@@ -937,10 +934,10 @@ OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  if (!IsValid(expire_it))
+  if (!it->first.HasExpire())
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it->second);
+  int64_t ttl_ms = it->first.GetExpireTime();
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
   return ttl_ms;
 }
@@ -967,12 +964,9 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
     return OpStatus::KEY_EXISTS;
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
+  uint64_t exp_ts = from_res.it->first.GetExpireTime();
   from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
-
-  // Restore expire flag after std::move.
-  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
 
   db_slice.Del(op_args.db_cntx, from_res.it);
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
@@ -1013,24 +1007,22 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   RemoveKeyFromIndexesIfNeeded(from_key, op_args.db_cntx, from_res.it->second, op_args.shard);
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
+  uint64_t exp_ts = from_res.it->first.GetExpireTime();
   from_res.post_updater.ReduceHeapUsage();
 
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
 
-  // Restore the expire flag on 'from' so we could delete it from expire table.
-  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
-
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     to_res.it->second = std::move(from_obj);
-    to_res.it->first.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
 
-    // It is guaranteed that UpdateExpire() call does not erase the element because then
-    // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
-    // therefore we can delete 'from_it'.
-    db_slice.UpdateExpire(op_args.db_cntx.db_index, to_res.it, exp_ts);
+    if (exp_ts) {
+      db_slice.AddExpire(op_args.db_cntx.db_index, to_res.it, exp_ts);
+    } else {
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, to_res.it);
+    }
+
     to_res.it->first.SetSticky(sticky);
     to_res.post_updater.Run();
 
@@ -2570,8 +2562,8 @@ void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
 
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
-        auto [prime_table, expire_table] =
-            cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
+        auto* prime_table =
+            cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index).first;
         if (prime_table->size() == 0) {
           return;
         }

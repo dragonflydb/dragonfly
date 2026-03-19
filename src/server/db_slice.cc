@@ -57,15 +57,9 @@ using Payload = journal::Entry::Payload;
 namespace {
 
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
-constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
-constexpr auto kExpireRegularSize = ExpireTable::kSegRegularBytes;
+
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize <= 32304);
-
-// 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
-// 24576
-static_assert(kExpireSegmentSize <= 23544);
-static_assert(double(kExpireRegularSize) / kExpireSegmentSize > 0.9);
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
   DCHECK_NE(db, nullptr);
@@ -359,14 +353,12 @@ inline bool MayDeleteAsynchronously(const PrimeValue& pv) {
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
-  static_assert(kDbSz == 40);
+  static_assert(kDbSz == 24);
 
   DbTableStats::operator+=(o);
 
   ADD(key_count);
-  ADD(expire_count);
   ADD(prime_capacity);
-  ADD(expire_capacity);
   ADD(table_mem_usage);
 
   return *this;
@@ -457,8 +449,6 @@ auto DbSlice::GetStats() const -> Stats {
     stats = db_wrap.stats;
     stats.key_count = db_wrap.prime.size();
     stats.prime_capacity = db_wrap.prime.capacity();
-    stats.expire_capacity = db_wrap.expire.capacity();
-    stats.expire_count = db_wrap.expire.size();
     stats.table_mem_usage = db_wrap.table_memory();
   }
   auto co_stats = CompactObj::GetStatsThreadLocal();
@@ -563,18 +553,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, res->it->second.MallocUsed());
-
-    if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is still
-                                 // valid after
-                                 // PreUpdateBlocking.
-      auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
-      LOG_IF(DFATAL, fresh_it != res->exp_it)
-          << "Inconsistent state after PreUpdateBlocking for key " << key
-          << ", db_index: " << cntx.db_index
-          << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
-          << ", expire table size: " << db_arr_[cntx.db_index]->expire.size()
-          << util::fb2::GetStacktrace();
-    }
 
     return {{it, exp_it, AutoUpdater{cntx.db_index, key, it, this}}};
   } else {
@@ -701,17 +679,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
-      if (IsValid(res->exp_it)) {  // This code added for DEBUG purpose to check that exp_it is
-                                   // still valid after
-                                   // PreUpdateBlocking.
-        auto fresh_it = db_arr_[cntx.db_index]->expire.Find(key);
-        LOG_IF(DFATAL, fresh_it != res->exp_it)
-            << "Inconsistent state after PreUpdateBlocking for key " << key
-            << ", db_index: " << cntx.db_index
-            << ", prime table size: " << db_arr_[cntx.db_index]->prime.size()
-            << ", expire table size: " << db_arr_[cntx.db_index]->expire.size()
-            << util::fb2::GetStacktrace();
-      }
       return ItAndUpdater{
           .it = it, .exp_it = exp_it, .post_updater{cntx.db_index, key, it, this}, .is_new = false};
     } else {
@@ -854,11 +821,6 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
-  }
-
-  if (it->first.HasExpire()) {
-    exp_it = ExpIterator::FromPrime(table->expire.Find(it->first));
-    DCHECK(!exp_it.is_done());
   }
 
   PerformDeletionAtomic(it, exp_it, table, async);
@@ -1009,38 +971,45 @@ util::fb2::Fiber DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, const Iterator& main_it, uint64_t at) {
-  uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
+  bool had_expire = main_it->first.HasExpire();
+  bool was_inline = main_it->first.IsInline();
+  ssize_t old_malloc = static_cast<ssize_t>(main_it->first.MallocUsed());
+
+  main_it->first.SetExpireTime(at);
+
   auto& db = *db_arr_[db_ind];
-  size_t table_before = db.expire.mem_usage();
-  CHECK(db.expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
-  table_memory_ += (db.expire.mem_usage() - table_before);
-  main_it->first.SetExpire(true);
+  ssize_t new_malloc = static_cast<ssize_t>(main_it->first.MallocUsed());
+  if (was_inline && !main_it->first.IsInline()) {
+    --db.stats.inline_keys;
+    AccountObjectMemory(main_it.key(), OBJ_KEY, new_malloc, &db);
+  } else if (new_malloc != old_malloc) {
+    AccountObjectMemory(main_it.key(), OBJ_KEY, new_malloc - old_malloc, &db);
+  }
+
+  if (!had_expire)
+    ++db.stats.expire_count;
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, const Iterator& main_it) {
-  if (main_it->first.HasExpire()) {
-    auto& db = *db_arr_[db_ind];
-    size_t table_before = db.expire.mem_usage();
-    CHECK_EQ(1u, db.expire.Erase(main_it->first));
-    main_it->first.SetExpire(false);
-    table_memory_ += (db.expire.mem_usage() - table_before);
-    return true;
-  }
-  return false;
-}
+  if (!main_it->first.HasExpire())
+    return false;
 
-// Returns true if a state has changed, false otherwise.
-bool DbSlice::UpdateExpire(DbIndex db_ind, const Iterator& it, uint64_t at) {
-  if (at == 0) {
-    return RemoveExpire(db_ind, it);
-  }
+  DCHECK(!main_it->first.IsInline());  // SDS_TTL_TAG is never inline
+  ssize_t old_malloc = static_cast<ssize_t>(main_it->first.MallocUsed());
 
-  if (!it->first.HasExpire() && at) {
-    AddExpire(db_ind, it, at);
-    return true;
+  main_it->first.ClearExpireTime();
+
+  auto& db = *db_arr_[db_ind];
+  ssize_t new_malloc = static_cast<ssize_t>(main_it->first.MallocUsed());
+  if (main_it->first.IsInline()) {
+    AccountObjectMemory(main_it.key(), OBJ_KEY, -old_malloc, &db);
+    ++db.stats.inline_keys;
+  } else if (new_malloc != old_malloc) {
+    AccountObjectMemory(main_it.key(), OBJ_KEY, new_malloc - old_malloc, &db);
   }
 
-  return false;
+  --db.stats.expire_count;
+  return true;
 }
 
 bool DbSlice::SetMCFlag(DbIndex db_ind, const PrimeKey& key, uint32_t flag) {
@@ -1125,8 +1094,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
   bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
 
-  if (IsValid(expire_it)) {
-    current_cmp = ExpireTime(expire_it->second);
+  if (prime_it->first.HasExpire()) {
+    current_cmp = prime_it->first.GetExpireTime();
     satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
   } else {
     satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
@@ -1144,11 +1113,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return -1;
   }
 
-  // Update or add expiration
-  if (IsValid(expire_it))
-    expire_it->second = FromAbsoluteTime(abs_msec);
-  else
-    AddExpire(cntx.db_index, prime_it, abs_msec);
+  AddExpire(cntx.db_index, prime_it, abs_msec);
   return abs_msec;
 }
 
@@ -1165,28 +1130,14 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
   if (!res.is_new && !force_update)  // have not inserted.
     return op_result;
 
-  auto& db = *db_arr_[cntx.db_index];
   auto& it = res.it;
 
   it->second = std::move(obj);
 
   if (expire_at_ms) {
-    it->first.SetExpire(true);
-    uint64_t delta = expire_at_ms - expire_base_[0];
-    if (IsValid(res.exp_it) && force_update) {
-      res.exp_it->second = ExpirePeriod(delta);
-    } else {
-      size_t table_before = db.expire.mem_usage();
-      auto exp_it = db.expire.InsertNew(it->first.AsRef(), ExpirePeriod(delta));
-      res.exp_it = ExpIterator(exp_it, StringOrView::FromView(key));
-      table_memory_ += (db.expire.mem_usage() - table_before);
-    }
+    AddExpire(cntx.db_index, it, expire_at_ms);
   } else {
-    // If the key had an expiry but the new value should have none, clear it.
-    if (IsValid(res.exp_it)) {
-      RemoveExpire(cntx.db_index, res.it);
-      res.exp_it = ExpIterator{};
-    }
+    RemoveExpire(cntx.db_index, it);
   }
 
   return op_result;
@@ -1305,23 +1256,11 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     return {it, ExpireIterator{}};
   }
 
-  auto& db = db_arr_[cntx.db_index];
-  auto expire_it = db->expire.Find(it->first);
-
-  if (!IsValid(expire_it)) {
-    LOG(DFATAL) << "Internal error, entry " << it->first.ToString()
-                << " not found in expire table, db_index: " << cntx.db_index
-                << ", expire table size: " << db->expire.size()
-                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
-    return {it, ExpireIterator{}};
-  }
-
-  // TODO: to employ multi-generation update of expire-base and the underlying values.
-  int64_t expire_time = ExpireTime(expire_it->second);
+  int64_t expire_time = it->first.GetExpireTime();
 
   // Never do expiration on replica or if expiration is disabled.
   if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
-    return {it, expire_it};
+    return {it, ExpireIterator{}};
   }
 
   string scratch;
@@ -1332,6 +1271,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     RecordExpiryBlocking(cntx.db_index, key);
   }
 
+  auto& db = db_arr_[cntx.db_index];
   if (expired_keys_events_recording_)
     db->expired_keys_events_.emplace_back(key);
 
@@ -1340,9 +1280,8 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     doc_del_cb_(key, cntx, it->second);
   }
 
-  const_cast<DbSlice*>(this)->PerformDeletionAtomic(
-      Iterator(it, StringOrView::FromView(key)),
-      ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
+  const_cast<DbSlice*>(this)->PerformDeletionAtomic(Iterator(it, StringOrView::FromView(key)),
+                                                    ExpIterator{}, db.get());
 
   ++events_.expired_keys;
   db->stats.events.expired_keys++;
@@ -1362,18 +1301,15 @@ void DbSlice::ExpireAllIfNeeded() {
       continue;
     auto& db = *db_arr_[db_index];
 
-    auto cb = [&](ExpireTable::iterator exp_it) {
-      auto prime_it = db.prime.Find(exp_it->first);
-      if (!IsValid(prime_it)) {
-        LOG(DFATAL) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
-        return;
+    auto cb = [&](PrimeTable::iterator prime_it) {
+      if (prime_it->first.HasExpire()) {
+        ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
       }
-      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
     };
 
-    ExpireTable::Cursor cursor;
+    PrimeTable::Cursor cursor;
     do {
-      cursor = db.expire.Traverse(cursor, cb);
+      cursor = db.prime.Traverse(cursor, cb);
     } while (cursor);
   }
 }
@@ -1441,25 +1377,19 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   std::string stash;
 
-  auto cb = [&](ExpireIterator it) {
+  auto cb = [&](PrimeTable::iterator it) {
+    if (!it->first.HasExpire())
+      return;
+
     string_view key = it->first.GetSlice(&stash);
     if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
       return;
 
     result.traversed++;
-    int64_t ttl = ExpireTime(it->second) - cntx.time_now_ms;
+    int64_t ttl = it->first.GetExpireTime() - cntx.time_now_ms;
     if (ttl <= 0) {
-      auto prime_it = db.prime.Find(it->first);
-      if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
-        LOG(DFATAL) << "Expired key " << key
-                    << " not found in prime table, expire_done: " << it.is_done();
-        if (!it.is_done()) {
-          db.expire.Erase(it->first);
-        }
-      } else {
-        result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
-        ExpireIfNeeded(cntx, prime_it);
-      }
+      result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
+      ExpireIfNeeded(cntx, it);
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
@@ -1474,13 +1404,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   };
 
   for (; i < count / 3 && quota_remains(); ++i) {
-    db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+    db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
     for (; i < count && quota_remains(); ++i) {
-      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+      db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
     }
   }
 
@@ -1848,9 +1778,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
                                     DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
-  if (!exp_it.is_done()) {
-    table->expire.Erase(exp_it.GetInnerIt());
-  }
 
   if (del_it->second.HasFlag()) {
     if (!SetMCFlag(table->index, del_it->first, 0)) {
@@ -1860,6 +1787,10 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& e
   }
 
   DbTableStats& stats = table->stats;
+
+  if (del_it->first.HasExpire())
+    --stats.expire_count;
+
   PrimeValue& pv = del_it->second;
 
   if (pv.HasStashPending()) {

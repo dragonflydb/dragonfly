@@ -66,6 +66,9 @@ struct DbTableStats {
   // Number of inline keys.
   uint64_t inline_keys = 0;
 
+  // number of keys with ttls set.
+  uint64_t expire_count = 0;
+
   // Object memory usage besides hash-table capacity.
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
@@ -127,7 +130,7 @@ class LockTable {
 // A single Db table that represents a table that can be chosen with "SELECT" command.
 struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_counter> {
   PrimeTable prime;
-  ExpireTable expire;
+  // ExpireTable expire;  // TTL is now embedded in CompactKey via SDS_TTL_TAG.
   DashTable<PrimeKey, uint32_t, detail::ExpireTablePolicy> mcflag;
 
   // Contains transaction locks
@@ -141,7 +144,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 
   mutable DbTableStats stats;
   std::unique_ptr<SlotStats[]> slots_stats;
-  ExpireTable::Cursor expire_cursor;
+  PrimeTable::Cursor expire_cursor;
 
   struct SampleTopKeys {
     TopKeys* top_keys = nullptr;
@@ -177,7 +180,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   PrimeIterator Launder(PrimeIterator it, std::string_view key);
 
   size_t table_memory() const {
-    return expire.mem_usage() + prime.mem_usage();
+    return prime.mem_usage();
   }
 };
 
