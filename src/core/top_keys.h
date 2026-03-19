@@ -15,7 +15,7 @@
 namespace dfly {
 
 // INTERNAL USE ONLY: This class is an optimized, O(1) probabilistic hot-key tracker designed
-// specifically to run on the database's hot path (e.g., tracking hot keys for DEBUG HTKEYS).
+// specifically to run on the database's hot path (e.g., tracking hot keys using DEBUG TOPK).
 // It cannot and should not be used for user-facing Redis TOPK commands. It intentionally
 // omits a Min-Heap (preventing instant eviction reporting), does not support arbitrary
 // increments, and does not use PMR allocators (which are required for strict memory

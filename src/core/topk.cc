@@ -67,8 +67,7 @@ TOPK::TOPK(TOPK&& other) noexcept
       decay_lookup_(std::exchange(other.decay_lookup_, nullptr)),
       custom_decay_table_(std::move(other.custom_decay_table_)),
       counters_(std::move(other.counters_)),
-      min_heap_(std::move(other.min_heap_)),
-      item_to_hash_(std::move(other.item_to_hash_)) {
+      min_heap_(std::move(other.min_heap_)) {
 }
 
 TOPK& TOPK::operator=(TOPK&& other) noexcept {
@@ -81,7 +80,6 @@ TOPK& TOPK::operator=(TOPK&& other) noexcept {
     custom_decay_table_ = std::move(other.custom_decay_table_);
     counters_ = std::move(other.counters_);
     min_heap_ = std::move(other.min_heap_);
-    item_to_hash_ = std::move(other.item_to_hash_);
   }
   return *this;
 }
@@ -309,27 +307,19 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
 }
 
 std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_count) {
-  // Fast path: O(1) hash lookup for membership, followed by a cache-friendly
-  // O(K) linear scan and O(log K) heap update.
-  auto it = item_to_hash_.find(item);
-  if (it != item_to_hash_.end()) {
-    size_t cached_hash = it->second;
-    for (size_t i = 0; i < min_heap_.size(); ++i) {
-      if ((min_heap_[i].hash == cached_hash) && (min_heap_[i].key == item)) {
-        uint32_t old_count = min_heap_[i].count;
-        min_heap_[i].count = new_count;
-        if (new_count > old_count) {
-          HeapifyDown(i);
-        } else if (new_count < old_count) {
-          HeapifyUp(i);
-        }
-        DCHECK_EQ(min_heap_.size(), item_to_hash_.size());
-        return std::nullopt;
+  // Fast path: O(K) cache-friendly linear scan over contiguous memory.
+  // For small K, this is faster than paying the overhead of a hash map lookup.
+  for (size_t i = 0; i < min_heap_.size(); ++i) {
+    if (min_heap_[i].key == item) {
+      uint32_t old_count = min_heap_[i].count;
+      min_heap_[i].count = new_count;
+      if (new_count > old_count) {
+        HeapifyDown(i);
+      } else if (new_count < old_count) {
+        HeapifyUp(i);
       }
+      return std::nullopt;
     }
-    LOG(DFATAL) << "TopK invariant broken: item found in map but missing from heap!";
-    // Production: self-heal the corruption so the item can be cleanly re-inserted below.
-    item_to_hash_.erase(it);
   }
 
   // Fast reject: item doesn't qualify for the heap. Just exit without any memory allocations or
@@ -341,26 +331,20 @@ std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_
 
   // Slow path: item will enter the heap. Now allocate.
   std::string item_str(item);
-  size_t item_hash = XXH3_64bits(item.data(), item.size());
 
   if (min_heap_.size() < k_) {
     // Heap not full, add the item, no eviction needed
     size_t new_idx = min_heap_.size();
-    min_heap_.push_back({item_str, new_count, item_hash});
-    item_to_hash_[item_str] = item_hash;
+    min_heap_.push_back({std::move(item_str), new_count});
     HeapifyUp(new_idx);
-    DCHECK_EQ(min_heap_.size(), item_to_hash_.size());
     return std::nullopt;
   }
 
   // Heap is full, evict minimum and add new item
   DCHECK_EQ(min_heap_.size(), k_);
   std::string old_key = std::move(min_heap_[0].key);
-  item_to_hash_.erase(old_key);
-  min_heap_[0] = {item_str, new_count, item_hash};
-  item_to_hash_[item_str] = item_hash;
+  min_heap_[0] = {std::move(item_str), new_count};
   HeapifyDown(0);
-  DCHECK_EQ(min_heap_.size(), item_to_hash_.size());
   return old_key;
 }
 
@@ -379,12 +363,6 @@ size_t TOPK::MallocUsed() const {
   size += min_heap_.capacity() * sizeof(HeapItem);
   for (const auto& item : min_heap_) {
     size += item.key.capacity();
-  }
-
-  // flat_hash_map overhead
-  size += item_to_hash_.bucket_count() * sizeof(std::pair<const std::string, size_t>);
-  for (const auto& [key, hash] : item_to_hash_) {
-    size += key.capacity();
   }
 
   return size;
@@ -419,22 +397,17 @@ void TOPK::Deserialize(const SerializedData& data) {
 
   // Clear existing data
   min_heap_.clear();
-  item_to_hash_.clear();
 
   // Restore counters
   counters_.assign(data.counters.begin(), data.counters.end());
 
   // Restore heap
   min_heap_.reserve(data.heap_items.size());
-  item_to_hash_.reserve(data.heap_items.size());
   for (const auto& item : data.heap_items) {
-    size_t item_hash = XXH3_64bits(item.item.data(), item.item.size());
-    min_heap_.push_back({item.item, item.count, item_hash});
-    item_to_hash_[item.item] = item_hash;
+    min_heap_.push_back({item.item, item.count});
   }
 
   // Rebuild heap property
-  DCHECK_EQ(item_to_hash_.size(), data.heap_items.size());
   std::make_heap(min_heap_.begin(), min_heap_.end(), std::greater<HeapItem>());
 }
 

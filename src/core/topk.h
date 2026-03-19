@@ -13,7 +13,6 @@
 #include <string_view>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
 #include "base/pmr/memory_resource.h"
 
 namespace dfly {
@@ -53,9 +52,9 @@ class TOPKTest;
 // TODO: Full PMR Integration for String Ownership
 // Currently, min_heap_ and counters_ use the provided memory_resource, ensuring the
 // dominant allocations are tracked. However, the std::string keys inside HeapItem
-// and the absl::flat_hash_map use the default heap.
-// Future optimization: Wrap flat_hash_map with a PMR allocator and upgrade
-// HeapItem to use PMR_NS::string with proper uses_allocator construction.
+// use the default heap.
+// Future optimization: Upgrade HeapItem to use PMR_NS::string with proper
+// uses_allocator construction.
 class TOPK {
   friend class TOPKTest;
 
@@ -197,7 +196,6 @@ class TOPK {
   struct HeapItem {
     std::string key;
     uint32_t count;
-    size_t hash;  // Pre-computed hash
 
     // Min heap comparator
     bool operator>(const HeapItem& other) const {
@@ -221,7 +219,11 @@ class TOPK {
 
   // Check if an item is in the Top-K heap
   [[nodiscard]] bool IsInHeap(std::string_view item) const {
-    return item_to_hash_.contains(item);
+    for (const auto& heap_item : min_heap_) {
+      if (heap_item.key == item)
+        return true;
+    }
+    return false;
   }
 
   // Hashes the item for a specific row and calculates its flattened 1D index
@@ -263,14 +265,6 @@ class TOPK {
 
   // Min heap: vector of top-K items maintained as a min heap
   std::vector<HeapItem, PMR_NS::polymorphic_allocator<HeapItem>> min_heap_;
-
-  // O(1) fast-path membership index for the min-heap.
-  // Maps items currently in the Top-K list to their pre-computed 64-bit hashes.
-  // This serves two critical performance goals:
-  // 1. Prevents O(K) linear scans just to check if an item is currently in the heap.
-  // 2. Caches the hash to allow very fast integer comparisons instead of
-  //    slow string comparisons when locating the item inside the heap array.
-  absl::flat_hash_map<std::string, size_t> item_to_hash_;
 };
 
 }  // namespace dfly
