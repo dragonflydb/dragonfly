@@ -546,7 +546,7 @@ def test_redis_om(df_server):
 
     client = redis.Redis(port=df_server.port, decode_responses=True)
 
-    class TestCar(redis_om.HashModel, index=True):
+    class TestCar(redis_om.HashModel):
         producer: str = redis_om.Field(index=True)
         description: str = redis_om.Field(index=True, full_text_search=True)
         speed: int = redis_om.Field(index=True, sortable=True)
