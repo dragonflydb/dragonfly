@@ -128,6 +128,11 @@ class TOPK {
     return k_;
   }
 
+  // Returns the number of items currently tracked in the Top-K heap.
+  [[nodiscard]] size_t Size() const {
+    return min_heap_.size();
+  }
+
   // Returns the width (number of columns/buckets) of the Count-Min Sketch array.
   [[nodiscard]] uint32_t Width() const {
     return width_;

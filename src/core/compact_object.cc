@@ -754,6 +754,10 @@ size_t CompactObj::Size() const {
         return u_.json_obj.cons.json_ptr->size();
     case SBF_TAG:
       return u_.sbf->current_size();
+    case CMS_TAG:
+      return 0;
+    case TOPK_TAG:
+      return u_.topk->Size();
     default:
       LOG(DFATAL) << "Should not reach " << int(taglen_);
       return 0;
