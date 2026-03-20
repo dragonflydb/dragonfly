@@ -4346,6 +4346,112 @@ TEST_F(SearchFamilyTest, HnswVectorRange) {
   EXPECT_THAT(vals_desc, ElementsAre(60, 50, 40));
 }
 
+TEST_F(SearchFamilyTest, VectorRangeAggregate) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D FLAT index with a TAG field — mirrors semantic routing use case from issue #6802
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+
+  // Two routes: "tech" at positions 1,2,3 and "sports" at positions 7,8,9
+  for (int i : {1, 2, 3}) {
+    Run({"HSET", absl::StrFormat("t%d", i), "vec", FloatToBytes(static_cast<float>(i)), "route",
+         "tech"});
+  }
+  for (int i : {7, 8, 9}) {
+    Run({"HSET", absl::StrFormat("s%d", i), "vec", FloatToBytes(static_cast<float>(i)), "route",
+         "sports"});
+  }
+
+  string query_vec = FloatToBytes(2.0f);  // near "tech" docs (positions 1,2,3)
+
+  // GROUPBY route, REDUCE SUM of distances.
+  // radius=2.5 from pos=2.0 hits t1(dist=1), t2(dist=0), t3(dist=1) — all "tech"
+  // sum of distances = 1+0+1 = 2
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
+           "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  // Large radius — both routes captured; each route has 3 docs
+  resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
+              "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3"),
+                                         IsMap("route", "sports", "cnt", "3")));
+
+  // Zero radius — only exact match (dist=0) is t2
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "1")));
+
+  // No docs in range — FT.AGGREGATE returns 0
+  string far_vec = FloatToBytes(100.0f);
+  resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
+              "cnt"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with a TAG field — same semantic routing use case but with HNSW index
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+
+  for (int i : {1, 2, 3}) {
+    Run({"HSET", absl::StrFormat("t%d", i), "pos", FloatToBytes(static_cast<float>(i)), "route",
+         "tech"});
+  }
+  for (int i : {7, 8, 9}) {
+    Run({"HSET", absl::StrFormat("s%d", i), "pos", FloatToBytes(static_cast<float>(i)), "route",
+         "sports"});
+  }
+
+  string query_vec = FloatToBytes(2.0f);
+
+  // radius=2.5 from pos=2.0 hits t1(dist=1), t2(dist=0), t3(dist=1) → only "tech"
+  // sum of distances = 2
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
+           "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  // Large radius — both routes; each has 3 docs
+  resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
+              "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3"),
+                                         IsMap("route", "sports", "cnt", "3")));
+
+  // Zero radius — only exact match (dist=0) is t2
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "1")));
+
+  // No docs in range — FT.AGGREGATE returns 0
+  string far_vec = FloatToBytes(100.0f);
+  resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
+              "cnt"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 1: Correct geo field definition and usage with HASH
   auto resp =

@@ -289,6 +289,14 @@ class ShardDocIndex {
                                                  const AggregateParams& params,
                                                  search::SearchAlgorithm* search_algo) const;
 
+  // Load and serialize docs for aggregation from pre-computed (DocId, distance) pairs.
+  // Used by the HNSW VECTOR_RANGE path in FT.AGGREGATE, where doc ids and distances come
+  // from the global HNSW index rather than a per-shard search.
+  std::vector<SearchDocData> LoadHnswRangeDocsForAggregator(
+      const OpArgs& op_args, const AggregateParams& params,
+      absl::Span<const std::pair<search::DocId, float>> doc_distances,
+      std::string_view score_alias) const;
+
   // Methods needed for join operation
   join::Vector<join::OwnedEntry> PreagregateDataForJoin(
       const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
