@@ -280,7 +280,7 @@ class Connection : public util::Connection {
 
   void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
-  void CheckIoBufCapacity(bool is_iobuf_full);
+  void CheckIoBufCapacity(bool is_iobuf_full, io::IoBuf& buf);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -365,12 +365,12 @@ class Connection : public util::Connection {
   // Returns true if one or more commands were parsed from the read buffer,
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
-  bool ParseMCBatch();
+  bool ParseMCBatch(io::IoBuf& buf);
 
-  bool ParseRedisBatch();
+  bool ParseRedisBatch(io::IoBuf& buf);
 
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
-  ParserStatus ParseLoop();
+  ParserStatus ParseLoop(io::IoBuf& buf);
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
@@ -424,9 +424,9 @@ class Connection : public util::Connection {
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
-  io::IoBuf
-      io_buf_;  // parser input: fed exclusively from disk pops (or socket_buf_ when disk empty)
-  io::IoBuf socket_buf_;  // recv target: new TCP bytes always land here
+  // parser input: fed exclusively from disk pops (or socket_buf_ when disk empty)
+  io::IoBuf io_buf_;
+  io::IoBuf socket_buf_;
   std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;

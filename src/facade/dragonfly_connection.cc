@@ -829,8 +829,8 @@ void Connection::HandleRequests() {
 
       // We validate the http request using basic-auth inside HttpConnection::HandleSingleRequest.
       cc_->authenticated = true;
-      auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
-      io_buf_.ConsumeInput(io_buf_.InputLen());
+      auto ec = http_conn.ParseFromBuffer(socket_buf_.InputBuffer());
+      socket_buf_.ConsumeInput(socket_buf_.InputLen());
       if (!ec) {
         http_conn.HandleRequests();
       }
@@ -1041,7 +1041,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
   auto* peer = socket_.get();
   auto& conn_stats = tl_facade_stats->conn_stats;
   do {
-    auto buf = io_buf_.AppendBuffer();
+    auto buf = socket_buf_.AppendBuffer();
     DCHECK(!buf.empty());
 
     ::io::Result<size_t> recv_sz = peer->Recv(buf);
@@ -1053,8 +1053,8 @@ io::Result<bool> Connection::CheckForHttpProto() {
       return false;
     }
 
-    io_buf_.CommitWrite(*recv_sz);
-    string_view ib = io::View(io_buf_.InputBuffer());
+    socket_buf_.CommitWrite(*recv_sz);
+    string_view ib = io::View(socket_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
       // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
       // Reject the connection.
@@ -1064,15 +1064,15 @@ io::Result<bool> Connection::CheckForHttpProto() {
     ib = ib.substr(last_len);
     size_t pos = ib.find('\n');
     if (pos != string_view::npos) {
-      ib = io::View(io_buf_.InputBuffer().first(last_len + pos));
+      ib = io::View(socket_buf_.InputBuffer().first(last_len + pos));
       if (ib.size() < 10 || ib.back() != '\r')
         return false;
 
       ib.remove_suffix(1);
       return MatchHttp11Line(ib);
     }
-    last_len = io_buf_.InputLen();
-    UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() { io_buf_.EnsureCapacity(128); });
+    last_len = socket_buf_.InputLen();
+    UpdateIoBufCapacity(socket_buf_, &conn_stats, [&]() { socket_buf_.EnsureCapacity(128); });
   } while (last_len < 1024);
 
   return false;
@@ -1089,7 +1089,18 @@ void Connection::ConnectionFlow() {
   ++conn_stats.conn_received_cnt;
 
   ++local_stats_.read_cnt;
-  local_stats_.net_bytes_in += io_buf_.InputLen();
+
+  // For the old IoLoop path, promote CheckForHttpProto bytes from socket_buf_ to io_buf_.
+  // IoLoopV2 reads socket_buf_ directly via its active_buf pointer, so no copy is needed.
+  if (socket_buf_.InputLen() > 0 && !ioloop_v2_) {
+    UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
+      io_buf_.Reserve(socket_buf_.InputLen());
+      io_buf_.WriteAndCommit(socket_buf_.InputBuffer().data(), socket_buf_.InputLen());
+    });
+    socket_buf_.ConsumeInput(socket_buf_.InputLen());
+  }
+
+  local_stats_.net_bytes_in += io_buf_.InputLen() + socket_buf_.InputLen();
 
   ParserStatus parse_status = OK;
 
@@ -1101,7 +1112,7 @@ void Connection::ConnectionFlow() {
       parse_status = ParseRedis(10000);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseLoop();
+      parse_status = ParseLoop(io_buf_);
     }
   }
 
@@ -1186,8 +1197,8 @@ void Connection::ConnectionFlow() {
     LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
     while (!ec2) {
       // Discard any received data.
-      io_buf_.Clear();
-      auto recv_sz = socket_->Recv(io_buf_.AppendBuffer());
+      socket_buf_.Clear();
+      auto recv_sz = socket_->Recv(socket_buf_.AppendBuffer());
       if (!recv_sz || *recv_sz == 0) {
         break;  // Peer closed connection.
       }
@@ -1347,7 +1358,7 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
   return ERROR;
 }
 
-auto Connection::ParseLoop() -> ParserStatus {
+auto Connection::ParseLoop(io::IoBuf& buf) -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
@@ -1361,10 +1372,10 @@ auto Connection::ParseLoop() -> ParserStatus {
     // We still execute and reply already-queued commands such that the parsed_cmd_q_bytes
     // drains.
     VLOG(4) << "ParseLoop check: parsed_cmd_q_bytes_=" << parsed_cmd_q_bytes_
-            << " threshold=" << offload_threshold << " io_buf_len=" << io_buf_.InputLen();
+            << " threshold=" << offload_threshold << " buf_len=" << buf.InputLen();
     if (offload_threshold > 0 && parsed_cmd_q_bytes_ >= offload_threshold) {
       VLOG(3) << "Offload triggered. offload_threshold=" << offload_threshold
-              << " io_buf_len=" << io_buf_.InputLen() << " parsed_head_=" << parsed_head_
+              << " buf_len=" << buf.InputLen() << " parsed_head_=" << parsed_head_
               << " parsed_to_execute_=" << parsed_to_execute_;
       HandleSocketBackpressure(offload_threshold);
       if (!ExecuteBatch())
@@ -1374,7 +1385,7 @@ auto Connection::ParseLoop() -> ParserStatus {
       break;
     }
 
-    commands_parsed = (this->*parse_func)();
+    commands_parsed = (this->*parse_func)(buf);
 
     if (!ExecuteBatch())
       return ERROR;
@@ -1382,7 +1393,7 @@ auto Connection::ParseLoop() -> ParserStatus {
     if (!ReplyBatch())
       return ERROR;
 
-  } while (commands_parsed && io_buf_.InputLen() > 0);
+  } while (commands_parsed && buf.InputLen() > 0);
 
   return commands_parsed ? OK : NEED_MORE;
 }
@@ -1490,7 +1501,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
       parse_status = ParseRedis(max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
-      parse_status = ParseLoop();
+      parse_status = ParseLoop(io_buf_);
     }
 
     if (reply_builder_->GetError()) {
@@ -2301,12 +2312,14 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-bool Connection::ParseRedisBatch() {
+bool Connection::ParseRedisBatch(io::IoBuf& buf) {
+  // IoLoopV2 is MEMCACHE only; for the Redis path buf is always io_buf_.
+  (void)buf;
   return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
 }
 
-bool Connection::ParseMCBatch() {
-  CHECK(io_buf_.InputLen() > 0);
+bool Connection::ParseMCBatch(io::IoBuf& buf) {
+  CHECK(buf.InputLen() > 0);
 
   do {
     if (parsed_cmd_ == nullptr) {
@@ -2316,9 +2329,9 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
-    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
-                                                            &consumed, parsed_cmd_->mc_command());
-    io_buf_.ConsumeInput(consumed);
+    MemcacheParser::Result result =
+        memcache_parser_->Parse(io::View(buf.InputBuffer()), &consumed, parsed_cmd_->mc_command());
+    buf.ConsumeInput(consumed);
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
@@ -2353,7 +2366,7 @@ bool Connection::ParseMCBatch() {
           break;
       }
     }
-  } while (parsed_cmd_q_len_ < 128 && io_buf_.InputLen() > 0);
+  } while (parsed_cmd_q_len_ < 128 && buf.InputLen() > 0);
   return true;
 }
 
@@ -2609,13 +2622,12 @@ void Connection::HandleSocketBackpressure(size_t offload_threshold) {
   disk_push_in_flight_ = true;
 
   // We intentionally defer ConsumeInput until the write completes rather than deep-copying
-  // the buffer. This is safe because:
-  //   1. socket_buf_.AppendBuffer() starts after the in-flight bytes, so incoming recv data
-  //      written via CommitWrite never overlaps the region io_uring is reading.
-  //   2. DoReadOnRecv checks disk_push_in_flight_ and skips writes to socket_buf_ while the
-  //      push is in flight, preventing any mutation of the buffer io_uring is reading.
-  // Calling ConsumeInput here would reset offs_/size_ to 0, making AppendBuffer() alias the
-  // same memory io_uring is still reading, and would allow Reserve() to free that memory.
+  // the buffer. This is safe because socket_buf_.AppendBuffer() starts after the in-flight
+  // InputBuffer bytes, so incoming recv data written via CommitWrite never overlaps the region
+  // io_uring is reading. Calling ConsumeInput here would reset offs_/size_ to 0, making
+  // AppendBuffer() alias the same memory io_uring is still reading, and would allow Reserve()
+  // to free that memory. Any path that would Reserve socket_buf_ (WriteAndCommit with
+  // insufficient AppendLen, or CheckIoBufCapacity) checks disk_push_in_flight_ and skips.
   disk_queue_->PushAsync(socket_buf_.InputBuffer(), [this, to_offload](std::error_code ec) {
     disk_push_in_flight_ = false;
     if (ec) {
@@ -2701,10 +2713,6 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     return;
   }
 
-  // socket_buf_ is pinned by io_uring during a push; new writes would corrupt the in-flight read.
-  if (disk_push_in_flight_)
-    return;
-
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
     if (!std::get<RecvNoti>(n.read_result)) {
@@ -2717,6 +2725,8 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
       return;
     }
 
+    // Writes go to AppendBuffer which starts after the in-flight InputBuffer region,
+    // so they never overlap the memory io_uring is reading during a push. Safe to proceed.
     io::MutableBytes buf = socket_buf_.AppendBuffer();
     io::Result<size_t> res = socket_->TryRecv(buf);
 
@@ -2745,6 +2755,10 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io_ec_ = ec;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
+    // WriteAndCommit may call Reserve() if AppendLen() < buf.size(), which would free the
+    // backing allocation that io_uring is still reading during an in-flight push. Skip.
+    if (disk_push_in_flight_ && socket_buf_.AppendLen() < buf.size())
+      return;
     UpdateIoBufCapacity(socket_buf_, &tl_facade_stats->conn_stats,
                         [&]() { socket_buf_.WriteAndCommit(buf.data(), buf.size()); });
   } else {
@@ -2752,15 +2766,17 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
   }
 }
 
-void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
-  // io_buf_ backing allocation is pinned by an in-flight pop. Reserve() would free it.
-  if (disk_pop_in_flight_)
+void Connection::CheckIoBufCapacity(bool is_iobuf_full, io::IoBuf& buf) {
+  // Reserve() frees the backing allocation, which is unsafe while io_uring has a reference:
+  //   io_buf_    is pinned by an in-flight disk pop  (PopAsync reads into it)
+  //   socket_buf_ is pinned by an in-flight disk push (PushAsync reads from it)
+  if ((disk_pop_in_flight_ && &buf == &io_buf_) || (disk_push_in_flight_ && &buf == &socket_buf_))
     return;
 
   auto& conn_stats = tl_facade_stats->conn_stats;
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
-  size_t capacity = io_buf_.Capacity();
+  size_t capacity = buf.Capacity();
   if (capacity < max_io_buf_len) {
     size_t parser_hint = 0;
     if (redis_parser_)
@@ -2772,23 +2788,23 @@ void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
     // (Note: The buffer object is only working in power-of-2 sizes,
     // so there's no danger of accidental O(n^2) behavior.)
     if (parser_hint > capacity) {
-      UpdateIoBufCapacity(io_buf_, &conn_stats,
-                          [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
+      UpdateIoBufCapacity(buf, &conn_stats,
+                          [&]() { buf.Reserve(std::min(max_io_buf_len, parser_hint)); });
     }
 
     // If we got a partial request because iobuf was full, grow it up to
     // a reasonable limit to save on Recv() calls.
     if (is_iobuf_full && capacity < max_io_buf_len / 2) {
       // Last io used most of the io_buf to the end.
-      UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
-        io_buf_.Reserve(capacity * 2);  // Valid growth range.
+      UpdateIoBufCapacity(buf, &conn_stats, [&]() {
+        buf.Reserve(capacity * 2);  // Valid growth range.
       });
     }
 
-    if (io_buf_.AppendLen() == 0U) {
+    if (buf.AppendLen() == 0U) {
       // it can happen with memcached but not for RedisParser, because RedisParser fully
       // consumes the passed buffer
-      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
+      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << buf.Capacity()
                                << ", consider to increase max_client_iobuf_len flag";
     }
   }
@@ -2848,6 +2864,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};  // takes callback by reference
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
 
+  // active_buf points to whichever buffer the parser should read from this iteration:
+  //   &io_buf_     when disk data is present or a pop is in-flight (io_buf_ is the sink)
+  //   &socket_buf_ otherwise (no disk involvement; parse socket bytes without copying)
+  io::IoBuf* active_buf = &socket_buf_;
+
   do {
     HandleMigrateRequest();
 
@@ -2858,22 +2879,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     DrainDiskQueue(offload_threshold);
 
-    // Once disk is fully drained and the parser buffer is empty, promote buffered socket
-    // bytes into io_buf_ so the parser sees them next. This is always safe: disk is empty so
-    // there are no older bytes that could be violated by parsing socket_buf_ data now.
-    if ((!disk_queue_ || disk_queue_->Empty()) && !disk_pop_in_flight_ && io_buf_.InputLen() == 0 &&
-        socket_buf_.InputLen() > 0) {
-      UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats, [&]() {
-        io_buf_.Reserve(socket_buf_.InputLen());
-        io_buf_.WriteAndCommit(socket_buf_.InputBuffer().data(), socket_buf_.InputLen());
-      });
-      socket_buf_.ConsumeInput(socket_buf_.InputLen());
-    }
+    // Recompute active_buf every iteration after DrainDiskQueue may have changed disk state.
+    active_buf = (io_buf_.InputLen() > 0 || disk_pop_in_flight_) ? &io_buf_ : &socket_buf_;
 
-    // Enter the await block when io_buf_ is empty OR when a disk pop is in-flight.
+    // Enter the await block when the active buffer is empty OR when a disk pop is in-flight.
     // The in-flight case: PopAsync owns io_buf_.AppendBuffer() until the CQE fires.
-    if (io_buf_.InputLen() == 0 || disk_pop_in_flight_) {
-      if (io_buf_.InputLen() == 0 && !disk_pop_in_flight_) {
+    if (active_buf->InputLen() == 0 || disk_pop_in_flight_) {
+      if (active_buf->InputLen() == 0 && !disk_pop_in_flight_) {
         // Poll again for readiness. The event handler registered above is edge triggered.
         // We should read from the socket until EAGAIN or EWOULDBLOCK to make sure we consume
         // all available data. See "Do I need to continuously read/write" question under
@@ -2897,12 +2909,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // Wake to drain disk once the pipeline queue has room again.
         bool can_drain_disk = offload_threshold > 0 && disk_queue_ && !disk_queue_->Empty() &&
                               parsed_cmd_q_bytes_ < offload_threshold && disk_op_done;
-        // Wake to parse restored disk bytes.
-        bool can_parse = io_buf_.InputLen() > 0 && !disk_pop_in_flight_;
-        // Wake to promote socket bytes once disk is empty and io_buf_ is drained.
+        // Wake when there is parseable data: disk bytes in io_buf_, or socket bytes when
+        // disk is fully drained (active_buf will be re-evaluated on the next iteration).
         bool disk_empty = !disk_queue_ || disk_queue_->Empty();
-        bool can_promote = socket_buf_.InputLen() > 0 && disk_empty && !disk_pop_in_flight_;
-        return can_parse || can_promote || cmd_ready || cmd_executable || io_ec_ || can_drain_disk;
+        bool can_parse = (io_buf_.InputLen() > 0 || (socket_buf_.InputLen() > 0 && disk_empty)) &&
+                         !disk_pop_in_flight_;
+        return can_parse || cmd_ready || cmd_executable || io_ec_ || can_drain_disk;
       });
     }
 
@@ -2912,16 +2924,16 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     phase_ = PROCESS;
-    bool is_iobuf_full = io_buf_.AppendLen() == 0;
+    bool is_iobuf_full = active_buf->AppendLen() == 0;
 
     // When over the offload threshold with no commands left to dispatch, force the
     // await path so the fiber yields and lets shard completions be processed.
-    // Without this, recv keeps refilling io_buf_ and we spin forever.
+    // Without this, recv keeps refilling the buffer and we spin forever.
     bool force_await = offload_threshold > 0 && parsed_cmd_q_bytes_ >= offload_threshold &&
                        parsed_to_execute_ == nullptr;
 
-    if (io_buf_.InputLen() > 0 && !force_await && !disk_pop_in_flight_) {
-      parse_status = ParseLoop();
+    if (active_buf->InputLen() > 0 && !force_await && !disk_pop_in_flight_) {
+      parse_status = ParseLoop(*active_buf);
     } else {
       parse_status = NEED_MORE;
 
@@ -2931,10 +2943,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         ReplyBatch();
       }
 
-      // When force_await is active we cannot parse even if io_buf_ or socket_buf_ has data.
+      // When force_await is active we cannot parse even if active_buf or socket_buf_ has data.
       // Push any pending socket bytes to disk so TCP keeps flowing, then yield until either
       // a command finishes (cmd_ready) or the queue drains below the threshold. Without this
-      // yield the fiber spins: the await block is skipped (io_buf_ non-empty), parse is
+      // yield the fiber spins: the await block is skipped (active_buf non-empty), parse is
       // skipped (force_await), and nothing makes progress.
       if (force_await && (io_buf_.InputLen() > 0 || socket_buf_.InputLen() > 0)) {
         HandleSocketBackpressure(offload_threshold);
@@ -2956,7 +2968,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-      CheckIoBufCapacity(is_iobuf_full);
+      CheckIoBufCapacity(is_iobuf_full, *active_buf);
     } else if (parse_status != OK) {
       break;
     }
