@@ -196,10 +196,6 @@ class CompactObj {
   // For containers - returns number of elements in the container.
   size_t Size() const;
 
-  bool IsRef() const {
-    return mask_bits_.ref;
-  }
-
   std::string_view GetSlice(std::string* scratch) const;
 
   std::string ToString() const {
@@ -532,8 +528,7 @@ class CompactObj {
   union {
     uint8_t mask_ = 0;
     struct {
-      uint8_t ref : 1;      // Mark objects that don't own their allocation.
-      uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
+      uint8_t unused : 2;
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
@@ -564,23 +559,8 @@ struct CompactKey : public CompactObj {
   explicit CompactKey(std::string_view str) : CompactObj{str, true} {
   }
 
-  CompactKey AsRef() const {
-    CompactKey res;
-    memcpy(&res.u_, &u_, sizeof(u_));
-    res.encoding_ = encoding_;
-    res.taglen_ = taglen_;
-    res.mask_ = mask_;
-    res.mask_bits_.ref = 1;
-
-    return res;
-  }
-
   bool HasExpire() const {
-    return mask_bits_.expire;
-  }
-
-  void SetExpire(bool e) {
-    mask_bits_.expire = e;
+    return taglen_ == SDS_TTL_TAG;
   }
 
   // Embed expire time directly in the key by converting to SDS_TTL_TAG.
@@ -599,16 +579,10 @@ struct CompactKey : public CompactObj {
     return *this;
   }
 
-  bool operator==(const CompactKey& o) const;
-
   bool operator==(std::string_view sl) const;
 
   bool operator!=(std::string_view sl) const {
     return !(*this == sl);
-  }
-
-  friend bool operator!=(const CompactKey& lhs, const CompactKey& rhs) {
-    return !(lhs == rhs);
   }
 
   friend bool operator==(std::string_view sl, const CompactKey& o) {

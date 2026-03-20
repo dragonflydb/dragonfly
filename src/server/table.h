@@ -9,7 +9,6 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
-#include "core/expire_period.h"
 #include "core/intent_lock.h"
 #include "server/detail/table.h"
 #include "server/tx_base.h"
@@ -27,14 +26,11 @@ using PrimeKey = detail::PrimeKey;
 using PrimeValue = detail::PrimeValue;
 
 using PrimeTable = DashTable<PrimeKey, PrimeValue, detail::PrimeTablePolicy>;
-using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>;
 
 /// Iterators are invalidated when new keys are added to the table or some entries are deleted.
 /// Iterators are still valid if a different entry in the table was mutated.
 using PrimeIterator = PrimeTable::iterator;
 using PrimeConstIterator = PrimeTable::const_iterator;
-using ExpireIterator = ExpireTable::iterator;
-using ExpireConstIterator = ExpireTable::const_iterator;
 
 class TopKeys;
 
@@ -42,15 +38,7 @@ inline bool IsValid(PrimeIterator it) {
   return !it.is_done();
 }
 
-inline bool IsValid(ExpireIterator it) {
-  return !it.is_done();
-}
-
 inline bool IsValid(PrimeConstIterator it) {
-  return !it.is_done();
-}
-
-inline bool IsValid(ExpireConstIterator it) {
   return !it.is_done();
 }
 
@@ -130,7 +118,6 @@ class LockTable {
 // A single Db table that represents a table that can be chosen with "SELECT" command.
 struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_counter> {
   PrimeTable prime;
-  // ExpireTable expire;  // TTL is now embedded in CompactKey via SDS_TTL_TAG.
   DashTable<PrimeKey, uint32_t, detail::ExpireTablePolicy> mcflag;
 
   // Contains transaction locks
