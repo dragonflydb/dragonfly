@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "core/compact_object.h"
 
@@ -85,13 +86,16 @@ struct SerializedMapDecoder : public Decoder {
   UploadMetrics GetMetrics() const override;
   void Upload(CompactObj* obj) override;
 
-  std::variant<SerializedMap*, dfly::detail::ListpackWrap*> Read() const;
-  dfly::detail::ListpackWrap* Write();
+  // Access internal object for read, returns currently stored variant
+  std::variant<SerializedMap*, dfly::detail::ListpackWrap*> Get() const;
+
+  // Access internal object for writes
+  dfly::detail::ListpackWrap* GetMutable();
 
  private:
   void MakeOwned();  // Convert to listpack
 
-  bool modified_;
+  bool modified_ = false;
   std::variant<std::unique_ptr<SerializedMap>, std::unique_ptr<dfly::detail::ListpackWrap>> map_;
 };
 

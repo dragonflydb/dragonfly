@@ -143,7 +143,7 @@ struct HMapWrap {
   void Launder(tiering::SerializedMapDecoder* dec) {
     Overloaded ov{
         [](StringMap* s) {},
-        [&](detail::ListpackWrap& lw) { *dec->Write() = lw; },
+        [&](detail::ListpackWrap& lw) { *dec->GetMutable() = lw; },
     };
     VisitMut(ov);
   }
@@ -207,12 +207,17 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
       using D = tiering::SerializedMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
       auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
+        if (!res) {
+          fut.Resolve(OpResult<T>{OpStatus::IO_ERROR});
+          return;
+        }
+
         // Create wrapper from different types
         Overloaded ov{
             [](tiering::SerializedMap* sm) { return HMapWrap{sm}; },
             [](detail::ListpackWrap* lw) { return HMapWrap{*lw}; },
         };
-        auto hw = visit(ov, res.value()->Read());
+        auto hw = visit(ov, res.value()->Get());
         fut.Resolve(f(hw));
       };
 
@@ -252,8 +257,13 @@ template <typename F> auto ExecuteW(Transaction* tx, F&& f) {
       using D = tiering::SerializedMapDecoder;
       util::fb2::Future<OpResult<T>> fut;
       auto read_cb = [fut, f = std::move(f)](io::Result<D*> res) mutable {
+        if (!res) {
+          fut.Resolve(OpResult<T>{OpStatus::IO_ERROR});
+          return;
+        }
+
         // Create wrapper from different types
-        HMapWrap hw{*res.value()->Write()};
+        HMapWrap hw{*res.value()->GetMutable()};
         fut.Resolve(f(hw));
         hw.Launder(*res);
       };
@@ -495,7 +505,12 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
     using D = tiering::SerializedMapDecoder;
     util::fb2::Future<OpResult<uint32_t>> fut;
     auto read_cb = [fut, values, op_sp](io::Result<D*> res) mutable {
-      auto& lw = *res.value()->Write();
+      if (!res) {
+        fut.Resolve({OpStatus::IO_ERROR});
+        return;
+      }
+
+      auto& lw = *res.value()->GetMutable();
       uint32_t created = 0;
       for (size_t i = 0; i < values.size(); i += 2) {
         created += lw.Insert(values[i], values[i + 1], op_sp.skip_if_exists);
@@ -563,7 +578,7 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
+    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, op_sp.backpressure);
   }
 
   return CbVariant<uint32_t>{created};

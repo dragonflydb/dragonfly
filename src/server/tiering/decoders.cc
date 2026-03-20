@@ -90,22 +90,22 @@ void SerializedMapDecoder::Upload(CompactObj* obj) {
   if (std::holds_alternative<std::unique_ptr<SerializedMap>>(map_))
     MakeOwned();
 
-  obj->InitRobj(OBJ_HASH, kEncodingListPack, Write()->GetPointer());
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, GetMutable()->GetPointer());
 }
 
-std::variant<SerializedMap*, detail::ListpackWrap*> SerializedMapDecoder::Read() const {
+std::variant<SerializedMap*, detail::ListpackWrap*> SerializedMapDecoder::Get() const {
   using RT = std::variant<SerializedMap*, detail::ListpackWrap*>;
   return std::visit([](auto& ptr) -> RT { return ptr.get(); }, map_);
 }
 
-detail::ListpackWrap* SerializedMapDecoder::Write() {
+detail::ListpackWrap* SerializedMapDecoder::GetMutable() {
   if (std::holds_alternative<std::unique_ptr<detail::ListpackWrap>>(map_))
     return std::get<std::unique_ptr<detail::ListpackWrap>>(map_).get();
 
   // Convert SerializedMap to listpack
   MakeOwned();
   modified_ = true;
-  return Write();
+  return GetMutable();
 }
 
 void SerializedMapDecoder::MakeOwned() {
