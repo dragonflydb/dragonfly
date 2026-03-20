@@ -1792,3 +1792,41 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await flood_task
         writer.close()
         await writer.wait_closed()
+
+
+async def test_ioloopv2_disk_backpressure_offload(df_factory: DflyInstanceFactory):
+    MC_PORT = 11212
+    # Use a very small threshold (1 byte) so offloading triggers immediately once
+    # any command is in-flight, making the test reliable without needing precise timing.
+    server = df_factory.create(
+        proactor_threads=4,
+        memcached_port=MC_PORT,
+        experimental_io_loop_v2=True,
+        pipeline_disk_offload_threshold=1,
+        disk_backpressure_folder="/tmp/",
+        vmodule="dragonfly_connection=3",
+    )
+    server.start()
+
+    async def producer():
+        _, writer = await asyncio.open_connection("localhost", MC_PORT)
+        cmds = []
+        for i in range(10_000):
+            key = f"k{i % 100}"
+            val = f"val{i}"
+            cmds.append(f"set {key} 0 0 {len(val)} noreply\r\n{val}\r\n".encode())
+        writer.write(b"".join(cmds))
+        await writer.drain()
+        await asyncio.sleep(0.3)
+        writer.close()
+        await writer.wait_closed()
+
+    await asyncio.gather(*[producer() for _ in range(5)])
+
+    server.stop()
+
+    offload_lines = server.find_in_logs("Offloaded.*bytes to disk")
+    restore_lines = server.find_in_logs("Restored.*bytes from disk")
+
+    assert len(offload_lines) > 1
+    assert len(restore_lines) > 1

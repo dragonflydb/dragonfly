@@ -14,6 +14,7 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
+#include "facade/disk_backed_queue.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
@@ -279,7 +280,7 @@ class Connection : public util::Connection {
 
   void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
-  void CheckIoBufCapacity(bool is_iobuf_full);
+  void CheckIoBufCapacity(bool is_iobuf_full, io::IoBuf& buf);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -336,6 +337,12 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
+  // Lazily initialises disk_queue_. Returns false on error and disk_queue_ stays null.
+  bool InitDiskQueueIfNeeded();
+
+  void HandleSocketBackpressure(size_t offload_threshold);
+  void DrainDiskQueue(size_t offload_threshold);
+
   void IncreaseConnStats();
   void DecreaseConnStats();
   void BreakOnce(uint32_t ev_mask);
@@ -358,12 +365,12 @@ class Connection : public util::Connection {
   // Returns true if one or more commands were parsed from the read buffer,
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
-  bool ParseMCBatch();
+  bool ParseMCBatch(io::IoBuf& buf);
 
-  bool ParseRedisBatch();
+  bool ParseRedisBatch(io::IoBuf& buf);
 
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
-  ParserStatus ParseLoop();
+  ParserStatus ParseLoop(io::IoBuf& buf);
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
@@ -407,11 +414,19 @@ class Connection : public util::Connection {
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
 
+  // Disk-backed offload queue for IoLoopV2 pipeline backpressure.
+  // Lazily created when the parsed command queue exceeds the offload threshold.
+  std::unique_ptr<DiskBackedQueue> disk_queue_;
+  bool disk_push_in_flight_ = false;
+  bool disk_pop_in_flight_ = false;
+
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
-  io::IoBuf io_buf_;  // used in io loop and parsers
+  // parser input: fed exclusively from disk pops (or socket_buf_ when disk empty)
+  io::IoBuf io_buf_;
+  io::IoBuf socket_buf_;
   std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
