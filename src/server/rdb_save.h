@@ -6,6 +6,8 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
 
+#include "server/rdb_extensions.h"
+
 extern "C" {
 #include "redis/lzfP.h"
 }
@@ -283,6 +285,12 @@ class RdbSerializer : public RdbSerializerBase {
     send_tagged_entries_ = tag_entries;
   }
 
+  // Shadows RdbSerializerBase::WriteJournalEntry to add tag-switch stashing.
+  std::error_code WriteJournalEntry(std::string_view serialized_entry);
+
+  // Shadows RdbSerializerBase::SerializedLen to include stash size.
+  size_t SerializedLen() const;
+
  private:
   // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
@@ -303,11 +311,22 @@ class RdbSerializer : public RdbSerializerBase {
   // Might preempt
   void PushToConsumerIfNeeded(FlushState flush_state);
 
+  // Consumes and stores current mem_buf_ content into a stash so that interleaved entries of
+  // different tag types (Baseline/journal etc) are sent to consumer with correct headers on each
+  // chunk.
+  void StashCurrentBuffer(ChunkTag tag);
+
+  // Tags a given byte series with opcode, tag type and the size of bytes in 9 byte header.
+  static std::string TagChunk(io::Bytes bytes, ChunkTag tag);
+
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
+
   bool send_tagged_entries_ = false;
+  std::string tagged_chunk_stash_;
+  ChunkTag current_tag_ = ChunkTag::Baseline;
 };
 
 }  // namespace dfly

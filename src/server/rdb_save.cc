@@ -274,6 +274,11 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return 0;
   }
 
+  if (send_tagged_entries_ && current_tag_ != ChunkTag::Baseline) {
+    StashCurrentBuffer(current_tag_);
+    current_tag_ = ChunkTag::Baseline;
+  }
+
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   auto ec = SelectDb(dbid);
   if (ec) {
@@ -894,6 +899,15 @@ string RdbSerializerBase::Flush(RdbSerializerBase::FlushState flush_state) {
 
 string RdbSerializer::Flush(FlushState flush_state) {
   string res = RdbSerializerBase::Flush(flush_state);
+
+  if (send_tagged_entries_) {
+    if (!res.empty()) {
+      tagged_chunk_stash_.append(
+          TagChunk({reinterpret_cast<const unsigned char*>(res.data()), res.size()}, current_tag_));
+    }
+    res = std::move(tagged_chunk_stash_);
+    tagged_chunk_stash_.clear();
+  }
 
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
@@ -1823,12 +1837,64 @@ size_t RdbSerializer::GetTempBufferSize() const {
   return RdbSerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
-void RdbSerializer::PushToConsumerIfNeeded(RdbSerializerBase::FlushState flush_state) {
+size_t RdbSerializer::SerializedLen() const {
+  return RdbSerializerBase::SerializedLen() + tagged_chunk_stash_.size();
+}
+
+error_code RdbSerializer::WriteJournalEntry(string_view serialized_entry) {
+  if (send_tagged_entries_ && current_tag_ != ChunkTag::Journal) {
+    StashCurrentBuffer(current_tag_);
+    current_tag_ = ChunkTag::Journal;
+  }
+  return RdbSerializerBase::WriteJournalEntry(serialized_entry);
+}
+
+void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
   if (consume_fun_ && SerializedLen() > flush_threshold_) {
     string blob = Flush(flush_state);
     DCHECK(!blob.empty());  // SerializedLen() > 0.
+    const auto tag = current_tag_;
     consume_fun_(std::move(blob));
+
+    // Tag changed while fiber yielded in consume_fun_. Stash the data written during yield and
+    // restore our pre-yield tag.
+    if (send_tagged_entries_ && current_tag_ != tag) {
+      StashCurrentBuffer(current_tag_);
+      current_tag_ = tag;
+    }
   }
+}
+
+void RdbSerializer::StashCurrentBuffer(ChunkTag tag) {
+  // TODO skipped compression here using FlushState::kFlushMidEntry, it should be doable if
+  // number_of_chunks_ can be maintained across the stash. Currently just save the value before and
+  // restore after.
+  const auto number_of_chunks = number_of_chunks_;
+  const absl::Cleanup reset_chunks = [&] { number_of_chunks_ = number_of_chunks; };
+
+  const auto bytes = PrepareFlush(FlushState::kFlushMidEntry);
+
+  // Don't stash if there's nothing in the buffer
+  if (bytes.empty())
+    return;
+
+  tagged_chunk_stash_.append(TagChunk(bytes, tag));
+
+  // Clear mem buf of the entry we just stashed
+  mem_buf_.ConsumeInput(mem_buf_.InputLen());
+}
+
+std::string RdbSerializer::TagChunk(Bytes bytes, ChunkTag tag) {
+  uint8_t header[9];
+  header[0] = RDB_OPCODE_TAGGED_CHUNK;
+  absl::little_endian::Store32(header + 1, static_cast<uint32_t>(tag));
+  absl::little_endian::Store32(header + 5, bytes.size());
+
+  std::string result;
+  result.reserve(sizeof(header) + bytes.size());
+  result.append(reinterpret_cast<const char*>(header), sizeof(header));
+  result.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  return result;
 }
 
 }  // namespace dfly
