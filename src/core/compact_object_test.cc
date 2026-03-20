@@ -20,6 +20,7 @@
 #include "core/page_usage/page_usage_stats.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/tiering_types.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -820,12 +821,16 @@ TEST_F(CompactObjectTest, StrEncodingAndMaterialize) {
       EXPECT_EQ(test_str, enc.Decode(raw_str).Take());
 
       // Test Materialize
-      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);  // dummy values
+      tiering::Fragment frag1(&obj);
+      frag1.SetSegmentInfo(0, 0, CompactObj::ExternalRep::STRING);
+      obj.SetExternal(&frag1);
       obj.Materialize(raw_str, true);
       EXPECT_EQ(test_str, obj.ToString());
 
       // Restore from external again, but not as a raw value
-      obj.SetExternal(0, 0, CompactObj::ExternalRep::STRING);
+      tiering::Fragment frag2(&obj);
+      frag2.SetSegmentInfo(0, 0, CompactObj::ExternalRep::STRING);
+      obj.SetExternal(&frag2);
       auto test_str2 = test_str + "updated";
       obj.Materialize(test_str2, false);
       EXPECT_EQ(obj.ToString(), test_str2);
@@ -837,15 +842,21 @@ TEST_F(CompactObjectTest, ExternalRepresentation) {
   {
     CompactValue obj;
     obj.SetString("test");
-    obj.SetExternal(0, 4, CompactObj::ExternalRep::STRING);
+    tiering::Fragment frag(&obj);
+    frag.SetSegmentInfo(0, 4, CompactObj::ExternalRep::STRING);
+    obj.SetExternal(&frag);
     EXPECT_EQ(obj.ObjType(), OBJ_STRING);
+    obj.RemoveExternal();
   }
   {
     StringMap sm{};
     CompactValue obj;
     obj.SetRObjPtr(&sm);
-    obj.SetExternal(0, 4, CompactObj::ExternalRep::SERIALIZED_MAP);
+    tiering::Fragment frag(&obj);
+    frag.SetSegmentInfo(0, 4, CompactObj::ExternalRep::SERIALIZED_MAP);
+    obj.SetExternal(&frag);
     EXPECT_EQ(obj.ObjType(), OBJ_HASH);
+    obj.RemoveExternal();
   }
 }
 

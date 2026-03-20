@@ -21,7 +21,8 @@ namespace dfly {
 
 namespace tiering {
 struct TieredCoolRecord;
-}
+class Fragment;
+}  // namespace tiering
 
 constexpr unsigned kEncodingIntSet = 0;
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
@@ -319,14 +320,17 @@ class CompactObj {
     return taglen_ == EXTERNAL_TAG;
   }
 
-  // returns true if the value is stored in the cooling storage. Cooling storage has an item both
+  // Returns true if the value is stored in the cooling storage. Cooling storage has an item both
   // on disk and in memory.
-  bool IsCool() const {
-    assert(IsExternal());
-    return u_.ext_ptr.is_cool;
-  }
+  bool IsCool() const;
 
-  void SetExternal(size_t offset, uint32_t sz, ExternalRep rep);
+  // Sets the object to external state, freeing in-memory value data.
+  void SetExternal(tiering::Fragment* fragment);
+
+  // Prerequisite: IsExternal() is true.
+  // Returns the fragment holding external value.
+  tiering::Fragment* GetFragment() const;
+
   ExternalRep GetExternalRep() const;
 
   // Switches to empty, non-external string.
@@ -336,13 +340,9 @@ class CompactObj {
     SetMeta(0, mask_);
   }
 
-  // Assigns a cooling record to the object together with its external slice.
-  void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
-               tiering::TieredCoolRecord* record);
-
   struct CoolItem {
-    uint16_t page_offset;
     size_t serialized_size;
+    size_t offset;
     tiering::TieredCoolRecord* record;
   };
 
@@ -451,35 +451,12 @@ class CompactObj {
     mask_ = mask;
   }
 
-  struct ExternalPtr {
-    uint32_t serialized_size;
-    uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
-    uint8_t is_cool : 1;
-    uint8_t representation : 2;  // See ExternalRep
-    uint8_t is_reserved : 5;
-    uint8_t first_byte;
-
-    // We do not have enough space in the common area to store page_index together with
-    // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
-    struct Offload {
-      uint32_t page_index;
-      uint32_t reserved;
-    };
-
-    union {
-      Offload offload;
-      tiering::TieredCoolRecord* cool_record;
-    };
-  } __attribute__((packed));
-  static_assert(sizeof(ExternalPtr) == 16);
-
   struct SdsTtlString {
     char* sds_ptr;    // SDS string (length via sdslen)
-    uint64_t exp_ms;  // absolute expiry time in ms
 
+    uint64_t exp_ms;  // absolute expiry time in ms
     std::string_view view() const;
   } __attribute__((packed));
-
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
@@ -516,7 +493,7 @@ class CompactObj {
     TOPK* topk __attribute__((packed));
     CMS* cms __attribute__((packed));
     int64_t ival __attribute__((packed));
-    ExternalPtr ext_ptr;
+    tiering::Fragment* fragment __attribute__((packed));
     SdsTtlString sds_ttl;
 
     U() : r_obj() {

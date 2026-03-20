@@ -3,7 +3,7 @@
 //
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
 
 #include <boost/intrusive/list.hpp>
 #include <memory>
@@ -30,11 +30,11 @@ struct Decoder;
 struct TieredStorageBase {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-  struct StashDescriptor : public tiering::FragmentRef::SerializationDescr {
+  struct StashDescriptor : public tiering::Fragment::SerializationDescr {
     StashDescriptor() = default;
 
-    StashDescriptor(const tiering::FragmentRef::SerializationDescr& params)  // NOLINT
-        : tiering::FragmentRef::SerializationDescr(params) {
+    StashDescriptor(const tiering::Fragment::SerializationDescr& params)  // NOLINT
+        : tiering::Fragment::SerializationDescr(params) {
     }
 
     size_t EstimatedSerializedSize() const;
@@ -83,7 +83,7 @@ class TieredStorage : public TieredStorageBase {
   }
 
   // Returns StashDescriptor if a value should be stashed.
-  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment_ref) const;
+  std::optional<StashDescriptor> ShouldStash(const tiering::Fragment& fragment) const;
 
   // Stash value, returns optional future for backpressure is not null.
   // if `provide_bp` is set and conditions are met.
@@ -91,13 +91,14 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
-  void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
+  void Delete(DbIndex dbid, tiering::Fragment* fragment);
 
   // Returns true if there is a pending modification for the given segment.
   bool HasModificationPending(tiering::DiskSegment segment) const;
 
-  // Cancel pending stash for the fragment, must have HasStashPending() true.
-  void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
+  // Cancel pending stash for the value. Pending fragment will be matched by (dbid, key)
+  // and removed from pending fragment container. Must have HasStashPending() true.
+  void CancelStash(tiering::PendingId id);
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
@@ -106,7 +107,8 @@ class TieredStorage : public TieredStorageBase {
   size_t ReclaimMemory(size_t goal);
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
+  // Also deregisters the fragment from the central container.
+  PrimeValue Warmup(DbIndex dbid, PrimeValue& pv);
 
   TieredStats GetStats() const;
 
@@ -122,6 +124,12 @@ class TieredStorage : public TieredStorageBase {
     return stats_.cool_memory_used;
   }
 
+  // Create a Fragment for the given value and register it as pending under (dbid, key).
+  // Returns a stable pointer (node_hash_map guarantees pointer stability).
+  tiering::Fragment* AddFragment(DbIndex dbid, std::string_view key,
+                                 tiering::Fragment::FragmentType pv);
+  void RemoveFragment(tiering::Fragment* fragment);
+
  private:
   void ReadInternal(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
@@ -129,7 +137,7 @@ class TieredStorage : public TieredStorageBase {
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
-                CompactObj::ExternalRep rep, PrimeValue* pv);
+                PrimeValue* pv, tiering::Fragment* fragment);
 
   PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
@@ -144,6 +152,18 @@ class TieredStorage : public TieredStorageBase {
 
   using CoolQueue = ::boost::intrusive::list<tiering::TieredCoolRecord>;
   CoolQueue cool_queue_;
+
+  // Fragment container — keyed by monotonic id, pointer-stable.
+  using TieredFragments = absl::node_hash_map<size_t, tiering::Fragment>;
+  size_t next_fragment_id_ = 0;
+  TieredFragments tiered_fragments_;
+
+  // Maps (dbid, key) -> fragment id for stash-pending entries.
+  // Safe against DashTable relocations (keys are copied strings).
+  tiering::EntryMap<size_t> pending_fragments_;
+
+  // Look up and remove a pending fragment by (dbid, key). Returns the Fragment pointer.
+  tiering::Fragment* TakePendingFragment(const tiering::KeyRef& key);
 
   struct {
     size_t min_value_size;
@@ -234,7 +254,7 @@ class TieredStorage : public TieredStorageBase {
     return {};
   }
 
-  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment) const {
+  std::optional<StashDescriptor> ShouldStash(const tiering::Fragment& fragment) const {
     return {};
   }
 
@@ -242,7 +262,7 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure) {
   }
 
-  void Delete(DbIndex dbid, PrimeValue* value) {
+  void Delete(DbIndex dbid, tiering::Fragment* fragment) {
   }
 
   bool HasModificationPending(tiering::DiskSegment segment) const {
@@ -261,7 +281,7 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref) {
+  void CancelStash(tiering::PendingId id) {
   }
 
   TieredStats GetStats() const {
@@ -286,8 +306,16 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+  PrimeValue Warmup(DbIndex dbid, PrimeValue& pv) {
     return PrimeValue{};
+  }
+
+  tiering::Fragment* AddFragment(DbIndex dbid, std::string_view key,
+                                 tiering::Fragment::FragmentType pv) {
+    return nullptr;
+  }
+
+  void RemoveFragment(tiering::Fragment* fragment) {
   }
 };
 

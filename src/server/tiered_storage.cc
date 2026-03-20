@@ -58,7 +58,7 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
-using tiering::FragmentRef;
+using tiering::Fragment;
 using tiering::KeyRef;
 using tiering::TieredCoolRecord;
 
@@ -79,7 +79,7 @@ void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats)
 }
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
-  return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
+  return {item.offset, item.serialized_size};
 }
 
 string SerializeToString(const TieredStorage::StashDescriptor& blobs) {
@@ -134,6 +134,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void ClearStashPending(OpManager::KeyRef key) {
     UnblockBackpressure(key, false);
     if (auto pv = Find(key.first, key.second); pv) {
+      auto* fragment = ts_->TakePendingFragment(key);
+      ts_->RemoveFragment(fragment);
       pv->SetStashPending(false);
       stats_.total_cancels++;
     }
@@ -189,11 +191,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       case CompactObj::ExternalRep::STRING:
         pv->Materialize(value, true);
         break;
-      case CompactObj::ExternalRep::SERIALIZED_MAP:
+      case CompactObj::ExternalRep::SERIALIZED_MAP: {
         tiering::SerializedMapDecoder decoder{};
         decoder.Initialize(value);
         decoder.Upload(pv);
         break;
+      }
     };
 
     RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
@@ -211,14 +214,17 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats->tiered_used_bytes += segment.length;
       stats_.total_stashes++;
 
-      StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
+      tiering::Fragment* fragment = ts_->TakePendingFragment({key.first, std::string{key.second}});
+      auto blobs = fragment->GetSerializationDescr();
+      fragment->SetSegmentInfo(segment.offset, segment.length, blobs.rep);
+
       if (ts_->config_.experimental_cooling) {
         RetireColdEntries(pv->MallocUsed());
-        ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
+        ts_->CoolDown(key.first, key.second, segment, pv, fragment);
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
-        pv->SetExternal(segment.offset, segment.length, blobs.rep);
       }
+      fragment->SetExternal();
     } else {
       LOG(DFATAL) << "Should not reach here";
     }
@@ -262,12 +268,14 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
 
     stats_.total_defrags++;
     PrimeValue& pv = it->second;
+    tiering::Fragment* frag = pv.GetFragment();
     if (pv.IsCool()) {
       PrimeValue::CoolItem item = pv.GetCool();
       tiering::DiskSegment segment = FromCoolItem(item);
 
       // We remove it from both cool storage and the offline storage.
       pv = ts_->DeleteCool(item.record);
+      ts_->RemoveFragment(frag);
       auto* stats = GetDbTableStats(dbid);
       stats->tiered_entries--;
       stats->tiered_used_bytes -= segment.length;
@@ -275,6 +283,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
       // Cut out relevant part of value and restore it to memory
       string_view value = page.substr(item_segment.offset - segment.offset, item_segment.length);
       Upload(dbid, value, &pv);
+      ts_->RemoveFragment(frag);
     }
   }
 }
@@ -309,8 +318,10 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
     if (metrics.modified || pv->WasTouched()) {
       ++stats_.total_uploads;
+      tiering::Fragment* frag = pv->GetFragment();
       decoder->Upload(pv);
       RecordDeleted(*pv, segment.length, GetDbTableStats(key.first));
+      ts_->RemoveFragment(frag);
       return true;
     }
     pv->SetTouched(true);
@@ -405,7 +416,7 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, const StashDescriptor& 
   size_t est_size = blobs.EstimatedSerializedSize();
   DCHECK_GT(est_size, 0u);
 
-  tiering::OpManager::PendingId id;
+  tiering::PendingId id;
   error_code ec;
 
   if (OccupiesWholePages(est_size)) {  // large enough for own page
@@ -438,36 +449,41 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, const StashDescriptor& 
   }
 }
 
-void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
-  DCHECK(!fragment_ref.HasStashPending());
+void TieredStorage::Delete(DbIndex dbid, Fragment* fragment) {
+  DCHECK(!fragment->HasStashPending());
   ++stats_.total_deletes;
 
-  tiering::DiskSegment segment = fragment_ref.GetExternalSlice();
-  if (auto* cool = fragment_ref.GetCoolRecord(); cool) {
-    auto hot = DeleteCool(cool);
+  tiering::DiskSegment segment = fragment->GetExternalSlice();
+  if (fragment->IsCool()) {
+    auto hot = DeleteCool(fragment->GetCoolRecord());
     DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
-  fragment_ref.ClearOffloaded();
+  fragment->RemoveExternal();
+  RemoveFragment(fragment);
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
-void TieredStorage::CancelStash(DbIndex dbid, std::string_view key,
-                                tiering::FragmentRef fragment_ref) {
-  DCHECK(fragment_ref.HasStashPending());
+void TieredStorage::CancelStash(tiering::PendingId id) {
+  DCHECK(std::holds_alternative<KeyRef>(id));
+  KeyRef key = std::get<KeyRef>(id);
+
+  tiering::Fragment* fragment = TakePendingFragment(key);
+  DCHECK(fragment->HasStashPending());
 
   // If any previous write was happening, it has been cancelled
-  if (auto node = stash_backpressure_.extract(make_pair(dbid, key)); !node.empty())
+  if (auto node = stash_backpressure_.extract(key); !node.empty())
     std::move(node.mapped()).Resolve(false);
 
   // TODO: Don't recompute size estimate, try-delete bin first
-  StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
+  StashDescriptor blobs{fragment->GetSerializationDescr()};
   size_t size = blobs.EstimatedSerializedSize();
   if (OccupiesWholePages(size)) {
-    op_manager_->CancelPending(KeyRef(dbid, key));
-  } else if (auto bin = bins_->Delete(dbid, key); bin) {
+    op_manager_->CancelPending(key);
+  } else if (auto bin = bins_->Delete(key.first, key.second); bin) {
     op_manager_->CancelPending(*bin);
   }
-  fragment_ref.ClearStashPending();
+  fragment->SetStashPending(false);
+  RemoveFragment(fragment);
 }
 
 TieredStats TieredStorage::GetStats() const {
@@ -567,7 +583,9 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
       } else {
         stats_.offloading_stashes++;
         it->second.SetStashPending(true);
-        Stash(dbid, it->first.GetSlice(&tmp), *blobs, nullptr);
+        string_view key_sv = it->first.GetSlice(&tmp);
+        AddFragment(dbid, key_sv, &it->second);
+        Stash(dbid, key_sv, *blobs, nullptr);
       }
     }
   };
@@ -621,18 +639,18 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
   return gained;
 }
 
-auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
+auto TieredStorage::ShouldStash(const tiering::Fragment& fragment) const
     -> std::optional<StashDescriptor> {
   // Check value state
-  if (fragment_ref.IsOffloaded() || fragment_ref.HasStashPending())
+  if (fragment.IsExternal() || fragment.HasStashPending())
     return nullopt;
 
   // For now, hash offloading is conditional
-  if (fragment_ref.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
+  if (fragment.ObjType() == OBJ_HASH && !config_.experimental_hash_offload)
     return nullopt;
 
   // Estimate value size
-  StashDescriptor blobs{fragment_ref.GetSerializationDescr()};
+  StashDescriptor blobs{fragment.GetSerializationDescr()};
   size_t estimated_size = blobs.EstimatedSerializedSize();
   if (estimated_size < config_.min_value_size)
     return nullopt;
@@ -651,26 +669,30 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref) const
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
-                             const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
-                             PrimeValue* pv) {
+                             const tiering::DiskSegment& segment, PrimeValue* pv,
+                             tiering::Fragment* fragment) {
   TieredCoolRecord* record = CompactObj::AllocateMR<TieredCoolRecord>();
   cool_queue_.push_front(*record);
   stats_.cool_memory_used += (sizeof(TieredCoolRecord) + pv->MallocUsed());
 
   record->key_hash = CompactObj::HashCode(str);
   record->db_index = db_ind;
-  record->page_index = segment.offset / tiering::kPageSize;
   record->value = std::move(*pv);
 
-  pv->SetCool(segment.offset, segment.length, rep, record);
+  // Store cool record in the fragment and point CompactObj to it.
+  fragment->SetCoolRecord(record);
 }
 
-PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue& pv) {
+  DCHECK(pv.IsExternal() && pv.IsCool());
+  PrimeValue::CoolItem item = pv.GetCool();
+  tiering::Fragment* frag = pv.GetFragment();
   tiering::DiskSegment segment = FromCoolItem(item);
 
   // We remove it from both cool storage and the offline storage.
   PrimeValue hot = DeleteCool(item.record);
   op_manager_->DeleteOffloaded(dbid, segment);
+  RemoveFragment(frag);
   return hot;
 }
 
@@ -694,10 +716,37 @@ TieredCoolRecord* TieredStorage::PopCool() {
   return &res;
 }
 
+tiering::Fragment* TieredStorage::AddFragment(DbIndex dbid, std::string_view key,
+                                              tiering::Fragment::FragmentType val) {
+  size_t id = next_fragment_id_++;
+  auto [it, inserted] = tiered_fragments_.emplace(
+      id, std::visit([](auto* pv) { return tiering::Fragment{pv}; }, val));
+  DCHECK(inserted);
+  it->second.SetId(id);
+  pending_fragments_[{dbid, std::string{key}}] = id;
+  return &it->second;
+}
+
+void TieredStorage::RemoveFragment(tiering::Fragment* fragment) {
+  size_t erased = tiered_fragments_.erase(fragment->Id());
+  DCHECK_EQ(erased, 1u);
+}
+
+tiering::Fragment* TieredStorage::TakePendingFragment(const KeyRef& key) {
+  auto it = pending_fragments_.find(key);
+  DCHECK(it != pending_fragments_.end());
+  size_t id = it->second;
+  pending_fragments_.erase(it);
+  auto frag_it = tiered_fragments_.find(id);
+  DCHECK(frag_it != tiered_fragments_.end());
+  return &frag_it->second;
+}
+
 void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                      BackPressureFuture* backpressure) {
-  if (auto blobs = ts->ShouldStash(*pv); blobs) {
+  if (auto blobs = ts->ShouldStash(pv); blobs) {
     pv->SetStashPending(true);
+    ts->AddFragment(dbid, key, pv);
     ts->Stash(dbid, key, *blobs, backpressure);
   }
 }

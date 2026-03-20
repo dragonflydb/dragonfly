@@ -18,13 +18,12 @@ namespace dfly::tiering {
 struct TieredCoolRecord : public ::boost::intrusive::list_base_hook<
                               boost::intrusive::link_mode<boost::intrusive::normal_link>> {
   uint64_t key_hash;  // Allows searching the entry in the dbslice.
-  CompactValue value;
   uint16_t db_index;
-  uint32_t page_index;
+  CompactValue value;
 };
 static_assert(sizeof(TieredCoolRecord) == 48);
 
-class FragmentRef {
+class Fragment {
  public:
   // Describes how this fragment should be serialized for offloading.
   // Used by stashing flow.
@@ -33,51 +32,91 @@ class FragmentRef {
     CompactObj::ExternalRep rep = CompactObj::ExternalRep::STRING;
   };
 
-  FragmentRef(CompactValue& pv) : val_(&pv) {  // NOLINT
+  using FragmentType = std::variant<CompactValue*>;
+
+  Fragment(CompactValue& pv) : val_(&pv) {  // NOLINT
   }
 
-  FragmentRef(CompactValue* pv) : val_(pv) {  // NOLINT
+  Fragment(CompactValue* pv) : val_(pv) {  // NOLINT
   }
 
-  bool IsOffloaded() const {
-    return std::visit([](auto* pv) { return pv->IsExternal(); }, val_);
-  }
+  bool IsExternal() const;
+  void RemoveExternal();
+  void SetExternal();
 
-  // Resets offloaded state for this fragment.
-  void ClearOffloaded() {
-    std::visit([](auto* pv) { pv->RemoveExternal(); }, val_);
-  }
+  bool HasStashPending() const;
+  void SetStashPending(bool b);
 
-  bool HasStashPending() const {
-    return std::visit([](auto* pv) { return pv->HasStashPending(); }, val_);
-  }
-
-  void ClearStashPending() {
-    std::visit([](auto* pv) { pv->SetStashPending(false); }, val_);
-  }
-
-  CompactObjType ObjType() const {
-    return std::visit([](auto* pv) { return pv->ObjType(); }, val_);
-  }
+  CompactObjType ObjType() const;
 
   // Determine required byte size and encoding type based on value.
-  SerializationDescr GetSerializationDescr() const {
-    return std::visit([](auto* pv) { return GetDescr(pv); }, val_);
+  SerializationDescr GetSerializationDescr() const;
+
+  bool IsCool() const {
+    return is_cool_;
   }
 
-  // Returns a pointer to TieredCoolRecord if this fragment is cool, and null otherwise.
-  TieredCoolRecord* GetCoolRecord() const;
+  void SetCoolRecord(TieredCoolRecord* record) {
+    cool_record_ = record;
+    is_cool_ = (record != nullptr);
+  }
 
-  // Returns the external slice of the offloaded value. Only valid if IsOffloaded() is true.
-  std::pair<size_t, size_t> GetExternalSlice() const {
-    return std::visit([](auto* pv) { return pv->GetExternalSlice(); }, val_);
+  TieredCoolRecord* GetCoolRecord() const {
+    return cool_record_;
+  }
+
+  std::pair<size_t, size_t> GetExternalSlice() const;
+
+  void SetSegmentInfo(size_t offset, size_t length, CompactObj::ExternalRep rep);
+
+  size_t Offset() const {
+    return offset_;
+  }
+
+  size_t Size() const {
+    return serialized_size_;
+  }
+
+  CompactObj::ExternalRep GetExternalRep() const;
+
+  void SetFirstByte(uint8_t byte) {
+    first_byte_ = byte;
+  }
+
+  uint8_t GetFirstByte() const {
+    return first_byte_;
+  }
+
+  void UpdateValue(CompactValue* pv) {
+    val_ = pv;
+  }
+
+  void SetId(size_t id) {
+    id_ = id;
+  }
+
+  size_t Id() const {
+    return id_;
   }
 
  private:
   static SerializationDescr GetDescr(const CompactValue* pv);
 
-  // TODO: to support more types, for example Node* from qlist.h.
-  std::variant<CompactValue*> val_;
+  size_t id_ = 0;
+
+  uint8_t is_cool_ : 1 = 0;         // Whether the values is in the cooling storage.
+  uint8_t representation_ : 2 = 0;  // See ExternalRep
+  uint8_t reserved_ : 5 = 0;
+
+  TieredCoolRecord* cool_record_ = nullptr;
+
+  uint32_t serialized_size_ = 0;
+  size_t offset_ = 0;
+
+  // First byte of the value if Huffman encoded
+  uint8_t first_byte_ = 0;
+
+  FragmentType val_;
 };
 
 }  // namespace dfly::tiering
