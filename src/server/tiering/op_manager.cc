@@ -50,12 +50,21 @@ void OpManager::Close() {
   DCHECK(pending_reads_.empty());
 }
 
-void OpManager::Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder,
-                        ReadCallback cb) {
+void OpManager::Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb,
+                        bool read_only) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
   PrepareRead(segment.ContainingPages())
-      .ForSegment(segment, id, decoder)
+      .ForSegment(segment, id, decoder, read_only)
       .read_cbs.emplace_back(std::move(cb));
+}
+
+bool OpManager::HasModificationPending(DiskSegment segment) const {
+  auto it = pending_reads_.find(segment.ContainingPages().offset);
+  if (it == pending_reads_.end())
+    return false;
+
+  auto* ops_ptr = it->second.Find(segment);
+  return ops_ptr && !ops_ptr->read_only;
 }
 
 void OpManager::CancelPending(PendingId id) {
@@ -183,25 +192,37 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   pending_reads_.erase(offset);
 }
 
-OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder)
-    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()} {
+OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder,
+                              bool read_only)
+    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()}, read_only{read_only} {
 }
 
 OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, PendingId id,
-                                                   const Decoder& decoder) {
+                                                   const Decoder& decoder, bool read_only) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);
 
   for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset) {
       DCHECK(typeid(*ops.decoder) == typeid(decoder));
+      if (!read_only) {
+        ops.read_only = false;
+      }
       return ops;
     }
   }
-  return entry_ops.emplace_back(ToOwned(id), key_segment, decoder);
+  return entry_ops.emplace_back(ToOwned(id), key_segment, decoder, read_only);
 }
 
 OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) {
+  for (auto& ops : entry_ops) {
+    if (ops.segment.offset == key_segment.offset)
+      return &ops;
+  }
+  return nullptr;
+}
+
+const OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) const {
   for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset)
       return &ops;

@@ -50,7 +50,11 @@ class OpManager {
   // Enqueue callback to be executed once value is read. Trigger read if none is pending yet for
   // this segment. Multiple entries can be obtained from a single segment, but every distinct id
   // will have it's own independent callback loop that can safely modify the underlying value
-  void Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb);
+  void Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb,
+               bool read_only = true);
+
+  // Returns true if there is a pending modification for the given segment.
+  bool HasModificationPending(DiskSegment segment) const;
 
   // Cancel entry with pending io
   void CancelPending(PendingId id);
@@ -88,7 +92,7 @@ class OpManager {
 
   // Describes pending read futures for a single entry
   struct EntryOps {
-    EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder);
+    EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder, bool read_only);
 
     // unique identifier for the entry being read. Used to notify higher layers.
     OwnedEntryId id;
@@ -99,6 +103,7 @@ class OpManager {
     // We may have multiple callbacks for the same entry.
     absl::InlinedVector<ReadCallback, 1> read_cbs;
     std::unique_ptr<Decoder> decoder;
+    bool read_only;
     bool deleting = false;
   };
 
@@ -108,10 +113,11 @@ class OpManager {
     }
 
     // Get ops for id or create new
-    EntryOps& ForSegment(DiskSegment segment, PendingId id, const Decoder& decoder);
+    EntryOps& ForSegment(DiskSegment segment, PendingId id, const Decoder& decoder, bool read_only);
 
     // Find if there are operations for the given segment, return nullptr otherwise
     EntryOps* Find(DiskSegment segment);
+    const EntryOps* Find(DiskSegment segment) const;
 
     DiskSegment segment;  // spanning segment of whole read
 

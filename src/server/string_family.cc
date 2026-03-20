@@ -128,11 +128,14 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   }
   RETURN_ON_BAD_STATUS(it_res);
 
-  // For external entries we have to enqueue reads because modify operations like append could be
-  // already pending.
-  // TODO(vlad): Optimize to return co.Size() if no modify operations are present
-  // TODO(vlad): Omit decoding string to just query it's length
+  // For external entries we have to enqueue reads if modify operations like append are pending.
+  // If no modify operations are present, we can return co.Size() immediately.
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
+    auto segment = co.GetExternalSlice();
+    if (!op_args.shard->tiered_storage()->HasModificationPending(segment)) {
+      return {co.Size()};
+    }
+
     auto cb = [](string_view s) { return s.size(); };
 
     TieredStorage::TResult<size_t> fut = ReadTiered<size_t>(
