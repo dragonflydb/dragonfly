@@ -20,7 +20,7 @@ std::string& QueryParams::operator[](std::string_view k) {
 
 std::optional<double> ParseNumericField(std::string_view value) {
   double value_as_double;
-  if (absl::SimpleAtod(value, &value_as_double))
+  if (absl::SimpleAtod(value, &value_as_double) && std::isfinite(value_as_double))
     return value_as_double;
   return std::nullopt;
 }

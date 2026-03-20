@@ -788,6 +788,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {
       sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
+      // KeepTopKSorted only fills the first sort_scores.size() entries of result.ids;
+      // trim the rest to avoid out-of-bounds access on sort_scores in the loop below.
+      if (!sort_scores.empty())
+        result.ids.resize(sort_scores.size());
       if (params.ShouldReturnAllFields())
         return_fields.push_back(so.field);
     }

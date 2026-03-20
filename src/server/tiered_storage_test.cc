@@ -139,6 +139,56 @@ TEST_P(LatentCoolingTSTest, SimpleGetSet) {
   EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, 0);
 }
 
+TEST_P(LatentCoolingTSTest, StrLen) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);  // force offloading
+  UpdateFromFlags();
+
+  // Edge case: Non-existent key
+  EXPECT_EQ(Run({"STRLEN", "nonexistent"}), 0);
+
+  const int kLen = 4000;
+  Run({"SET", "k1", BuildString(kLen)});
+
+  // Make sure it's stashed
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes == 1; });
+
+  auto metrics_before = GetMetrics();
+
+  // Perform STRLEN - should be optimized (no fetch)
+  auto resp = Run({"STRLEN", "k1"});
+  EXPECT_EQ(resp, kLen);
+
+  auto metrics_after = GetMetrics();
+  EXPECT_EQ(metrics_after.tiered_stats.total_fetches, metrics_before.tiered_stats.total_fetches);
+
+  // Now perform APPEND which should trigger a modification pending
+  Run({"APPEND", "k1", "suffix"});
+
+  // STRLEN now should still work but will fetch if modification IS pending
+  // NOTE: with experimental cooling enabled, the value might still be in memory (CoolQueue)
+  // so it might NOT trigger a disk fetch if it was just appended to.
+  resp = Run({"STRLEN", "k1"});
+  EXPECT_EQ(resp, kLen + 6);
+
+  // Verify fetch happened IF cooling is disabled (direct to disk)
+  metrics_after = GetMetrics();
+  LOG(INFO) << "GetParam: " << GetParam()
+            << " Before: " << metrics_before.tiered_stats.total_fetches
+            << " After: " << metrics_after.tiered_stats.total_fetches;
+  if (!GetParam()) {
+    EXPECT_GT(metrics_after.tiered_stats.total_fetches, metrics_before.tiered_stats.total_fetches);
+  }
+
+  // Edge case: Empty string offloaded (if possible, though usually too small)
+  // Small strings aren't offloaded by default, but we can test a string just above the limit
+  const int kSmallLen = 100;  // Above default tiered_min_value_size
+  Run({"SET", "k2", BuildString(kSmallLen)});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
+
+  EXPECT_EQ(Run({"STRLEN", "k2"}), kSmallLen);
+}
+
 TEST_F(TieredStorageTest, IntStrings) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_upload_threshold,
