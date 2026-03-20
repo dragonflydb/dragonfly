@@ -715,6 +715,12 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   encoding_ = o.encoding_;
   memcpy(&u_, &o.u_, sizeof(u_));
 
+  // If this is external object, we need to update the fragment's
+  // pointer to this object, since it has been moved.
+  if (taglen_ == EXTERNAL_TAG) {
+    u_.fragment->UpdateValue(static_cast<CompactValue*>(this));
+  }
+
   o.taglen_ = 0;  // forget all data
   o.encoding_ = 0;
   o.mask_ = 0;
@@ -735,9 +741,9 @@ size_t CompactObj::Size() const {
       return decoded_str_size(u_.small_str.size(), u_.small_str.first_byte());
     case EXTERNAL_TAG:
       if (ObjType() == OBJ_STRING)
-        return decoded_str_size(u_.ext_ptr.serialized_size, GetFirstByte());
+        return decoded_str_size(u_.fragment->Size(), GetFirstByte());
       else
-        return u_.ext_ptr.serialized_size;
+        return u_.fragment->Size();
     case ROBJ_TAG:
       if (size_t size = u_.r_obj.Size(); u_.r_obj.type() != OBJ_STRING)
         return size;
@@ -810,7 +816,7 @@ CompactObjType CompactObj::ObjType() const {
     return OBJ_STRING;
 
   if (taglen_ == EXTERNAL_TAG) {
-    switch (static_cast<ExternalRep>(u_.ext_ptr.representation)) {
+    switch (u_.fragment->GetExternalRep()) {
       case ExternalRep::STRING:
         return OBJ_STRING;
       case ExternalRep::SERIALIZED_MAP:
@@ -1170,59 +1176,58 @@ void CompactObj::GetString(char* dest) const {
   LOG(FATAL) << "Bad tag " << int(taglen_);
 }
 
-void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
-  uint8_t first_byte = 0;
-  if (encoding_ == HUFFMAN_ENC) {
-    CHECK(rep == ExternalRep::STRING);
-    first_byte = GetFirstByte();
+void CompactObj::SetExternal(tiering::Fragment* fragment) {
+  if (fragment->IsCool()) {
+    auto* record = fragment->GetCoolRecord();
+    encoding_ = record->value.encoding_;
+    SetMeta(EXTERNAL_TAG, record->value.mask_);
+  } else {
+    // Save first_byte for Huffman encoding before we lose the value data.
+    if (encoding_ == HUFFMAN_ENC) {
+      CHECK(fragment->GetExternalRep() == ExternalRep::STRING);
+      fragment->SetFirstByte(GetFirstByte());
+    }
+    SetMeta(EXTERNAL_TAG, mask_);
   }
-  SetMeta(EXTERNAL_TAG, mask_);
+  u_.fragment = fragment;
+}
 
-  u_.ext_ptr.is_cool = 0;
-  u_.ext_ptr.representation = static_cast<uint8_t>(rep);
-  u_.ext_ptr.first_byte = first_byte;
-  u_.ext_ptr.page_offset = offset % 4096;
-  u_.ext_ptr.serialized_size = sz;
-  u_.ext_ptr.offload.page_index = offset / 4096;
+tiering::Fragment* CompactObj::GetFragment() const {
+  DCHECK(IsExternal());
+  return u_.fragment;
+}
+
+bool CompactObj::IsCool() const {
+  assert(IsExternal());
+  return u_.fragment->IsCool();
 }
 
 CompactObj::ExternalRep CompactObj::GetExternalRep() const {
   DCHECK(IsExternal());
-  return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
-}
-
-void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
-                         tiering::TieredCoolRecord* record) {
-  encoding_ = record->value.encoding_;
-  SetMeta(EXTERNAL_TAG, record->value.mask_);
-
-  u_.ext_ptr.is_cool = 1;
-  u_.ext_ptr.representation = static_cast<uint8_t>(rep);
-  u_.ext_ptr.page_offset = offset % 4096;
-  u_.ext_ptr.serialized_size = sz;
-  u_.ext_ptr.cool_record = record;
+  return u_.fragment->GetExternalRep();
 }
 
 auto CompactObj::GetCool() const -> CoolItem {
-  DCHECK(IsExternal() && u_.ext_ptr.is_cool);
+  DCHECK(IsExternal() && IsCool());
+  auto* record = u_.fragment->GetCoolRecord();
 
   CoolItem res;
-  res.page_offset = u_.ext_ptr.page_offset;
-  res.serialized_size = u_.ext_ptr.serialized_size;
-  res.record = u_.ext_ptr.cool_record;
+  res.offset = u_.fragment->Offset();
+  res.serialized_size = u_.fragment->Size();
+  res.record = record;
   return res;
 }
 
 void CompactObj::Freeze(size_t offset, size_t sz) {
-  SetExternal(offset, sz, GetExternalRep());
+  DCHECK(IsExternal());
+  DCHECK_EQ(offset, u_.fragment->Offset());
+  DCHECK_EQ(sz, u_.fragment->Size());
+  u_.fragment->SetCoolRecord(nullptr);
 }
 
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
-  auto& ext = u_.ext_ptr;
-  size_t offset = ext.page_offset;
-  offset += size_t(ext.is_cool ? ext.cool_record->page_index : ext.offload.page_index) * 4096;
-  return {offset, size_t(u_.ext_ptr.serialized_size)};
+  return u_.fragment->GetExternalSlice();
 }
 
 string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const {
@@ -1253,7 +1258,7 @@ string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest)
 
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
   CHECK(IsExternal()) << int(taglen_);
-  DCHECK_EQ(u_.ext_ptr.representation, static_cast<uint8_t>(ExternalRep::STRING));
+  DCHECK(u_.fragment->GetExternalRep() == ExternalRep::STRING);
   DCHECK_GT(blob.size(), kInlineLen);  // There are no mutable commands that shrink strings
 
   if (is_raw) {
@@ -1301,11 +1306,11 @@ uint8_t CompactObj::GetFirstByte() const {
   }
 
   if (taglen_ == EXTERNAL_TAG) {
-    if (u_.ext_ptr.is_cool) {
-      const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
+    if (u_.fragment->IsCool()) {
+      const CompactObj& cooled_obj = u_.fragment->GetCoolRecord()->value;
       return cooled_obj.GetFirstByte();
     }
-    return u_.ext_ptr.first_byte;
+    return u_.fragment->GetFirstByte();
   }
 
   LOG(DFATAL) << "Bad tag " << int(taglen_);

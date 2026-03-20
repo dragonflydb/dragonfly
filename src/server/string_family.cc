@@ -896,9 +896,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
   RemoveKeyFromIndexesIfNeeded(it_upd->it.key(), op_args_.db_cntx, prime_value, shard);
 
-  // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, prime_value.GetFragment());
   }
 
   // overwrite existing entry.
