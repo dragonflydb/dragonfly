@@ -1133,6 +1133,11 @@ void Connection::ConnectionFlow() {
 
   phase_ = PRECLOSE;
 
+  if (disk_queue_) {
+    std::ignore = disk_queue_->Close();
+    disk_queue_.reset();
+  }
+
   ClearPipelinedMessages();
   DCHECK(!HasPendingMessages());
 
@@ -1214,19 +1219,30 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
                              << ", Connection parsed_cmd_q_bytes_: " << parsed_cmd_q_bytes_
                              << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
                              << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
-    fb2::NoOpLock noop;
-    qbp.pipeline_cnd.wait(noop, [this, &qbp, &can_dispatch_sync_fn] {
-      // Wait until at least one is true:
-      // 1) Connection is closing.
-      // 2) Can dispatch synchronously.
-      // 3) Not over limits (for an async dispatch).
-      bool can_dispatch_sync = can_dispatch_sync_fn();
-      if (can_dispatch_sync)
-        return true;
-      bool over_limits = qbp.IsPipelineBufferOverLimit(
-          tl_facade_stats->conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
-      return !over_limits || cc_->conn_closing;
-    });
+
+    // If disk offloading is available, signal ParseRedis to stop consuming io_buf_
+    // so IoLoop can push the remaining raw bytes to disk instead of blocking here.
+    // Note: the command that triggered this (the one currently being dispatched) is
+    // still enqueued normally below — it is a one-command overshoot over the limit,
+    // which is acceptable. All subsequent commands remain in io_buf_ and are offloaded.
+    InitDiskQueueIfNeeded();
+    if (disk_queue_) {
+      disk_offload_requested_ = true;
+    } else {
+      fb2::NoOpLock noop;
+      qbp.pipeline_cnd.wait(noop, [this, &qbp, &can_dispatch_sync_fn] {
+        // Wait until at least one is true:
+        // 1) Connection is closing.
+        // 2) Can dispatch synchronously.
+        // 3) Not over limits (for an async dispatch).
+        bool can_dispatch_sync = can_dispatch_sync_fn();
+        if (can_dispatch_sync)
+          return true;
+        bool over_limits = qbp.IsPipelineBufferOverLimit(
+            tl_facade_stats->conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
+        return !over_limits || cc_->conn_closing;
+      });
+    }
 
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
@@ -1300,6 +1316,9 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
         dispatch_async();
       else
         DispatchSingle(has_more, dispatch_sync, dispatch_async);
+
+      if (disk_offload_requested_)
+        break;
     }
     if (result != RespSrvParser::OK && result != RespSrvParser::INPUT_PENDING) {
       // We do not expect that a replica sends an invalid command so we log if it happens.
@@ -1429,6 +1448,55 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   return recv_sz;
 }
 
+void Connection::InitDiskQueueIfNeeded() {
+  if (disk_queue_)
+    return;
+  disk_queue_ = std::make_unique<DiskBackedQueue>(id_);
+  if (auto ec = disk_queue_->Init(); ec) {
+    LOG(WARNING) << "Failed to initialize disk-backed queue for connection " << id_ << ": " << ec;
+    disk_queue_.reset();
+  }
+}
+
+void Connection::PushToDiskSync(io::Bytes bytes) {
+  fb2::Done done;
+  std::error_code push_ec;
+  const size_t nbytes = bytes.size();
+  disk_queue_->PushAsync(bytes, [&done, &push_ec](std::error_code ec) {
+    push_ec = ec;
+    done.Notify();
+  });
+  done.Wait();
+  if (push_ec) {
+    LOG(ERROR) << "Disk push error for connection " << id_ << ": " << push_ec;
+    return;
+  }
+  VLOG(2) << "conn=" << id_ << " offloaded " << nbytes << " bytes to disk"
+          << ", disk_total=" << disk_queue_->TotalBytes() << " bytes";
+}
+
+size_t Connection::PopFromDiskSync(io::MutableBytes buf) {
+  fb2::Done done;
+  size_t result = 0;
+  std::error_code pop_ec;
+  disk_queue_->PopAsync(buf, [&done, &result, pop_ec](io::Result<size_t> res) mutable {
+    if (res) {
+      result = *res;
+    } else {
+      pop_ec = res.error();
+    }
+    done.Notify();
+  });
+  done.Wait();
+  if (pop_ec) {
+    LOG(ERROR) << "Disk pop error for connection " << id_ << ": " << pop_ec;
+    return 0;
+  }
+  VLOG(2) << "conn=" << id_ << " restored " << result << " bytes from disk"
+          << ", disk_remaining=" << disk_queue_->TotalBytes() << " bytes";
+  return result;
+}
+
 variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
   error_code ec;
   ParserStatus parse_status = OK;
@@ -1439,13 +1507,32 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
 
   do {
     HandleMigrateRequest();
-    auto recv_sz = HandleRecvSocket();
-    if (!recv_sz) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << recv_sz.error();
-      return recv_sz.error();
+
+    bool got_data_from_disk = false;
+
+    // If disk has buffered bytes, drain them when the pipeline has room.
+    if (disk_queue_ && !disk_queue_->Empty()) {
+      QueueBackpressure& qbp = GetQueueBackpressure();
+      auto& conn_stats = tl_facade_stats->conn_stats;
+      if (!qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_)) {
+        UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() { io_buf_.EnsureCapacity(64); });
+        size_t n = PopFromDiskSync(io_buf_.AppendBuffer());
+        if (n > 0) {
+          io_buf_.CommitWrite(n);
+          got_data_from_disk = true;
+        }
+      }
     }
-    if (*recv_sz == 0) {
-      break;
+
+    if (!got_data_from_disk) {
+      auto recv_sz = HandleRecvSocket();
+      if (!recv_sz) {
+        LOG_IF(WARNING, cntx()->replica_conn) << "HandleRecvSocket() error: " << recv_sz.error();
+        return recv_sz.error();
+      }
+      if (*recv_sz == 0) {
+        break;
+      }
     }
 
     phase_ = PROCESS;
@@ -1456,6 +1543,19 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseLoop();
+    }
+
+    // ParseRedis broke out early because DispatchSingle requested disk offloading.
+    // Push the remaining unparsed bytes from io_buf_ to disk so we can keep
+    // draining the socket without blocking.
+    if (disk_offload_requested_) {
+      disk_offload_requested_ = false;
+      if (io_buf_.InputLen() > 0 && disk_queue_->HasEnoughBackingSpaceFor(io_buf_.InputLen())) {
+        PushToDiskSync(io_buf_.InputBuffer());
+        io_buf_.ConsumeInput(io_buf_.InputLen());
+      }
+      parse_status = OK;
+      continue;
     }
 
     if (reply_builder_->GetError()) {

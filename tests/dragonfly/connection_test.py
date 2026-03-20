@@ -1792,3 +1792,32 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await flood_task
         writer.close()
         await writer.wait_closed()
+
+
+async def test_disk_backpressure_offload(df_factory: DflyInstanceFactory):
+    server = df_factory.create(
+        proactor_threads=1,
+        pipeline_queue_limit=10,
+        disk_backpressure_folder="/tmp/",
+        vmodule="dragonfly_connection=2",
+    )
+    server.start()
+
+    async def producer():
+        _, writer = await asyncio.open_connection("localhost", server.port)
+        payload = b"".join(f"SET k{i % 100} val{i}\r\n".encode() for i in range(10_000))
+        writer.write(payload)
+        await writer.drain()
+        await asyncio.sleep(0.3)
+        writer.close()
+        await writer.wait_closed()
+
+    await asyncio.gather(*[producer() for _ in range(5)])
+
+    server.stop()
+
+    offload_lines = server.find_in_logs("offloaded.*bytes to disk")
+    restore_lines = server.find_in_logs("restored.*bytes from disk")
+
+    assert len(offload_lines) > 1, f"Expected >1 disk-offload log lines, got {len(offload_lines)}"
+    assert len(restore_lines) > 1, f"Expected >1 disk-restore log lines, got {len(restore_lines)}"
