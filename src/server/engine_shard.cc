@@ -858,7 +858,7 @@ void EngineShard::RetireExpiredAndEvict() {
       unsigned db_ttl_delete_target = ttl_delete_target;
 
       if (pt->size() >= expire_count * 2) {
-        unsigned ratio = std::min(pt->size() / expire_count, 7UL);
+        unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
         db_ttl_delete_target = ttl_delete_target * ratio;
       }
       DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
