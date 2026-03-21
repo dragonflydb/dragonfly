@@ -8,8 +8,13 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 
 #include "core/compact_object.h"
+
+namespace dfly::detail {
+struct ListpackWrap;
+}
 
 namespace dfly::tiering {
 
@@ -74,15 +79,24 @@ struct StringDecoder : public Decoder {
 
 // Decodes SerializedMaps
 struct SerializedMapDecoder : public Decoder {
+  ~SerializedMapDecoder();  // because of forward declared types
+
   std::unique_ptr<Decoder> Clone() const override;
   void Initialize(std::string_view slice) override;
   UploadMetrics GetMetrics() const override;
   void Upload(CompactObj* obj) override;
 
-  SerializedMap* Get() const;
+  // Access internal object for read, returns currently stored variant
+  std::variant<SerializedMap*, dfly::detail::ListpackWrap*> Get() const;
+
+  // Access internal object for writes
+  dfly::detail::ListpackWrap* GetMutable();
 
  private:
-  std::unique_ptr<SerializedMap> map_;
+  void MakeOwned();  // Convert to listpack
+
+  bool modified_ = false;
+  std::variant<std::unique_ptr<SerializedMap>, std::unique_ptr<dfly::detail::ListpackWrap>> map_;
 };
 
 }  // namespace dfly::tiering
