@@ -73,13 +73,13 @@ class TieredStorage : public TieredStorageBase {
   // Enqueue read external value with generic decoder.
   template <typename D, typename F>
   void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
-            const D& decoder, F&& f) {
+            const D& decoder, F&& f, bool read_only = true) {
     // TODO(vlad): untangle endless callback wrapping!
     // Templates don't consider implicit conversions, so explicitly convert to std::function
     auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
       f(res.transform([](auto* d) { return static_cast<D*>(d); }));
     };
-    ReadInternal(dbid, key, segment, decoder, wrapped_cb);
+    ReadInternal(dbid, key, segment, decoder, wrapped_cb, read_only);
   }
 
   // Returns StashDescriptor if a value should be stashed.
@@ -92,6 +92,9 @@ class TieredStorage : public TieredStorageBase {
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
+
+  // Returns true if there is a pending modification for the given segment.
+  bool HasModificationPending(tiering::DiskSegment segment) const;
 
   // Cancel pending stash for the fragment, must have HasStashPending() true.
   void CancelStash(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
@@ -122,7 +125,7 @@ class TieredStorage : public TieredStorageBase {
  private:
   void ReadInternal(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
-                    std::function<void(io::Result<tiering::Decoder*>)> cb);
+                    std::function<void(io::Result<tiering::Decoder*>)> cb, bool read_only);
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
@@ -222,7 +225,7 @@ class TieredStorage : public TieredStorageBase {
 
   template <typename D, typename F>
   void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& value, const D& decoder,
-            F&& f) {
+            F&& f, bool read_only = true) {
   }
 
   template <typename T>
@@ -240,6 +243,10 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void Delete(DbIndex dbid, PrimeValue* value) {
+  }
+
+  bool HasModificationPending(tiering::DiskSegment segment) const {
+    return false;
   }
 
   size_t ReclaimMemory(size_t goal) {

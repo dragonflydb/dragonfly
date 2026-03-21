@@ -10,6 +10,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
+#include "facade/reply_payload.h"
 
 namespace facade {
 
@@ -69,10 +70,7 @@ void ParsedCommand::SendError(std::string_view str, std::string_view type) {
 
 void ParsedCommand::SendError(facade::OpStatus status) {
   if (!is_deferred_reply_) {
-    if (status == OpStatus::OK)
-      rb_->SendSimpleString("OK");
-    else
-      rb_->SendError(StatusToMsg(status));
+    rb_->SendError(status);
   } else {
     if (status == OpStatus::OK)
       reply_ = payload::SimpleString{"OK"};
@@ -96,43 +94,34 @@ void ParsedCommand::SendSimpleString(std::string_view str) {
 }
 
 void ParsedCommand::SendLong(long val) {
-  if (is_deferred_reply_) {
-    reply_ = long(val);
-  } else {
-    rb_->SendLong(val);
-  }
-}
-
-void ParsedCommand::SendNull() {
-  if (is_deferred_reply_) {
-    reply_ = payload::Null{};
-  } else {
-    DCHECK(mc_cmd_ == nullptr);  // RESP only
-    static_cast<RedisReplyBuilder*>(rb_)->SendNull();
-  }
-}
-
-void ParsedCommand::SendEmptyArray() {
-  if (is_deferred_reply_) {
-    reply_ = make_unique<payload::CollectionPayload>(0, CollectionType::ARRAY);
-  } else {
-    DCHECK(mc_cmd_ == nullptr);  // RESP only
-    static_cast<RedisReplyBuilder*>(rb_)->SendEmptyArray();
-  }
+  DCHECK(!is_deferred_reply_);
+  rb_->SendLong(val);
 }
 
 bool ParsedCommand::CanReply() const {
   DCHECK(is_deferred_reply_);
   dfly::Overloaded ov{[](const payload::Payload& pl) { return pl.index() > 0 /* not monostate */; },
-                      [](const AsyncTask& task) { return task.blocker->IsCompleted(); }};
+                      [](const SuspendedCommand& task) { return task.blocker->IsCompleted(); }};
   return std::visit(ov, reply_);
 }
 
 void ParsedCommand::SendReply() {
-  dfly::Overloaded ov{
-      [this](payload::Payload& pl) { CapturingReplyBuilder::Apply(std::move(pl), rb_); },
-      [this](AsyncTask& task) { return task.replier(rb_); }};
-  return std::visit(ov, reply_);
+  auto payload_handler = [this](payload::Payload& pl) {
+    CapturingReplyBuilder::Apply(std::move(pl), rb_);
+  };
+  auto task_handler = [](SuspendedCommand& task) {
+    DCHECK(task.coro);
+    task.coro.resume();
+    task.coro = {};
+  };
+  std::visit(dfly::Overloaded{task_handler, payload_handler}, reply_);
+}
+
+ParsedCommand::SuspendedCommand::~SuspendedCommand() {
+  if (coro) {
+    coro.destroy();
+    coro = {};
+  }
 }
 
 }  // namespace facade

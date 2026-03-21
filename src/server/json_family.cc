@@ -96,8 +96,7 @@ class JsonAutoUpdater {
     GetPrimeValue().SetJsonSize(diff);
 
     // Under any flow we must not end up with this special value.
-    // TODO: disable for now as it breaks with interned strings.
-    // DCHECK(GetPrimeValue().MallocUsed() != 0);
+    DCHECK(GetPrimeValue().MallocUsed() != 0);
   }
 
   void AddDocToIndexes() {
@@ -105,6 +104,10 @@ class JsonAutoUpdater {
   }
 
   ~JsonAutoUpdater() {
+    if (was_released_) {
+      return;  // Skip all cleanup if iterator was released
+    }
+
     if (options_.update_on_delete && !set_size_was_called_) {
       SetJsonSize();
     } else if (!set_size_was_called_) {
@@ -134,6 +137,13 @@ class JsonAutoUpdater {
     return it_.it;
   }
 
+  // Releases ownership of the iterator. After calling this, the destructor becomes a noop.
+  // Used when we need to delete the entry manually (e.g., on error paths for newly created keys).
+  DbSlice::ItAndUpdater Release() {
+    was_released_ = true;
+    return std::move(it_);
+  }
+
  private:
   size_t GetMemoryUsage() const {
     return static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
@@ -157,6 +167,7 @@ class JsonAutoUpdater {
   // Used to track the memory usage of the json object
   size_t start_size_{0};
   bool set_size_was_called_{false};
+  bool was_released_{false};
 };
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
@@ -503,12 +514,21 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
     return OpStatus::WRONG_TYPE;
   }
 
-  // For non-JSON types (i.e., strings), validate JSON and free the old value before
-  // constructing JsonAutoUpdater. This ensures start_size_ doesn't include the old
-  // string's memory, which would cause a negative diff in SetJsonSize() and crash
-  // in UpdateSize().
+  const bool is_new_key = it_res->is_new;
+
+  // AddOrFind for Add case has type == OBJ_STRING.
+  // We either added a new key (is_new_key is true) or found a pre-existing (string).
+  // For both cases we must reset the object before we set up the JsonAutoUpdater.
+  // *note* that ShardJsonFromString is called twice. This *parses and allocates* the
+  // same JSON object twice and might impact performance of large json strings.
   if (type != OBJ_JSON) {
     if (!ShardJsonFromString(json_str)) {
+      if (is_new_key) {
+        // Delete the key if it was created during this operation to avoid
+        // an orphan (leftover empty key).
+        auto& db_slice = op_args.GetDbSlice();
+        db_slice.DelMutable(op_args.db_cntx, std::move(*it_res));
+      }
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       return OpStatus::INVALID_JSON;
     }
@@ -525,6 +545,10 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
       if (type == OBJ_JSON) {
         // We need to add the document to the indexes, because we removed it before
         op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &updater.GetPrimeValue());
+      }
+      if (is_new_key) {
+        auto& db_slice = op_args.GetDbSlice();
+        db_slice.DelMutable(op_args.db_cntx, updater.Release());
       }
       return OpStatus::INVALID_JSON;
     }
@@ -851,7 +875,7 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
   // We don't use OBJ_JSON here because we want to support both JSON and STRING types.
   // If the key is not OBJ_JSON and not OBJ_STRING, we return WRONG_TYPE.
-  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
@@ -1189,7 +1213,6 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
 
   updater.SetJsonSize();
 
-  // SetString(op_args, key, j.as_string());
   return total_deletions;
 }
 
@@ -1635,31 +1658,44 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-  if (!parsed_json) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_JSON;
-  }
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  OpStatus res_status = it_res.status();
 
-  auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
-    string_view strpath = cur_path ? *cur_path : string_view{};
+  if (res_status == OpStatus::OK) {
+    JsonAutoUpdater updater(op_args, key, *std::move(it_res));
 
-    DVLOG(2) << "Handling " << strpath << " " << val->to_string();
-    // https://datatracker.ietf.org/doc/html/rfc7386#section-2
-    try {
-      mergepatch::apply_merge_patch(*val, *parsed_json);
-    } catch (const std::exception& e) {
-      LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *val
-                            << " and patch: " << *parsed_json << ", path: " << strpath;
+    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+    if (!parsed_json) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      return OpStatus::INVALID_JSON;
     }
 
-    return {};
-  };
+    auto cb = [&](std::optional<std::string_view> cur_path,
+                  JsonType* val) -> MutateCallbackResult<> {
+      string_view strpath = cur_path ? *cur_path : string_view{};
+      DVLOG(2) << "Handling " << strpath << " " << val->to_string();
 
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
+      // https://datatracker.ietf.org/doc/html/rfc7386#section-2
+      try {
+        mergepatch::apply_merge_patch(*val, *parsed_json);
+      } catch (const std::exception& e) {
+        LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *val
+                              << " and patch: " << *parsed_json << ", path: " << strpath;
+      }
 
-  if (res.status() != OpStatus::KEY_NOTFOUND)
-    return res.status();
+      return {};
+    };
+
+    auto opts = CallbackResultOptions::DefaultMutateOptions();
+    auto res = json_path.ExecuteMutateCallback<Nothing>(updater.GetJson(), cb, opts);
+    parsed_json.reset();
+    updater.SetJsonSize();
+
+    res_status = res.status();
+  }
+
+  if (res_status != OpStatus::KEY_NOTFOUND)
+    return res_status;
 
   if (json_path.RefersToRootElement()) {
     return OpSet(op_args, key, path, json_path, json_str, false, false).status();

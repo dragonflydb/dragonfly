@@ -654,6 +654,132 @@ TEST_F(SearchTest, MatchNumericRangeWithCommas) {
 
 class KnnTest : public SearchTest {};
 
+class VectorRangeTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+    InitSimSIMD();
+  }
+};
+
+TEST_F(VectorRangeTest, FlatRange1D) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Place 10 points on a line: 1, 2, ..., 10 (avoid zero vector for doc 0)
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Query at 5.0 with radius 1.5 → points at pos 4,5,6 → doc ids 3,4,5
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
+  }
+
+  // Exact match at pos 4.0 with radius 0 → only doc 3
+  {
+    params["vec"] = ToBytes({4.0f});
+    algo.Init("@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3));
+  }
+
+  // Large radius → all 10 points
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_EQ(result.ids.size(), 10u);
+  }
+
+  // Empty result when radius is too small
+  {
+    params["vec"] = ToBytes({5.5f});
+    algo.Init("@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_TRUE(result.ids.empty());
+  }
+}
+
+TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Use i+1 so doc positions are 1..5 (query radius 1.5 from pos 2.0 catches docs 0,1,2)
+  for (size_t i = 0; i < 5; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({2.0f});
+
+  algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: vector_distance}", &params);
+  ASSERT_NE(nullptr, algo.GetVectorRangeNode());
+  EXPECT_STREQ("vector_distance", algo.GetVectorRangeNode()->score_alias.c_str());
+
+  auto result = algo.Search(&indices);
+  // Positions 1,2,3 (docs 0,1,2) are within L2 distance 1.5 from query pos 2.0
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1, 2));
+  // knn_scores should contain distances for all matched docs
+  EXPECT_EQ(result.knn_scores.size(), 3u);
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // incorrectly skips zero vectors. The zero vector [0.0,...,0.0] is a valid embedding.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // doc 0: zero vector [0.0, 0.0] — valid embedding, must not be skipped
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({0.0f, 0.0f})}}});
+  // doc 1: non-zero vector [1.0, 0.0]
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({1.0f, 0.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Both docs must appear — zero vector is NOT null
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1));
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryRemovedDocNotMatched) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // iterates entries_ directly and does NOT respect all_ids_. After Remove(), the doc's
+  // slot in entries_ is still non-zero, so the removed doc incorrectly appears in results.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({2.0f})}}});
+  indices.Add(2, MockedDocument{Map{{"pos", ToBytes({3.0f})}}});
+
+  // Remove doc 1
+  MockedDocument doc1{Map{{"pos", ToBytes({2.0f})}}};
+  indices.Remove(1, doc1);
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Doc 1 was removed, only docs 0 and 2 should appear
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 2));
+}
+
 TEST_F(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
@@ -1549,6 +1675,160 @@ INSTANTIATE_TEST_SUITE_P(SubsetKnnSimilarities, HnswSubsetKnnTest,
                                return "Unknown";
                            }
                          });
+
+// Tests for HnswVectorIndex::RangeQuery
+class HnswRangeQueryTest : public ::testing::TestWithParam<VectorSimilarity> {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+
+  // 1-D index: doc i has vector {float(i)}, GlobalDocId = i
+  unique_ptr<HnswVectorIndex> CreateSimple1DIndex(size_t num_elements) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 1;
+    params.sim = VectorSimilarity::L2;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+    for (size_t i = 0; i < num_elements; i++) {
+      vector<float> coords = {static_cast<float>(i)};
+      index->Add(i,
+                 MockedDocument(MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}}),
+                 "vec");
+    }
+    return index;
+  }
+};
+
+TEST_P(HnswRangeQueryTest, BasicRange) {
+  // 10 docs at positions 0..9. Query at 5.0 with radius 1.5 → docs 4,5,6 (dist 1.0,0.0,1.0)
+  (void)GetParam();  // L2 only for 1-D
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {5.0f};
+  auto results = index->RangeQuery(query.data(), 1.5f);
+
+  set<GlobalDocId> ids;
+  for (const auto& [dist, id] : results)
+    ids.insert(id);
+
+  EXPECT_THAT(ids, testing::UnorderedElementsAre(4, 5, 6));
+}
+
+TEST_P(HnswRangeQueryTest, ExactMatch) {
+  // Radius 0: only the doc at exact position
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {3.0f};
+  auto results = index->RangeQuery(query.data(), 0.0f);
+
+  ASSERT_EQ(results.size(), 1u);
+  EXPECT_EQ(results[0].second, GlobalDocId{3});
+  EXPECT_FLOAT_EQ(results[0].first, 0.0f);
+}
+
+TEST_P(HnswRangeQueryTest, LargeRadiusReturnsAll) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(20);
+
+  vector<float> query = {10.0f};
+  auto results = index->RangeQuery(query.data(), 1000.0f);
+
+  EXPECT_EQ(results.size(), 20u);
+}
+
+TEST_P(HnswRangeQueryTest, EmptyResultOutsideRadius) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {5.5f};
+  auto results = index->RangeQuery(query.data(), 0.1f);
+
+  EXPECT_TRUE(results.empty());
+}
+
+TEST_P(HnswRangeQueryTest, EmptyIndex) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(0);
+
+  vector<float> query = {0.0f};
+  auto results = index->RangeQuery(query.data(), 100.0f);
+
+  EXPECT_TRUE(results.empty());
+}
+
+TEST_P(HnswRangeQueryTest, DistancesCorrect) {
+  // Verify returned distances match actual L2 distances
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {5.0f};
+  auto results = index->RangeQuery(query.data(), 2.0f);  // docs 3,4,5,6,7
+
+  EXPECT_EQ(results.size(), 5u);
+  for (const auto& [dist, id] : results) {
+    float expected = std::abs(static_cast<float>(id) - 5.0f);
+    // L2Distance returns sqrt(sum of squares); for 1-D: sqrt((a-b)²) = |a-b|
+    EXPECT_FLOAT_EQ(dist, expected);
+  }
+}
+
+TEST_P(HnswRangeQueryTest, DeletedDocNotReturned) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  // Remove doc 5 (at position 5.0, distance 0 from query)
+  index->Remove(5);
+
+  vector<float> query = {5.0f};
+  auto results = index->RangeQuery(query.data(), 1.5f);
+
+  set<GlobalDocId> ids;
+  for (const auto& [dist, id] : results)
+    ids.insert(id);
+
+  EXPECT_THAT(ids, testing::UnorderedElementsAre(4, 6));
+  EXPECT_THAT(ids, testing::Not(testing::Contains(GlobalDocId{5})));
+}
+
+TEST_P(HnswRangeQueryTest, ConsistentWithBruteForce) {
+  // Compare RangeQuery results against brute-force SubsetKnn-based check
+  (void)GetParam();
+  const size_t n = 50;
+  auto index = CreateSimple1DIndex(n);
+
+  vector<float> query = {25.0f};
+  float radius = 5.0f;
+
+  auto results = index->RangeQuery(query.data(), radius);
+
+  // Brute force: collect all docs within radius.
+  // L2Distance returns |a-b| for 1-D vectors (actual Euclidean, not squared).
+  set<GlobalDocId> expected;
+  for (size_t i = 0; i < n; i++) {
+    float dist = std::abs(static_cast<float>(i) - 25.0f);
+    if (dist <= radius)
+      expected.insert(i);
+  }
+
+  set<GlobalDocId> got;
+  for (const auto& [dist, id] : results)
+    got.insert(id);
+
+  EXPECT_EQ(got, expected);
+}
+
+INSTANTIATE_TEST_SUITE_P(HnswRangeL2, HnswRangeQueryTest, testing::Values(VectorSimilarity::L2),
+                         [](const testing::TestParamInfo<VectorSimilarity>&) { return "L2"; });
 
 TEST_F(SearchTest, GeoSearch) {
   auto schema = MakeSimpleSchema({{"name", SchemaField::TEXT}, {"location", SchemaField::GEO}});

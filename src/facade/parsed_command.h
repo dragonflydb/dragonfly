@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <coroutine>
 #include <variant>
 
 #include "base/function2.hpp"
@@ -124,21 +125,11 @@ class ParsedCommand : public cmn::BackedArguments {
     SendSimpleString("OK");
   }
 
-  // TODO: remove
   void SendLong(long val);
-  void SendNull();
-  void SendEmptyArray();
-
-  // TODO: remove
   template <typename F> void ReplyWith(F&& func) {
+    assert(!is_deferred_reply_);
     using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
-    if (is_deferred_reply_) {
-      reply_ = [func = std::forward<F>(func)](SinkReplyBuilder* builder) {
-        func(static_cast<RbType>(builder));
-      };
-    } else {
-      func(static_cast<RbType>(rb_));
-    }
+    func(static_cast<RbType>(rb_));
   }
 
   // Below are main commands for the async api and all assume that the command defers replies
@@ -148,7 +139,7 @@ class ParsedCommand : public cmn::BackedArguments {
 
   // Reaching zero on blocker means CanReply() turns true
   util::fb2::EmbeddedBlockingCounter* Blocker() const {
-    return std::get<AsyncTask>(reply_).blocker;
+    return std::get<SuspendedCommand>(reply_).blocker;
   }
 
   // Assumes CanReply() is true. Sends reply
@@ -160,25 +151,43 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   // Resolve deferred command with async task
-  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, ReplyFunc replier) {
-    reply_ = AsyncTask{blocker, std::move(replier)};
+  void Resolve(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro) {
+    reply_ = SuspendedCommand{blocker, coro};
   }
 
  protected:
   virtual void ReuseInternal() = 0;
 
  private:
-  // Pending async command. Once blocker is ready, replier can be called
-  struct AsyncTask {
+  // Suspended asynchronous command. Once blocker is done, the coroutine can be resumed.
+  // Deletes the coroutine on drop.
+  struct SuspendedCommand {
+    SuspendedCommand(util::fb2::EmbeddedBlockingCounter* blocker, std::coroutine_handle<> coro)
+        : blocker{blocker}, coro{coro} {
+    }
+
+    SuspendedCommand(SuspendedCommand&& other) noexcept
+        : blocker{other.blocker}, coro{std::exchange(other.coro, {})} {
+    }
+
+    SuspendedCommand& operator=(SuspendedCommand&& other) noexcept {
+      blocker = other.blocker;
+      coro = std::exchange(other.coro, {});
+      return *this;
+    }
+
+    // To destroy the coroutine when cancelling (as the handle is non owning)
+    ~SuspendedCommand();
+
     util::fb2::EmbeddedBlockingCounter* blocker;
-    ReplyFunc replier;
+    std::coroutine_handle<> coro;
   };
 
   // if false then the reply was sent directly to reply builder,
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
 
-  std::variant<payload::Payload, AsyncTask> reply_;
+  std::variant<payload::Payload, SuspendedCommand> reply_;
 };
 
 #ifdef __linux__

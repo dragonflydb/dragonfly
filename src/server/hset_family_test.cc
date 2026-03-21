@@ -666,6 +666,34 @@ TEST_F(HSetFamilyTest, HExpireWithNullChar) {
   EXPECT_EQ(ToSV(Run({"HGET", "hash", "field"}).GetBuf()), expected_val);
 }
 
+TEST_F(HSetFamilyTest, HTtl) {
+  // Non-existent key returns -2 for all fields
+  EXPECT_THAT(Run({"HTTL", "nokey", "FIELDS", "2", "f1", "f2"}),
+              RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+
+  // Fields without TTL return -1, non-existent fields return -2
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "3", "k0", "k1", "nosuch"}),
+              RespArray(ElementsAre(IntArg(-1), IntArg(-1), IntArg(-2))));
+
+  // Set expiry and verify TTL
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0"}), IntArg(1));
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(10), IntArg(-1))));
+
+  // Advance time and verify TTL decreases
+  AdvanceTime(3000);
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "1", "k0"}), IntArg(7));
+
+  // Wrong type
+  Run({"SET", "strkey", "val"});
+  EXPECT_THAT(Run({"HTTL", "strkey", "FIELDS", "1", "f"}), ErrArg("WRONGTYPE"));
+
+  // Syntax errors
+  EXPECT_THAT(Run({"HTTL", "key", "1", "k0"}), ErrArg("Mandatory argument FIELDS"));
+  EXPECT_THAT(Run({"HTTL", "key", "FIELDS", "2", "k0"}), ErrArg("numfields"));
+}
+
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);

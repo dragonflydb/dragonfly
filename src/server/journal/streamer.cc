@@ -448,7 +448,6 @@ void RestoreStreamer::Run() {
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
   boost::intrusive_ptr<DbTable> table = db_array_.front();
   PrimeTable* pt = &table->prime;
-  ExpireTable& expire_table = table->expire;
 
   do {
     if (!cntx_->IsRunning())
@@ -497,7 +496,7 @@ void RestoreStreamer::Run() {
         auto* blocking_counter = db_slice_->GetLatch();
         lock_guard blocking_counter_guard(*blocking_counter);
 
-        stats_.buckets_loop += WriteBucket(it, expire_table, false);
+        stats_.buckets_loop += WriteBucket(it, false);
       }
 
       // We could have delayed entries that are watiting so we want to flush them
@@ -592,8 +591,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table,
-                                  bool on_db_change_cb) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, bool on_db_change_cb) {
   auto& shard_stats = EngineShard::tlocal()->stats();
   bool written = false;
   absl::flat_hash_set<string> tiered_keys;
@@ -620,12 +618,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, const ExpireTa
       if (ShouldWrite(key)) {
         ++stats_.keys_written;
         ++shard_stats.total_migrated_keys;
-        uint64_t expire = 0;
-        if (it->first.HasExpire()) {
-          auto eit = expire_table.Find(it->first);
-          CHECK(IsValid(eit)) << " " << expire_table.size();
-          expire = db_slice_->ExpireTime(eit->second);
-        }
+        uint64_t expire = it->first.GetExpireTime();
         // Track tiered keys that will need delayed entry flushing
         if (track_tiered_keys) {
           tiered_keys.emplace(key);
@@ -672,8 +665,7 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  PrimeTable* table = db_slice_->GetTables(0).first;
-  ExpireTable* expire_table = db_slice_->GetTables(0).second;
+  PrimeTable* table = db_slice_->GetTables(0);
   uint64_t throttle_start = throttle_count_;
   uint64_t throttle_usec_start = total_throttle_wait_usec_;
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
@@ -681,14 +673,14 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
       // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
       return;
     }
-    stats_.buckets_on_db_update += WriteBucket(*bit, *expire_table, true);
+    stats_.buckets_on_db_update += WriteBucket(*bit, true);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator it) {
       if (snapshot_version_ != 0) {  // we need this check because lambda can be called several
                                      // times and we can preempt in WriteBucket
         DCHECK_LT(it.GetVersion(), snapshot_version_);
-        stats_.buckets_on_db_update += WriteBucket(it, *expire_table, true);
+        stats_.buckets_on_db_update += WriteBucket(it, true);
       }
     });
   }

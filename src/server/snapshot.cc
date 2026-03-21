@@ -405,19 +405,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   if (pv.IsExternal() && pv.IsCool())
     return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
 
-  time_t expire_time = 0;
-  if (pk.HasExpire()) {
-    auto eit = db_array_[db_indx]->expire.Find(pk);
-    if (!IsValid(eit)) {
-      LOG(DFATAL) << "Internal error, entry " << pk.ToString()
-                  << " not found in expire table, db_index: " << db_indx
-                  << ", expire table size: " << db_array_[db_indx]->expire.size()
-                  << ", prime table size: " << db_array_[db_indx]->prime.size()
-                  << util::fb2::GetStacktrace();
-    } else {
-      expire_time = db_slice_->ExpireTime(eit->second);
-    }
-  }
+  time_t expire_time = pk.GetExpireTime();
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
@@ -568,7 +556,7 @@ void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const Prime
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
   if (use_snapshot_version_) {
-    PrimeTable* table = db_slice_->GetTables(db_index).first;
+    PrimeTable* table = db_slice_->GetTables(db_index);
     const PrimeTable::bucket_iterator* bit = req.update();
 
     if (bit) {
@@ -587,7 +575,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 }
 
 bool SliceSnapshot::IsPositionSerialized(DbIndex id, PrimeTable::Cursor cursor) {
-  uint8_t depth = db_slice_->GetTables(id).first->depth();
+  uint8_t depth = db_slice_->GetTables(id)->depth();
 
   return id < snapshot_db_index_ ||
          (id == snapshot_db_index_ &&
@@ -605,7 +593,7 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
     const PrimeTable::Cursor& dest = item_cursors.second;
     const PrimeTable::Cursor& source = item_cursors.first;
     if (IsPositionSerialized(id, dest) && !IsPositionSerialized(id, source)) {
-      PrimeTable::bucket_iterator bit = db_slice_->GetTables(id).first->CursorToBucketIt(dest);
+      PrimeTable::bucket_iterator bit = db_slice_->GetTables(id)->CursorToBucketIt(dest);
       ++stats_.moved_saved;
       SerializeBucket(id, bit, true);
     }
