@@ -430,6 +430,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
     SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
+    serializer_->SetCurrentStreamId(next_stream_id_++);
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
@@ -513,6 +514,7 @@ void SliceSnapshot::PushDelayedEntries(bool force,
     }
 
     PrimeValue pv{*value};
+    serializer_->SetCurrentStreamId(next_stream_id_++);
     auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
     CHECK(res);
 

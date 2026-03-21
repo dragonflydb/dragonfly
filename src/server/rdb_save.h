@@ -33,6 +33,10 @@ struct HnswNodeData;
 
 namespace dfly {
 
+// Used for non-baseline data, in particular, journal entries
+// Baseline entries use monotonically increasing IDs starting from 1.
+constexpr uint32_t kNoStreamId = 0;
+
 // keys are RDB_TYPE_xxx constants.
 using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 
@@ -285,11 +289,21 @@ class RdbSerializer : public RdbSerializerBase {
     send_tagged_entries_ = tag_entries;
   }
 
-  // Shadows RdbSerializerBase::WriteJournalEntry to add tag-switch stashing.
-  std::error_code WriteJournalEntry(std::string_view serialized_entry);
+  // Sets the current stream ID for tagged chunk output. Stashes any pending data from the
+  // previous stream. Called by snapshot before each SerializeEntry
+  void SetCurrentStreamId(uint32_t stream_id);
 
-  // Shadows RdbSerializerBase::SerializedLen to include stash size.
-  size_t SerializedLen() const;
+  // stash baseline data before journal write
+  // NOLINT - virtual method not required as it is used directly in snapshot
+  std::error_code WriteJournalEntry(std::string_view serialized_entry);  // NOLINT
+
+  // include stash size with mem buf size
+  // NOLINT - virtual method not required as it is used directly in snapshot
+  size_t SerializedLen() const;  // NOLINT
+
+  // Set raw mode before full sync cut
+  // NOLINT - virtual method not required as it is used directly in snapshot
+  std::error_code SendFullSyncCut();  // NOLINT
 
  private:
   // Might preempt if flush_fun_ is used
@@ -312,12 +326,16 @@ class RdbSerializer : public RdbSerializerBase {
   void PushToConsumerIfNeeded(FlushState flush_state);
 
   // Consumes and stores current mem_buf_ content into a stash so that interleaved entries of
-  // different tag types (Baseline/journal etc) are sent to consumer with correct headers on each
+  // different types (Baseline/journal etc) are sent to consumer with correct headers on each
   // chunk.
-  void StashCurrentBuffer(ChunkTag tag);
+  void StashCurrentBuffer(bool tag_stashed_data);
 
-  // Tags a given byte series with opcode, tag type and the size of bytes in 9 byte header.
-  static std::string TagChunk(io::Bytes bytes, ChunkTag tag);
+  // Tags a given byte series with opcode, stream ID and the size of bytes in 9 byte header.
+  static std::string TagChunk(io::Bytes bytes, uint32_t stream_id);
+
+  // Helper to switche state from tagged chunks to non tagged chunks, eg journal, full sync cut etc
+  // Must be called for any non k-v records to stash the current buffer data first.
+  void SetRawMode();
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
@@ -326,7 +344,7 @@ class RdbSerializer : public RdbSerializerBase {
 
   bool send_tagged_entries_ = false;
   std::string tagged_chunk_stash_;
-  ChunkTag current_tag_ = ChunkTag::Baseline;
+  uint32_t current_stream_id_ = kNoStreamId;
 };
 
 }  // namespace dfly

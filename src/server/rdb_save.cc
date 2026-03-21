@@ -274,11 +274,6 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return 0;
   }
 
-  if (send_tagged_entries_ && current_tag_ != ChunkTag::Baseline) {
-    StashCurrentBuffer(current_tag_);
-    current_tag_ = ChunkTag::Baseline;
-  }
-
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   auto ec = SelectDb(dbid);
   if (ec) {
@@ -809,6 +804,7 @@ error_code RdbSerializer::SendEofAndChecksum() {
 }
 
 error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
+  SetRawMode();
   VLOG(2) << "SendJournalOffset";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_OFFSET));
   uint8_t buf[sizeof(uint64_t)];
@@ -901,9 +897,12 @@ string RdbSerializer::Flush(FlushState flush_state) {
   string res = RdbSerializerBase::Flush(flush_state);
 
   if (send_tagged_entries_) {
-    if (!res.empty()) {
-      tagged_chunk_stash_.append(
-          TagChunk({reinterpret_cast<const unsigned char*>(res.data()), res.size()}, current_tag_));
+    if (!res.empty() && current_stream_id_ != kNoStreamId) {
+      tagged_chunk_stash_.append(TagChunk(
+          {reinterpret_cast<const unsigned char*>(res.data()), res.size()}, current_stream_id_));
+    } else if (!res.empty()) {
+      // any non-baseline data identified with opcode and contiguous, append raw.
+      tagged_chunk_stash_.append(res);
     }
     res = std::move(tagged_chunk_stash_);
     tagged_chunk_stash_.clear();
@@ -1841,11 +1840,20 @@ size_t RdbSerializer::SerializedLen() const {
   return RdbSerializerBase::SerializedLen() + tagged_chunk_stash_.size();
 }
 
-error_code RdbSerializer::WriteJournalEntry(string_view serialized_entry) {
-  if (send_tagged_entries_ && current_tag_ != ChunkTag::Journal) {
-    StashCurrentBuffer(current_tag_);
-    current_tag_ = ChunkTag::Journal;
+std::error_code RdbSerializer::SendFullSyncCut() {
+  SetRawMode();
+  return RdbSerializerBase::SendFullSyncCut();
+}
+
+void RdbSerializer::SetCurrentStreamId(uint32_t stream_id) {
+  if (send_tagged_entries_ && current_stream_id_ != stream_id) {
+    StashCurrentBuffer(current_stream_id_ != kNoStreamId);
+    current_stream_id_ = stream_id;
   }
+}
+
+error_code RdbSerializer::WriteJournalEntry(string_view serialized_entry) {
+  SetRawMode();
   return RdbSerializerBase::WriteJournalEntry(serialized_entry);
 }
 
@@ -1853,19 +1861,19 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
   if (consume_fun_ && SerializedLen() > flush_threshold_) {
     string blob = Flush(flush_state);
     DCHECK(!blob.empty());  // SerializedLen() > 0.
-    const auto tag = current_tag_;
+    const auto saved_stream_id = current_stream_id_;
     consume_fun_(std::move(blob));
 
-    // Tag changed while fiber yielded in consume_fun_. Stash the data written during yield and
-    // restore our pre-yield tag.
-    if (send_tagged_entries_ && current_tag_ != tag) {
-      StashCurrentBuffer(current_tag_);
-      current_tag_ = tag;
+    // Stream ID changed while fiber yielded in consume_fun_. Stash the data written during yield
+    // and restore our pre-yield stream ID.
+    if (send_tagged_entries_ && current_stream_id_ != saved_stream_id) {
+      StashCurrentBuffer(current_stream_id_ != kNoStreamId);
+      current_stream_id_ = saved_stream_id;
     }
   }
 }
 
-void RdbSerializer::StashCurrentBuffer(ChunkTag tag) {
+void RdbSerializer::StashCurrentBuffer(bool tag_stashed_data) {
   // TODO skipped compression here using FlushState::kFlushMidEntry, it should be doable if
   // number_of_chunks_ can be maintained across the stash. Currently just save the value before and
   // restore after.
@@ -1878,16 +1886,20 @@ void RdbSerializer::StashCurrentBuffer(ChunkTag tag) {
   if (bytes.empty())
     return;
 
-  tagged_chunk_stash_.append(TagChunk(bytes, tag));
+  if (tag_stashed_data) {
+    tagged_chunk_stash_.append(TagChunk(bytes, current_stream_id_));
+  } else {
+    tagged_chunk_stash_.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  }
 
   // Clear mem buf of the entry we just stashed
   mem_buf_.ConsumeInput(mem_buf_.InputLen());
 }
 
-std::string RdbSerializer::TagChunk(Bytes bytes, ChunkTag tag) {
+std::string RdbSerializer::TagChunk(Bytes bytes, uint32_t stream_id) {
   uint8_t header[9];
   header[0] = RDB_OPCODE_TAGGED_CHUNK;
-  absl::little_endian::Store32(header + 1, static_cast<uint32_t>(tag));
+  absl::little_endian::Store32(header + 1, stream_id);
   absl::little_endian::Store32(header + 5, bytes.size());
 
   std::string result;
@@ -1895,6 +1907,13 @@ std::string RdbSerializer::TagChunk(Bytes bytes, ChunkTag tag) {
   result.append(reinterpret_cast<const char*>(header), sizeof(header));
   result.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   return result;
+}
+
+void RdbSerializer::SetRawMode() {
+  if (send_tagged_entries_ && current_stream_id_ != kNoStreamId) {
+    StashCurrentBuffer(true);
+    current_stream_id_ = kNoStreamId;
+  }
 }
 
 }  // namespace dfly

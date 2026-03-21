@@ -59,8 +59,3 @@ constexpr uint8_t RDB_OPCODE_SHARD_DOC_INDEX = 223;
 
 // Used to tag a chunk of serialized data with its stream id
 constexpr uint8_t RDB_OPCODE_TAGGED_CHUNK = 224;
-
-enum class ChunkTag : uint32_t {
-  Baseline = 0,
-  Journal = 1,
-};
