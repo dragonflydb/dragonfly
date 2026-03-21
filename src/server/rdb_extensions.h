@@ -56,3 +56,6 @@ constexpr uint8_t RDB_OPCODE_VECTOR_INDEX = 222;
 // Opcode to store ShardDocIndex key-to-DocId mapping for search indices
 // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
 constexpr uint8_t RDB_OPCODE_SHARD_DOC_INDEX = 223;
+
+// Used to tag a chunk of serialized data with its stream id
+constexpr uint8_t RDB_OPCODE_TAGGED_CHUNK = 224;

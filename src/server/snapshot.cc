@@ -27,6 +27,8 @@
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
+ABSL_FLAG(bool, serialization_tagged_chunks, false,
+          "Tag each chunk for replication with type of stream");
 
 namespace dfly {
 
@@ -109,6 +111,10 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
   }
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
+
+  if (allow_flush == SnapshotFlush::kAllow) {
+    serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
+  }
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -412,6 +418,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
     SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
+    serializer_->SetCurrentStreamId(next_stream_id_++);
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
@@ -495,6 +502,7 @@ void SliceSnapshot::PushDelayedEntries(bool force,
     }
 
     PrimeValue pv{*value};
+    serializer_->SetCurrentStreamId(next_stream_id_++);
     auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
     CHECK(res);
 
