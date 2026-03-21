@@ -665,7 +665,7 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  PrimeTable* table = db_slice_->GetTables(0).first;
+  PrimeTable* table = db_slice_->GetTables(0);
   uint64_t throttle_start = throttle_count_;
   uint64_t throttle_usec_start = total_throttle_wait_usec_;
   if (const PrimeTable::bucket_iterator* bit = req.update()) {

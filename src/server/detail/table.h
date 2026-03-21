@@ -6,7 +6,6 @@
 
 #include "core/compact_object.h"
 #include "core/dash.h"
-#include "core/expire_period.h"
 
 namespace dfly {
 
@@ -16,7 +15,7 @@ using PrimeKey = CompactKey;
 using PrimeValue = CompactValue;
 
 struct PrimeTablePolicy {
-  enum { kSlotNum = 14, kBucketNum = 56 };
+  enum : uint8_t { kSlotNum = 14, kBucketNum = 56 };
 
   static constexpr bool kUseVersion = true;
 
@@ -37,10 +36,6 @@ struct PrimeTablePolicy {
   }
 
   static bool Equal(const PrimeKey& s1, std::string_view s2) {
-    return s1 == s2;
-  }
-
-  static bool Equal(const PrimeKey& s1, const PrimeKey& s2) {
     return s1 == s2;
   }
 };

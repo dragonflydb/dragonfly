@@ -294,10 +294,11 @@ TEST_F(CompactObjectTest, Int) {
 
 TEST_F(CompactObjectTest, Expire) {
   CompactKey key;
-  key.SetExpire(true);
   key.SetString("42");
+  key.SetExpireTime(10000);
+
   EXPECT_EQ(8181779779123079347, key.HashCode());
-  EXPECT_EQ(OBJ_ENCODING_INT, key.Encoding());
+  EXPECT_EQ(OBJ_ENCODING_RAW, key.Encoding());
   EXPECT_EQ(2, key.Size());
   EXPECT_TRUE(key.HasExpire());
 }
@@ -313,7 +314,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
     EXPECT_TRUE(key.HasExpire());
     EXPECT_EQ(1000, key.GetExpireTime());
     EXPECT_EQ(hash_before, key.HashCode());
-    EXPECT_TRUE(key == string_view("hello"));
+    EXPECT_TRUE(key == "hello"sv);
     EXPECT_EQ(5, key.Size());
     EXPECT_EQ(OBJ_STRING, key.ObjType());
 
@@ -331,7 +332,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
     key.SetExpireTime(2000);
     EXPECT_TRUE(key.HasExpire());
     EXPECT_EQ(2000, key.GetExpireTime());
-    EXPECT_TRUE(key == string_view("42"));
+    EXPECT_TRUE(key == "42"sv);
     EXPECT_EQ(hash_before, key.HashCode());
     // No longer INT_TAG — TryGetInt should return nullopt.
     EXPECT_FALSE(key.TryGetInt().has_value());
@@ -348,7 +349,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
     key.SetExpireTime(3000);
     EXPECT_TRUE(key.HasExpire());
     EXPECT_EQ(3000, key.GetExpireTime());
-    EXPECT_TRUE(key == string_view(s));
+    EXPECT_TRUE(key == s);
     EXPECT_EQ(hash_before, key.HashCode());
     EXPECT_EQ(s.size(), key.Size());
   }
@@ -364,7 +365,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
     key.SetExpireTime(4000);
     EXPECT_TRUE(key.HasExpire());
     EXPECT_EQ(4000, key.GetExpireTime());
-    EXPECT_TRUE(key == string_view(s));
+    EXPECT_TRUE(key == s);
     EXPECT_EQ(hash_before, key.HashCode());
     EXPECT_EQ(s.size(), key.Size());
   }
@@ -377,7 +378,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
 
     key.SetExpireTime(2000);
     EXPECT_EQ(2000, key.GetExpireTime());
-    EXPECT_TRUE(key == string_view("hello"));
+    EXPECT_TRUE(key == "hello"sv);
   }
 
   // 6. ClearTtl (inline recovery)
@@ -388,7 +389,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
 
     EXPECT_FALSE(key.HasExpire());
     EXPECT_TRUE(key.IsInline());
-    EXPECT_TRUE(key == string_view("hello"));
+    EXPECT_TRUE(key == "hello"sv);
   }
 
   // 7. ClearTtl (INT recovery)
@@ -410,7 +411,7 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
     key.SetExpireTime(1000);
     EXPECT_TRUE(key.ClearExpireTime());
     EXPECT_FALSE(key.HasExpire());
-    EXPECT_TRUE(key == string_view(s));
+    EXPECT_TRUE(key == s);
   }
 
   // 9. Move semantics
@@ -420,34 +421,13 @@ TEST_F(CompactObjectTest, SdsTtlTag) {
     CompactKey b(std::move(a));
     EXPECT_TRUE(b.HasExpire());
     EXPECT_EQ(100, b.GetExpireTime());
-    EXPECT_TRUE(b == string_view("test"));
+    EXPECT_TRUE(b == "test"sv);
   }
 
   // 10. Free/destructor — just verify no leaks (TearDown catches them).
   {
     CompactKey key("hello");
     key.SetExpireTime(5000);
-  }
-
-  // 11. Cross-tag operator== (SDS_TTL_TAG vs inline/INT_TAG).
-  {
-    CompactKey a("hello");
-    CompactKey b("hello");
-    b.SetExpireTime(999);
-    // b is SDS_TTL_TAG, a is inline — must compare equal as OBJ_STRING.
-    EXPECT_TRUE(a == b);
-    EXPECT_TRUE(b == a);
-
-    CompactKey c("42");
-    CompactKey d("42");
-    d.SetExpireTime(1);
-    EXPECT_TRUE(c == d);
-    EXPECT_TRUE(d == c);
-
-    // Different content must not compare equal.
-    CompactKey e("world");
-    e.SetExpireTime(1);
-    EXPECT_FALSE(a == e);
   }
 }
 

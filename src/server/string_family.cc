@@ -776,7 +776,7 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
 
   find_res->post_updater.Run();
 
-  auto update = db_slice.UpdateExpire(ctx, find_res->it, find_res->exp_it, params.expire_params);
+  auto update = db_slice.UpdateExpire(ctx, find_res->it, params.expire_params);
   if (!update.ok()) {
     return update.status();
   }
@@ -1297,8 +1297,8 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it,
-                                                             it_res->exp_it, exp_params));
+      RETURN_ON_BAD_STATUS(
+          op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params));
     }
 
     // Replicate GETEX as PEXPIREAT or PERSIST
@@ -1522,7 +1522,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
     auto args = t->GetShardArgs(sid);
     auto op_args = t->GetOpArgs(es);
     for (auto arg_it = args.begin(); arg_it != args.end(); ++arg_it) {
-      auto it = op_args.GetDbSlice().FindReadOnly(t->GetDbContext(), *arg_it).it;
+      auto it = op_args.GetDbSlice().FindReadOnly(t->GetDbContext(), *arg_it);
       ++arg_it;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
