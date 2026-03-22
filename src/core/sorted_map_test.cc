@@ -304,6 +304,7 @@ TEST_F(SortedMapTest, ReallocIfNeeded) {
 static void BM_GetRangeForwardInf(benchmark::State& state) {
   auto* tlh = mi_heap_get_backing();
   init_zmalloc_threadlocal(tlh);
+  InitTLStatelessAllocMR(PMR_NS::get_default_resource());
 
   unsigned num_elems = state.range(0);
   unsigned limit = state.range(1);
