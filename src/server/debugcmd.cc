@@ -372,7 +372,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
-  auto [pt, exp_t] = db_slice.GetTables(db_index);
+  auto* pt = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
   ObjInfo oinfo;
@@ -403,12 +403,9 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
     }
 
     if (it->first.HasExpire()) {
-      ExpireIterator exp_it = exp_t->Find(it->first);
-      CHECK(!exp_it.is_done());
-
-      time_t exp_time = db_slice.ExpireTime(exp_it->second);
+      time_t exp_time = it->first.GetExpireTime();
       oinfo.ttl = exp_time - GetCurrentTimeMs();
-      oinfo.has_sec_precision = exp_it->second.is_second_precision();
+      oinfo.has_sec_precision = false;  // Embedded TTL is always ms precision.
     }
   }
 
@@ -423,7 +420,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
 OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
-  auto [pt, exp_t] = db_slice.GetTables(db_index);
+  auto* pt = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
   if (!IsValid(it)) {

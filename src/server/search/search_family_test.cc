@@ -4274,6 +4274,78 @@ TEST_F(SearchFamilyTest, GeoSearchUnits) {
   EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
+TEST_F(SearchFamilyTest, HnswVectorRange) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with an extra numeric field for SORTBY testing
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "val", "NUMERIC"});
+
+  // 10 docs at positions 0..9, val = i*10
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i)), "val",
+         absl::StrFormat("%d", i * 10)});
+  }
+
+  string query_vec = FloatToBytes(5.0f);
+
+  // Basic range: query at 5.0, radius 1.5 → k4 (dist=1), k5 (dist=0), k6 (dist=1)
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+
+  // Score alias is returned in each document by default
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "RETURN", "1", "dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  // Response: [total, key1, [field, val, ...], ...]
+  // Each doc should have "dist" in its fields
+  auto& arr = resp.GetVec();
+  ASSERT_GE(arr.size(), 3u);
+  for (size_t i = 2; i < arr.size(); i += 2) {
+    auto fields = arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    EXPECT_EQ(fields[0].GetString(), "dist");
+  }
+
+  // Large radius — all 10 docs returned
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "20"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 10);
+
+  // SORTBY val ASC — tests that sort_score is populated for non-score SORTBY
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "ASC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& asc_arr = resp.GetVec();
+  // Extract val values from response: [total, key, [val, v1], key, [val, v2], ...]
+  vector<int> vals_asc;
+  for (size_t i = 2; i < asc_arr.size(); i += 2) {
+    auto fields = asc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_asc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_asc, ElementsAre(40, 50, 60));
+
+  // SORTBY val DESC
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "DESC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& desc_arr = resp.GetVec();
+  vector<int> vals_desc;
+  for (size_t i = 2; i < desc_arr.size(); i += 2) {
+    auto fields = desc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_desc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_desc, ElementsAre(60, 50, 40));
+}
+
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 1: Correct geo field definition and usage with HASH
   auto resp =
@@ -4385,6 +4457,75 @@ TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   Run({"JSON.DEL", "j:12"});
   resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
   EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+}
+
+TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
+  // DIM=1 FLOAT32 expects exactly 4 bytes per value.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Insert values with wrong byte lengths (6 and 7 bytes instead of 4).
+  Run({"HSET", "k1", "pos", "AAAAAAA"});  // 7 bytes
+  Run({"HSET", "k2", "pos", "AQAAAA"});   // 6 bytes
+  Run({"HSET", "k3", "pos", "AgAAAA"});   // 6 bytes
+
+  // FT.SEARCH must not crash when serializing the wrong-sized vector fields.
+  auto resp = Run({"FT.SEARCH", "idx", "*", "PARAMS", "2", "vec", "AQAAAA", "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+
+  // Same scenario with 10-byte values and multiple keys.
+  Run({"FT.CREATE", "idx2", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  Run({"HSET", "a1", "v", "aaaaaaaaaa"});  // 10 bytes
+  Run({"HSET", "a2", "v", "bbbbbbbbbb"});
+  Run({"HSET", "a3", "v", "cccccccccc"});
+  Run({"HSET", "a4", "v", "dddddddddd"});
+  Run({"HSET", "a5", "v", "eeeeeeeeee"});
+
+  resp = Run({"FT.SEARCH", "idx2", "*", "PARAMS", "2", "vec", "aaaaaaaaaa", "LIMIT", "0", "100"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+}
+
+TEST_F(SearchFamilyTest, SortBySkipsDocsWithoutSortField) {
+  // KeepTopKSorted skips docs that don't have the sort field, returning fewer sort scores
+  // than result.ids.size(). The loop then accesses sort_scores[i] out-of-bounds.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "valid:1", "val", "123"});
+  Run({"HSET", "valid:2", "val", "456"});
+  Run({"HSET", "valid:3", "val", "789"});
+
+  // These docs are indexed (no prefix restriction) but lack the sort field.
+  // They appear in '*' search results but are skipped by KeepTopKSorted.
+  for (int i = 0; i < 97; i++)
+    Run({"HSET", absl::StrCat("nofield:", i), "txt", "garbage"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", "val", "LIMIT", "0", "100"});
+  auto vec = resp.GetVec();
+
+  // Extract doc keys from the response (indices 1, 3, 5, ...).
+  vector<string> keys;
+  for (size_t i = 1; i < vec.size(); i += 2)
+    keys.push_back(vec[i].GetString());
+
+  EXPECT_THAT(keys, ElementsAre("valid:1", "valid:2", "valid:3"));
+}
+
+TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
+  // Regression test: HSET with inf/nan values on a NUMERIC field used to crash with
+  // DCHECK(std::isfinite(value)) in RangeTree::Add, because absl::SimpleAtod accepts
+  // "inf", "-inf", "nan" etc. as valid doubles.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "doc:1", "val", "inf"});
+  Run({"HSET", "doc:2", "val", "-inf"});
+  Run({"HSET", "doc:3", "val", "+inf"});
+  Run({"HSET", "doc:4", "val", "nan"});
+  Run({"HSET", "doc:5", "val", "42"});  // finite — must still be indexed
+
+  // Non-finite docs are not in the numeric index; only doc:5 should match the range query.
+  auto resp = Run({"FT.SEARCH", "idx", "@val:[-inf +inf]"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
 }
 
 }  // namespace dfly

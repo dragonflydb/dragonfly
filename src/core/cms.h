@@ -6,7 +6,6 @@
 
 #include <cstdint>
 #include <string_view>
-#include <vector>
 
 #include "base/pmr/memory_resource.h"
 
@@ -15,19 +14,10 @@ namespace dfly {
 /// Count-Min Sketch implementation compatible with Redis CMS commands.
 class CMS {
  public:
-  // Tag type to disambiguate CMS construction by error rate and probability.
-  struct ErrorRateTag {};
-
   // Create a CMS with given width and depth dimensions.
   // width: number of counters per row
   // depth: number of rows (hash functions)
   CMS(uint32_t width, uint32_t depth, PMR_NS::memory_resource* mr);
-
-  // Create a CMS from error rate and probability parameters.
-  // error: relative error (e.g. 0.01 for 1%), must be in (0, 1).
-  // probability: probability of exceeding the error, must be in (0, 1).
-  // width = ceil(e / error), depth = ceil(ln(1 / probability)).
-  CMS(ErrorRateTag, double error, double probability, PMR_NS::memory_resource* mr);
 
   CMS(const CMS&) = delete;
   CMS& operator=(const CMS&) = delete;
@@ -36,6 +26,15 @@ class CMS {
   CMS& operator=(CMS&& other) noexcept;
 
   ~CMS();
+
+  // Tag type to disambiguate CMS construction by error rate and probability.
+  struct ErrorRateTag {};
+
+  // Create a CMS from error rate and probability parameters.
+  // error: relative error (e.g. 0.01 for 1%), must be in (0, 1).
+  // probability: probability of exceeding the error, must be in (0, 1).
+  // width = ceil(e / error), depth = ceil(ln(1 / probability)).
+  CMS(ErrorRateTag, double error, double probability, PMR_NS::memory_resource* mr);
 
   // Increment the count for an item by the given value.
   // Returns the new estimated count for the item.
@@ -48,6 +47,12 @@ class CMS {
   // The other CMS must have the same dimensions.
   // Returns false if dimensions don't match.
   bool MergeFrom(const CMS& other, int64_t weight = 1);
+
+  // Reset all counters and total count to zero.
+  void Reset();
+
+  // Load serialized counter state. data must have exactly NumCounters() elements.
+  void Load(int64_t total_incr_count, const int64_t* data);
 
   // Accessors for CMS properties
   uint32_t width() const {
@@ -65,14 +70,18 @@ class CMS {
 
   // Memory usage in bytes
   size_t MallocUsed() const {
-    return size() * sizeof(int64_t);
+    return NumCounters() * sizeof(int64_t);
   }
 
- private:
-  size_t size() const {
+  size_t NumCounters() const {
     return static_cast<size_t>(width_) * depth_;
   }
 
+  const int64_t* Data() const {
+    return counters_;
+  }
+
+ private:
   uint32_t width_;
   uint32_t depth_;
   PMR_NS::memory_resource* mr_ = nullptr;

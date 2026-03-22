@@ -96,7 +96,7 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
 
 void SerializerBase::OnInsert(DbIndex db_index, std::string_view key) {
   DCHECK(db_slice_);
-  PrimeTable* table = db_slice_->GetTables(db_index).first;
+  PrimeTable* table = db_slice_->GetTables(db_index);
   table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator bit) {
     DCHECK_LT(bit.GetVersion(), snapshot_version_);
     OnChange(db_index, bit);

@@ -523,59 +523,53 @@ bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_vie
   return true;
 }
 
+// Each document occupies (dim_ + 1) floats in entries_: dim_ floats for the vector data,
+// followed by one float as a presence marker (1.0 = present, 0.0 = absent/removed).
+// This avoids the previous heuristic of treating all-zero vectors as null.
+static constexpr float kPresent = 1.0f;
+static constexpr float kAbsent = 0.0f;
+
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
     : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
   DCHECK(!params.use_hnsw);
-  entries_.reserve(params.capacity * params.dim);
+  entries_.reserve(params.capacity * (params.dim + 1));
 }
 
 void FlatVectorIndex::AddVector(DocId id, const void* vector) {
-  DCHECK_LE(id * dim_, entries_.size());
-  if (id * dim_ == entries_.size())
-    entries_.resize((id + 1) * dim_);
+  const size_t stride = dim_ + 1;
+  DCHECK_LE(id * stride, entries_.size());
+  if (id * stride == entries_.size())
+    entries_.resize((id + 1) * stride, 0.0f);
 
-  // TODO: Let get vector write to buf itself
   if (vector) {
-    memcpy(&entries_[id * dim_], vector, dim_ * sizeof(float));
+    memcpy(&entries_[id * stride], vector, dim_ * sizeof(float));
+    entries_[id * stride + dim_] = kPresent;
   }
 }
 
 void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  // noop
+  const size_t stride = dim_ + 1;
+  if (id * stride + dim_ < entries_.size())
+    entries_[id * stride + dim_] = kAbsent;
 }
 
 const float* FlatVectorIndex::Get(DocId doc) const {
-  return &entries_[doc * dim_];
+  const size_t stride = dim_ + 1;
+  if (doc * stride + dim_ >= entries_.size() || entries_[doc * stride + dim_] != kPresent)
+    return nullptr;
+  return &entries_[doc * stride];
 }
 
 std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
+  const size_t stride = dim_ + 1;
+  size_t num_slots = entries_.size() / stride;
   std::vector<DocId> result;
-
-  size_t num_vectors = entries_.size() / dim_;
-  result.reserve(num_vectors);
-
-  for (DocId id = 0; id < num_vectors; ++id) {
-    // Check if the vector is not zero (all elements are 0)
-    // TODO: Valid vector can contain 0s, we should use a better approach
-    const float* vec = Get(id);
-    bool is_zero_vector = true;
-
-    // TODO: Consider don't use check for zero vector
-    for (size_t i = 0; i < dim_; ++i) {
-      if (vec[i] != 0.0f) {  // TODO: Consider using a threshold for float comparison
-        is_zero_vector = false;
-        break;
-      }
-    }
-
-    if (!is_zero_vector) {
+  result.reserve(num_slots);
+  for (DocId id = 0; id < num_slots; ++id) {
+    if (entries_[id * stride + dim_] == kPresent)
       result.push_back(id);
-    }
   }
-
-  // Result is already sorted by id, no need to sort again
-  // Also it has no duplicates
   return result;
 }
 

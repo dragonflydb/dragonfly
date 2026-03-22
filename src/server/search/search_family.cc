@@ -1223,6 +1223,83 @@ vector<SearchResult> SearchGlobalHnswIndex(
   return results;
 }
 
+// Search HNSW index for all documents within the given radius.
+// Similar to SearchGlobalHnswIndex but uses RangeQuery instead of Knn.
+vector<SearchResult> SearchGlobalHnswIndexRange(
+    const search::AstVectorRangeNode* range, const shared_ptr<search::HnswVectorIndex>& index,
+    string_view index_name, const std::optional<search::KnnScoreSortOption>& knn_score_option,
+    const SearchParams& params, const CommandContext& cmd_cntx) {
+  std::vector<SearchResult> results(1);
+  const ShardId shard_size = shard_set->size();
+
+  auto range_results = index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius));
+
+  std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
+  for (const auto& [score, global_doc_id] : range_results) {
+    auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+    SerializedSearchDoc doc;
+    doc.id = local_doc_id;
+    doc.knn_score = score;
+    shard_docs[shard_id].emplace_back(doc);
+  }
+
+  bool set_sort_score =
+      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
+  bool remove_sort_field = false;
+  std::optional<std::vector<FieldReference>> return_fields = params.return_fields;
+
+  if (set_sort_score && return_fields) {
+    bool found_sort_field = false;
+    for (const auto& rf : *return_fields) {
+      if (rf.Name() == params.sort_option->field.Name()) {
+        found_sort_field = true;
+        break;
+      }
+    }
+    if (!found_sort_field) {
+      return_fields->push_back(params.sort_option->field);
+      remove_sort_field = true;
+    }
+  }
+
+  cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* idx = es->search_indices()->GetIndex(index_name);
+    if (!idx || shard_docs[es->shard_id()].empty())
+      return OpStatus::OK;
+    const auto& schema = idx->GetInfo().base_index.schema;
+    for (auto& shard_doc : shard_docs[es->shard_id()]) {
+      if (auto doc =
+              idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema, return_fields);
+          doc) {
+        auto& [key, fields] = *doc;
+        search::SortableValue sort_score = std::monostate{};
+        if (set_sort_score) {
+          sort_score = fields[params.sort_option->field.Name()];
+          if (remove_sort_field)
+            fields.erase(params.sort_option->field.Name());
+        }
+        shard_doc.key = std::string{key};
+        shard_doc.values = std::move(fields);
+        shard_doc.sort_score = sort_score;
+      }
+    }
+    return OpStatus::OK;
+  });
+
+  std::vector<SerializedSearchDoc> serialized_docs;
+  serialized_docs.reserve(range_results.size());
+  for (const auto& shard : shard_docs) {
+    for (const auto& doc : shard) {
+      if (!doc.key.empty())
+        serialized_docs.push_back(doc);
+    }
+  }
+
+  results[0].total_hits = serialized_docs.size();
+  results[0].docs = std::move(serialized_docs);
+  return results;
+}
+
 // Try creating global hnsw indices for given fields and return true on success
 bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
   std::vector<std::string> created_vector_indices;
@@ -1634,6 +1711,15 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
     }
   }
 
+  // Check for HNSW vector range query (mutually exclusive with KNN)
+  const search::AstVectorRangeNode* hnsw_range = nullptr;
+  if (!knn) {
+    if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
+      if (GlobalHnswIndexRegistry::Instance().Exist(index_name, vr->field))
+        hnsw_range = vr;
+    }
+  }
+
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
@@ -1641,8 +1727,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   const bool knn_has_prefilter = knn && knn->HasPreFilter();
   bool empty_prefilter_result = true;
 
-  // If the query does not contain knn component, or it is a hybrid query
-  if (!knn || knn_has_prefilter) {
+  // If the query does not contain knn component, or it is a hybrid query.
+  // HNSW vector range has no prefilter, so skip per-shard search entirely.
+  if ((!knn || knn_has_prefilter) && !hnsw_range) {
     cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
       if (auto* index = es->search_indices()->GetIndex(index_name); index)
         docs[es->shard_id()] =
@@ -1671,12 +1758,37 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
                                  docs, *params, *cmd_cntx);
   }
 
+  auto knn_sort_option = search_algo.GetKnnScoreSortOption();
+
+  if (hnsw_range) {
+    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_range->field);
+    if (!hnsw_index) {
+      return builder->SendError(string{index_name} + ": no such global hnsw index");
+    }
+    if (hnsw_range->vec.second == 0) {
+      return builder->SendError("Parse error of vector parameters");
+    }
+    if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
+      return builder->SendError(
+          absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
+    }
+    if (hnsw_index->GetDim() != hnsw_range->vec.second) {
+      return builder->SendError(
+          absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
+                       ", expected: ", hnsw_index->GetDim()));
+    }
+    if (!hnsw_range->score_alias.empty())
+      knn_sort_option =
+          search::KnnScoreSortOption{hnsw_range->score_alias, std::numeric_limits<size_t>::max()};
+    docs = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, index_name, knn_sort_option, *params,
+                                      *cmd_cntx);
+  }
+
   // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
   docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
               std::make_move_iterator(css_docs.end()));
 
-  SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(docs), builder,
-              is_cross_shard);
+  SearchReply(*params, knn_sort_option, absl::MakeSpan(docs), builder, is_cross_shard);
 }
 
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
