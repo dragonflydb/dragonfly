@@ -299,4 +299,33 @@ TEST_F(SortedMapTest, ReallocIfNeeded) {
   sm_.Iterate(0, 10000, false, cb);
 }
 
+// Benchmark GetRange call with range starting always at -inf and with no right bound
+// with diffenent size/limit configurations
+static void BM_GetRangeForwardInf(benchmark::State& state) {
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
+
+  unsigned num_elems = state.range(0);
+  unsigned limit = state.range(1);
+
+  SortedMap sm;
+  for (unsigned i = 0; i < num_elems; ++i) {
+    sm.InsertNew(i, StrCat("member", i));
+  }
+
+  zrangespec range;
+  range.min = -HUGE_VAL;  // -inf
+  range.max = HUGE_VAL;   // +inf
+  range.minex = 0;
+  range.maxex = 0;
+
+  while (state.KeepRunning()) {
+    auto arr = sm.GetRange(range, 0, limit, /*reverse=*/false);
+    benchmark::DoNotOptimize(arr);
+  }
+}
+BENCHMARK(BM_GetRangeForwardInf)
+    ->ArgNames({"elements", "limit"})
+    ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000, UINT32_MAX}});
+
 }  // namespace dfly

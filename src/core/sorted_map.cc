@@ -185,6 +185,61 @@ char kMaxStrData[] =
     "\110"
     "maxstring";
 
+// Collect path into scored array by forward traversal inside given range limits
+SortedMap::ScoredArray CollectByPath(BPTreePath<SortedMap::ScoreSds> path, const zrangespec& range,
+                                     unsigned offset, unsigned limit) {
+  // Skip offset items
+  while (offset--) {
+    if (!path.Next())
+      return {};
+  }
+
+  SortedMap::ScoredArray out;
+
+  // With small limit, reserve possibly more space but avoid traversing twice to count items
+  if (limit <= 100) {
+    out.reserve(limit);
+
+    while (limit--) {
+      auto ele = path.Terminal();
+      double score = GetObjScore(ele);
+      if (range.max < score || (range.max == score && range.maxex))
+        break;
+
+      out.emplace_back(string{(sds)ele, sdslen((sds)ele)}, score);
+      if (!path.Next())
+        break;
+    }
+
+    return out;
+  }
+
+  auto path2 = path;
+  size_t num_elems = 0;
+
+  // Count the number of elements in the range.
+  while (limit--) {
+    auto ele = path.Terminal();
+
+    double score = GetObjScore(ele);
+    if (range.max < score || (range.max == score && range.maxex))
+      break;
+    ++num_elems;
+    if (!path.Next())
+      break;
+  }
+
+  // Traverse again and save all items
+  out.resize(num_elems);
+  for (size_t i = 0; i < num_elems; ++i) {
+    auto ele = path2.Terminal();
+    out[i] = {string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele)};
+    path2.Next();
+  }
+
+  return out;
+}
+
 }  // namespace
 
 double ZzlGetScore(const uint8_t* sptr) {
@@ -695,12 +750,13 @@ optional<unsigned> SortedMap::GetRank(std::string_view ele, bool reverse) const 
 
 SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned offset, unsigned limit,
                                            bool reverse) const {
-  ScoredArray arr;
   if (score_tree->Size() <= offset || limit == 0)
-    return arr;
+    return {};
 
   char buf[16];
   if (reverse) {
+    ScoredArray arr;
+
     ScoreSds key = BuildScoredKey(range.max, buf);
     auto path = score_tree->LEQ(Query{key, false, !range.maxex});
     if (path.Empty())
@@ -726,42 +782,15 @@ SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned off
       if (!path.Prev())
         break;
     }
+    return arr;
   } else {
     ScoreSds key = BuildScoredKey(range.min, buf);
     auto path = score_tree->GEQ(Query{key, false, range.minex});
     if (path.Empty())
-      return arr;
+      return {};
 
-    while (offset--) {
-      if (!path.Next())
-        return arr;
-    }
-
-    auto path2 = path;
-    size_t num_elems = 0;
-
-    // Count the number of elements in the range.
-    while (limit--) {
-      ScoreSds ele = path.Terminal();
-
-      double score = GetObjScore(ele);
-      if (range.max < score || (range.max == score && range.maxex))
-        break;
-      ++num_elems;
-      if (!path.Next())
-        break;
-    }
-
-    // reserve enough space.
-    arr.resize(num_elems);
-    for (size_t i = 0; i < num_elems; ++i) {
-      ScoreSds ele = path2.Terminal();
-      arr[i] = {string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele)};
-      path2.Next();
-    }
+    return CollectByPath(path, range, offset, limit);
   }
-
-  return arr;
 }
 
 SortedMap::ScoredArray SortedMap::GetLexRange(const zlexrangespec& range, unsigned offset,
