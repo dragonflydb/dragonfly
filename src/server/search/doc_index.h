@@ -377,6 +377,13 @@ class ShardDocIndex {
   }
 
  private:
+  // Common doc-loading loop used by SearchForAggregator and LoadHnswRangeDocsForAggregator.
+  // Loads, serializes, and (optionally) injects the YIELD_DISTANCE_AS alias for each doc.
+  std::vector<SearchDocData> LoadDocEntriesWithScores(
+      const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
+      std::string_view score_alias,
+      const absl::flat_hash_map<search::DocId, float>& score_map) const;
+
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
 

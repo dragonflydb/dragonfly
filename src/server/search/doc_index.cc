@@ -853,11 +853,8 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   if (!search_results.error.empty())
     return {};
 
-  auto [fields_to_load, sort_indicies] =
-      PreprocessAggregateFields(base_->schema, params, params.load_fields);
-
-  // Build distance lookup for VECTOR_RANGE queries so YIELD_DISTANCE_AS alias is
-  // available as a field in the aggregation pipeline (GROUPBY/REDUCE etc).
+  // Build distance lookup for FLAT VECTOR_RANGE so the YIELD_DISTANCE_AS alias is
+  // available in the aggregation pipeline. HNSW VECTOR_RANGE uses LoadHnswRangeDocsForAggregator.
   absl::flat_hash_map<DocId, float> knn_score_map;
   std::string score_alias;
   if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
@@ -867,8 +864,34 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
       knn_score_map[doc_id] = dist;
   }
 
-  vector<absl::flat_hash_map<string, search::SortableValue>> out;
-  for (DocId doc : search_results.ids) {
+  return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map);
+}
+
+vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
+    const OpArgs& op_args, const AggregateParams& params,
+    absl::Span<const std::pair<search::DocId, float>> doc_distances,
+    std::string_view score_alias) const {
+  vector<DocId> ids;
+  absl::flat_hash_map<DocId, float> score_map;
+  ids.reserve(doc_distances.size());
+  score_map.reserve(doc_distances.size());
+  for (auto& [doc_id, dist] : doc_distances) {
+    ids.push_back(doc_id);
+    score_map[doc_id] = dist;
+  }
+  return LoadDocEntriesWithScores(op_args, params, ids, score_alias, score_map);
+}
+
+vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
+    const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
+    std::string_view score_alias,
+    const absl::flat_hash_map<search::DocId, float>& score_map) const {
+  auto [fields_to_load, sort_indicies] =
+      PreprocessAggregateFields(base_->schema, params, params.load_fields);
+
+  vector<SearchDocData> out;
+  out.reserve(ids.size());
+  for (DocId doc : ids) {
     auto entry = LoadEntry(doc, op_args);
     if (!entry)
       continue;
@@ -876,55 +899,19 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
-    for (const auto& [fident, fname] : sort_indicies) {
-      extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc, fident);
-    }
-
-    SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
-
-    out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
-                     make_move_iterator(extracted_sort_indicies.end()));
-    out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
-
-    // Inject the vector distance under the YIELD_DISTANCE_AS alias so it can be
-    // referenced in subsequent aggregation steps (GROUPBY, REDUCE, FILTER, etc.).
-    if (!score_alias.empty()) {
-      auto it = knn_score_map.find(doc);
-      if (it != knn_score_map.end())
-        out.back()[score_alias] = static_cast<double>(it->second);
-    }
-  }
-
-  return out;
-}
-
-vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
-    const OpArgs& op_args, const AggregateParams& params,
-    absl::Span<const std::pair<search::DocId, float>> doc_distances,
-    std::string_view score_alias) const {
-  auto [fields_to_load, sort_indicies] =
-      PreprocessAggregateFields(base_->schema, params, params.load_fields);
-
-  vector<SearchDocData> out;
-  out.reserve(doc_distances.size());
-  for (auto& [doc_id, dist] : doc_distances) {
-    auto entry = LoadEntry(doc_id, op_args);
-    if (!entry)
-      continue;
-    auto& [_, accessor] = *entry;
-
-    SearchDocData extracted_sort_indicies;
-    extracted_sort_indicies.reserve(sort_indicies.size());
     for (const auto& [fident, fname] : sort_indicies)
-      extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc_id, fident);
+      extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc, fident);
 
     SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
     out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
                      make_move_iterator(extracted_sort_indicies.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
 
-    if (!score_alias.empty())
-      out.back()[string{score_alias}] = static_cast<double>(dist);
+    if (!score_alias.empty()) {
+      auto it = score_map.find(doc);
+      if (it != score_map.end())
+        out.back()[string{score_alias}] = static_cast<double>(it->second);
+    }
   }
   return out;
 }
