@@ -279,7 +279,7 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
     blocking_controller->Awaken(op_args.db_cntx.db_index, key);
   }
 
-  return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
+  return DbSlice::ItAndUpdater{add_res.it, std::move(add_res.post_updater)};
 }
 
 enum class Action : uint8_t { RANGE = 0, REMOVE = 1, POP = 2 };
@@ -867,16 +867,16 @@ OpResult<KeyIterWeightVec> PrepareWeightedSets(const Transaction& trans, bool st
   for (; start != end; ++start) {
     auto it_res = db_slice.FindReadOnly(trans.GetDbContext(), *start);
 
-    if (!IsValid(it_res.it)) {
+    if (!IsValid(it_res)) {
       ++index;
       continue;
     }
 
-    auto obj_type = it_res.it->second.ObjType();
+    auto obj_type = it_res->second.ObjType();
     if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
-    key_weight_vec[index] = {it_res.it, GetKeyWeight(weights, start.index() - cmdargs_keys_offset)};
+    key_weight_vec[index] = {it_res, GetKeyWeight(weights, start.index() - cmdargs_keys_offset)};
     ++index;
   }
 

@@ -8,6 +8,7 @@
 #include <absl/strings/str_format.h>
 
 #include <algorithm>
+#include <atomic>
 #include <string_view>
 
 #include "base/gtest.h"
@@ -4632,6 +4633,89 @@ TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
   // Non-finite docs are not in the numeric index; only doc:5 should match the range query.
   auto resp = Run({"FT.SEARCH", "idx", "@val:[-inf +inf]"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
+}
+
+class HnswRaceTest : public BaseFamilyTest {
+ protected:
+  HnswRaceTest() {
+    num_threads_ = 4;
+  }
+};
+
+TEST_F(HnswRaceTest, HnswKnnDeleteRaceCrash) {
+  constexpr int kDim = 128;
+  constexpr int kNumDocs = 5000;
+  // Only delete the K nearest docs to the query: these are guaranteed to appear
+  // in every KNN result, so every deletion is a potential crash trigger.
+  constexpr int kK = 200;
+
+  auto make_vec = [&](float seed) -> std::string {
+    std::string s(kDim * sizeof(float), '\0');
+    for (int j = 0; j < kDim; ++j) {
+      float v = seed + static_cast<float>(j) * 0.001f;
+      memcpy(s.data() + j * sizeof(float), &v, sizeof(float));
+    }
+    return s;
+  };
+
+  Run({"FT.CREATE",
+       "hnsw_race_idx",
+       "ON",
+       "HASH",
+       "PREFIX",
+       "1",
+       "doc:",
+       "SCHEMA",
+       "vec",
+       "VECTOR",
+       "HNSW",
+       "10",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       absl::StrCat(kDim),
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16",
+       "EF_CONSTRUCTION",
+       "200"});
+
+  for (int i = 0; i < kNumDocs; ++i)
+    Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+
+  const std::string kQueryVec = make_vec(0.0f);
+  std::atomic<bool> done{false};
+
+  auto search_fiber = pp_->at(3)->LaunchFiber([&] {
+    for (int i = 0; i < 50 && !done.load(); ++i) {
+      auto resp = Run({"FT.SEARCH", "hnsw_race_idx",
+                       absl::StrCat("*=>[KNN ", kK, " @vec $vec EF_RUNTIME 50000]"), "PARAMS", "2",
+                       "vec", kQueryVec, "DIALECT", "2"});
+      EXPECT_NE(resp.type, RespExpr::ERROR);
+    }
+    done.store(true);
+  });
+
+  auto make_del_fiber = [&](int thread_idx) {
+    return pp_->at(thread_idx)->LaunchFiber([&, thread_idx] {
+      while (!done.load()) {
+        for (int i = 0; i < kK && !done.load(); ++i) {
+          Run({"DEL", absl::StrCat("doc:", i)});
+          Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+        }
+      }
+    });
+  };
+
+  auto del0 = make_del_fiber(0);
+  auto del1 = make_del_fiber(1);
+  auto del2 = make_del_fiber(2);
+
+  search_fiber.Join();
+  del0.Join();
+  del1.Join();
+  del2.Join();
 }
 
 }  // namespace dfly

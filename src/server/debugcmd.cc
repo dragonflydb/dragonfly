@@ -372,7 +372,7 @@ void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* c
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
-  auto* pt = db_slice.GetTables(db_index).first;
+  auto* pt = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
   ObjInfo oinfo;
@@ -420,7 +420,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
 OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
-  auto* pt = db_slice.GetTables(db_index).first;
+  auto* pt = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
   if (!IsValid(it)) {

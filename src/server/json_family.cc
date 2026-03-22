@@ -875,7 +875,7 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
   // We don't use OBJ_JSON here because we want to support both JSON and STRING types.
   // If the key is not OBJ_JSON and not OBJ_STRING, we return WRONG_TYPE.
-  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
