@@ -300,7 +300,7 @@ TEST_F(SortedMapTest, ReallocIfNeeded) {
 }
 
 // Benchmark GetRange call with range starting always at -inf and with no right bound
-// with diffenent size/limit configurations
+// with different size/limit configurations
 static void BM_GetRangeForwardInf(benchmark::State& state) {
   auto* tlh = mi_heap_get_backing();
   init_zmalloc_threadlocal(tlh);

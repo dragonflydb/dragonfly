@@ -194,22 +194,29 @@ SortedMap::ScoredArray CollectByPath(BPTreePath<SortedMap::ScoreSds> path, const
       return {};
   }
 
-  SortedMap::ScoredArray out;
-
-  // With small limit, reserve possibly more space but avoid traversing twice to count items
-  if (limit <= 100) {
-    out.reserve(limit);
-
+  // Iterate over path and call cb
+  auto loop = [&](auto cb) {
     while (limit--) {
       auto ele = path.Terminal();
       double score = GetObjScore(ele);
       if (range.max < score || (range.max == score && range.maxex))
         break;
 
-      out.emplace_back(string{(sds)ele, sdslen((sds)ele)}, score);
+      cb(ele, score);
       if (!path.Next())
         break;
     }
+  };
+
+  SortedMap::ScoredArray out;
+
+  // With small limit, reserve possibly more space but avoid traversing twice to count items
+  const unsigned kSmallPreallocateSize = 100;
+  if (limit <= kSmallPreallocateSize) {
+    out.reserve(limit);
+    loop([&](void* ele, double score) {
+      out.emplace_back(string{(sds)ele, sdslen((sds)ele)}, score);
+    });
 
     return out;
   }
@@ -218,16 +225,7 @@ SortedMap::ScoredArray CollectByPath(BPTreePath<SortedMap::ScoreSds> path, const
   size_t num_elems = 0;
 
   // Count the number of elements in the range.
-  while (limit--) {
-    auto ele = path.Terminal();
-
-    double score = GetObjScore(ele);
-    if (range.max < score || (range.max == score && range.maxex))
-      break;
-    ++num_elems;
-    if (!path.Next())
-      break;
-  }
+  loop([&](void*, double) { ++num_elems; });
 
   // Traverse again and save all items
   out.resize(num_elems);
