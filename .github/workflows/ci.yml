@@ -228,8 +228,7 @@ jobs:
           targets: 'dragonfly'
 
       - name: Authenticate to AWS
-        # Runs if it's NOT a PR, OR if the PR originates from the same repository (not a fork)
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.repository_owner == 'dragonflydb' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
