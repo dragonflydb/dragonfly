@@ -695,6 +695,8 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 
 optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
                                                               const OpArgs& op_args) const {
+  if (!key_index_.IsValid(id))
+    return std::nullopt;
   auto& db_slice = op_args.GetDbSlice();
   string_view key = key_index_.Get(id);
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
@@ -818,6 +820,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
+      if (!key_index_.IsValid(result.ids[i])) {
+        expired_count++;
+        continue;
+      }
       string_view key = key_index_.Get(result.ids[i]);
       out.push_back({result.ids[i], string{key}, {}, knn_score, sort_score});
       continue;
