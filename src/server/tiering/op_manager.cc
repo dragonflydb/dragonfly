@@ -205,7 +205,8 @@ OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, Pend
   for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset) {
       auto ops_decoder = ops.decoder.get();
-      DCHECK(typeid(ops_decoder) == typeid(decoder));
+      DCHECK(typeid(*ops_decoder) == typeid(decoder))
+          << typeid(*ops_decoder).name() << " " << typeid(decoder).name();
       ops.read_only &= read_only;
       return ops;
     }
