@@ -532,8 +532,9 @@ class RedisServer:
         ]
 
         if self.log_dir:
-            log_path = os.path.join(self.log_dir, f"redis-server-{self.port}.log")
-            command.append(f"--logfile {log_path}")
+            bin_name = os.path.basename(self.server_bin)
+            log_path = os.path.join(self.log_dir, f"{bin_name}-{self.port}.log")
+            command.extend(["--logfile", log_path])
 
         # Convert kwargs to command-line arguments
         for key, value in kwargs.items():
