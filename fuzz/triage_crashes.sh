@@ -198,26 +198,37 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     LOG_DIR="$WORK_DIR/logs_${CRASH_ID}"
     mkdir -p "$LOG_DIR"
 
-    # Mirror the exact flags used by run_fuzzer.sh so replay runs in the same
-    # server configuration as when the crash was found.
-    # Missing rename_command flags are the most common cause of false positives:
-    # if FLUSHALL/FLUSHDB/SHUTDOWN are not disabled, they execute during replay,
-    # wiping state or shutting down the server before the crash can trigger.
-    DF_ARGS=(
-        --port "$RESP_PORT"
-        --log_dir="$LOG_DIR"
-        --proactor_threads 1
-        --dbfilename=""
-        --omit_basic_usage
-        --rename_command=SHUTDOWN=
-        --rename_command=DEBUG=
-        --rename_command=FLUSHALL=
-        --rename_command=FLUSHDB=
-        --max_bulk_len=1048576
-    )
-    [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
+    # Load exact Dragonfly flags and memory limit from repro.env bundled in the archive.
+    # repro.env is written by run_fuzzer.sh so flags stay in sync with the fuzz run.
+    # Fallback to safe defaults for older archives that don't include repro.env.
+    REPRO_ENV="$EXTRACT_DIR/${CRASH_NAME}/repro.env"
+    if [[ -f "$REPRO_ENV" ]]; then
+        MEM_LIMIT_KB=$(grep '^MEM_LIMIT_KB=' "$REPRO_ENV" | cut -d= -f2)
+        MEM_LIMIT_KB="${MEM_LIMIT_KB:-$((4 * 1024 * 1024))}"
+        mapfile -t DF_ARGS < <(grep -v '^#' "$REPRO_ENV" | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
+        RESP_PORT=$(grep '^--port=' "$REPRO_ENV" | cut -d= -f2)
+        RESP_PORT="${RESP_PORT:-6379}"
+    else
+        print_warn "repro.env not found — using default flags (older crash archive)"
+        MEM_LIMIT_KB=$((4 * 1024 * 1024))
+        DF_ARGS=(
+            --port="$RESP_PORT"
+            --proactor_threads=1
+            --dbfilename=
+            --omit_basic_usage
+            --rename_command=SHUTDOWN=
+            --rename_command=DEBUG=
+            --rename_command=FLUSHALL=
+            --rename_command=FLUSHDB=
+            --max_bulk_len=1048576
+        )
+        [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
+    fi
 
-    "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >/dev/null 2>&1 &
+    # --log_dir is triage-specific (captures crash logs); not part of the fuzz run
+    DF_ARGS+=(--log_dir="$LOG_DIR")
+
+    (ulimit -v "$MEM_LIMIT_KB"; exec "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >/dev/null 2>&1) &
     DF_PID=$!
 
     if ! wait_for_port 127.0.0.1 "$RESP_PORT" "$STARTUP_TIMEOUT"; then
