@@ -524,7 +524,7 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
   known_indexes->insert(join_params.index_alias);
 
   size_t num_fields = parser->Next<size_t>();
-  join_params.conditions.reserve(num_fields);
+  join_params.conditions.reserve(std::min(num_fields, parser->Tail().size()));
   // Conditions are in the form index.field=foreign_index.field or foreign_index.field=index.field
   while (parser->HasNext() && num_fields > 0) {
     auto [left, right] = Split(parser->Next(), '=');
