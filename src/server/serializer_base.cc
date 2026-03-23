@@ -85,16 +85,16 @@ std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bu
   return it.bucket_address();
 }
 
-void SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) {
+  std::lock_guard guard(big_value_mu_);
+
   // Check if this bucket should be serialized
   std::optional<BucketIdentity> bid = ShouldProcessBucket(it);
   if (!bid)
-    return;
+    return false;
 
-  std::lock_guard guard(big_value_mu_);
-
-  // For non updates, flush change to earlier callbacks and acquire serialization latch
+  // For non updates, flush change to earlier snapshots and acquire serialization latch
   std::optional<std::lock_guard<LocalLatch>> db_guard;
   if (!on_update) {
     db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
@@ -104,13 +104,14 @@ void SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(*bid);
-  stats_.keys_serialized += SerializeBucket(db_index, it, true);
+  stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
   FinishBucketIteration(*bid, {});
+  return true;
 }
 
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  ProcessBucket(db_index, it, true);
-  ++stats_.buckets_on_change;
+  if (ProcessBucket(db_index, it, true))
+    ++stats_.buckets_on_change;
 }
 
 void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {

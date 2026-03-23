@@ -68,8 +68,8 @@ class SerializerBase {
   // Transition bucket from DelayedPending -> Covered.
   void CompleteBucketDelayed(BucketIdentity bid);
 
-  // Process single bucket and call SerializeBucket.
-  void ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
+  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
