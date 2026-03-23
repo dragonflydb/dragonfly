@@ -31,6 +31,7 @@ class OpManager {
   };
 
   using KeyRef = ::dfly::tiering::KeyRef;
+  using ListNodeId = ::dfly::tiering::ListNodeId;
 
   using PendingId = ::dfly::tiering::PendingId;
 
@@ -77,7 +78,7 @@ class OpManager {
   Stats GetStats() const;
 
  protected:
-  using OwnedEntryId = std::variant<uintptr_t, DbKeyId>;
+  using OwnedEntryId = std::variant<uintptr_t, DbKeyId, ListNodeId>;
 
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error

@@ -7,6 +7,7 @@
 #include <absl/functional/function_ref.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -65,14 +66,24 @@ class QList {
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
     uint16_t reserved1 : 7;          /* reserved for future use */
 
-    uint16_t reserved2; /* more bits to steal for future usage */
-    uint32_t reserved3; /* more bits to steal for future usage */
-
     bool IsCompressed() const {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
     size_t GetLZF(void** data) const;
+
+    struct __attribute__((__packed__)) ExternalRecord {
+      uint32_t size;
+      size_t offset;
+    };
+    static_assert(sizeof(ExternalRecord) == 12);
+
+    ExternalRecord ext;
+
+    void SetExternal(size_t offset, uint32_t sz);
+    std::pair<size_t, size_t> GetExternalSlice() const {
+      return std::make_pair(size_t(ext.offset), size_t(ext.size));
+    }
   };
 
   using Entry = CollectionEntry;
@@ -102,9 +113,18 @@ class QList {
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
+  void AdjustMallocSize(size_t delta) {
+    malloc_size_ += delta;
+  }
+
   struct TieringParams {
-    // TODO: hook functions and params that allow qlist offloading nodes to colder storage.
     uint32_t node_depth_threshold = 2;
+    // Called when a node should be offloaded to disk.
+    std::function<void(Node*)> offload_cb;
+    // Called when an offloaded node needs its data loaded back from disk.
+    std::function<void(Node*)> onload_cb;
+    // Called when an offloaded or io_pending node is being deleted.
+    std::function<void(Node*)> delete_cb;
   };
 
   /**

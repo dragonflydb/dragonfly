@@ -18,15 +18,21 @@ using namespace std;
 
 OpManager::OwnedEntryId OpManager::ToOwned(PendingId id) {
   return std::visit(Overloaded{[](uintptr_t i) -> OpManager::OwnedEntryId { return i; },
-                               [](std::pair<DbIndex, std::string_view> p) -> OwnedEntryId {
-                                 return std::make_pair(p.first, std::string{p.second});
-                               }},
+                               [](KeyRef ref) -> OwnedEntryId {
+                                 return std::make_pair(ref.first, std::string{ref.second});
+                               },
+                               [](ListNodeId id) -> OwnedEntryId { return id; }},
                     id);
 }
 
 string OpManager::ToString(const OwnedEntryId& id) {
   if (const auto* i = std::get_if<uintptr_t>(&id); i) {
     return absl::StrCat(*i);
+  }
+  if (const auto* key = std::get_if<ListNodeId>(&id); key) {
+    // Format dbid::qlist::node
+    return absl::StrCat("(", std::get<0>(*key), ":", absl::StrFormat("%p", std::get<2>(*key)), ":",
+                        absl::StrFormat("%p", std::get<1>(*key)), ")");
   }
   const auto& key = std::get<DbKeyId>(id);
   return absl::StrCat("(", key.first, ":", key.second, ")");

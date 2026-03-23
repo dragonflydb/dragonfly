@@ -19,6 +19,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/dict_builder.h"
 #include "core/page_usage/page_usage_stats.h"
+#include "core/tiering_types.h"
 
 using namespace std;
 
@@ -188,6 +189,7 @@ QList::Node* CreateRAW(int container, uint8_t* entry, size_t sz) {
   node->recompress = 0;
   node->dont_compress = 0;
   node->offloaded = 0;
+  node->io_pending = 0;
 
   return node;
 }
@@ -504,6 +506,14 @@ void QList::Clear() noexcept {
 
   while (len_) {
     Node* next = current->next;
+
+    // Clean up offloaded/pending nodes before freeing.
+    if (current->offloaded || current->io_pending) {
+      if (tiering_params_ && tiering_params_->delete_cb) {
+        tiering_params_->delete_cb(current);
+      }
+    }
+
     if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
       quicklistLZF* lzf = (quicklistLZF*)current->entry;
       stats.compressed_bytes -= lzf->sz;
@@ -898,7 +908,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     //    off due to merges (can be improved in future).
     if (node_id >= tiering_params_->node_depth_threshold &&
         node_id + tiering_params_->node_depth_threshold < len_) {
-      if (!node->offloaded) {
+      if (!node->offloaded && !node->io_pending) {
         OffloadNode(node);
       }
     } else if (num_offloaded_nodes_ * 2 + tiering_params_->node_depth_threshold * 2 < len_) {
@@ -914,12 +924,12 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
       while (traverse_node_id <= len_ / 2 &&
              (num_offloaded_nodes_ + 2 * tiering_params_->node_depth_threshold) < len_) {
         if (traverse_node_id >= tiering_params_->node_depth_threshold) {
-          if (fw->offloaded == 0) {
+          if (fw->offloaded == 0 && fw->io_pending == 0) {
             OffloadNode(fw);
           }
 
           // Avoid offloading the same node twice when fw and rev meet in the middle.
-          if (rev != fw && rev->offloaded == 0) {
+          if (rev != fw && rev->offloaded == 0 && rev->io_pending == 0) {
             OffloadNode(rev);
           }
         }
@@ -1016,12 +1026,28 @@ void QList::CompressByDepth(Node* node) {
 void QList::AccessForReads(bool recompress, Node* node) {
   DCHECK(node);
   stats.total_node_reads++;
+
+  if (node->io_pending) {
+    // Offload in progres so cancel it and read the node synchronously.
+    DCHECK(tiering_params_);
+    if (tiering_params_->delete_cb) {
+      tiering_params_->delete_cb(node);
+    }
+    DCHECK(!node->io_pending);
+  }
+
   if (node->offloaded) {
     DCHECK(tiering_params_);
     stats.onload_requests++;
+    if (tiering_params_->onload_cb) {
+      tiering_params_->onload_cb(node);
+    }
+    // After onload_cb returns, the node entry must be restored.
+    DCHECK(!node->offloaded);
+    DCHECK(node->entry != nullptr);
     num_offloaded_nodes_--;
-    node->offloaded = 0;
   }
+
   if (len_ > 2 && node != head_ && node->next != nullptr) {
     stats.interior_node_reads++;
   }
@@ -1143,8 +1169,16 @@ void QList::DelNode(Node* node) {
   len_--;
   count_ -= node->count;
   malloc_size_ -= node->sz;
-  if (node->offloaded) {
-    num_offloaded_nodes_--;
+
+  if (node->offloaded || node->io_pending) {
+    if (node->offloaded)
+      num_offloaded_nodes_--;
+    else if (node->io_pending)
+      num_offloaded_nodes_--;  // was pre-counted in OffloadNode
+    // Clean up disk segment and deregister fragment.
+    if (tiering_params_ && tiering_params_->delete_cb) {
+      tiering_params_->delete_cb(node);
+    }
   }
 
   /* If we deleted a node within our compress depth, we
@@ -1180,9 +1214,14 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
 
 void QList::OffloadNode(Node* node) {
   DCHECK(tiering_params_ && node->offloaded == 0);
+  if (node->io_pending)
+    return;
+
   num_offloaded_nodes_++;
   stats.offload_requests++;
-  node->offloaded = 1;
+  if (tiering_params_->offload_cb) {
+    tiering_params_->offload_cb(node);
+  }
 }
 
 void QList::InitIteratorEntry(Iterator* it) const {
@@ -1472,6 +1511,15 @@ auto QList::Iterator::Get() const -> Entry {
   uint8_t* ptr = lpGetValue(zi_, &sz, &val);
 
   return ptr ? Entry(reinterpret_cast<char*>(ptr), sz) : Entry(val);
+}
+
+void QList::Node::SetExternal(size_t offset, uint32_t size) {
+  DCHECK(entry);
+  zfree(entry);
+  offloaded = 1;
+  entry = nullptr;
+  ext.offset = offset;
+  ext.size = size;
 }
 
 bool QList::TrainZstdDict() {
