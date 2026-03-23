@@ -426,6 +426,13 @@ TEST_F(QListTest, InsertPivotSplitMergeMallocSize) {
   // Insert before 'b' on a full node triggers the split path.
   ql.Insert("b", "x", QList::BEFORE);
 
+  // Verify malloc_size_ matches the actual sum of node sizes.
+  size_t actual_sz = 0;
+  for (auto* n = ql.Head(); n; n = n->next)
+    actual_sz += n->sz;
+  size_t node_overhead = ql.node_count() * sizeof(QList::Node) + znallocx(sizeof(QList));
+  EXPECT_EQ(ql.MallocUsed(false) - node_overhead, actual_sz);
+
   ql.Pop(QList::TAIL);  // remove 'b' node → 1 node ['x','x']
 
   // Erase one element; list stays at len==1.
