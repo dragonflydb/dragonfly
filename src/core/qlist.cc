@@ -14,7 +14,6 @@ extern "C" {
 #include <absl/base/optimization.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
-#include <lz4frame.h>
 
 #include "base/logging.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -220,8 +219,7 @@ using quicklistLZF = struct quicklistLZF {
 };
 
 inline quicklistLZF* GetLzf(QList::Node* node) {
-  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF ||
-         node->encoding == QLIST_NODE_ENCODING_LZ4);
+  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF);
   return (quicklistLZF*)node->entry;
 }
 
@@ -251,46 +249,10 @@ bool CompressLZF(QList::Node* node) {
   return true;
 }
 
-bool CompressLZ4(QList::Node* node) {
-  LZ4F_cctx* cntx;
-  LZ4F_errorCode_t code = LZ4F_createCompressionContext(&cntx, LZ4F_VERSION);
-  CHECK(!LZ4F_isError(code));
-
-  LZ4F_preferences_t lz4_pref = LZ4F_INIT_PREFERENCES;
-  lz4_pref.compressionLevel = -1;
-  lz4_pref.frameInfo.contentSize = node->sz;
-  size_t buf_size = LZ4F_compressFrameBound(node->sz, &lz4_pref);
-
-  // We reuse quicklistLZF struct for LZ4 metadata.
-  quicklistLZF* dest = (quicklistLZF*)zmalloc(sizeof(quicklistLZF) + buf_size);
-  size_t compr_sz = LZ4F_compressFrame_usingCDict(cntx, dest->compressed, buf_size, node->entry,
-                                                  node->sz, nullptr /* dict */, &lz4_pref);
-  CHECK(!LZ4F_isError(compr_sz));
-
-  code = LZ4F_freeCompressionContext(cntx);
-  CHECK(!LZ4F_isError(code));
-
-  if (compr_sz + MIN_COMPRESS_IMPROVE >= node->sz) {
-    QList::stats.bad_compression_attempts++;
-    zfree(dest);
-    return false;
-  }
-
-  dest->sz = compr_sz;
-  dest = (quicklistLZF*)zrealloc(dest, sizeof(quicklistLZF) + compr_sz);
-  QList::stats.compressed_bytes += compr_sz;
-  QList::stats.raw_compressed_bytes += node->sz;
-
-  zfree(node->entry);
-  node->entry = (unsigned char*)dest;
-  node->encoding = QLIST_NODE_ENCODING_LZ4;
-  return true;
-}
-
 /* Compress the listpack in 'node' and update encoding details.
  * Returns true if listpack compressed successfully.
  * Returns false if compression failed or if listpack too small to compress. */
-bool CompressRaw(QList::Node* node, unsigned method) {
+bool CompressRaw(QList::Node* node) {
   DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_RAW);
   DCHECK(!node->dont_compress);
 
@@ -304,19 +266,15 @@ bool CompressRaw(QList::Node* node, unsigned method) {
     return false;
 
   QList::stats.compression_attempts++;
-  if (method == static_cast<unsigned>(QList::LZF)) {
-    return CompressLZF(node);
-  }
-
-  return CompressLZ4(node);
+  return CompressLZF(node);
 }
 
-ssize_t TryCompress(QList::Node* node, unsigned method) {
+ssize_t TryCompress(QList::Node* node) {
   DCHECK(node);
   if (node->encoding == QUICKLIST_NODE_ENCODING_RAW) {
     node->attempted_compress = 1;
     if (!node->dont_compress) {
-      if (CompressRaw(node, method))
+      if (CompressRaw(node))
         return ssize_t(GetLzf(node)->sz) - node->sz;
     }
   }
@@ -326,8 +284,7 @@ ssize_t TryCompress(QList::Node* node, unsigned method) {
 /* Uncompress the listpack in 'node' and update encoding details.
  * Returns 1 on successful decode, 0 on failure to decode. */
 bool DecompressRaw(bool recompress, QList::Node* node) {
-  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF ||
-         node->encoding == QLIST_NODE_ENCODING_LZ4);
+  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF);
 
   node->recompress = int(recompress);
 
@@ -337,23 +294,11 @@ bool DecompressRaw(bool recompress, QList::Node* node) {
   QList::stats.compressed_bytes -= lzf->sz;
   QList::stats.raw_compressed_bytes -= node->sz;
 
-  if (node->encoding == QLIST_NODE_ENCODING_LZ4) {
-    LZ4F_dctx* dctx = nullptr;
-    LZ4F_errorCode_t code = LZ4F_createDecompressionContext(&dctx, LZ4F_VERSION);
-    CHECK(!LZ4F_isError(code));
-    size_t decompressed_sz = node->sz;
-    size_t left =
-        LZ4F_decompress(dctx, decompressed, &decompressed_sz, lzf->compressed, &lzf->sz, nullptr);
-    CHECK_EQ(left, 0u);
-    CHECK_EQ(decompressed_sz, node->sz);
-    LZ4F_freeDecompressionContext(dctx);
-  } else {
-    if (lzf_decompress(lzf->compressed, lzf->sz, decompressed, node->sz) == 0) {
-      LOG(DFATAL) << "Invalid LZF compressed data";
-      /* Someone requested decompress, but we can't decompress.  Not good. */
-      zfree(decompressed);
-      return false;
-    }
+  if (lzf_decompress(lzf->compressed, lzf->sz, decompressed, node->sz) == 0) {
+    LOG(DFATAL) << "Invalid LZF compressed data";
+    /* Someone requested decompress, but we can't decompress.  Not good. */
+    zfree(decompressed);
+    return false;
   }
   zfree(lzf);
   node->entry = (uint8_t*)decompressed;
@@ -375,9 +320,9 @@ ssize_t TryDecompressInternal(bool recompress, QList::Node* node) {
   return 0;
 }
 
-ssize_t RecompressOnly(QList::Node* node, unsigned method) {
+ssize_t RecompressOnly(QList::Node* node) {
   if (node->recompress && !node->dont_compress) {
-    if (CompressRaw(node, method))
+    if (CompressRaw(node))
       return (GetLzf(node))->sz - node->sz;
   }
   return 0;
@@ -436,7 +381,7 @@ QList::Stats& QList::Stats::operator+=(const Stats& other) {
 }
 
 size_t QList::Node::GetLZF(void** data) const {
-  DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF || encoding == QLIST_NODE_ENCODING_LZ4);
+  DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF);
   quicklistLZF* lzf = (quicklistLZF*)entry;
   *data = lzf->compressed;
   return lzf->sz;
@@ -475,7 +420,6 @@ void QList::SetTieringParams(const TieringParams& params) {
 }
 
 QList::QList(int fill, int compress) : fill_(fill), compress_(compress), bookmark_count_(0) {
-  compr_method_ = 0;
 }
 
 QList::QList(QList&& other) noexcept
@@ -783,7 +727,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
     uint8_t* new_entry = LP_Insert(node->entry, elem, it.zi_, after ? LP_AFTER : LP_BEFORE);
     malloc_size_ += NodeSetEntry(node, new_entry);
     node->count++;
-    malloc_size_ += RecompressOnly(node, compr_method_);
+    malloc_size_ += RecompressOnly(node);
   } else {
     bool insert_tail = at_tail && after;
     bool insert_head = at_head && !after;
@@ -794,8 +738,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       AccessForReads(true, new_node);
       malloc_size_ += NodeSetEntry(new_node, LP_Prepend(new_node->entry, elem));
       new_node->count++;
-      malloc_size_ += RecompressOnly(new_node, compr_method_);
-      malloc_size_ += RecompressOnly(node, compr_method_);
+      malloc_size_ += RecompressOnly(new_node);
+      malloc_size_ += RecompressOnly(node);
     } else if (insert_head && avail_prev) {
       /* If we are: at head, previous has free space, and inserting before:
        *   - insert entry at tail of previous node. */
@@ -803,8 +747,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       AccessForReads(true, new_node);
       malloc_size_ += NodeSetEntry(new_node, LP_Append(new_node->entry, elem));
       new_node->count++;
-      malloc_size_ += RecompressOnly(new_node, compr_method_);
-      malloc_size_ += RecompressOnly(node, compr_method_);
+      malloc_size_ += RecompressOnly(new_node);
+      malloc_size_ += RecompressOnly(node);
     } else if (insert_tail || insert_head) {
       /* If we are: full, and our prev/next has no available space, then:
        *   - create new node and attach to qlist */
@@ -943,7 +887,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
    * If compress depth is larger than the entire list, we return immediately. */
 
   if (node->recompress)
-    CompressRaw(node, this->compr_method_);
+    CompressRaw(node);
   else
     this->CompressByDepth(node);
 }
@@ -984,11 +928,11 @@ void QList::CompressByDepth(Node* node) {
   }
 
   if (!in_depth && node) {
-    malloc_size_ += TryCompress(node, this->compr_method_);
+    malloc_size_ += TryCompress(node);
   }
   /* At this point, forward and reverse are one node beyond depth */
-  malloc_size_ += TryCompress(forward, this->compr_method_);
-  malloc_size_ += TryCompress(reverse, this->compr_method_);
+  malloc_size_ += TryCompress(forward);
+  malloc_size_ += TryCompress(reverse);
 }
 
 void QList::AccessForReads(bool recompress, Node* node) {
@@ -1364,7 +1308,7 @@ bool QList::Erase(const long start, unsigned count) {
       if (node->count == 0) {
         DelNode(node);
       } else {
-        malloc_size_ += RecompressOnly(node, compr_method_);
+        malloc_size_ += RecompressOnly(node);
       }
     }
 
