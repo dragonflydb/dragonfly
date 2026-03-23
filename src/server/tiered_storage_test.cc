@@ -29,6 +29,9 @@ ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
+ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
+ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
+ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 
 namespace dfly {
 
@@ -608,6 +611,140 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
     auto v = string{31, 'x'} + 'f';
     EXPECT_EQ(resp, v);
   }
+}
+
+class ListNodeTieringTest : public TieredStorageTest {
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0f);
+    SetFlag(&FLAGS_tiered_experimental_cooling, false);
+    // One entry per QList node
+    SetFlag(&FLAGS_list_max_listpack_size, 1);
+    // Offload nodes at depth >= 2 from both ends
+    SetFlag(&FLAGS_list_tiering_threshold, 2u);
+    SetFlag(&FLAGS_tiered_experimental_list_support, true);
+    TieredStorageTest::SetUp();
+  }
+
+  optional<absl::FlagSaver> fs;
+};
+
+// Push 6 large values; verify that at least one QList node is offloaded to disk.
+TEST_F(ListNodeTieringTest, StashOccurs) {
+  // 2048-byte values ensure QList creation on the very first RPUSH.
+  // 6 pushes produce 6 nodes; CoolOff on the 5th push offloads node 2.
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_GE(GetMetrics().tiered_stats.total_stashes, 1u);
+}
+
+// LLEN counts entries stored in QList::count_ and does not touch node data,
+// so it must return the correct total even when interior nodes are offloaded.
+TEST_F(ListNodeTieringTest, LLenCorrectAfterStash) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
+}
+
+// DEL a list that has fully-offloaded nodes (io_pending=0, offloaded=1).
+// QList::Clear() zfrees node memory directly without calling onload_cb, so
+// the deletion must complete without a crash or DCHECK.
+TEST_F(ListNodeTieringTest, DeleteAfterStash) {
+  const int kItems = 6;
+  for (int i = 0; i < kItems; i++) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+  }
+
+  // Wait until stash is complete (io_pending cleared, offloaded=1) before DEL
+  // to avoid the io_pending use-after-free path.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// LRANGE all elements forces the QList iterator to call AccessForReads on every
+// node, including those that were offloaded to disk. The onload_cb must
+// synchronously restore node->entry before returning so LRANGE returns the
+// correct values.
+TEST_F(ListNodeTieringTest, LoadOccurs) {
+  const int kItems = 6;
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    string val = BuildString(2048, static_cast<char>('a' + i));
+    expected.push_back(val);
+    Run({"RPUSH", "mylist", val});
+  }
+
+  // Wait for at least one interior node to be offloaded.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // LRANGE 0 -1 must traverse all nodes, triggering onload_cb for offloaded
+  // interior nodes, and return the correct values.
+  auto resp = Run({"LRANGE", "mylist", "0", "-1"});
+  const auto& elements = resp.GetVec();
+  ASSERT_EQ(static_cast<int>(elements.size()), kItems);
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(elements[i].GetString(), expected[i]) << "index " << i;
+  }
+
+  // LLEN must still be correct after the load.
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
+}
+
+// Verify that every element read back from a list whose interior nodes were
+// offloaded to disk is bit-for-bit identical to what was originally pushed.
+// The test confirms two things:
+//   1. At least one disk fetch occurred (data really came from disk, not a
+//      cached copy that was never evicted).
+//   2. Every LINDEX and the LRANGE bulk-read return exactly the bytes that
+//      were stored — no corruption, truncation, or off-by-one.
+TEST_F(ListNodeTieringTest, StashedDataMatchesOnLoad) {
+  const int kItems = 8;
+
+  // Build values with a unique fill character per position so any swap or
+  // corruption is immediately visible.
+  vector<string> expected;
+  for (int i = 0; i < kItems; i++) {
+    expected.push_back(BuildString(2048, static_cast<char>('A' + i)));
+    Run({"RPUSH", "mylist", expected.back()});
+  }
+
+  // Wait until at least one interior node has been flushed to disk.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  const auto fetches_before = GetMetrics().tiered_stats.total_fetches;
+
+  // Read every element individually via LINDEX — this forces node-level access
+  // and triggers onload_cb for each offloaded node.
+  for (int i = 0; i < kItems; i++) {
+    auto resp = Run({"LINDEX", "mylist", absl::StrCat(i)});
+    EXPECT_EQ(resp, expected[i]) << "LINDEX mismatch at position " << i;
+  }
+
+  // At least one fetch must have gone to disk (proving the data was actually
+  // loaded from the tiered store and not served from an in-memory copy).
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+
+  // Also verify the bulk read path returns identical data.
+  auto resp = Run({"LRANGE", "mylist", "0", "-1"});
+  const auto& elements = resp.GetVec();
+  ASSERT_EQ(static_cast<int>(elements.size()), kItems);
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_EQ(elements[i].GetString(), expected[i]) << "LRANGE mismatch at position " << i;
+  }
+
+  EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kItems));
 }
 
 }  // namespace dfly

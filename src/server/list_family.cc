@@ -3,6 +3,7 @@
 //
 extern "C" {
 #include "redis/sds.h"
+#include "redis/zmalloc.h"
 }
 
 #include <absl/functional/overload.h>
@@ -25,6 +26,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 /**
@@ -83,6 +85,7 @@ namespace {
 class ListWrapper {
   using LP = detail::ListPack;
 
+  DbIndex db_id_;
   std::variant<QList*, LP> impl_;
 
   template <typename F> decltype(auto) VisitRef(F f) const {  // Cast T* to T&
@@ -93,16 +96,57 @@ class ListWrapper {
     return std::visit(Overload{[&f](auto* s) { return f(*s); }, f}, impl_);
   }
 
-  static QList* PromoteToQLIfNeeded(LP lp, size_t additional_size) {
+  QList* PromoteToQLIfNeeded(LP lp, size_t additional_size) const {
     size_t sz = lp.BytesSize();
     if (ShouldStoreAsListPack(sz + additional_size)) {
       return nullptr;
     }
     QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                               GetFlag(FLAGS_list_compress_depth));
-    if (GetFlag(FLAGS_list_tiering_threshold) > 0) {
-      ql->SetTieringParams(
-          QList::TieringParams{.node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold)});
+
+    if (GetFlag(FLAGS_list_tiering_threshold) > 0 && EngineShard::tlocal()->tiered_storage()) {
+      TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+      QList::TieringParams params{
+
+          .node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold),
+
+          .offload_cb = [ts, db_id = db_id_,
+                         ql](QList::Node* node) { StashListNode(db_id, node, ql, ts, nullptr); },
+
+          .onload_cb =
+              [ts, db_id = db_id_, ql](QList::Node* node) {
+                util::fb2::Future<io::Result<std::string_view>> node_entry;
+                ReadTieredListNode(
+                    db_id, node, ql, node->GetExternalSlice(),
+                    [node_entry](io::Result<std::string_view> res) mutable {
+                      node_entry.Resolve(res.transform([](std::string_view sv) { return sv; }));
+                    },
+                    ts);
+
+                auto res = node_entry.Get();
+
+                if (!res)
+                  return;
+
+                node->entry = static_cast<unsigned char*>(zmalloc(res->size()));
+                memcpy(node->entry, res->data(), res->size());
+                node->sz = res->size();
+
+                ts->Delete(db_id, node);
+              },
+
+          .delete_cb =
+              [ts, db_id = db_id_, ql](QList::Node* node) {
+                if (!ts->IsClosed()) {
+                  if (node->io_pending) {
+                    ts->CancelStash(tiering::ListNodeId{db_id, node, ql}, node);
+                  } else {
+                    ts->Delete(db_id, node);
+                  }
+                }
+              }};
+
+      ql->SetTieringParams(params);
     }
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_experimental_zstd_dict_threshold);
         zstd_thresh > 0) {
@@ -168,7 +212,8 @@ class ListWrapper {
   }
 
  public:
-  template <typename T> explicit ListWrapper(T t) : impl_(std::forward<T>(t)) {
+  template <typename T>
+  explicit ListWrapper(DbIndex dbid, T t) : db_id_(dbid), impl_(std::forward<T>(t)) {
   }
 
   size_t Size() const {
@@ -301,11 +346,11 @@ unsigned ListWrapper::Remove(string_view elem, unsigned count, QList::Where wher
   return removed;
 }
 
-ListWrapper GetLW(const PrimeValue& mv) {
+ListWrapper GetLW(DbIndex dbid, const PrimeValue& mv) {
   if (mv.Encoding() == kEncodingQL2) {
-    return ListWrapper{static_cast<QList*>(mv.RObjPtr())};
+    return ListWrapper{dbid, static_cast<QList*>(mv.RObjPtr())};
   }
-  return ListWrapper{detail::ListPack(static_cast<uint8_t*>(mv.RObjPtr()))};
+  return ListWrapper{dbid, detail::ListPack(static_cast<uint8_t*>(mv.RObjPtr()))};
 }
 
 enum class ListDir : uint8_t { LEFT, RIGHT };
@@ -347,7 +392,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   std::string value;
   size_t len;
 
-  ListWrapper lw = GetLW(it->second);
+  ListWrapper lw = GetLW(t->GetDbContext().db_index, it->second);
   QList::Where where = ToWhere(dir);
   value = lw.Pop(where);
   lw.Launder(&it->second);
@@ -378,10 +423,10 @@ ListWrapper CreateOrGet(const OpArgs& op_args, string_view key, bool create, Pri
 
     uint8_t* lp = lpNew(0);
     pv->InitRobj(OBJ_LIST, kEncodingListPack, lp);
-    return ListWrapper{detail::ListPack(lp)};
+    return ListWrapper{op_args.db_cntx.db_index, detail::ListPack(lp)};
   }
 
-  return GetLW(*pv);
+  return GetLW(op_args.db_cntx.db_index, *pv);
 }
 
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
@@ -393,7 +438,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   auto src_it = src_res->it;
   string val;
-  ListWrapper srcql_v2 = GetLW(src_it->second);
+  ListWrapper srcql_v2 = GetLW(op_args.db_cntx.db_index, src_it->second);
   size_t prev_len = srcql_v2.Size();
 
   if (src == dest) {  // simple case.
@@ -445,7 +490,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
   const PrimeValue& pv = it_res.value()->second;
   DCHECK_GT(pv.Size(), 0u);  // should be not-empty.
 
-  ListWrapper lw = GetLW(pv);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, pv);
   return lw.First(ToWhere(dir));
 }
 
@@ -501,7 +546,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   size_t prev_len = 0;
   StringVec res;
 
-  ListWrapper lw = GetLW(it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it->second);
   prev_len = lw.Size();
 
   if (prev_len < count) {
@@ -605,7 +650,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
   if (!res)
     return res.status();
 
-  ListWrapper lw = GetLW(res.value()->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, res.value()->second);
   return lw.Size();
 }
 
@@ -614,7 +659,7 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   if (!res)
     return res.status();
 
-  ListWrapper lw = GetLW(res.value()->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, res.value()->second);
   optional elem = lw.At(index);
   if (!elem)
     return OpStatus::KEY_NOTFOUND;
@@ -631,7 +676,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_
     return it_res.status();
 
   const PrimeValue& pv = (*it_res)->second;
-  ListWrapper lw = GetLW(pv);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, pv);
 
   QList::Where where = QList::HEAD;
   if (rank < 0) {
@@ -651,7 +696,7 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
   if (!it_res)
     return it_res.status();
 
-  ListWrapper lw = GetLW(it_res->it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it_res->it->second);
 
   int res = -1;
 
@@ -669,7 +714,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   if (!it_res)
     return it_res.status();
 
-  ListWrapper lw = GetLW(it_res->it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it_res->it->second);
 
   QList::Where where = QList::HEAD;
   if (count < 0) {
@@ -695,7 +740,7 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
   if (!it_res)
     return it_res.status();
 
-  ListWrapper lw = GetLW(it_res->it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it_res->it->second);
   OpStatus status = OpStatus::OUT_OF_RANGE;
   if (lw.Replace(index, elem)) {
     lw.Launder(&it_res->it->second);
@@ -737,7 +782,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     rtrim = llen - end - 1;
   }
 
-  ListWrapper lw = GetLW(it->second);
+  ListWrapper lw = GetLW(op_args.db_cntx.db_index, it->second);
   lw.Erase(0, ltrim);
   lw.Erase(-rtrim, rtrim);
   lw.Launder(&it->second);
