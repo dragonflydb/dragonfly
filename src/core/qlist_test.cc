@@ -411,7 +411,10 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
 
 TEST_F(QListTest, Tiering) {
   QList::stats.offload_requests = 0;
-  ql_.SetTieringParams(QList::TieringParams{.node_depth_threshold = 1});
+  ql_.SetTieringParams(QList::TieringParams{.node_depth_threshold = 1,
+                                            .offload_cb = nullptr,
+                                            .onload_cb = nullptr,
+                                            .delete_cb = nullptr});
   for (int i = 0; i < 8000; i++) {
     ql_.Push(absl::StrCat("value", i), QList::TAIL);
   }

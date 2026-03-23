@@ -70,6 +70,9 @@ class QList {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
+    // Returns the size of entry data.
+    size_t GetEntrySize() const;
+
     size_t GetLZF(void** data) const;
 
     struct __attribute__((__packed__)) ExternalRecord {
@@ -113,7 +116,7 @@ class QList {
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
-  void AdjustMallocSize(size_t delta) {
+  void AdjustMallocSize(ssize_t delta) {
     malloc_size_ += delta;
   }
 
@@ -257,6 +260,11 @@ class QList {
   // 0 disables ZSTD dictionary compression.
   void set_compr_threshold(uint32_t threshold) {
     zstd_threshold_ = threshold;
+  }
+
+  // If offloading node fails or we cancel pendig offload, we need to decrease the counter.
+  void DecreaseNumOffloadedNodes() {
+    num_offloaded_nodes_--;
   }
 
   struct Stats {

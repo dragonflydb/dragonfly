@@ -65,7 +65,7 @@ auto FragmentRef::GetDescr(const QList::Node* node) -> SerializationDescr {
   if (!node->entry || node->sz == 0)
     return {};
 
-  std::string_view entry_view{reinterpret_cast<const char*>(node->entry), node->sz};
+  std::string_view entry_view{reinterpret_cast<const char*>(node->entry), node->GetEntrySize()};
   return {std::array<std::string_view, 2>{entry_view, {}}, CompactObj::ExternalRep::LIST_NODE};
 }
 

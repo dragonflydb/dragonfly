@@ -20,6 +20,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/snapshot.h"
@@ -158,6 +159,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     stats_.total_cancels++;
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<1>(id));
     node->io_pending = 0;
+    // If stashing failed we need to decrease offloaded nodes count.
+    QList* ql = reinterpret_cast<QList*>(std::get<2>(id));
+    ql->DecreaseNumOffloadedNodes();
   }
 
   DbTableStats* GetDbTableStats(DbIndex dbid) {
@@ -263,11 +267,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
     node->io_pending = 0;
 
-    // Adjust parent QList node malloc size
-    ql->AdjustMallocSize(-node->sz);
+    // Adjust parent QList node malloc size.
+    ql->AdjustMallocSize(-segment.length);
     node->SetExternal(segment.offset, segment.length);
 
-    stats->AddTypeMemoryUsage(OBJ_LIST, -node->sz);
+    stats->AddTypeMemoryUsage(OBJ_LIST, -segment.length);
   }
 
   // If any backpressure (throttling) is active, notify that the operation finished
@@ -326,14 +330,12 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
 
   if (const auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
     ++stats_.total_uploads;
-    QList::Node* node = reinterpret_cast<QList::Node*>(std::get<1>(*key));
     QList* ql = reinterpret_cast<QList*>(std::get<2>(*key));
+    ql->AdjustMallocSize(segment.length);
     DbTableStats* stats = GetDbTableStats(std::get<0>(*key));
-    stats->AddTypeMemoryUsage(OBJ_LIST, node->sz);
-    // Adjust parent QList node malloc size
-    ql->AdjustMallocSize(-node->sz);
+    stats->AddTypeMemoryUsage(OBJ_LIST, segment.length);
     // We return false here, because we don't want to delete the value from storage yet.
-    // It is handed in onload_cb callback.
+    // It will be done in onload_cb callback.
     return false;
   }
 
@@ -524,6 +526,8 @@ void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef frag
       op_manager_->CancelPending(*bin);
     }
   } else if (auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
+    QList* ql = reinterpret_cast<QList*>(std::get<2>(*key));
+    ql->DecreaseNumOffloadedNodes();
     op_manager_->CancelPending(id);
   }
   fragment_ref.SetStashPending(false);

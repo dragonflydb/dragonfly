@@ -115,11 +115,12 @@ class ListWrapper {
 
           .onload_cb =
               [ts, db_id = db_id_, ql](QList::Node* node) {
-                util::fb2::Future<io::Result<std::string_view>> node_entry;
+                util::fb2::Future<io::Result<std::string>> node_entry;
                 ReadTieredListNode(
                     db_id, node, ql, node->GetExternalSlice(),
                     [node_entry](io::Result<std::string_view> res) mutable {
-                      node_entry.Resolve(res.transform([](std::string_view sv) { return sv; }));
+                      node_entry.Resolve(
+                          res.transform([](std::string_view sv) { return std::string{sv}; }));
                     },
                     ts);
 
@@ -130,7 +131,6 @@ class ListWrapper {
 
                 node->entry = static_cast<unsigned char*>(zmalloc(res->size()));
                 memcpy(node->entry, res->data(), res->size());
-                node->sz = res->size();
 
                 ts->Delete(db_id, node);
               },
