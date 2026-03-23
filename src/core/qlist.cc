@@ -14,6 +14,7 @@ extern "C" {
 #include <absl/base/optimization.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
+#include <zstd.h>
 
 #include "base/logging.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -47,7 +48,7 @@ namespace dfly {
 
 namespace {
 
-static_assert(sizeof(QList) == 48);
+static_assert(sizeof(QList) == 56);
 static_assert(sizeof(QList::Node) == 40);
 
 enum IterDir : uint8_t { FWD = 1, REV = 0 };
@@ -219,7 +220,8 @@ using quicklistLZF = struct quicklistLZF {
 };
 
 inline quicklistLZF* GetLzf(QList::Node* node) {
-  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF);
+  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF ||
+         node->encoding == QLIST_NODE_ENCODING_ZSTD);
   return (quicklistLZF*)node->entry;
 }
 
@@ -282,9 +284,11 @@ ssize_t TryCompress(QList::Node* node) {
 }
 
 /* Uncompress the listpack in 'node' and update encoding details.
- * Returns 1 on successful decode, 0 on failure to decode. */
-bool DecompressRaw(bool recompress, QList::Node* node) {
-  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF);
+ * Returns 1 on successful decode, 0 on failure to decode.
+ * ddict is required for ZSTD-compressed nodes (encoding == QLIST_NODE_ENCODING_ZSTD). */
+bool DecompressRaw(bool recompress, QList::Node* node, ZSTD_DDict* ddict) {
+  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_LZF ||
+         node->encoding == QLIST_NODE_ENCODING_ZSTD);
 
   node->recompress = int(recompress);
 
@@ -294,11 +298,22 @@ bool DecompressRaw(bool recompress, QList::Node* node) {
   QList::stats.compressed_bytes -= lzf->sz;
   QList::stats.raw_compressed_bytes -= node->sz;
 
-  if (lzf_decompress(lzf->compressed, lzf->sz, decompressed, node->sz) == 0) {
-    LOG(DFATAL) << "Invalid LZF compressed data";
-    /* Someone requested decompress, but we can't decompress.  Not good. */
-    zfree(decompressed);
-    return false;
+  if (node->encoding == QLIST_NODE_ENCODING_ZSTD) {
+    CHECK(ddict);
+    ZSTD_DCtx* dctx = ZSTD_createDCtx();
+    CHECK(dctx != nullptr);
+    size_t dsz =
+        ZSTD_decompress_usingDDict(dctx, decompressed, node->sz, lzf->compressed, lzf->sz, ddict);
+    CHECK(!ZSTD_isError(dsz)) << "ZSTD decompression error: " << ZSTD_getErrorName(dsz);
+    CHECK_EQ(dsz, node->sz);
+    ZSTD_freeDCtx(dctx);
+  } else {
+    if (lzf_decompress(lzf->compressed, lzf->sz, decompressed, node->sz) == 0) {
+      LOG(DFATAL) << "Invalid LZF compressed data";
+      /* Someone requested decompress, but we can't decompress.  Not good. */
+      zfree(decompressed);
+      return false;
+    }
   }
   zfree(lzf);
   node->entry = (uint8_t*)decompressed;
@@ -310,10 +325,10 @@ bool DecompressRaw(bool recompress, QList::Node* node) {
    recompress: if true, the node will be marked for recompression after decompression.
    returns by how much the size of the node has increased.
 */
-ssize_t TryDecompressInternal(bool recompress, QList::Node* node) {
+ssize_t TryDecompressInternal(bool recompress, QList::Node* node, ZSTD_DDict* ddict) {
   if (node->encoding != QUICKLIST_NODE_ENCODING_RAW) {
     size_t compressed_sz = GetLzf(node)->sz;
-    if (DecompressRaw(recompress, node)) {
+    if (DecompressRaw(recompress, node, ddict)) {
       return node->sz - compressed_sz;
     }
   }
@@ -360,6 +375,18 @@ QList::Node* SplitNode(QList::Node* node, int offset, bool after, ssize_t* diff)
 
 }  // namespace
 
+struct QList::ZstdDictState {
+  ZSTD_CDict* cdict = nullptr;
+  ZSTD_DDict* ddict = nullptr;
+
+  ~ZstdDictState() {
+    if (cdict)
+      ZSTD_freeCDict(cdict);
+    if (ddict)
+      ZSTD_freeDDict(ddict);
+  }
+};
+
 __thread QList::Stats QList::stats;
 
 QList::Stats& QList::Stats::operator+=(const Stats& other) {
@@ -374,6 +401,7 @@ QList::Stats& QList::Stats::operator+=(const Stats& other) {
   ADD_FIELD(total_node_reads);
   ADD_FIELD(offload_requests);
   ADD_FIELD(onload_requests);
+  ADD_FIELD(zstd_dict_compressions);
 
 #undef ADD_FIELD
 
@@ -381,7 +409,7 @@ QList::Stats& QList::Stats::operator+=(const Stats& other) {
 }
 
 size_t QList::Node::GetLZF(void** data) const {
-  DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF);
+  DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF || encoding == QLIST_NODE_ENCODING_ZSTD);
   quicklistLZF* lzf = (quicklistLZF*)entry;
   *data = lzf->compressed;
   return lzf->sz;
@@ -428,9 +456,13 @@ QList::QList(QList&& other) noexcept
       len_(other.len_),
       fill_(other.fill_),
       compress_(other.compress_),
-      bookmark_count_(other.bookmark_count_) {
+      bookmark_count_(other.bookmark_count_),
+      num_offloaded_nodes_(other.num_offloaded_nodes_),
+      tiering_params_(std::move(other.tiering_params_)),
+      zstd_dict_(std::move(other.zstd_dict_)) {
   other.head_ = nullptr;
   other.len_ = other.count_ = 0;
+  other.num_offloaded_nodes_ = 0;
 }
 
 QList::~QList() {
@@ -447,6 +479,7 @@ QList& QList::operator=(QList&& other) noexcept {
     compress_ = other.compress_;
     bookmark_count_ = other.bookmark_count_;
     tiering_params_ = std::move(other.tiering_params_);
+    zstd_dict_ = std::move(other.zstd_dict_);
     num_offloaded_nodes_ = other.num_offloaded_nodes_;
     other.head_ = nullptr;
     other.len_ = other.count_ = other.num_offloaded_nodes_ = 0;
@@ -481,8 +514,8 @@ void QList::Push(string_view value, Where where) {
 
   /* The head and tail should never be compressed (we don't attempt to decompress them) */
   if (head_) {
-    DCHECK(head_->encoding != QUICKLIST_NODE_ENCODING_LZF);
-    DCHECK(head_->prev->encoding != QUICKLIST_NODE_ENCODING_LZF);
+    DCHECK_EQ(head_->encoding, QUICKLIST_NODE_ENCODING_RAW);
+    DCHECK_EQ(head_->prev->encoding, QUICKLIST_NODE_ENCODING_RAW);
   }
 
   Node* orig = head_;
@@ -915,9 +948,12 @@ void QList::CompressByDepth(Node* node) {
   Node* reverse = head_->prev;
   int depth = 0;
   int in_depth = 0;
+
+  DCHECK(!zstd_dict_);
+
   while (depth++ < compress_) {
-    malloc_size_ += TryDecompressInternal(false, forward);
-    malloc_size_ += TryDecompressInternal(false, reverse);
+    malloc_size_ += TryDecompressInternal(false, forward, nullptr);
+    malloc_size_ += TryDecompressInternal(false, reverse, nullptr);
 
     if (forward == node || reverse == node)
       in_depth = 1;
@@ -951,7 +987,8 @@ void QList::AccessForReads(bool recompress, Node* node) {
   if (len_ > 2 && node != head_ && node->next != nullptr) {
     stats.interior_node_reads++;
   }
-  ssize_t res = TryDecompressInternal(recompress, node);
+  ZSTD_DDict* ddict = zstd_dict_ ? zstd_dict_->ddict : nullptr;
+  ssize_t res = TryDecompressInternal(recompress, node, ddict);
   malloc_size_ += res;
 }
 
