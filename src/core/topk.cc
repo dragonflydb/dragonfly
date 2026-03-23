@@ -256,8 +256,9 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
     result.push_back({heap_item.count, heap_item.key});
   }
 
-  // Sort by count (descending) for output.
-  // Add a lexicographical tie-breaker for deterministic RDB test outputs.
+  // Sort descending by count.
+  // If counts are equal, tie-break lexicographically to ensure
+  // deterministic API responses and exact Redis compatibility.
   std::sort(result.begin(), result.end(), [](const TopKItem& a, const TopKItem& b) {
     if (a.count != b.count) {
       return a.count > b.count;
