@@ -256,9 +256,14 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
     result.push_back({heap_item.count, heap_item.key});
   }
 
-  // Sort by count (descending) for output
-  std::sort(result.begin(), result.end(),
-            [](const TopKItem& a, const TopKItem& b) { return a.count > b.count; });
+  // Sort by count (descending) for output.
+  // Add a lexicographical tie-breaker for deterministic RDB test outputs.
+  std::sort(result.begin(), result.end(), [](const TopKItem& a, const TopKItem& b) {
+    if (a.count != b.count) {
+      return a.count > b.count;
+    }
+    return a.item < b.item;
+  });
 
   return result;
 }
