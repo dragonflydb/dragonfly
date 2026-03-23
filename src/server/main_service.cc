@@ -2943,6 +2943,7 @@ void Service::RegisterCommands() {
   RegisterHllFamily(&registry_);
   RegisterBloomFamily(&registry_);
   RegisterCmsFamily(&registry_);
+  RegisterTopkFamily(&registry_);
   RegisterJsonFamily(&registry_);
 #endif
 
