@@ -430,9 +430,9 @@ TEST(TOPKBasic, MallocUsedIncreaseWithHeapGrowth) {
 // Serialize / Deserialize
 // ---------------------------------------------------------------------------
 
-// Helper to manually pack the struct for testing. Actual serialization is done in production code
-// in topk_save.cc, but we want to test the core logic of Serialize/Deserialize here in isolation
-// without involving RDB buffer code.
+// Helper to manually pack the struct for testing. Actual RDB serialization is done in production
+// code (see src/server/rdb_save.cc), but we want to test the core logic of Serialize/Deserialize
+// here in isolation without involving RDB buffer code.
 static TOPK::SerializedData ExtractData(const TOPK& topk) {
   TOPK::SerializedData data;
   data.k = topk.K();
