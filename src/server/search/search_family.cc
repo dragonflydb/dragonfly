@@ -1323,6 +1323,33 @@ bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
   return true;
 }
 
+// Validate HNSW VECTOR_RANGE parameters and return the index on success.
+// On failure, sends an error reply via builder and returns nullptr.
+std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
+    std::string_view index_name, const search::AstVectorRangeNode* hnsw_range,
+    SinkReplyBuilder* builder) {
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_range->field);
+  if (!hnsw_index) {
+    builder->SendError(string{index_name} + ": no such global hnsw index");
+    return nullptr;
+  }
+  if (hnsw_range->vec.second == 0) {
+    builder->SendError("Parse error of vector parameters");
+    return nullptr;
+  }
+  if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
+    builder->SendError(
+        absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
+    return nullptr;
+  }
+  if (hnsw_index->GetDim() != hnsw_range->vec.second) {
+    builder->SendError(absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
+                                    ", expected: ", hnsw_index->GetDim()));
+    return nullptr;
+  }
+  return hnsw_index;
+}
+
 }  // namespace
 
 void CmdFtCreate(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1761,22 +1788,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   auto knn_sort_option = search_algo.GetKnnScoreSortOption();
 
   if (hnsw_range) {
-    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_range->field);
-    if (!hnsw_index) {
-      return builder->SendError(string{index_name} + ": no such global hnsw index");
-    }
-    if (hnsw_range->vec.second == 0) {
-      return builder->SendError("Parse error of vector parameters");
-    }
-    if (hnsw_range->radius < 0 || std::isnan(hnsw_range->radius)) {
-      return builder->SendError(
-          absl::StrCat("VECTOR_RANGE radius must be non-negative, got: ", hnsw_range->radius));
-    }
-    if (hnsw_index->GetDim() != hnsw_range->vec.second) {
-      return builder->SendError(
-          absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
-                       ", expected: ", hnsw_index->GetDim()));
-    }
+    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range, builder);
+    if (!hnsw_index)
+      return;
     if (!hnsw_range->score_alias.empty())
       knn_sort_option =
           search::KnnScoreSortOption{hnsw_range->score_alias, std::numeric_limits<size_t>::max()};
@@ -1991,13 +2005,47 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     vector<ResultContainer> query_results(shard_set->size());
 
-    cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-      if (auto* index = es->search_indices()->GetIndex(params->index); index) {
-        query_results[es->shard_id()] =
-            index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
+    // Check for HNSW VECTOR_RANGE — must be handled via GlobalHnswIndexRegistry,
+    // not per-shard FieldIndices (HNSW fields are not stored there).
+    const search::AstVectorRangeNode* hnsw_range = nullptr;
+    if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
+      if (GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field))
+        hnsw_range = vr;
+    }
+
+    if (hnsw_range) {
+      auto hnsw_index = GetValidatedHnswRangeIndex(params->index, hnsw_range, builder);
+      if (!hnsw_index)
+        return;
+
+      auto range_results = hnsw_index->RangeQuery(hnsw_range->vec.first.get(),
+                                                  static_cast<float>(hnsw_range->radius));
+
+      // Group (local DocId, distance) pairs by shard.
+      const ShardId shard_size = shard_set->size();
+      std::vector<std::vector<std::pair<search::DocId, float>>> shard_docs(shard_size);
+      for (const auto& [score, global_doc_id] : range_results) {
+        auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+        shard_docs[shard_id].emplace_back(local_doc_id, score);
       }
-      return OpStatus::OK;
-    });
+
+      cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+        auto* index = es->search_indices()->GetIndex(params->index);
+        if (!index || shard_docs[es->shard_id()].empty())
+          return OpStatus::OK;
+        query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
+            t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], hnsw_range->score_alias);
+        return OpStatus::OK;
+      });
+    } else {
+      cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+        if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+          query_results[es->shard_id()] =
+              index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
+        }
+        return OpStatus::OK;
+      });
+    }
 
     // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
     // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
