@@ -70,6 +70,9 @@ class QList {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
+    // Returns the size of entry data.
+    size_t GetEntrySize() const;
+
     size_t GetLZF(void** data) const;
 
     struct __attribute__((__packed__)) ExternalRecord {
@@ -113,15 +116,16 @@ class QList {
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
-  void AdjustMallocSize(size_t delta) {
+  void AdjustMallocSize(ssize_t delta) {
     malloc_size_ += delta;
   }
 
   struct TieringParams {
     uint32_t node_depth_threshold = 2;
-    // Called when a node should be offloaded to disk.
-    std::function<void(Node*)> offload_cb;
-    // Called when an offloaded node needs its data loaded back from disk.
+    // Called when a node should be offloaded.
+    // True if node meets criteria for offloading and stashing was initiated.
+    std::function<bool(Node*)> offload_cb;
+    // Called when an offloaded node needs its data loaded back into memory
     std::function<void(Node*)> onload_cb;
     // Called when an offloaded or io_pending node is being deleted.
     std::function<void(Node*)> delete_cb;
@@ -257,6 +261,11 @@ class QList {
   // 0 disables ZSTD dictionary compression.
   void set_compr_threshold(uint32_t threshold) {
     zstd_threshold_ = threshold;
+  }
+
+  // If offloading node fails or we cancel pendig offload, we need to decrease the counter.
+  void DecreaseNumOffloadedNodes() {
+    num_offloaded_nodes_--;
   }
 
   struct Stats {

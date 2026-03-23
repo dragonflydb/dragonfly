@@ -215,8 +215,9 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                      BackPressureFuture* backpressure);
 
-// Stash list node if it meets criteria. If the node was stashed and `backpressure` is not nullptr,
-void StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
+// Stash list node if it meets criteria.
+// Returns true if stash was initiated, false otherwise.
+bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
                    BackPressureFuture* backpressure);
 
 #else
@@ -347,7 +348,7 @@ inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, 
                             BackPressureFuture* backpressure) {
 }
 
-inline void StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
+inline bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
                           BackPressureFuture* backpressure) {
 }
 

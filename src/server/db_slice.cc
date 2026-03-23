@@ -1575,6 +1575,12 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
         } else if (it->second.HasStashPending()) {
           tiered_storage->CancelStash(std::make_pair(index, it->first.GetSlice(&scratch)),
                                       &it->second);
+        } else if (it->second.ObjType() == OBJ_LIST && it->second.Encoding() == kEncodingQL2) {
+          // Nodes can be offloaded to tiered storage, but the main object doesn't have external or
+          // pending flag set. We need to clear the list explicitly.
+          if (auto* ql = static_cast<QList*>(it->second.RObjPtr()); ql) {
+            ql->Clear();
+          }
         }
       });
     } while (cursor);

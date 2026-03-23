@@ -412,11 +412,28 @@ QList::Stats& QList::Stats::operator+=(const Stats& other) {
   return *this;
 }
 
+size_t QList::Node::GetEntrySize() const {
+  if (encoding == QUICKLIST_NODE_ENCODING_RAW) {
+    return sz;
+  } else {
+    return GetLzf(const_cast<QList::Node*>(this))->sz + sizeof(quicklistLZF);
+  }
+}
+
 size_t QList::Node::GetLZF(void** data) const {
   DCHECK(encoding == QUICKLIST_NODE_ENCODING_LZF || encoding == QLIST_NODE_ENCODING_ZSTD);
   quicklistLZF* lzf = (quicklistLZF*)entry;
   *data = lzf->compressed;
   return lzf->sz;
+}
+
+void QList::Node::SetExternal(size_t offset, uint32_t size) {
+  DCHECK(entry);
+  zfree(entry);
+  offloaded = 1;
+  entry = nullptr;
+  ext.offset = offset;
+  ext.size = size;
 }
 
 void QList::SetPackedThreshold(unsigned threshold) {
@@ -427,6 +444,11 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
   size_t reallocated = 0;
 
   for (Node* curr = head_; curr; curr = curr->next) {
+    // Skip offloaded or pending nodes
+    if (curr->offloaded || curr->io_pending) {
+      continue;
+    }
+
     if (!page_usage->IsPageForObjectUnderUtilized(curr->entry)) {
       continue;
     }
@@ -507,19 +529,19 @@ void QList::Clear() noexcept {
   while (len_) {
     Node* next = current->next;
 
-    // Clean up offloaded/pending nodes before freeing.
     if (current->offloaded || current->io_pending) {
       if (tiering_params_ && tiering_params_->delete_cb) {
         tiering_params_->delete_cb(current);
       }
+    } else {
+      if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
+        quicklistLZF* lzf = (quicklistLZF*)current->entry;
+        stats.compressed_bytes -= lzf->sz;
+        stats.raw_compressed_bytes -= current->sz;
+      }
+      zfree(current->entry);
     }
 
-    if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
-      quicklistLZF* lzf = (quicklistLZF*)current->entry;
-      stats.compressed_bytes -= lzf->sz;
-      stats.raw_compressed_bytes -= current->sz;
-    }
-    zfree(current->entry);
     zfree(current);
 
     len_--;
@@ -583,6 +605,11 @@ string QList::Pop(Where where) {
   /* The head and tail should never be compressed */
   DCHECK_EQ(node->encoding, QUICKLIST_NODE_ENCODING_RAW);
   DCHECK(head_->prev->next == nullptr);
+
+  // Try onloading entry if it's offloaded.
+  if (tiering_params_) {
+    AccessForReads(false, node);
+  }
 
   string res;
   if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(node))) {
@@ -1000,8 +1027,11 @@ void QList::CompressByDepth(Node* node) {
   int in_depth = 0;
 
   while (depth++ < compress_) {
-    malloc_size_ += TryDecompressInternal(false, forward);
-    malloc_size_ += TryDecompressInternal(false, reverse);
+    // Offloaded nodes have no entry data yet; skip decompression here.
+    if (!forward->offloaded && !forward->io_pending)
+      malloc_size_ += TryDecompressInternal(false, forward);
+    if (!reverse->offloaded && !reverse->io_pending)
+      malloc_size_ += TryDecompressInternal(false, Reverse);
 
     if (forward == node || reverse == node)
       in_depth = 1;
@@ -1034,6 +1064,7 @@ void QList::AccessForReads(bool recompress, Node* node) {
       tiering_params_->delete_cb(node);
     }
     DCHECK(!node->io_pending);
+    num_offloaded_nodes_--;
   }
 
   if (node->offloaded) {
@@ -1047,7 +1078,6 @@ void QList::AccessForReads(bool recompress, Node* node) {
     DCHECK(node->entry != nullptr);
     num_offloaded_nodes_--;
   }
-
   if (len_ > 2 && node != head_ && node->next != nullptr) {
     stats.interior_node_reads++;
   }
@@ -1168,15 +1198,15 @@ void QList::DelNode(Node* node) {
   /* Update len first, so in CompressByDepth we know exactly len */
   len_--;
   count_ -= node->count;
-  malloc_size_ -= node->sz;
 
-  if (node->offloaded || node->io_pending) {
-    if (node->offloaded)
-      num_offloaded_nodes_--;
-    else if (node->io_pending)
-      num_offloaded_nodes_--;  // was pre-counted in OffloadNode
-    // Clean up disk segment and deregister fragment.
-    if (tiering_params_ && tiering_params_->delete_cb) {
+  // Offloaded nodes don't have entry data, so we only update malloc_size_ for non-offloaded nodes.
+  if (!node->offloaded) {
+    malloc_size_ -= node->sz;
+  }
+
+  if (tiering_params_ && (node->offloaded || node->io_pending)) {
+    num_offloaded_nodes_--;
+    if (tiering_params_->delete_cb) {
       tiering_params_->delete_cb(node);
     }
   }
@@ -1196,7 +1226,10 @@ void QList::DelNode(Node* node) {
     }
   }
 
-  zfree(node->entry);
+  if (!node->offloaded) {
+    zfree(node->entry);
+  }
+
   zfree(node);
 }
 
@@ -1227,11 +1260,9 @@ void QList::OffloadNode(Node* node) {
   DCHECK(tiering_params_ && node->offloaded == 0);
   if (node->io_pending)
     return;
-
-  num_offloaded_nodes_++;
   stats.offload_requests++;
-  if (tiering_params_->offload_cb) {
-    tiering_params_->offload_cb(node);
+  if (tiering_params_->offload_cb && tiering_params_->offload_cb(node)) {
+    num_offloaded_nodes_++;
   }
 }
 
