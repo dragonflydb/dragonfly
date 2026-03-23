@@ -592,9 +592,9 @@ TEST(TOPKBasic, DeserializeRestoresHeapProperty) {
   data.counters.resize(500, 0);
 
   // Items deliberately out of min-heap order: smallest must end up at the root.
-  data.heap_items.push_back({"heavy", 1000});
-  data.heap_items.push_back({"medium", 500});
-  data.heap_items.push_back({"light", 10});
+  data.heap_items.push_back({1000, "heavy"});
+  data.heap_items.push_back({500, "medium"});
+  data.heap_items.push_back({10, "light"});
 
   TOPK restored(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
   restored.Deserialize(data);
