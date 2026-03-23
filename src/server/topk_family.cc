@@ -141,6 +141,23 @@ OpResult<TopkInfo> OpInfo(const OpArgs& op_args, string_view key) {
   return info;
 }
 
+// Returns true if an error occurred and a reply was sent.
+bool HandleOpError(OpStatus status, CommandContext* cmd_cntx) {
+  if (status == OpStatus::OK)
+    return false;
+
+  if (status == OpStatus::KEY_NOTFOUND) {
+    cmd_cntx->SendError(kKeyNotFoundErr);
+  } else if (status == OpStatus::WRONG_TYPE) {
+    cmd_cntx->SendError(kWrongTypeErr);
+  } else if (status == OpStatus::KEY_EXISTS) {
+    cmd_cntx->SendError("item exists");  // Specific to TOPK.RESERVE
+  } else {
+    cmd_cntx->SendError(status);  // Catch OOM, Timeout, etc.
+  }
+  return true;
+}
+
 }  // namespace
 
 void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
@@ -165,11 +182,11 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
     decay = parser.Next<double>();
     RETURN_ON_PARSE_ERROR(parser, rb);
 
-    if (width == 0 || depth == 0) {
+    if ((width == 0) || (depth == 0)) {
       return rb->SendError("width and depth must be greater than 0");
     }
 
-    if (decay < 0.0 || decay > 1.0) {
+    if (!std::isfinite(decay) || (decay < 0.0) || (decay > 1.0)) {
       return rb->SendError("decay must be between 0 and 1");
     }
   }
@@ -188,12 +205,8 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpStatus result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
-  if (result == OpStatus::KEY_EXISTS) {
-    return rb->SendError("item exists");
-  }
-  if (result != OpStatus::OK) {
-    return rb->SendError(result);
-  }
+  if (HandleOpError(result, cmd_cntx))
+    return;
   rb->SendOk();
 }
 
@@ -213,12 +226,8 @@ void TopkFamily::Add(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->SendError(kKeyNotFoundErr);
-  }
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  if (HandleOpError(result.status(), cmd_cntx))
+    return;
 
   // Build array response
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -261,12 +270,8 @@ void TopkFamily::IncrBy(CmdArgList args, CommandContext* cmd_cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, items);
   };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->SendError(kKeyNotFoundErr);
-  }
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  if (HandleOpError(result.status(), cmd_cntx))
+    return;
 
   // Build array response
   {
@@ -297,12 +302,8 @@ void TopkFamily::Query(CmdArgList args, CommandContext* cmd_cntx) {
     return OpQuery(t->GetOpArgs(shard), key, items);
   };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->SendError(kKeyNotFoundErr);
-  }
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  if (HandleOpError(result.status(), cmd_cntx))
+    return;
 
   // Build array response
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -330,12 +331,8 @@ void TopkFamily::Count(CmdArgList args, CommandContext* cmd_cntx) {
     return OpCount(t->GetOpArgs(shard), key, items);
   };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->SendError(kKeyNotFoundErr);
-  }
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  if (HandleOpError(result.status(), cmd_cntx))
+    return;
 
   // Build array response
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -369,12 +366,8 @@ void TopkFamily::List(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpList(t->GetOpArgs(shard), key); };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->SendError(kKeyNotFoundErr);
-  }
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  if (HandleOpError(result.status(), cmd_cntx))
+    return;
 
   // Build array response
   {
@@ -401,12 +394,8 @@ void TopkFamily::Info(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpInfo(t->GetOpArgs(shard), key); };
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
-    return cmd_cntx->SendError(kKeyNotFoundErr);
-  }
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx->SendError(kWrongTypeErr);
-  }
+  if (HandleOpError(result.status(), cmd_cntx))
+    return;
 
   // Build array response: [k, <k>, width, <width>, depth, <depth>, decay, <decay>]
   {
@@ -433,7 +422,7 @@ void RegisterTopkFamily(CommandRegistry* registry) {
             << CI{"TOPK.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
             << CI{"TOPK.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
             << CI{"TOPK.COUNT", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Count)
-            << CI{"TOPK.LIST", CO::READONLY | CO::FAST, -2, 1, 1}.HFUNC(List)
+            << CI{"TOPK.LIST", CO::READONLY, -2, 1, 1}.HFUNC(List)
             << CI{"TOPK.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info);
 }
 
