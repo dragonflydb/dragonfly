@@ -104,7 +104,7 @@ jobs:
         uses: ./.github/actions/sync-valkey-tests
       - name: Authenticate to AWS
         if: github.repository_owner == 'dragonflydb' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           aws-region: us-east-1
@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: logs
           path: /tmp/failed/*
