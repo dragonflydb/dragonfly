@@ -18,8 +18,6 @@
 /* quicklist node encodings */
 #define QUICKLIST_NODE_ENCODING_RAW 1
 #define QUICKLIST_NODE_ENCODING_LZF 2
-#define QLIST_NODE_ENCODING_LZ4 3
-
 /* quicklist node container formats */
 #define QUICKLIST_NODE_CONTAINER_PLAIN 1
 #define QUICKLIST_NODE_CONTAINER_PACKED 2
@@ -39,7 +37,6 @@ inline bool ShouldStoreAsListPack(size_t size) {
 class QList {
  public:
   enum Where : uint8_t { TAIL, HEAD };
-  enum COMPR_METHOD : uint8_t { LZF = 0, LZ4 = 1 };
 
   /* Node is a 40 byte struct describing a listpack for a quicklist.
    * We use bit fields keep the Node at 40 bytes.
@@ -58,7 +55,7 @@ class QList {
     size_t sz : 48;    /* entry size in bytes */
     size_t count : 16; /* count of items in listpack */
 
-    uint16_t encoding : 2;           /* RAW==1 or LZF==2 */
+    uint16_t encoding : 2;           /* RAW==1, LZF==2 */
     uint16_t container : 2;          /* PLAIN==1 or PACKED==2 */
     uint16_t recompress : 1;         /* was this node previous compressed? */
     uint16_t attempted_compress : 1; /* node can't compress; too small */
@@ -217,10 +214,6 @@ class QList {
     fill_ = fill;
   }
 
-  void set_compr_method(COMPR_METHOD cm) {
-    compr_method_ = static_cast<unsigned>(cm);
-  }
-
   static void SetPackedThreshold(unsigned threshold);
 
   // Moves nodes away from underused pages by reallocating if the underlying page usage is low.
@@ -291,12 +284,11 @@ class QList {
   void InitIteratorEntry(Iterator* it) const;
 
   Node* head_ = nullptr;
-  size_t malloc_size_ = 0;    // size of the quicklist struct
-  uint32_t count_ = 0;        /* total count of all entries in all listpacks */
-  uint32_t len_ = 0;          /* number of quicklistNodes */
-  int16_t fill_;              /* fill factor for individual nodes */
-  int16_t compr_method_ : 2;  // 0 - lzf, 1 - lz4
-  int16_t reserved1_ : 14;
+  size_t malloc_size_ = 0;  // size of the quicklist struct
+  uint32_t count_ = 0;      /* total count of all entries in all listpacks */
+  uint32_t len_ = 0;        /* number of quicklistNodes */
+  int16_t fill_;            /* fill factor for individual nodes */
+  int16_t reserved1_;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;

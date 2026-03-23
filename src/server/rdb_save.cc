@@ -398,8 +398,6 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     if (node->IsCompressed()) {
       void* data;
       size_t compress_len = node->GetLZF(&data);
-      // TODO: LZ4 compression mode is not enabled for list objects yet.
-      // If it will be enabled in the future, we need to adjust here accordingly.
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
       RETURN_ON_ERR(SaveString(node->entry, node->sz));

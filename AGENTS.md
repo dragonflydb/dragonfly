@@ -55,12 +55,12 @@
 
 ```bash
 # Debug build (for development)
-./helio/blaze.sh
+./helio/blaze.sh -DWITH_AWS=OFF -DWITH_GCP=OFF
 cd build-dbg && ninja dragonfly              # Build main binary
 cd build-dbg && ninja generic_family_test    # Build specific test
 
-# Release build (for production/benchmarking)
-./helio/blaze.sh -release
+# Release build for local benchmarking
+./helio/blaze.sh -release -DWITH_AWS=OFF -DWITH_GCP=OFF
 cd build-opt && ninja dragonfly
 ```
 
