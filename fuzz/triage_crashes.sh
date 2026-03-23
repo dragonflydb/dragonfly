@@ -165,6 +165,9 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     CRASH_NAME=$(basename "$CRASH_ARCHIVE" .tar.gz)   # crash-000000
     CRASH_ID="${CRASH_NAME#crash-}"                    # 000000
     IDX=$((CONFIRMED + FALSE_POSITIVE + FAILED + 1))
+    # Reset per-archive port defaults (may be overridden from repro.env below)
+    RESP_PORT=6379
+    MC_PORT=11211
 
     echo -e "${CYAN}${BOLD}─── [$IDX/$TOTAL] Crash ${CRASH_ID} ───${NC}"
 
@@ -182,32 +185,19 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         continue
     fi
 
-    # Kill any leftover process on the port from a previous iteration
-    if (>/dev/tcp/127.0.0.1/"$RESP_PORT") 2>/dev/null; then
-        print_warn "Port $RESP_PORT still in use — waiting..."
-        wait_port_free "$RESP_PORT" 5 || {
-            print_error "Port $RESP_PORT still blocked after 5s — cannot start Dragonfly"
-            FAILED=$((FAILED + 1))
-            echo ""
-            continue
-        }
-    fi
-
-    # Start Dragonfly — use --log_dir so glog writes to separate per-level files
-    # (dragonfly.FATAL symlink is created on crash and contains the fatal message)
-    LOG_DIR="$WORK_DIR/logs_${CRASH_ID}"
-    mkdir -p "$LOG_DIR"
-
     # Load exact Dragonfly flags and memory limit from repro.env bundled in the archive.
+    # Done before the port-in-use check so RESP_PORT reflects the actual fuzz port.
     # repro.env is written by run_fuzzer.sh so flags stay in sync with the fuzz run.
     # Fallback to safe defaults for older archives that don't include repro.env.
     REPRO_ENV="$EXTRACT_DIR/${CRASH_NAME}/repro.env"
     if [[ -f "$REPRO_ENV" ]]; then
-        MEM_LIMIT_KB=$(grep '^MEM_LIMIT_KB=' "$REPRO_ENV" | cut -d= -f2)
+        MEM_LIMIT_KB=$(grep '^MEM_LIMIT_KB=' "$REPRO_ENV" | cut -d= -f2 || true)
         MEM_LIMIT_KB="${MEM_LIMIT_KB:-$((4 * 1024 * 1024))}"
-        mapfile -t DF_ARGS < <(grep -v '^#' "$REPRO_ENV" | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
-        RESP_PORT=$(grep '^--port=' "$REPRO_ENV" | cut -d= -f2)
+        mapfile -t DF_ARGS < <(grep -v '^#' "$REPRO_ENV" | grep -v '^MEM_LIMIT_KB=' | grep -v '^$' || true)
+        RESP_PORT=$(grep '^--port=' "$REPRO_ENV" | cut -d= -f2 || true)
         RESP_PORT="${RESP_PORT:-6379}"
+        MC_PORT=$(grep '^--memcached_port=' "$REPRO_ENV" | cut -d= -f2 || true)
+        MC_PORT="${MC_PORT:-11211}"
     else
         print_warn "repro.env not found — using default flags (older crash archive)"
         MEM_LIMIT_KB=$((4 * 1024 * 1024))
@@ -224,6 +214,22 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         )
         [[ "$MODE" == "memcache" ]] && DF_ARGS+=(--memcached_port="$MC_PORT")
     fi
+
+    # Kill any leftover process on the port from a previous iteration
+    if (>/dev/tcp/127.0.0.1/"$RESP_PORT") 2>/dev/null; then
+        print_warn "Port $RESP_PORT still in use — waiting..."
+        wait_port_free "$RESP_PORT" 5 || {
+            print_error "Port $RESP_PORT still blocked after 5s — cannot start Dragonfly"
+            FAILED=$((FAILED + 1))
+            echo ""
+            continue
+        }
+    fi
+
+    # Start Dragonfly — use --log_dir so glog writes to separate per-level files
+    # (dragonfly.FATAL symlink is created on crash and contains the fatal message)
+    LOG_DIR="$WORK_DIR/logs_${CRASH_ID}"
+    mkdir -p "$LOG_DIR"
 
     # --log_dir is triage-specific (captures crash logs); not part of the fuzz run
     DF_ARGS+=(--log_dir="$LOG_DIR")

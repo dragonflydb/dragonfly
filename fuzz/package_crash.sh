@@ -82,8 +82,14 @@ else
 fi
 
 REPLAY_PORT=6379
-if [[ -f "$DEST/repro.env" ]] && grep -q '^--memcached_port=' "$DEST/repro.env"; then
-    REPLAY_PORT=$(grep '^--memcached_port=' "$DEST/repro.env" | cut -d= -f2)
+if [[ -f "$DEST/repro.env" ]]; then
+    _mc_port=$(grep '^--memcached_port=' "$DEST/repro.env" | cut -d= -f2 || true)
+    if [[ -n "$_mc_port" ]]; then
+        REPLAY_PORT="$_mc_port"
+    else
+        _resp_port=$(grep '^--port=' "$DEST/repro.env" | cut -d= -f2 || true)
+        REPLAY_PORT="${_resp_port:-6379}"
+    fi
 fi
 
 # Create archive
@@ -100,7 +106,7 @@ echo "  1. Extract the archive:"
 echo "     tar xzf ${ARCHIVE_NAME}.tar.gz && cd ${ARCHIVE_NAME}"
 echo "  2. Start Dragonfly with the exact flags from the fuzz run (repro.env):"
 echo "     MEM_KB=\$(grep '^MEM_LIMIT_KB=' repro.env | cut -d= -f2)"
-echo "     readarray -t DF_FLAGS < <(grep -v '^#' repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^\$')"
+echo "     readarray -t DF_FLAGS < <(grep -v '^#' repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')"
 echo "     (ulimit -v \"\$MEM_KB\"; exec ./build-dbg/dragonfly \"\${DF_FLAGS[@]}\") &"
 echo "  3. Replay:"
 echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 ${REPLAY_PORT}"
