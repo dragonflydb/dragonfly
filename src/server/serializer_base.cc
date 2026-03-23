@@ -8,14 +8,25 @@
 
 namespace dfly {
 
-SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
+SerializerBase::SerializerBase(DbSlice* slice)
+    : db_slice_(slice), db_array_(slice ? slice->databases() : DbTableArray{}) {
 }
 
 SerializerBase::~SerializerBase() {
 }
 
+// Ordering invariant:
+//   For any key K, the replica must receive K's baseline value strictly before any journal entry
+//   that mutates K.
+//
+// RegisterChangeListener registers the DbSlice callback that routes mutations through
+//   SerializerBase::OnChange. ConsumeJournalChange runs later on the
+//   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
+//   from interleaving with the traversal fiber's bucket serialization, which may preempt while
+//   emitting large values.
 uint64_t SerializerBase::RegisterChangeListener() {
   DCHECK(db_slice_);
+  db_array_ = db_slice_->databases();
   auto cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
     HandleChangeReq(db_index, req);
   };
@@ -57,6 +68,11 @@ void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
   bucket_states_.erase(it);
 }
 
+unsigned SerializerBase::DoSerializeBucketOnChange(DbIndex db_index,
+                                                   PrimeTable::bucket_iterator it) {
+  return DoSerializeBucket(db_index, it);
+}
+
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
   std::lock_guard guard(big_value_mu_);
 
@@ -73,14 +89,14 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
 
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(bid);
-  DoSerializeBucket(db_index, it);
+  stats_.keys_serialized += DoSerializeBucketOnChange(db_index, it);
   FinishBucketIteration(bid, {});
   ++stats_.buckets_on_change;
 }
 
 void SerializerBase::OnInsert(DbIndex db_index, std::string_view key) {
   DCHECK(db_slice_);
-  PrimeTable* table = db_slice_->GetTables(db_index).first;
+  PrimeTable* table = db_slice_->GetTables(db_index);
   table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator bit) {
     DCHECK_LT(bit.GetVersion(), snapshot_version_);
     OnChange(db_index, bit);

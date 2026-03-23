@@ -6,14 +6,15 @@
 
 #include <functional>
 #include <memory>
-#include <string_view>
 #include <system_error>
 
 #include "io/io.h"
-#include "util/fibers/uring_file.h"
 
 namespace facade {
 
+// Disk-backed queue for offloading connection backpressure to disk.
+// On non-Linux platforms this is a no-op stub: Init() returns ENOSYS and
+// HasEnoughBackingSpaceFor() always returns false, so callers never push/pop.
 class DiskBackedQueue {
  public:
   explicit DiskBackedQueue(uint32_t conn_id);
@@ -39,24 +40,15 @@ class DiskBackedQueue {
   std::error_code Close();
 
  private:
-  // Punch holes over the aligned region we have fully read past so the OS can reclaim pages.
-  void MaybePunchHole();
+  struct Impl;
 
-  // Single O_RDWR file used for both writes and reads, avoiding a separate fd for fallocate.
-  std::unique_ptr<util::fb2::LinuxFile> file_;
-
-  size_t write_offset_ = 0;
-  size_t total_backing_bytes_ = 0;
-  size_t next_read_offset_ = 0;
-  // Tracks how far into the file holes have been punched (always 4096-aligned).
-  size_t punch_offset_ = 0;
+  std::unique_ptr<Impl> impl_;
 
   // Read only constants
-  const size_t max_backing_size_ = 0;
+  const size_t max_backing_size_;
 
   // same as connection id. Used to uniquely identify the backed file
-  const size_t id_ = 0;
-  size_t in_flight_callbacks_ = 0;
+  const size_t id_;
 };
 
 }  // namespace facade

@@ -8,6 +8,7 @@
 #include <absl/strings/str_format.h>
 
 #include <algorithm>
+#include <atomic>
 #include <string_view>
 
 #include "base/gtest.h"
@@ -4274,6 +4275,78 @@ TEST_F(SearchFamilyTest, GeoSearchUnits) {
   EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
+TEST_F(SearchFamilyTest, HnswVectorRange) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with an extra numeric field for SORTBY testing
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "val", "NUMERIC"});
+
+  // 10 docs at positions 0..9, val = i*10
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i)), "val",
+         absl::StrFormat("%d", i * 10)});
+  }
+
+  string query_vec = FloatToBytes(5.0f);
+
+  // Basic range: query at 5.0, radius 1.5 → k4 (dist=1), k5 (dist=0), k6 (dist=1)
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+
+  // Score alias is returned in each document by default
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "RETURN", "1", "dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  // Response: [total, key1, [field, val, ...], ...]
+  // Each doc should have "dist" in its fields
+  auto& arr = resp.GetVec();
+  ASSERT_GE(arr.size(), 3u);
+  for (size_t i = 2; i < arr.size(); i += 2) {
+    auto fields = arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    EXPECT_EQ(fields[0].GetString(), "dist");
+  }
+
+  // Large radius — all 10 docs returned
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "20"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 10);
+
+  // SORTBY val ASC — tests that sort_score is populated for non-score SORTBY
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "ASC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& asc_arr = resp.GetVec();
+  // Extract val values from response: [total, key, [val, v1], key, [val, v2], ...]
+  vector<int> vals_asc;
+  for (size_t i = 2; i < asc_arr.size(); i += 2) {
+    auto fields = asc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_asc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_asc, ElementsAre(40, 50, 60));
+
+  // SORTBY val DESC
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "DESC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& desc_arr = resp.GetVec();
+  vector<int> vals_desc;
+  for (size_t i = 2; i < desc_arr.size(); i += 2) {
+    auto fields = desc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_desc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_desc, ElementsAre(60, 50, 40));
+}
+
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 1: Correct geo field definition and usage with HASH
   auto resp =
@@ -4454,6 +4527,89 @@ TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
   // Non-finite docs are not in the numeric index; only doc:5 should match the range query.
   auto resp = Run({"FT.SEARCH", "idx", "@val:[-inf +inf]"});
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
+}
+
+class HnswRaceTest : public BaseFamilyTest {
+ protected:
+  HnswRaceTest() {
+    num_threads_ = 4;
+  }
+};
+
+TEST_F(HnswRaceTest, HnswKnnDeleteRaceCrash) {
+  constexpr int kDim = 128;
+  constexpr int kNumDocs = 5000;
+  // Only delete the K nearest docs to the query: these are guaranteed to appear
+  // in every KNN result, so every deletion is a potential crash trigger.
+  constexpr int kK = 200;
+
+  auto make_vec = [&](float seed) -> std::string {
+    std::string s(kDim * sizeof(float), '\0');
+    for (int j = 0; j < kDim; ++j) {
+      float v = seed + static_cast<float>(j) * 0.001f;
+      memcpy(s.data() + j * sizeof(float), &v, sizeof(float));
+    }
+    return s;
+  };
+
+  Run({"FT.CREATE",
+       "hnsw_race_idx",
+       "ON",
+       "HASH",
+       "PREFIX",
+       "1",
+       "doc:",
+       "SCHEMA",
+       "vec",
+       "VECTOR",
+       "HNSW",
+       "10",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       absl::StrCat(kDim),
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16",
+       "EF_CONSTRUCTION",
+       "200"});
+
+  for (int i = 0; i < kNumDocs; ++i)
+    Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+
+  const std::string kQueryVec = make_vec(0.0f);
+  std::atomic<bool> done{false};
+
+  auto search_fiber = pp_->at(3)->LaunchFiber([&] {
+    for (int i = 0; i < 50 && !done.load(); ++i) {
+      auto resp = Run({"FT.SEARCH", "hnsw_race_idx",
+                       absl::StrCat("*=>[KNN ", kK, " @vec $vec EF_RUNTIME 50000]"), "PARAMS", "2",
+                       "vec", kQueryVec, "DIALECT", "2"});
+      EXPECT_NE(resp.type, RespExpr::ERROR);
+    }
+    done.store(true);
+  });
+
+  auto make_del_fiber = [&](int thread_idx) {
+    return pp_->at(thread_idx)->LaunchFiber([&, thread_idx] {
+      while (!done.load()) {
+        for (int i = 0; i < kK && !done.load(); ++i) {
+          Run({"DEL", absl::StrCat("doc:", i)});
+          Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+        }
+      }
+    });
+  };
+
+  auto del0 = make_del_fiber(0);
+  auto del1 = make_del_fiber(1);
+  auto del2 = make_del_fiber(2);
+
+  search_fiber.Join();
+  del0.Join();
+  del1.Join();
+  del2.Join();
 }
 
 }  // namespace dfly

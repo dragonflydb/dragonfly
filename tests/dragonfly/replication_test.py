@@ -2167,7 +2167,11 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     ), f"Weak testcase: policy based eviction was not triggered. {await c_master.info()}"
 
     await check_all_replicas_finished([c_replica], c_master)
+
+    # KEYS may trigger lazy expiry on master, generating DELs not yet received by replica.
+    # Fetch master keys first, then re-sync to ensure replica applies any resulting DELs.
     keys_master = await c_master.execute_command("keys k*")
+    await check_all_replicas_finished([c_replica], c_master)
     keys_replica = await c_replica.execute_command("keys k*")
 
     assert set(keys_replica).difference(keys_master) == set()

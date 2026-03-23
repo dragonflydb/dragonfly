@@ -67,8 +67,14 @@ class RdbLoaderBase {
     std::vector<int64_t> counters;
   };
 
+  struct RdbTOPK {
+    uint32_t k, width, depth;
+    double decay;
+    std::vector<std::pair<std::string, uint32_t>> heap_items;  // parsed one by one
+    std::string counters_buffer;  // Unstructured: raw bytes dumped from memory
+  };
   using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
-                                  std::unique_ptr<LoadTrace>, RdbSBF, RdbCMS>;
+                                  std::unique_ptr<LoadTrace>, RdbSBF, RdbCMS, RdbTOPK>;
 
   struct OpaqueObj {
     RdbVariant obj;
@@ -185,6 +191,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadSBF();
   ::io::Result<OpaqueObj> ReadSBF2();
   ::io::Result<OpaqueObj> ReadCMS();
+  ::io::Result<OpaqueObj> ReadTOPK();
 
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
