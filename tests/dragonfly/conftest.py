@@ -575,8 +575,8 @@ def pytest_runtest_makereport(item, call):
 
 
 @pytest.fixture(scope="function")
-def redis_server(port_picker) -> RedisServer:
-    s = RedisServer(port_picker.get_available_port())
+def redis_server(port_picker, df_log_dir) -> RedisServer:
+    s = RedisServer(port_picker.get_available_port(), log_dir=df_log_dir)
     try:
         s.start()
     except FileNotFoundError as e:

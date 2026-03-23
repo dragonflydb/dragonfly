@@ -510,16 +510,19 @@ class DflyInstanceFactory:
 
 
 class RedisServer:
-    def __init__(self, port):
+    def __init__(self, port, log_dir=None):
         self.port = port
         self.proc = None
+        self.log_dir = log_dir
+        self.server_bin = None
 
     def start(self, redis7=None, **kwargs):
         servers = ["redis-server-7.2.2"]
         if not redis7:
             servers += ["redis-server-6.2.11", "valkey-server-8.0.1"]
+        self.server_bin = random.choice(servers)
         command = [
-            random.choice(servers),
+            self.server_bin,
             f"--port {self.port}",
             "--save ''",
             "--appendonly no",
@@ -527,6 +530,12 @@ class RedisServer:
             "--repl-diskless-sync yes",
             "--repl-diskless-sync-delay 0",
         ]
+
+        if self.log_dir:
+            bin_name = os.path.basename(self.server_bin)
+            log_path = os.path.join(self.log_dir, f"{bin_name}-{self.port}.log")
+            command.extend(["--logfile", log_path])
+
         # Convert kwargs to command-line arguments
         for key, value in kwargs.items():
             if value is None:
@@ -535,9 +544,16 @@ class RedisServer:
                 command.append(f"--{key} {value}")
 
         self.proc = subprocess.Popen(command)
-        logging.debug(self.proc.args)
+        logging.info(f"Started {self.server_bin} on port {self.port}, pid={self.proc.pid}")
 
     def stop(self):
+        ret = self.proc.poll()
+        if ret is not None:
+            logging.error(
+                f"{self.server_bin} (port={self.port}, pid={self.proc.pid}) "
+                f"already exited with code {ret}"
+            )
+            return
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
