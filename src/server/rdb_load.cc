@@ -315,15 +315,13 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
   if (!src.counters_buffer.empty()) {
     const size_t sz = src.counters_buffer.size();
     DCHECK_EQ(sz % sizeof(uint32_t), 0u);
-
-    size_t counter_count = sz / sizeof(uint32_t);
-    std::vector<uint32_t> counters(counter_count);
+    const size_t counter_count = sz / sizeof(uint32_t);
+    data.counters.resize(counter_count);
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(src.counters_buffer.data());
 
     for (size_t i = 0; i < counter_count; ++i) {
-      counters[i] = absl::little_endian::Load32(bytes + (i * sizeof(uint32_t)));
+      data.counters[i] = absl::little_endian::Load32(bytes + (i * sizeof(uint32_t)));
     }
-    data.counters = std::move(counters);
   }
 
   topk->Deserialize(data);
