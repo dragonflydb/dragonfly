@@ -4528,4 +4528,22 @@ TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
 }
 
+TEST_F(SearchFamilyTest, AggregateGroupByHugeNargsDoesNotCrash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Intentionally invalid float32 value (1 byte instead of 4).
+  Run({"HSET", "d", "vec", "x"});
+
+  // GROUPBY 9999999999999 — exceeds the 128 TiB x86-64 virtual address space, so
+  // fields.reserve() always fails regardless of RLIMIT_AS.  Must return an error, not crash.
+  auto resp = Run({"FT.AGGREGATE", "idx",
+                   "@vec:[VECTOR_RANGE 0.01 $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS", "2",
+                   "vec", "far", "GROUPBY", "9999999999999", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("bad arguments"));
+
+  // Server must still be alive and respond correctly after the oversized GROUPBY.
+  EXPECT_THAT(Run({"PING"}), "PONG");
+}
+
 }  // namespace dfly

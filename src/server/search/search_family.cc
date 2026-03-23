@@ -593,7 +593,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       size_t num_fields = parser->Next<size_t>();
 
       std::vector<std::string> fields;
-      fields.reserve(num_fields);
+      fields.reserve(std::min(num_fields, parser->Tail().size()));
       while (parser->HasNext() && num_fields > 0) {
         auto parsed_field = ParseFieldWithAtSign(parser);
         if (!parsed_field) {
