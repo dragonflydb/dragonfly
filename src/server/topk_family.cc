@@ -5,6 +5,7 @@
 #include "server/topk_family.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
 #include "core/topk.h"
@@ -171,6 +172,11 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError("k must be greater than 0");
   }
 
+  static constexpr uint32_t kMax = 100'000;  // Limit to prevent excessive memory usage (OOM)
+  if (k > kMax) {
+    return rb->SendError(absl::StrCat("k exceeds maximum allowed value of ", kMax));
+  }
+
   // Optional parameters
   uint32_t width = TOPK::kDefaultWidth;
   uint32_t depth = TOPK::kDefaultDepth;
@@ -184,6 +190,15 @@ void TopkFamily::Reserve(CmdArgList args, CommandContext* cmd_cntx) {
 
     if ((width == 0) || (depth == 0)) {
       return rb->SendError("width and depth must be greater than 0");
+    }
+
+    // Width capped at 1M. Depth capped at 100 (which is already overkill).
+    // Max theoretical memory: 1,000,000 * 100 * 4 bytes = ~400 MB. (Safe!)
+    static constexpr uint32_t kMaxWidth = 1'000'000;
+    static constexpr uint32_t kMaxDepth = 100;
+    if ((width > kMaxWidth) || (depth > kMaxDepth)) {
+      return rb->SendError(absl::StrCat("width must not exceed ", kMaxWidth,
+                                        " and depth must not exceed ", kMaxDepth));
     }
 
     if (!std::isfinite(decay) || (decay < 0.0) || (decay > 1.0)) {
@@ -416,7 +431,7 @@ using CI = CommandId;
 #define HFUNC(x) SetHandler(&TopkFamily::x)
 
 void RegisterTopkFamily(CommandRegistry* registry) {
-  registry->StartFamily(acl::BLOOM);
+  registry->StartFamily(acl::TOPK);
   *registry << CI{"TOPK.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Reserve)
             << CI{"TOPK.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Add)
             << CI{"TOPK.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
