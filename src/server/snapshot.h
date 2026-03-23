@@ -99,8 +99,8 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Journal listener
-  void ConsumeJournalChange(const journal::JournalChangeItem& item) override;
-  void ThrottleIfNeeded() override;
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
+  void ThrottleIfNeeded() final;
 
  private:
   [[maybe_unused]] void SerializeIndexMapping(

@@ -11,8 +11,7 @@
 
 namespace dfly {
 
-SerializerBase::SerializerBase(DbSlice* slice)
-    : db_slice_(slice), db_array_(slice ? slice->databases() : DbTableArray{}) {
+SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
   DCHECK(db_slice_);
 }
 
@@ -76,7 +75,7 @@ std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bu
     return std::nullopt;
   }
 
-  // Check if this bucker is currently being serialized
+  // Check if this bucket is currently being serialized
   if (bucket_states_.contains(it.bucket_address())) {
     ++stats_.change_during_serialization;
     return std::nullopt;
