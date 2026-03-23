@@ -215,12 +215,16 @@ TEST_F(TopkFamilyTest, ReserveTrailingArgs) {
   EXPECT_THAT(Run({"topk.reserve", "tk", "5", "8", "7", "0.9", "extra"}), ErrArg("syntax error"));
 }
 
-// Tests that TOPK.RESERVE safely rejects dimensions that would cause integer overflow
-// in the counter array allocation (width * depth * sizeof(uint32_t) > SIZE_MAX).
-TEST_F(TopkFamilyTest, ReserveDimensionsTooLarge) {
-  // width = 4 billion, depth = 4 billion → overflow in width * depth * sizeof(uint32_t).
-  auto resp = Run({"topk.reserve", "tk", "50", "4000000000", "4000000000", "0.9"});
-  EXPECT_THAT(resp, ErrArg("too large"));
+// Tests that TOPK.RESERVE safely rejects dimensions that exceed our hard caps,
+// preventing massive memory allocations (DoS protection).
+TEST_F(TopkFamilyTest, ReserveDimensionsExceedCaps) {
+  // width = 1,000,001 (exceeds kMaxWidth of 1,000,000)
+  auto resp1 = Run({"topk.reserve", "tk1", "50", "1000001", "7", "0.9"});
+  EXPECT_THAT(resp1, ErrArg("must not exceed"));
+
+  // depth = 101 (exceeds kMaxDepth of 100)
+  auto resp2 = Run({"topk.reserve", "tk2", "50", "100000", "101", "0.9"});
+  EXPECT_THAT(resp2, ErrArg("must not exceed"));
 }
 
 // =============================================================================

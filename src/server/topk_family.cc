@@ -2,8 +2,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/topk_family.h"
-
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
@@ -11,6 +9,7 @@
 #include "core/topk.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/reply_builder.h"
+#include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/db_slice.h"
 #include "server/error.h"
@@ -21,6 +20,16 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+
+struct TopkFamily {
+  static void Reserve(CmdArgList args, CommandContext* cmd_cntx);
+  static void Add(CmdArgList args, CommandContext* cmd_cntx);
+  static void IncrBy(CmdArgList args, CommandContext* cmd_cntx);
+  static void Query(CmdArgList args, CommandContext* cmd_cntx);
+  static void Count(CmdArgList args, CommandContext* cmd_cntx);
+  static void List(CmdArgList args, CommandContext* cmd_cntx);
+  static void Info(CmdArgList args, CommandContext* cmd_cntx);
+};
 
 namespace {
 
