@@ -761,7 +761,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       ssize_t diff_existing = 0;
       auto* new_node = SplitNode(node, it.offset_, after, &diff_existing);
       auto func = after ? LP_Prepend : LP_Append;
-      malloc_size_ += NodeSetEntry(new_node, func(new_node->entry, elem));
+      new_node->entry = func(new_node->entry, elem);
+      new_node->sz = lpBytes(new_node->entry);
       new_node->count++;
       InsertNode(node, new_node, node_id, insert_opt);
       MergeNodes(node);
@@ -769,6 +770,9 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
     }
   }
   count_++;
+  if (len_ == 1) {
+    DCHECK_EQ(malloc_size_, head_->sz);
+  }
 }
 
 void QList::Replace(Iterator it, std::string_view elem) {
