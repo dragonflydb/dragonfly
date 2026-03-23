@@ -430,10 +430,27 @@ TEST(TOPKBasic, MallocUsedIncreaseWithHeapGrowth) {
 // Serialize / Deserialize
 // ---------------------------------------------------------------------------
 
+// Helper to manually pack the struct for testing. Actual serialization is done in production code
+// in topk_save.cc, but we want to test the core logic of Serialize/Deserialize here in isolation
+// without involving RDB buffer code.
+static TOPK::SerializedData ExtractData(const TOPK& topk) {
+  TOPK::SerializedData data;
+  data.k = topk.K();
+  data.width = topk.Width();
+  data.depth = topk.Depth();
+  data.decay = topk.Decay();
+  for (const auto& item : topk.List()) {
+    data.heap_items.push_back({item.count, item.item});
+  }
+  const auto& counters = topk.Counters();
+  data.counters.assign(counters.begin(), counters.end());
+  return data;
+}
+
 // After Serialize() + Deserialize(), K(), Width(), Depth(), Decay() are unchanged.
 TEST_F(TOPKTest, SerializeRoundTripPreservesConfiguration) {
   topk_.IncrBy("a", 10);
-  auto data = topk_.Serialize();
+  auto data = ExtractData(topk_);
 
   TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
@@ -450,7 +467,7 @@ TEST_F(TOPKTest, SerializeRoundTripPreservesHeapItems) {
   topk_.IncrBy("beta", 50);
   topk_.IncrBy("gamma", 25);
 
-  auto data = topk_.Serialize();
+  auto data = ExtractData(topk_);
   TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
@@ -468,7 +485,7 @@ TEST_F(TOPKTest, SerializeRoundTripPreservesCounters) {
   topk_.IncrBy("foo", 42);
   topk_.IncrBy("bar", 77);
 
-  auto data = topk_.Serialize();
+  auto data = ExtractData(topk_);
   TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
@@ -482,7 +499,7 @@ TEST_F(TOPKTest, DeserializeRebuildsValidHeapProperty) {
     topk_.IncrBy(absl::StrCat("pre", i), 10);
   }
 
-  auto data = topk_.Serialize();
+  auto data = ExtractData(topk_);
   TOPK restored(PMR_NS::get_default_resource(), data.k, data.width, data.depth, data.decay);
   restored.Deserialize(data);
 
@@ -495,7 +512,7 @@ TEST_F(TOPKTest, DeserializeRebuildsValidHeapProperty) {
 // Serializing a fresh TOPK produces empty heap_items and a zero-filled counters vector.
 TEST(TOPKBasic, SerializeEmptyTOPK) {
   TOPK topk(PMR_NS::get_default_resource(), 5, 100, 5, 0.0);
-  auto data = topk.Serialize();
+  auto data = ExtractData(topk);
 
   EXPECT_TRUE(data.heap_items.empty());
   EXPECT_EQ(data.counters.size(), 100u * 5);

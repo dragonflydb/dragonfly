@@ -328,25 +328,6 @@ size_t TOPK::MallocUsed() const {
   return size;
 }
 
-TOPK::SerializedData TOPK::Serialize() const {
-  SerializedData data;
-  data.k = k_;
-  data.width = width_;
-  data.depth = depth_;
-  data.decay = decay_;
-
-  // Serialize heap items
-  data.heap_items.reserve(min_heap_.size());
-  for (const auto& heap_item : min_heap_) {
-    data.heap_items.push_back({heap_item.count, heap_item.key});
-  }
-
-  // Serialize counter array
-  data.counters.assign(counters_.begin(), counters_.end());
-
-  return data;
-}
-
 void TOPK::Deserialize(const SerializedData& data) {
   DCHECK_EQ(data.counters.size(), static_cast<size_t>(width_) * depth_);
   DCHECK_LE(data.heap_items.size(), k_);

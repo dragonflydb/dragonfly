@@ -148,6 +148,12 @@ class TOPK {
     return decay_;
   }
 
+  // Returns a read-only view of the raw counter array (width × depth entries).
+  // Use this instead of Serialize() when you only need to stream the counters.
+  [[nodiscard]] const auto& Counters() const {
+    return counters_;
+  }
+
   // Calculates the total heap memory dynamically allocated by this Top-K instance,
   // including sketch counters, min-heap allocations, and hash map overhead.
   //
@@ -167,9 +173,6 @@ class TOPK {
     std::vector<TopKItem> heap_items;
     std::vector<uint32_t> counters;
   };
-
-  // Extracts the current structural state of the sketch for RDB persistence.
-  [[nodiscard]] SerializedData Serialize() const;
 
   // Reconstructs the internal state of the sketch from a previously serialized dataset.
   void Deserialize(const SerializedData& data);

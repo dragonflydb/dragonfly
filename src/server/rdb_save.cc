@@ -684,18 +684,19 @@ std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
   size_t num_counters = cms->NumCounters();
   const int64_t* data = cms->Data();
 
-  // Serialize counters as little-endian 64-bit values, streaming in fixed-size stack chunks
-  // to avoid an O(N) temporary heap allocation.
-  constexpr size_t kChunkCounters = 512;  // 4KB stack buffer
-  uint8_t chunk_buf[kChunkCounters * sizeof(uint64_t)];
+  // Serialize counters as little-endian 64-bit values, streaming in fixed-size chunks
+  // to avoid an O(N) memory spike. We allocate this 4KB buffer on the heap
+  // to respect Dragonfly's small fiber stack limits.
+  constexpr size_t kChunkCounters = 512;
+  std::vector<uint8_t> chunk_buf(kChunkCounters * sizeof(uint64_t));
   size_t i{};
   while (i < num_counters) {
     size_t chunk_count = std::min(kChunkCounters, num_counters - i);
     for (size_t j{}; j < chunk_count; ++j, ++i) {
-      absl::little_endian::Store64(chunk_buf + (j * sizeof(uint64_t)),
+      absl::little_endian::Store64(chunk_buf.data() + (j * sizeof(uint64_t)),
                                    static_cast<uint64_t>(data[i]));
     }
-    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf, chunk_count * sizeof(uint64_t)}));
+    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf.data(), chunk_count * sizeof(uint64_t)}));
   }
 
   return {};
@@ -703,35 +704,36 @@ std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
 
 std::error_code RdbSerializer::SaveTOPKObject(const PrimeValue& pv) {
   TOPK* topk = pv.GetTOPK();
-  auto data = topk->Serialize();
 
   RETURN_ON_ERR(SaveLen(0));  // Options (reserved)
-  RETURN_ON_ERR(SaveLen(data.k));
-  RETURN_ON_ERR(SaveLen(data.width));
-  RETURN_ON_ERR(SaveLen(data.depth));
-  RETURN_ON_ERR(SaveBinaryDouble(data.decay));
+  RETURN_ON_ERR(SaveLen(topk->K()));
+  RETURN_ON_ERR(SaveLen(topk->Width()));
+  RETURN_ON_ERR(SaveLen(topk->Depth()));
+  RETURN_ON_ERR(SaveBinaryDouble(topk->Decay()));
 
-  // Save heap items (top-k list)
-  RETURN_ON_ERR(SaveLen(data.heap_items.size()));
-  for (const auto& item : data.heap_items) {
+  // Save heap items (top-k list). O(K) - always small, safe to copy.
+  auto heap_items = topk->List();
+  RETURN_ON_ERR(SaveLen(heap_items.size()));
+  for (const auto& item : heap_items) {
     RETURN_ON_ERR(SaveString(item.item));
     RETURN_ON_ERR(SaveLen(item.count));
   }
 
-  // Save counter array as a length-prefixed blob, streaming in fixed-size stack chunks
-  // to avoid an O(N) temporary heap allocation.
-  const size_t total_bytes = data.counters.size() * sizeof(uint32_t);
+  // Stream the counter array directly from the internal PMR vector — no O(N) copy.
+  // Use a 4KB heap buffer to respect Dragonfly's small fiber stack limits.
+  const auto& counters = topk->Counters();
+  const size_t total_bytes = counters.size() * sizeof(uint32_t);
   RETURN_ON_ERR(SaveLen(total_bytes));
 
-  constexpr size_t kChunkCounters = 1024;  // 4KB stack buffer
-  uint8_t chunk_buf[kChunkCounters * sizeof(uint32_t)];
+  constexpr size_t kChunkCounters = 1024;
+  std::vector<uint8_t> chunk_buf(kChunkCounters * sizeof(uint32_t));
   size_t i{};
-  while (i < data.counters.size()) {
-    size_t chunk_count = std::min(kChunkCounters, data.counters.size() - i);
+  while (i < counters.size()) {
+    size_t chunk_count = std::min(kChunkCounters, counters.size() - i);
     for (size_t j{}; j < chunk_count; ++j, ++i) {
-      absl::little_endian::Store32(chunk_buf + (j * sizeof(uint32_t)), data.counters[i]);
+      absl::little_endian::Store32(chunk_buf.data() + (j * sizeof(uint32_t)), counters[i]);
     }
-    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf, chunk_count * sizeof(uint32_t)}));
+    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf.data(), chunk_count * sizeof(uint32_t)}));
   }
 
   return {};
