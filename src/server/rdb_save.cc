@@ -31,6 +31,7 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/topk.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -205,6 +206,8 @@ uint8_t RdbObjectType(const CompactObj& pv) {
       return absl::GetFlag(FLAGS_rdb_sbf_chunked) ? RDB_TYPE_SBF2 : RDB_TYPE_SBF;
     case OBJ_CMS:
       return RDB_TYPE_CMS;
+    case OBJ_TOPK:
+      return RDB_TYPE_TOPK;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -360,6 +363,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_CMS) {
     return SaveCMSObject(pv);
+  }
+
+  if (obj_type == OBJ_TOPK) {
+    return SaveTOPKObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -677,13 +684,57 @@ std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
   size_t num_counters = cms->NumCounters();
   const int64_t* data = cms->Data();
 
-  // Serialize counters as little-endian 64-bit values
-  std::vector<uint64_t> buf(num_counters);
-  for (size_t i = 0; i < num_counters; ++i) {
-    absl::little_endian::Store64(&buf[i], static_cast<uint64_t>(data[i]));
+  // Serialize counters as little-endian 64-bit values, streaming in fixed-size chunks
+  // to avoid an O(N) memory spike. We allocate this 4KB buffer on the heap
+  // to respect Dragonfly's small fiber stack limits.
+  constexpr size_t kChunkCounters = 512;
+  std::vector<uint8_t> chunk_buf(kChunkCounters * sizeof(uint64_t));
+  size_t i{};
+  while (i < num_counters) {
+    size_t chunk_count = std::min(kChunkCounters, num_counters - i);
+    for (size_t j{}; j < chunk_count; ++j, ++i) {
+      absl::little_endian::Store64(chunk_buf.data() + (j * sizeof(uint64_t)),
+                                   static_cast<uint64_t>(data[i]));
+    }
+    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf.data(), chunk_count * sizeof(uint64_t)}));
   }
-  RETURN_ON_ERR(
-      WriteRaw(Bytes{reinterpret_cast<const uint8_t*>(buf.data()), buf.size() * sizeof(uint64_t)}));
+
+  return {};
+}
+
+std::error_code RdbSerializer::SaveTOPKObject(const PrimeValue& pv) {
+  TOPK* topk = pv.GetTOPK();
+
+  RETURN_ON_ERR(SaveLen(0));  // Options (reserved)
+  RETURN_ON_ERR(SaveLen(topk->K()));
+  RETURN_ON_ERR(SaveLen(topk->Width()));
+  RETURN_ON_ERR(SaveLen(topk->Depth()));
+  RETURN_ON_ERR(SaveBinaryDouble(topk->Decay()));
+
+  // Save heap items (top-k list). O(K) - always small, safe to copy.
+  auto heap_items = topk->List();
+  RETURN_ON_ERR(SaveLen(heap_items.size()));
+  for (const auto& item : heap_items) {
+    RETURN_ON_ERR(SaveString(item.item));
+    RETURN_ON_ERR(SaveLen(item.count));
+  }
+
+  // Stream the counter array directly from the internal PMR vector — no O(N) copy.
+  // Use a 4KB heap buffer to respect Dragonfly's small fiber stack limits.
+  const auto& counters = topk->Counters();
+  const size_t total_bytes = counters.size() * sizeof(uint32_t);
+  RETURN_ON_ERR(SaveLen(total_bytes));
+
+  constexpr size_t kChunkCounters = 1024;
+  std::vector<uint8_t> chunk_buf(kChunkCounters * sizeof(uint32_t));
+  size_t i{};
+  while (i < counters.size()) {
+    size_t chunk_count = std::min(kChunkCounters, counters.size() - i);
+    for (size_t j{}; j < chunk_count; ++j, ++i) {
+      absl::little_endian::Store32(chunk_buf.data() + (j * sizeof(uint32_t)), counters[i]);
+    }
+    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf.data(), chunk_count * sizeof(uint32_t)}));
+  }
 
   return {};
 }

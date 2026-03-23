@@ -155,10 +155,13 @@ jobs:
         set -eu
         mkdir -p ${{ env.RELEASE_DIR }}
         tar -xzf results-artifacts/dragonfly-*dbgsym.tar.gz -C ${{ env.RELEASE_DIR }}
+        ls -lh results-artifacts/
+        ls -lh ${{ env.RELEASE_DIR }}/
+
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
-        dfly-executable: ${{ matrix.binary }}
+        dfly-executable: dragonfly
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
         build-folder-name: ${{ env.RELEASE_DIR }}
         filter: 'not debug_only'

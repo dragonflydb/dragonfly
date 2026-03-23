@@ -145,8 +145,6 @@ class DbSlice {
 
   using Iterator = IteratorT<PrimeIterator>;
   using ConstIterator = IteratorT<PrimeConstIterator>;
-  using ExpIterator = IteratorT<ExpireIterator>;
-  using ExpConstIterator = IteratorT<ExpireConstIterator>;
 
   class AutoUpdater {
    public:
@@ -235,10 +233,6 @@ class DbSlice {
   // Returns slot statistics for db 0.
   SlotStats GetSlotStats(SlotId sid) const;
 
-  void UpdateExpireBase(uint64_t now, unsigned generation) {
-    expire_base_[generation & 1] = now;
-  }
-
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
     bytes_per_object_ = bytes_per_object;
@@ -252,17 +246,8 @@ class DbSlice {
     return bytes_per_object_;
   }
 
-  int64_t ExpireTime(const ExpirePeriod& val) const {
-    return expire_base_[0] + val.duration_ms();
-  }
-
-  ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {
-    return ExpirePeriod{time_ms - expire_base_[0]};
-  }
-
   struct ItAndUpdater {
     Iterator it;
-    ExpIterator exp_it;
     AutoUpdater post_updater;
     bool is_new = false;
   };
@@ -271,12 +256,7 @@ class DbSlice {
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
 
-  struct ItAndExpConst {
-    ConstIterator it;
-    ExpConstIterator exp_it;
-  };
-
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
+  ConstIterator FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
 
@@ -301,9 +281,9 @@ class DbSlice {
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
 
-  // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
+  // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
-  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
+  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          const ExpireParams& params);
 
   // Adds expiry on a key. If the key already has expiry, updates it.
@@ -378,8 +358,8 @@ class DbSlice {
     return db_arr_[id].get();
   }
 
-  std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
-    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime, nullptr);
+  PrimeTable* GetTables(DbIndex id) {
+    return &db_arr_[id]->prime;
   }
 
   // Returns existing keys count in the db.
@@ -390,12 +370,8 @@ class DbSlice {
   }
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
-  // from both tables and return Iterator{}.
-  struct ItAndExp {
-    Iterator it;
-    ExpIterator exp_it;
-  };
-  ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it) const;
+  // and returns Iterator{}.
+  Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -570,8 +546,7 @@ class DbSlice {
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
                                                const DbTableArray& db_arr) const;
 
-  void PerformDeletionAtomic(const Iterator& del_it, const ExpIterator& exp_it, DbTable* table,
-                             bool async = false);
+  void PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async = false);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
@@ -585,17 +560,12 @@ class DbSlice {
     kMutableStats,
   };
 
-  struct PrimeItAndExp {
-    PrimeIterator it;
-    ExpireIterator exp_it;
-  };
-
-  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
 
-  OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
+  OpResult<PrimeIterator> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
                                        UpdateStatsMode stats_mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
@@ -618,7 +588,6 @@ class DbSlice {
 
   EngineShard* owner_;
 
-  int64_t expire_base_[2];  // Used for expire logic, represents a real clock.
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
@@ -711,14 +680,6 @@ inline bool IsValid(const DbSlice::Iterator& it) {
 }
 
 inline bool IsValid(const DbSlice::ConstIterator& it) {
-  return dfly::IsValid(it.GetInnerIt());
-}
-
-inline bool IsValid(const DbSlice::ExpIterator& it) {
-  return dfly::IsValid(it.GetInnerIt());
-}
-
-inline bool IsValid(const DbSlice::ExpConstIterator& it) {
   return dfly::IsValid(it.GetInnerIt());
 }
 

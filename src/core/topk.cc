@@ -253,7 +253,7 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
   result.reserve(min_heap_.size());
 
   for (const auto& heap_item : min_heap_) {
-    result.push_back({heap_item.key, heap_item.count});
+    result.push_back({heap_item.count, heap_item.key});
   }
 
   // Sort by count (descending) for output
@@ -326,25 +326,6 @@ size_t TOPK::MallocUsed() const {
   }
 
   return size;
-}
-
-TOPK::SerializedData TOPK::Serialize() const {
-  SerializedData data;
-  data.k = k_;
-  data.width = width_;
-  data.depth = depth_;
-  data.decay = decay_;
-
-  // Serialize heap items
-  data.heap_items.reserve(min_heap_.size());
-  for (const auto& heap_item : min_heap_) {
-    data.heap_items.push_back({heap_item.key, heap_item.count});
-  }
-
-  // Serialize counter array
-  data.counters.assign(counters_.begin(), counters_.end());
-
-  return data;
 }
 
 void TOPK::Deserialize(const SerializedData& data) {
