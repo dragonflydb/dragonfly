@@ -1484,6 +1484,12 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
   shared_ptr<DocIndex> index_info;
   atomic_uint num_deleted{0};
 
+  // Collect dropped indices per shard. We must NOT destroy ShardDocIndex inside the transaction
+  // callback because it runs on the shard's FiberQueue, and ~ShardDocIndex -> CancelBuilder ->
+  // IndexBuilder::Cancel joins the builder fiber. If the builder's VectorLoop dispatched work
+  // to the same FiberQueue (via shard_set->Await), joining from within the FiberQueue deadlocks.
+  vector<unique_ptr<ShardDocIndex>> dropped(shard_set->size());
+
   auto cb = [&](Transaction* t, EngineShard* es) {
     // Get index info from first shard for global cleanup
     if (es->shard_id() == 0) {
@@ -1500,7 +1506,6 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
 
     // If DD is set, delete all documents that were in the index
     if (delete_docs) {
-      // Get const reference to document keys map (index will be destroyed after this scope)
       const auto& doc_keys = index->key_index().GetDocKeysMap();
 
       auto op_args = t->GetOpArgs(es);
@@ -1514,10 +1519,19 @@ void CmdFtDropIndex(CmdArgList args, CommandContext* cmd_cntx) {
       }
     }
 
+    // Defer destruction — will be destroyed on the shard thread after the transaction.
+    dropped[es->shard_id()] = std::move(index);
     return OpStatus::OK;
   };
 
   cmd_cntx->tx()->Execute(cb, true);
+
+  // Destroy indices on their shard threads outside the FiberQueue.
+  // ~ShardDocIndex calls CancelBuilder which joins the builder fiber. We must not run this
+  // on the FiberQueue because the builder's VectorLoop may have work queued on the same
+  // FiberQueue — joining from within the FiberQueue consumer would deadlock.
+  shard_set->RunBlockingInParallel(
+      [&dropped](EngineShard* es) { dropped[es->shard_id()].reset(); });
 
   if (index_info) {
     for (const auto& [field_ident, field_info] : index_info->schema.fields) {
