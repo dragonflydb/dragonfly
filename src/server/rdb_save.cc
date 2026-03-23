@@ -684,13 +684,19 @@ std::error_code RdbSerializer::SaveCMSObject(const PrimeValue& pv) {
   size_t num_counters = cms->NumCounters();
   const int64_t* data = cms->Data();
 
-  // Serialize counters as little-endian 64-bit values
-  std::vector<uint64_t> buf(num_counters);
-  for (size_t i = 0; i < num_counters; ++i) {
-    absl::little_endian::Store64(&buf[i], static_cast<uint64_t>(data[i]));
+  // Serialize counters as little-endian 64-bit values, streaming in fixed-size stack chunks
+  // to avoid an O(N) temporary heap allocation.
+  constexpr size_t kChunkCounters = 512;  // 4KB stack buffer
+  uint8_t chunk_buf[kChunkCounters * sizeof(uint64_t)];
+  size_t i{};
+  while (i < num_counters) {
+    size_t chunk_count = std::min(kChunkCounters, num_counters - i);
+    for (size_t j{}; j < chunk_count; ++j, ++i) {
+      absl::little_endian::Store64(chunk_buf + (j * sizeof(uint64_t)),
+                                   static_cast<uint64_t>(data[i]));
+    }
+    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf, chunk_count * sizeof(uint64_t)}));
   }
-  RETURN_ON_ERR(
-      WriteRaw(Bytes{reinterpret_cast<const uint8_t*>(buf.data()), buf.size() * sizeof(uint64_t)}));
 
   return {};
 }
