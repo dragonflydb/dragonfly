@@ -358,11 +358,22 @@ def delete_s3_objects(bucket, prefix):
     )
 
 
+def _missing_s3_test_env():
+    return (
+        "DRAGONFLY_S3_BUCKET" not in os.environ
+        or os.environ["DRAGONFLY_S3_BUCKET"] == ""
+        or "AWS_ACCESS_KEY_ID" not in os.environ
+        or os.environ["AWS_ACCESS_KEY_ID"] == ""
+        or "AWS_SECRET_ACCESS_KEY" not in os.environ
+        or os.environ["AWS_SECRET_ACCESS_KEY"] == ""
+    )
+
+
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 async def test_exit_on_s3_snapshot_load_err(df_factory):
     invalid_s3_dir = "s3://{DRAGONFLY_S3_BUCKET}" + "_invalid_bucket_"
@@ -375,8 +386,8 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
 async def test_s3_snapshot(async_client, tmp_dir):
@@ -408,8 +419,8 @@ async def test_s3_snapshot(async_client, tmp_dir):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args(
     {
@@ -449,8 +460,8 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
-    reason="AWS S3 snapshots bucket is not configured",
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args({**BASIC_ARGS})
 async def test_s3_save_local_dir(async_client, tmp_dir):

@@ -4718,4 +4718,22 @@ TEST_F(HnswRaceTest, HnswKnnDeleteRaceCrash) {
   del2.Join();
 }
 
+TEST_F(SearchFamilyTest, AggregateGroupByHugeNargsDoesNotCrash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Intentionally invalid float32 value (1 byte instead of 4).
+  Run({"HSET", "d", "vec", "x"});
+
+  // GROUPBY 9999999999999 — after the reserve() cap, the parser sees "REDUCE" where it
+  // expects a field name starting with '@', and returns a syntax error.  Must not crash.
+  auto resp = Run({"FT.AGGREGATE", "idx",
+                   "@vec:[VECTOR_RANGE 0.01 $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS", "2",
+                   "vec", "far", "GROUPBY", "9999999999999", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
+
+  // Server must still be alive and respond correctly after the oversized GROUPBY.
+  EXPECT_THAT(Run({"PING"}), "PONG");
+}
+
 }  // namespace dfly

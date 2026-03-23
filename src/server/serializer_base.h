@@ -91,6 +91,16 @@ class SerializerBase {
   // Called while big_value_mu_ is held.
   virtual unsigned DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) = 0;
 
+  // This function is temporary and preserves the old behaviour: OnDbChange pushes delayed
+  // entries and BucketSaveCb in snapshot does not.
+  // It shall be deleted once we switch to two pass bucket serialization and chunking.
+  //
+  // Serialize a single bucket from the OnChange path.  Defaults to DoSerializeBucket().
+  // Subclasses can override when the callback path must preserve behavior that differs
+  // from the main traversal (for example, forcing delayed tiered entries for the bucket
+  // to be flushed before releasing big_value_mu_).
+  virtual unsigned DoSerializeBucketOnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
+
   // --- Change callbacks ---
 
   // Called when an existing bucket is about to be mutated.
