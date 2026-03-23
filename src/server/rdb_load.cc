@@ -1898,15 +1898,15 @@ auto RdbLoaderBase::ReadTOPK() -> io::Result<OpaqueObj> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
+  res.k = static_cast<uint32_t>(k);
+  res.width = static_cast<uint32_t>(width);
+  res.depth = static_cast<uint32_t>(depth);
+
+  SET_OR_UNEXPECT(FetchBinaryDouble(), res.decay);
   if (!std::isfinite(res.decay) || res.decay < 0.0 || res.decay > 1.0) {
     LOG(ERROR) << "Invalid TOPK decay value: " << res.decay;
     return Unexpected(errc::rdb_file_corrupted);
   }
-
-  res.k = static_cast<uint32_t>(k);
-  res.width = static_cast<uint32_t>(width);
-  res.depth = static_cast<uint32_t>(depth);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.decay);
 
   // Load heap items
   uint64_t heap_size;
