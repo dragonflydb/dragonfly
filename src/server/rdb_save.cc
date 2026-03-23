@@ -712,14 +712,21 @@ std::error_code RdbSerializer::SaveTOPKObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(item.count));
   }
 
-  // Save counter array
-  std::string counter_buf;
-  counter_buf.resize(data.counters.size() * sizeof(uint32_t));
-  uint8_t* buf_ptr = reinterpret_cast<uint8_t*>(counter_buf.data());
-  for (size_t i{}; i < data.counters.size(); ++i) {
-    absl::little_endian::Store32(buf_ptr + (i * sizeof(uint32_t)), data.counters[i]);
+  // Save counter array as a length-prefixed blob, streaming in fixed-size stack chunks
+  // to avoid an O(N) temporary heap allocation.
+  const size_t total_bytes = data.counters.size() * sizeof(uint32_t);
+  RETURN_ON_ERR(SaveLen(total_bytes));
+
+  constexpr size_t kChunkCounters = 1024;  // 4KB stack buffer
+  uint8_t chunk_buf[kChunkCounters * sizeof(uint32_t)];
+  size_t i{};
+  while (i < data.counters.size()) {
+    size_t chunk_count = std::min(kChunkCounters, data.counters.size() - i);
+    for (size_t j{}; j < chunk_count; ++j, ++i) {
+      absl::little_endian::Store32(chunk_buf + (j * sizeof(uint32_t)), data.counters[i]);
+    }
+    RETURN_ON_ERR(WriteRaw(Bytes{chunk_buf, chunk_count * sizeof(uint32_t)}));
   }
-  RETURN_ON_ERR(SaveString(counter_buf));
 
   return {};
 }

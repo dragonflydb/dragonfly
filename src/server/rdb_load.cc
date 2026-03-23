@@ -1948,9 +1948,11 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   SET_OR_UNEXPECT(LoadLen(nullptr), width);
   SET_OR_UNEXPECT(LoadLen(nullptr), depth);
 
-  // Validate parameters fit in uint32_t to prevent silent truncation and potential OOM
-  if (width > UINT32_MAX || depth > UINT32_MAX)
+  // Validate parameters: must be positive and fit in uint32_t
+  if ((width == 0) || (depth == 0) || (width > UINT32_MAX) || (depth > UINT32_MAX)) {
+    LOG(ERROR) << "Invalid CMS parameters: width=" << width << ", depth=" << depth;
     return Unexpected(errc::rdb_file_corrupted);
+  }
 
   SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
 
