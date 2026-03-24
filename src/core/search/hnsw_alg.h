@@ -48,6 +48,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   // Locks operations with element by label value
   mutable std::vector<std::mutex> label_op_locks_;
 
+  // Before changing it, grep for "global-hnsw-mutex" in the codebase!
   std::mutex global;
   std::vector<std::mutex> link_list_locks_;
 
