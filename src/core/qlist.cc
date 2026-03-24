@@ -1065,6 +1065,7 @@ void QList::AccessForReads(bool recompress, Node* node) {
       tiering_params_->delete_cb(node);
     }
     DCHECK(!node->io_pending);
+    num_offloaded_nodes_--;
   }
 
   if (node->offloaded) {
@@ -1205,8 +1206,7 @@ void QList::DelNode(Node* node) {
   }
 
   if (tiering_params_ && (node->offloaded || node->io_pending)) {
-    num_offloaded_nodes_--;  // was pre-counted in OffloadNode
-    // Clean up disk segment
+    num_offloaded_nodes_--;
     if (tiering_params_->delete_cb) {
       tiering_params_->delete_cb(node);
     }
@@ -1250,11 +1250,9 @@ void QList::OffloadNode(Node* node) {
   DCHECK(tiering_params_ && node->offloaded == 0);
   if (node->io_pending)
     return;
-
-  num_offloaded_nodes_++;
   stats.offload_requests++;
-  if (tiering_params_->offload_cb) {
-    tiering_params_->offload_cb(node);
+  if (tiering_params_->offload_cb && tiering_params_->offload_cb(node)) {
+    num_offloaded_nodes_++;
   }
 }
 

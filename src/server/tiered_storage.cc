@@ -790,13 +790,16 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredS
   }
 }
 
-void StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
+bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
                    BackPressureFuture* backpressure) {
-  if (auto blobs = ts->ShouldStash(*node); blobs) {
-    node->io_pending = 1;
-    tiering::ListNodeId id{dbid, node, ql};
-    ts->StashPartialValue(id, *blobs, backpressure);
+  std::optional<TieredStorage::StashDescriptor> blobs = ts->ShouldStash(*node);
+  if (!blobs) {
+    return false;
   }
+  node->io_pending = 1;
+  tiering::ListNodeId id{dbid, node, ql};
+  ts->StashPartialValue(id, *blobs, backpressure);
+  return true;
 }
 
 void TieredStorage::StashPartialValue(tiering::PendingId id, const StashDescriptor& blobs,

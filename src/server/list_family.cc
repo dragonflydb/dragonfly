@@ -110,8 +110,10 @@ class ListWrapper {
 
           .node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold),
 
-          .offload_cb = [ts, db_id = db_id_,
-                         ql](QList::Node* node) { StashListNode(db_id, node, ql, ts, nullptr); },
+          .offload_cb =
+              [ts, db_id = db_id_, ql](QList::Node* node) {
+                return StashListNode(db_id, node, ql, ts, nullptr);
+              },
 
           .onload_cb =
               [ts, db_id = db_id_, ql](QList::Node* node) {

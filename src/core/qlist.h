@@ -122,9 +122,10 @@ class QList {
 
   struct TieringParams {
     uint32_t node_depth_threshold = 2;
-    // Called when a node should be offloaded to disk.
-    std::function<void(Node*)> offload_cb;
-    // Called when an offloaded node needs its data loaded back from disk.
+    // Called when a node should be offloaded.
+    // True if node meets criteria for offloading and stashing was initiated.
+    std::function<bool(Node*)> offload_cb;
+    // Called when an offloaded node needs its data loaded back into memory
     std::function<void(Node*)> onload_cb;
     // Called when an offloaded or io_pending node is being deleted.
     std::function<void(Node*)> delete_cb;
