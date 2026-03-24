@@ -72,6 +72,7 @@ class SerializerBase {
   // Transition bucket from DelayedPending -> Covered.
   void CompleteBucketDelayed(BucketIdentity bid);
 
+  // Enqueue a offloaded value for read
   void EnqueueDelayedEntry(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
                            uint32_t mc_flags);
 
@@ -115,10 +116,6 @@ class SerializerBase {
   ThreadLocalMutex big_value_mu_;
   Stats stats_;
 
-  // Delayed entries that are waiting for tiered storage reads to complete before they can be
-  // serialized.
-  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
-
  private:
   friend class SerializerBaseTest;
   SerializerBase() : db_slice_(nullptr) {
@@ -134,6 +131,9 @@ class SerializerBase {
   // Transition bucket from Serializing -> Covered (empty delayed) or
   // Serializing -> DelayedPending (non-empty delayed).
   void FinishBucketIteration(BucketIdentity bid, std::vector<TieredDelayedEntry> delayed);
+
+  // Entries that are waiting for tiered storage reads to complete before they can be serialized.
+  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
   absl::flat_hash_map<BucketIdentity, BucketState> bucket_states_;
   uint64_t change_cb_id_ = 0;

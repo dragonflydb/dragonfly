@@ -139,13 +139,9 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
                   uint64_t expire_ms);
 
   struct Stats {
-    uint64_t buckets_skipped = 0;
-    uint64_t buckets_written = 0;
     uint64_t buckets_loop = 0;
-    uint64_t buckets_on_db_update = 0;
     uint64_t throttle_on_db_update = 0;
     uint64_t throttle_usec_on_db_update = 0;
-    uint64_t keys_written = 0;
     uint64_t keys_skipped = 0;
     uint64_t commands = 0;
     uint64_t iter_skips = 0;

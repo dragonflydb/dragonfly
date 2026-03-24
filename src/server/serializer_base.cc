@@ -5,6 +5,7 @@
 #include "server/serializer_base.h"
 
 #include "base/logging.h"
+#include "redis/redis_aux.h"
 #include "server/common_types.h"
 #include "server/engine_shard.h"
 #include "server/journal/journal.h"
@@ -72,6 +73,10 @@ void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
 
 void SerializerBase::EnqueueDelayedEntry(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
                                          time_t expire_time, uint32_t mc_flags) {
+  DCHECK(pv.IsExternal());
+  DCHECK(!pv.IsCool());
+  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
+
   auto key = pk.ToString();
   auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
@@ -122,13 +127,18 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 void SerializerBase::ProcessDelayedEntries(bool force,
                                            std::vector<TieredDelayEntryKey>* bucket_tiered_keys,
                                            ExecutionState* cntx) {
+  const size_t kMaxDelayedEntries = 512;
+  if (delayed_entries_.size() > kMaxDelayedEntries)
+    force |= true;
+
   using DelayedEntryIt = decltype(delayed_entries_)::iterator;
   auto serialize_entry = [&](DelayedEntryIt it) {
     auto& entry = it->second;
     auto value = entry->value.Get();
 
     if (!value.has_value()) {
-      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
+      cntx->ReportError(make_error_code(std::errc::io_error),
+                        absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
     }
 

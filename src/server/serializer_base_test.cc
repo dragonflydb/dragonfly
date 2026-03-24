@@ -29,6 +29,9 @@ class SerializerBaseTest : public BaseFamilyTest, public SerializerBase {
                            bool /* on_update */) override {
     return 0;
   }
+
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
+  }
 };
 
 // --- State-machine tests ---

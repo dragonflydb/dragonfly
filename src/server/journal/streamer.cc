@@ -508,12 +508,13 @@ void RestoreStreamer::Run() {
 }
 
 void RestoreStreamer::SendFinalize(long attempt) {
+  auto base_stats = SerializerBase::GetStats();
   VLOG(1) << "RestoreStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
           << db_slice_->shard_id() << " attempt " << attempt << " with " << stats_.commands
           << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
-          << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
-          << ", buckets written " << stats_.buckets_written << ". Keys skipped "
-          << stats_.keys_skipped << ", keys written " << stats_.keys_written
+          << base_stats.buckets_on_change << ", buckets skipped " << base_stats.buckets_skipped
+          << ", buckets written " << base_stats.buckets_serialized << ". Keys skipped "
+          << stats_.keys_skipped << ", keys written " << base_stats.keys_serialized
           << " throttle count: " << throttle_count_
           << ", throttle on db update: " << stats_.throttle_on_db_update
           << ", throttle usec on db update: " << stats_.throttle_usec_on_db_update
@@ -575,6 +576,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
+// TODO(vlad): 80% similar with Snapshot::SerializeBucket. Move common parts
 unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::bucket_iterator it,
                                           bool on_update) {
   auto& shard_stats = EngineShard::tlocal()->stats();
@@ -614,13 +616,8 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
     }
   }
 
-  if (tiering_enabled) {
-    // Push tracked tiered keys forcefully. If there are too many delayed entries
-    // accumulated we should also push them forcefully.
-    const size_t kMaxDelayedEntries = 512;
-    ProcessDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
-                          track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
-  }
+  if (tiering_enabled)
+    ProcessDelayedEntries(false, track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
 
   // we don't need throttle here, because we throttle after every entry written
   return written > 0;
