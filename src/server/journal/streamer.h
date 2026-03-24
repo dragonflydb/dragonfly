@@ -126,6 +126,8 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                            bool on_update) override;
 
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
+
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
@@ -135,11 +137,6 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
 
   void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
-
-  // Serialize delayed entries. If force is true, blocks until all are resolved.
-  // If force is false, only serializes entries whose futures are already resolved.
-  // If tiered_keys is provided, only serializes entries whose keys are in the set.
-  size_t SerializeDelayedEntries(bool force, std::vector<std::string>* tiered_keys);
 
   struct Stats {
     uint64_t buckets_skipped = 0;
@@ -157,7 +154,6 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   cluster::SlotSet my_slots_;
 
   std::unique_ptr<CmdSerializer> cmd_serializer_;
-  absl::flat_hash_map<std::string, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
   Stats stats_;
   base::RealTimeAggregator cpu_aggregator_;

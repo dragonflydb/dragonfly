@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "server/db_slice.h"
+#include "server/execution_state.h"
 #include "server/journal/types.h"
 #include "server/synchronization.h"
 #include "server/table.h"
@@ -65,16 +66,27 @@ class SerializerBase {
     std::vector<TieredDelayedEntry> delayed;
   };
 
+  // Tuple <db_index, key> is used as a key to uniquely identify tiered entry on shard.
+  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
+
   // Transition bucket from DelayedPending -> Covered.
   void CompleteBucketDelayed(BucketIdentity bid);
 
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
+  // Serialize delayed entries. If force is true, blocks until all are resolved.
+  // If force is false, only serializes entries whose futures are already resolved.
+  // If tiered_keys is provided, only serializes entries whose keys are in the set.
+  void ProcessDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* tiered_keys,
+                             ExecutionState* cntx);
+
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
   virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) = 0;
+
+  virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
   // --- Change callbacks ---
 
@@ -94,9 +106,14 @@ class SerializerBase {
 
   DbSlice* const db_slice_;
   DbTableArray db_array_;
+
   uint64_t snapshot_version_ = 0;
   ThreadLocalMutex big_value_mu_;
   Stats stats_;
+
+  // Delayed entries that are waiting for tiered storage reads to complete before they can be
+  // serialized.
+  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
  private:
   friend class SerializerBaseTest;

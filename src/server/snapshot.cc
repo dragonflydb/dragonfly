@@ -300,7 +300,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
     // Wait for all the outstanding delayed entries and serialize them as well.
-    PushDelayedEntries(true, nullptr);
+    ProcessDelayedEntries(true, nullptr, cntx_);
     PushSerialized(true);
   }  // for (dbindex)
 
@@ -349,12 +349,17 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     // Push tracked tiered keys forcefully. If there are too many delayed entries
     // accumulated we should also push them forcefully.
     const size_t kMaxDelayedEntries = 512;
-    PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
-                       track_tiered_keys ? &bucket_tiered_keys : nullptr);
+    ProcessDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
+                          track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
   }
 
   serialize_bucket_running_ = false;
   return result;
+}
+
+void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
+  CHECK(res);
 }
 
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
@@ -433,55 +438,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize)
     return false;
   return FlushSerialized();
-}
-
-void SliceSnapshot::PushDelayedEntries(bool force,
-                                       std::vector<TieredDelayEntryKey>* bucket_tiered_keys) {
-  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
-
-  // Serializes a single delayed entry. Resolves the tiered read future, write the
-  // key/value and removes the entry from the map.
-  auto serialize_entry = [this](DelayedEntryIt it) {
-    auto& entry = it->second;
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      cntx_->ReportError(make_error_code(errc::io_error),
-                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
-      return;
-    }
-
-    PrimeValue pv{*value};
-    auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
-    CHECK(res);
-
-    delayed_entries_.erase(it);
-
-    // If we have serialized enough data we should push it to avoid building
-    // up a large blob in memory.
-    PushSerialized(false);
-  };
-
-  // When tiered_keys are provided, we should serialize the entries matching the keys.
-  if (bucket_tiered_keys) {
-    for (const auto& key : *bucket_tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        serialize_entry(it);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    serialize_entry(it++);
-  }
-
-  // If we need to serialize all entries (force=true), we should push
-  // leftover serialized data after the loop.
-  PushSerialized(force);
 }
 
 void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,

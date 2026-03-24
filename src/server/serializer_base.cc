@@ -8,6 +8,7 @@
 #include "server/common_types.h"
 #include "server/journal/journal.h"
 #include "server/synchronization.h"
+#include "server/tiered_storage.h"
 
 namespace dfly {
 
@@ -106,6 +107,41 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
   FinishBucketIteration(*bid, {});
   return true;
+}
+
+void SerializerBase::ProcessDelayedEntries(bool force,
+                                           std::vector<TieredDelayEntryKey>* bucket_tiered_keys,
+                                           ExecutionState* cntx) {
+  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
+  auto serialize_entry = [&](DelayedEntryIt it) {
+    auto& entry = it->second;
+    auto value = entry->value.Get();
+
+    if (!value.has_value()) {
+      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
+      return;
+    }
+
+    PrimeValue pv{*value};
+    SerializeFetchedEntry(*entry, pv);
+    delayed_entries_.erase(it++);
+  };
+
+  if (bucket_tiered_keys) {
+    for (const auto& key : *bucket_tiered_keys) {
+      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
+        serialize_entry(it);
+    }
+  }
+
+  // Serialize the delayed entries that are resolved, or all if force it true.
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved()) {
+      ++it;
+      continue;
+    }
+    serialize_entry(it++);
+  }
 }
 
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {

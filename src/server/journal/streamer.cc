@@ -486,7 +486,7 @@ void RestoreStreamer::Run() {
       stats_.buckets_loop += ProcessBucket(0, it, false);
 
       // We could have delayed entries that are watiting so we want to flush them
-      SerializeDelayedEntries(false, nullptr);
+      ProcessDelayedEntries(false, nullptr, cntx_);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
@@ -502,7 +502,7 @@ void RestoreStreamer::Run() {
   // Force serialize of all delayed entries.
   {
     std::lock_guard guard(big_value_mu_);
-    SerializeDelayedEntries(true, nullptr);
+    ProcessDelayedEntries(true, nullptr, cntx_);
   }
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
@@ -583,7 +583,7 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
 
   unsigned written = 0;
   std::string key_buffer;
-  std::vector<std::string> bucket_tiered_keys;
+  std::vector<std::pair<DbIndex, std::string>> bucket_tiered_keys;
 
   // Only track tiered keys when needed and flush delayed entries
   // 1. When we have tiered storage
@@ -608,7 +608,7 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
 
       // Track tiered keys that will need delayed entry flushing
       if (track_tiered_keys && it->second.IsExternal())
-        bucket_tiered_keys.emplace_back(key);
+        bucket_tiered_keys.emplace_back(0, key);
 
       ++written;
     } else {
@@ -620,12 +620,16 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
     // Push tracked tiered keys forcefully. If there are too many delayed entries
     // accumulated we should also push them forcefully.
     const size_t kMaxDelayedEntries = 512;
-    SerializeDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
-                            track_tiered_keys ? &bucket_tiered_keys : nullptr);
+    ProcessDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
+                          track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
   }
 
   // we don't need throttle here, because we throttle after every entry written
   return written > 0;
+}
+
+void RestoreStreamer::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  cmd_serializer_->SerializeEntry(tde.key.ToString(), tde.key, pv, tde.expire);
 }
 
 // TODO: Update those
@@ -645,50 +649,11 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const Prim
       uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(kClusterDbId, prime_key) : 0;
       auto entry = std::make_unique<TieredDelayedEntry>(kClusterDbId, std::move(prime_key),
                                                         std::move(future), expire_ms, mc_flags);
-      delayed_entries_.emplace(key, std::move(entry));
+      delayed_entries_.emplace(std::make_pair(kClusterDbId, key), std::move(entry));
     }
   } else {
     stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
   }
-}
-
-size_t RestoreStreamer::SerializeDelayedEntries(bool force,
-                                                std::vector<std::string>* bucket_tiered_keys) {
-  size_t serialized = 0;
-
-  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
-  auto serialize_entry = [&](DelayedEntryIt it) {
-    auto& entry = it->second;
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
-      return;
-    }
-
-    PrimeValue pv{*value};
-    serialized +=
-        cmd_serializer_->SerializeEntry(entry->key.ToString(), entry->key, pv, entry->expire);
-    delayed_entries_.erase(it++);
-  };
-
-  if (bucket_tiered_keys) {
-    for (const auto& key : *bucket_tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        serialize_entry(it);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    serialize_entry(it++);
-  }
-
-  return serialized;
 }
 
 }  // namespace dfly

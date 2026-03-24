@@ -121,6 +121,8 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
                            bool on_update) override;
 
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
+
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
@@ -140,21 +142,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
 
-  // Tuple <db_index, key> is used as a key to uniquely identify tiered entry on shard.
-  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
-
-  // Serialize delayed entries.
-  // If bucket_tiered_keys is provided we should serialize these keys forcefully.
-  // Other entries can be serialized if they are resolved, but we don't wait for them unless force
-  // is true.
-  void PushDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* bucket_tiered_keys);
-
   PrimeTable::Cursor snapshot_cursor_;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  // Delayed entries that are waiting for tiered storage reads to complete before they can be
-  // serialized.
-  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
