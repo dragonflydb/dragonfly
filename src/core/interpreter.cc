@@ -15,7 +15,6 @@
 
 #include <cstring>
 #include <optional>
-#include <regex>
 #include <set>
 #include <variant>
 
@@ -827,7 +826,6 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   //
   // If we need to check the previous line, we search for the last word (before comments, if it has
   // one).
-  static const regex kRegex{"(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)"};
 
   // Taken from https://www.lua.org/manual/5.4/manual.html - 3.1 - Lexical conventions
 
@@ -841,11 +839,6 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
                                                "if",     "in",     "local",  "not",  "or",
                                                "repeat", "return", "until",  "while"};
 
-  auto last_n = [](const string& s, size_t n) {
-    return s.size() < n ? s : s.substr(s.size() - n, n);
-  };
-
-  smatch sm;
   string body{body_sv};
   vector<size_t> targets;
 
@@ -853,20 +846,95 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   if (body.find("--[[") != string::npos)
     return {};
 
-  sregex_iterator it{body.begin(), body.end(), kRegex};
-  sregex_iterator end{};
+  // Find the last meaningful (non-whitespace, non-comment) token on the line(s) ending before
+  // 'end'. Skips blank lines and comment-only lines. Returns nullopt if no token found.
+  auto find_prev_token = [&](size_t end) -> optional<string_view> {
+    while (true) {
+      // Skip trailing newlines
+      while (end > 0 && body[end - 1] == '\n')
+        --end;
+      if (end == 0)
+        return nullopt;
 
-  for (; it != end; it++) {
-    auto last_word = it->str(1);
+      // Find start of the current line
+      size_t nl = body.rfind('\n', end - 1);
+      size_t line_start = (nl == string::npos) ? 0 : nl + 1;
 
-    if (kContOperators.count(last_n(last_word, 2)) > 0 ||
-        kContOperators.count(last_n(last_word, 1)) > 0)
-      continue;
+      string_view line{body.data() + line_start, end - line_start};
 
-    if (kContTokens.count(last_word) > 0)
-      continue;
+      // Strip inline comment (-- to end of line)
+      size_t comment = line.find("--");
+      string_view effective = (comment != string_view::npos) ? line.substr(0, comment) : line;
 
-    targets.push_back(it->position(it->size() - 1));
+      // Find last non-whitespace token
+      size_t tok_end = effective.find_last_not_of(" \t");
+      if (tok_end != string_view::npos) {
+        size_t tok_start = effective.find_last_of(" \t", tok_end);
+        tok_start = (tok_start == string_view::npos) ? 0 : tok_start + 1;
+        return effective.substr(tok_start, tok_end - tok_start + 1);
+      }
+
+      // Line was blank or comment-only; look at the previous line
+      end = line_start;
+    }
+  };
+
+  // Returns true if the token is a continuation operator (by last 1 or 2 chars) or keyword
+  auto is_continuation = [&](string_view tok) -> bool {
+    if (kContTokens.count(tok))
+      return true;
+    if (tok.size() >= 2 && kContOperators.count(tok.substr(tok.size() - 2)))
+      return true;
+    if (tok.size() >= 1 && kContOperators.count(tok.substr(tok.size() - 1)))
+      return true;
+    return false;
+  };
+
+  size_t pos = 0;
+  while (pos < body.size()) {
+    size_t call_pos = body.find("redis.call", pos);
+    size_t pcall_pos = body.find("redis.pcall", pos);
+
+    if (call_pos == string::npos && pcall_pos == string::npos)
+      break;
+
+    size_t match_pos;
+    size_t call_start;  // position of "call" or "pcall" (after "redis.")
+    if (pcall_pos != string::npos && (call_pos == string::npos || pcall_pos < call_pos)) {
+      match_pos = pcall_pos;
+      call_start = pcall_pos + 6;  // "redis." is 6 chars
+      pos = pcall_pos + 11;        // advance past "redis.pcall"
+    } else {
+      match_pos = call_pos;
+      call_start = call_pos + 6;
+      pos = call_pos + 10;  // advance past "redis.call"
+    }
+
+    // Scan backwards from match_pos, skipping spaces and tabs on the same line
+    size_t i = match_pos;
+    while (i > 0 && (body[i - 1] == ' ' || body[i - 1] == '\t'))
+      --i;
+
+    bool eligible = false;
+    if (i == 0) {
+      // Start of file
+      eligible = true;
+    } else if (body[i - 1] == '\n') {
+      // Nothing meaningful on the same line before redis.call;
+      // check the preceding line(s) for a continuation context
+      auto tok = find_prev_token(i);
+      eligible = !tok.has_value() || !is_continuation(*tok);
+    } else {
+      // There's a non-whitespace character on the same line; extract that token
+      size_t j = i - 1;
+      while (j > 0 && body[j - 1] != ' ' && body[j - 1] != '\t' && body[j - 1] != '\n')
+        --j;
+      string_view token{body.data() + j, i - j};
+      eligible = (token == "then" || token == "do");
+    }
+
+    if (eligible)
+      targets.push_back(call_start);
   }
 
   if (targets.empty())
