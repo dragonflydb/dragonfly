@@ -764,7 +764,8 @@ TEST_F(ListNodeTieringTest, DeleteWhileNodePending) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 // RENAME a list whose interior nodes are fully offloaded.
@@ -838,7 +839,8 @@ TEST_F(ListNodeTieringTest, ExpireListWithStashedNodes) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 // PEXPIRE a list while its nodes are still io_pending
@@ -859,7 +861,9 @@ TEST_F(ListNodeTieringTest, ExpireListWhileNodesPending) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  // Wait so that all allocated bytes for stashed nodes are freed
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 // FLUSHALL while list nodes are io_pending or fully offloaded.
@@ -888,7 +892,8 @@ TEST_F(ListNodeTieringTest, FlushAllWithTieredListNodes) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 // LPOP exhausts a list whose interior nodes were offloaded to disk..
@@ -1025,7 +1030,8 @@ TEST_F(CompressedListNodeTieringTest, DeleteWhileCompressedNodePending) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 // DEL after stash is complete.
@@ -1044,7 +1050,8 @@ TEST_F(CompressedListNodeTieringTest, DeleteAfterCompressedNodesStashed) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 // FLUSHALL on offloaded values.
@@ -1070,7 +1077,8 @@ TEST_F(CompressedListNodeTieringTest, FlushAllWithCompressedOffloadedNodes) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);
-  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
 }
 
 }  // namespace dfly
