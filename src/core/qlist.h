@@ -18,6 +18,8 @@
 /* quicklist node encodings */
 #define QUICKLIST_NODE_ENCODING_RAW 1
 #define QUICKLIST_NODE_ENCODING_LZF 2
+#define QLIST_NODE_ENCODING_ZSTD 3
+
 /* quicklist node container formats */
 #define QUICKLIST_NODE_CONTAINER_PLAIN 1
 #define QUICKLIST_NODE_CONTAINER_PACKED 2
@@ -55,13 +57,13 @@ class QList {
     size_t sz : 48;    /* entry size in bytes */
     size_t count : 16; /* count of items in listpack */
 
-    uint16_t encoding : 2;           /* RAW==1, LZF==2 */
+    uint16_t encoding : 2;           /* RAW==1, LZF==2, ZSTD==3 */
     uint16_t container : 2;          /* PLAIN==1 or PACKED==2 */
     uint16_t recompress : 1;         /* was this node previous compressed? */
     uint16_t attempted_compress : 1; /* node can't compress; too small */
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
-    uint16_t reserved1 : 8;          /* reserved for future use */
+    uint16_t reserved1 : 7;          /* reserved for future use */
 
     uint16_t reserved2; /* more bits to steal for future usage */
     uint32_t reserved3; /* more bits to steal for future usage */
@@ -222,6 +224,12 @@ class QList {
 
   void SetTieringParams(const TieringParams& params);
 
+  // Sets the malloc_size_ threshold at which ZSTD dictionary training is triggered.
+  // 0 disables ZSTD dictionary compression.
+  void set_compr_threshold(uint32_t threshold) {
+    zstd_threshold_ = threshold;
+  }
+
   struct Stats {
     uint64_t compression_attempts = 0;
 
@@ -241,6 +249,8 @@ class QList {
     uint64_t total_node_reads = 0;
     uint64_t offload_requests = 0;
     uint64_t onload_requests = 0;
+
+    uint64_t zstd_dict_compressions = 0;
 
     Stats& operator+=(const Stats& other);
   };
@@ -293,7 +303,11 @@ class QList {
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
   uint32_t num_offloaded_nodes_ = 0;
+  uint32_t zstd_threshold_ = 0;  // 0 = disabled
   std::unique_ptr<TieringParams> tiering_params_;
+
+  struct ZstdDictState;
+  std::unique_ptr<ZstdDictState> zstd_dict_;
 };
 
 }  // namespace dfly
