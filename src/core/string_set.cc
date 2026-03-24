@@ -173,7 +173,7 @@ void StringSet::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
   return SdsUpdateExpireTime(obj, time_now() + ttl_sec, 0);
 }
 
-void StringSet::ObjDelete(void* obj, bool has_ttl) const {
+void StringSet::ObjDelete(void* obj) const {
   sdsfree((sds)obj);
 }
 
