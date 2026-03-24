@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/journal/types.h"
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
 #include "server/synchronization.h"
@@ -98,8 +99,8 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Journal listener
-  void ConsumeJournalChange(const journal::JournalChangeItem& item);
-  void ThrottleIfNeeded();
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
+  void ThrottleIfNeeded() final;
 
  private:
   [[maybe_unused]] void SerializeIndexMapping(
@@ -115,17 +116,10 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Main snapshotting fiber that iterates over all buckets in the db slice.
   void IterateBucketsFb(bool send_full_sync_cut);
 
-  // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
-
   // Serialize single bucket.
   // Returns number of serialized entries.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
-                           bool push_tracked_tiered_keys);
-
-  unsigned DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it) override;
-  unsigned DoSerializeBucketOnChange(DbIndex db_index,
-                                     PrimeTable::bucket_iterator bucket_it) override;
+                           bool on_update) override;
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
@@ -164,6 +158,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
+  uint32_t journal_cb_id_ = 0;
 
   util::fb2::Fiber snapshot_fb_;
   util::fb2::CondVarAny seq_cond_;
@@ -171,17 +166,13 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
-  uint32_t journal_cb_id_ = 0;
-
   bool use_background_mode_ = false;
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
-    size_t loop_serialized = 0;
     size_t skipped = 0;
-    size_t savecb_calls = 0;
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;

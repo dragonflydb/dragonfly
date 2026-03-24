@@ -3242,7 +3242,7 @@ async def test_replica_snapshot_with_big_values_while_seeding(df_factory: DflyIn
     assert len(lines) == (proactors - 1)
     for line in lines:
         # We test the serializtion path of command execution
-        side_saved = extract_int_after_prefix("side_saved ", line)
+        side_saved = extract_int_after_prefix("side saved ", line)
         assert side_saved > 0
 
     # Check that the produced rdb is loaded correctly

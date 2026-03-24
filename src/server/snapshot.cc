@@ -77,7 +77,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
-  RegisterChangeListener();
+  SerializerBase::RegisterChangeListener();
 
   if (stream_journal) {
     journal_cb_id_ = journal::RegisterConsumer(this);
@@ -280,7 +280,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
 
       snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
-        return BucketSaveCb(snapshot_db_indx, it);
+        return ProcessBucket(snapshot_db_indx, it, false);
       });
 
       if (use_background_mode_) {
@@ -310,44 +310,19 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     PushSerialized(true);
   }
 
-  // serialized + side_saved must be equal to the total saved.
-  VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
-          << ", side_saved " << SerializerBase::GetStats().keys_serialized << ", cbcalls "
-          << stats_.savecb_calls << ", journal_saved " << stats_.jounal_changes;
-}
+  if (VLOG_IS_ON(1)) {
+    auto stats = SerializerBase::GetStats();
 
-bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::lock_guard guard(big_value_mu_);
-
-  ++stats_.savecb_calls;
-
-  if (it.GetVersion() >= snapshot_version_) {
-    // Either already serialized by OnChange or inserted after snapshotting started.
-    DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << it.GetVersion();
-    ++stats_.skipped;
-    return false;
+    // serialized + side_saved must be equal to the total saved.
+    VLOG(1) << "Exit SnapshotSerializer total_serialized: " << stats.keys_serialized
+            << ", buckets side saved " << stats.buckets_on_change << ", total bucket saved "
+            << stats.buckets_serialized << ", journal_saved " << stats_.jounal_changes;
   }
-
-  db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
-                                           snapshot_version_);
-
-  auto* latch = db_slice_->GetLatch();
-
-  // Locking this never preempts. We merely just increment the underline counter such that
-  // if DoSerializeBucket preempts, Heartbeat() won't run because the blocking counter is not zero.
-  std::lock_guard latch_guard(*latch);
-
-  BucketIdentity bid = it.bucket_address();
-  it.SetVersion(snapshot_version_);
-  MarkBucketSerializing(bid);
-  stats_.loop_serialized += DoSerializeBucket(db_index, it);
-  FinishBucketIteration(bid, {});
-
-  return false;
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                        bool push_tiered) {
+                                        bool on_update) {
+  bool push_tiered = on_update;
   // Version is already stamped by the caller (BucketSaveCb or SerializerBase::OnChange).
   DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
@@ -380,15 +355,6 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   serialize_bucket_running_ = false;
   return result;
-}
-
-unsigned SliceSnapshot::DoSerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  return SerializeBucket(db_index, it, false);
-}
-
-unsigned SliceSnapshot::DoSerializeBucketOnChange(DbIndex db_index,
-                                                  PrimeTable::bucket_iterator it) {
-  return SerializeBucket(db_index, it, true);
 }
 
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
@@ -575,7 +541,7 @@ size_t SliceSnapshot::GetTempBuffersSize() const {
 }
 
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
-  return {stats_.loop_serialized + SerializerBase::GetStats().keys_serialized, stats_.keys_total};
+  return {SerializerBase::GetStats().keys_serialized, stats_.keys_total};
 }
 
 }  // namespace dfly
