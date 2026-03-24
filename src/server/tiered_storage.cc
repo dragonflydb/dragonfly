@@ -93,9 +93,9 @@ string SerializeToString(const TieredStorage::StashDescriptor& blobs) {
   return s;
 }
 
-// Return true for object that are not store in small bins.
+// Return true for object that are stored in small bins.
 bool IsFragmentInSmallBins(const tiering::FragmentRef& fragment) {
-  return fragment.ObjType() == OBJ_LIST;
+  return fragment.ObjType() != OBJ_LIST;
 }
 
 }  // anonymous namespace
@@ -521,11 +521,11 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
     DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
   fragment_ref.ClearOffloaded();
-  // If fragment is not using small bins, we can directly mark the segment as free.
+  // If fragment is not using small bins, we need mark the segment as free.
   if (IsFragmentInSmallBins(fragment_ref)) {
-    op_manager_->MarkSegmentFree(dbid, segment);
-  } else {
     op_manager_->DeleteOffloaded(dbid, segment);
+  } else {
+    op_manager_->MarkSegmentFree(dbid, segment);
   }
 }
 
