@@ -4,6 +4,8 @@
 
 #include "server/search/aggregator.h"
 
+#include <cmath>
+
 #include "base/gtest.h"
 #include "server/search/doc_index.h"
 
@@ -74,7 +76,7 @@ TEST(AggregatorTest, GroupWithReduce) {
   for (size_t i = 0; i < 10; i++) {
     values.push_back(DocValues{
         {"i", double(i)},
-        {"half-i", double(i / 4)},
+        {"half-i", std::floor(double(i) / 4.0)},  // same as integer floor(i/4)
         {"tag", i % 2 == 0 ? "even" : "odd"},
     });
   }

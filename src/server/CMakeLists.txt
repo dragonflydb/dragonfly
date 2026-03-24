@@ -118,7 +118,7 @@ if (WITH_GCP)
 endif()
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
-         redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath
+         redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath ${DF_FILTER_LIB}
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
@@ -171,7 +171,8 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
 if (WITH_SEARCH)
   helio_cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
   helio_cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
+  helio_cxx_test(search/filter_expr_test dfly_test_lib LABELS DFLY)
   helio_cxx_test(search/index_join_test dfly_test_lib LABELS DFLY)
 
-  add_dependencies(check_dfly search_family_test aggregator_test index_join_test)
+  add_dependencies(check_dfly search_family_test aggregator_test filter_expr_test index_join_test)
 endif()
