@@ -9,6 +9,8 @@
 
 #include <chrono>
 
+#include "server/serializer_base.h"
+
 #ifdef __linux__
 #include <netinet/tcp.h>
 #endif
@@ -413,7 +415,7 @@ bool JournalStreamer::IsStalled() const {
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx)
-    : JournalStreamer(cntx, {}), db_slice_(slice), my_slots_(std::move(slots)) {
+    : JournalStreamer(cntx, {}), SerializerBase(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
@@ -433,9 +435,7 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest) {
     return;
 
   VLOG(1) << "RestoreStreamer start";
-  auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
-  snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
-
+  SerializerBase::RegisterChangeListener();
   JournalStreamer::Start(dest);
 }
 
@@ -480,24 +480,10 @@ void RestoreStreamer::Run() {
       if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
 
-      db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
-                                               DbSlice::Iterator::FromPrime(it), snapshot_version_);
-
-      if (!cntx_->IsRunning())  // Could have been cancelled in above call too
-        return;
-
       // Do not progress if we are stalled.
       ThrottleIfNeeded();
 
-      std::lock_guard guard(big_value_mu_);
-
-      {
-        // Locking this never preempts. See snapshot.cc for why we need it.
-        auto* blocking_counter = db_slice_->GetLatch();
-        lock_guard blocking_counter_guard(*blocking_counter);
-
-        stats_.buckets_loop += WriteBucket(it, false);
-      }
+      stats_.buckets_loop += ProcessBucket(0, it, false);
 
       // We could have delayed entries that are watiting so we want to flush them
       cmd_serializer_->SerializeDelayedEntries(false, nullptr);
@@ -591,11 +577,13 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, bool on_db_change_cb) {
+unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::bucket_iterator it,
+                                          bool on_update) {
   auto& shard_stats = EngineShard::tlocal()->stats();
-  bool written = false;
-  absl::flat_hash_set<string> tiered_keys;
-  string key_buffer;  // we can reuse it
+
+  unsigned written = 0;
+  std::string key_buffer;
+  std::vector<std::string> bucket_tiered_keys;
 
   // Only track tiered keys when needed and flush delayed entries
   // 1. When we have tiered storage
@@ -605,88 +593,45 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, bool on_db_cha
   // is situation when we request externalization of key and key is read - marking it as not
   // external but not yet flushed. When OnDbChange callback is called we need to flush it and than
   // write journal changes - so we cannot realy on IsExternal flag and need to track all keys.
-  const bool track_tiered_keys =
-      on_db_change_cb && EngineShard::tlocal()->tiered_storage() != nullptr;
+  bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
+  const bool track_tiered_keys = tiering_enabled && on_update;
 
-  if (!it.is_done() && it.GetVersion() < snapshot_version_) {
-    base::CpuTimeGuard guard(&cpu_aggregator_);
-    stats_.buckets_written++;
-    it.SetVersion(snapshot_version_);
-    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-      const auto& pv = it->second;
-      string_view key = it->first.GetSlice(&key_buffer);
-      if (ShouldWrite(key)) {
-        ++stats_.keys_written;
-        ++shard_stats.total_migrated_keys;
-        uint64_t expire = it->first.GetExpireTime();
-        // Track tiered keys that will need delayed entry flushing
-        if (track_tiered_keys) {
-          tiered_keys.emplace(key);
-        }
-        WriteEntry(key, it->first, pv, expire);
-        written = true;
-      } else {
-        stats_.keys_skipped++;
-      }
+  base::CpuTimeGuard guard(&cpu_aggregator_);
+
+  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+    const auto& pv = it->second;
+    string_view key = it->first.GetSlice(&key_buffer);
+    if (ShouldWrite(key)) {
+      ++shard_stats.total_migrated_keys;
+      uint64_t expire = it->first.GetExpireTime();
+      WriteEntry(key, it->first, pv, expire);
+
+      // Track tiered keys that will need delayed entry flushing
+      if (track_tiered_keys && it->second.IsExternal())
+        bucket_tiered_keys.emplace_back(key);
+
+      ++written;
+    } else {
+      stats_.keys_skipped++;
     }
-  } else {
-    // Bucket already serialized, but we may still need to track tiered keys
-    // for force-flushing their delayed entries
-    if (track_tiered_keys) {
-      for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-        string_view key = it->first.GetSlice(&key_buffer);
-        if (ShouldWrite(key)) {
-          tiered_keys.emplace(key);
-        }
-      }
-    }
-    stats_.buckets_skipped++;
   }
 
-  // Force serialized entries for keys that are tiered and were updated during migration.
-  // Unfortunately we cannot be selective here and need to flush all delayed entreis that we
-  // collected while traversing bucket.
-  // TODO: change interface so we forcefully flush only single entry.
-  if (tiered_keys.size()) {
-    cmd_serializer_->SerializeDelayedEntries(true, &tiered_keys);
+  if (tiering_enabled) {
+    // Push tracked tiered keys forcefully. If there are too many delayed entries
+    // accumulated we should also push them forcefully.
+    const size_t kMaxDelayedEntries = 512;
+    cmd_serializer_->SerializeDelayedEntries(
+        cmd_serializer_->delayed_entries_.size() > kMaxDelayedEntries,
+        track_tiered_keys ? &bucket_tiered_keys : nullptr);
   }
 
   // we don't need throttle here, because we throttle after every entry written
-
-  return written;
+  return written > 0;
 }
 
-// Ordering invariant (PIT mode, slot migration):
-//   Same as SliceSnapshot::OnDbChange — for any key K the baseline must be sent before any
-//   journal entry that mutates K. RestoreStreamer always uses PIT mode (snapshot_version_ != 0)
-//   and serializes-before-mutate via CVCUponInsert (inserts) or WriteBucket (updates).
-//   big_value_mu_ prevents interleaving with the traversal fiber's WriteBucket.
-void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  std::lock_guard guard(big_value_mu_);
-  DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
-
-  PrimeTable* table = db_slice_->GetTables(0);
-  uint64_t throttle_start = throttle_count_;
-  uint64_t throttle_usec_start = total_throttle_wait_usec_;
-  if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    if (snapshot_version_ == 0) {
-      // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
-      return;
-    }
-    stats_.buckets_on_db_update += WriteBucket(*bit, true);
-  } else {
-    string_view key = get<string_view>(req.change);
-    table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator it) {
-      if (snapshot_version_ != 0) {  // we need this check because lambda can be called several
-                                     // times and we can preempt in WriteBucket
-        DCHECK_LT(it.GetVersion(), snapshot_version_);
-        stats_.buckets_on_db_update += WriteBucket(it, true);
-      }
-    });
-  }
-  stats_.throttle_on_db_update += throttle_count_ - throttle_start;
-  stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
-}
+// TODO: Update those
+// stats_.throttle_on_db_update += throttle_count_ - throttle_start;
+// stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {

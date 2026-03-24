@@ -35,7 +35,9 @@ class CmdSerializer {
   // Serialize delayed entries. If force is true, blocks until all are resolved.
   // If force is false, only serializes entries whose futures are already resolved.
   // If tiered_keys is provided, only serializes entries whose keys are in the set.
-  size_t SerializeDelayedEntries(bool force, absl::flat_hash_set<std::string>* tiered_keys);
+  size_t SerializeDelayedEntries(bool force, std::vector<std::string>* tiered_keys);
+
+  absl::flat_hash_map<std::string, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 
  private:
   void SerializeCommand(std::string_view cmd, absl::Span<const std::string_view> args);
@@ -55,7 +57,6 @@ class CmdSerializer {
   FlushSerialized cb_;
   size_t max_serialization_buffer_size_;
   std::unique_ptr<RdbSerializer> serializer_;
-  absl::flat_hash_map<std::string, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 };
 
 }  // namespace dfly

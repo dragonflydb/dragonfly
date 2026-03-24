@@ -10,6 +10,7 @@
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
+#include "server/serializer_base.h"
 #include "server/synchronization.h"
 #include "util/fiber_socket_base.h"
 
@@ -107,7 +108,7 @@ class CmdSerializer;
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
 // Only handles relevant slots, while ignoring all others.
-class RestoreStreamer : public JournalStreamer {
+class RestoreStreamer : public JournalStreamer, public SerializerBase {
  public:
   RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx);
   ~RestoreStreamer() override;
@@ -122,7 +123,9 @@ class RestoreStreamer : public JournalStreamer {
   void SendFinalize(long attempt);
 
  private:
-  void OnDbChange(DbIndex db_index, const ChangeReq& req);
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                           bool on_update) override;
+
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
@@ -146,14 +149,9 @@ class RestoreStreamer : public JournalStreamer {
     uint64_t iter_skips = 0;
   };
 
-  DbSlice* db_slice_;
-  DbTableArray db_array_;
-  uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
 
   std::unique_ptr<CmdSerializer> cmd_serializer_;
-
-  ThreadLocalMutex big_value_mu_;
   Stats stats_;
   base::RealTimeAggregator cpu_aggregator_;
 };
