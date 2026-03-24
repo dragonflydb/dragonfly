@@ -130,7 +130,7 @@ python3 replay_crash.py crashes 000000 127.0.0.1 11211
 
 | Target | Directory | Seeds | Coverage |
 |--------|-----------|-------|----------|
-| `resp` | `seeds/resp/` | 79 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops |
+| `resp` | `seeds/resp/` | 97 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GAT, GEORADIUS |
 | `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands, flush, stats |
 
 To add a new RESP seed:
