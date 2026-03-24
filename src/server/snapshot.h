@@ -130,8 +130,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
-  void SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
-                         uint32_t mc_flags);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).

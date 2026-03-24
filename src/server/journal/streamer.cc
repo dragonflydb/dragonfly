@@ -9,8 +9,6 @@
 
 #include <chrono>
 
-#include "server/serializer_base.h"
-
 #ifdef __linux__
 #include <netinet/tcp.h>
 #endif
@@ -642,14 +640,8 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const Prim
     if (pv.IsCool()) {
       WriteEntry(key, pk, pv.GetCool().record->value, expire_ms);
     } else {
-      constexpr DbIndex kClusterDbId = 0;
-      auto future =
-          ReadTieredString(kClusterDbId, key, pv, EngineShard::tlocal()->tiered_storage());
-      PrimeKey prime_key{key};
-      uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(kClusterDbId, prime_key) : 0;
-      auto entry = std::make_unique<TieredDelayedEntry>(kClusterDbId, std::move(prime_key),
-                                                        std::move(future), expire_ms, mc_flags);
-      delayed_entries_.emplace(std::make_pair(kClusterDbId, key), std::move(entry));
+      uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(0, pk) : 0;
+      EnqueueDelayedEntry(0, PrimeKey{key}, pv, expire_ms, mc_flags);
     }
   } else {
     stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);

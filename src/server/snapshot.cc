@@ -371,7 +371,8 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    EnqueueDelayedEntry(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    ++type_freq_map_[RDB_TYPE_STRING];
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -438,18 +439,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize)
     return false;
   return FlushSerialized();
-}
-
-void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
-                                      time_t expire_time, uint32_t mc_flags) {
-  // We prefer avoid blocking, so we just schedule a tiered read and append
-  // it to the delayed entries.
-  auto key = pk.ToString();
-  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
-  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
-                                                    expire_time, mc_flags);
-  delayed_entries_.emplace(TieredDelayEntryKey{db_index, std::string(key)}, std::move(entry));
-  ++type_freq_map_[RDB_TYPE_STRING];
 }
 
 // big_value_mu_ prevents expiry/eviction DEL journal entries from interleaving with an

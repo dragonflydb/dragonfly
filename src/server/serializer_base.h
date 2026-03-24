@@ -72,6 +72,9 @@ class SerializerBase {
   // Transition bucket from DelayedPending -> Covered.
   void CompleteBucketDelayed(BucketIdentity bid);
 
+  void EnqueueDelayedEntry(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
+                           uint32_t mc_flags);
+
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
@@ -86,6 +89,7 @@ class SerializerBase {
   virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) = 0;
 
+  // Serialize delayed entry that was fetched
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
   // --- Change callbacks ---

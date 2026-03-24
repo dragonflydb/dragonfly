@@ -6,6 +6,7 @@
 
 #include "base/logging.h"
 #include "server/common_types.h"
+#include "server/engine_shard.h"
 #include "server/journal/journal.h"
 #include "server/synchronization.h"
 #include "server/tiered_storage.h"
@@ -67,6 +68,15 @@ void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
   auto it = bucket_states_.find(bid);
   DCHECK(it != bucket_states_.end() && it->second.phase == BucketPhase::kDelayedPending);
   bucket_states_.erase(it);
+}
+
+void SerializerBase::EnqueueDelayedEntry(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
+                                         time_t expire_time, uint32_t mc_flags) {
+  auto key = pk.ToString();
+  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
+  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
+                                                    expire_time, mc_flags);
+  delayed_entries_.emplace(TieredDelayEntryKey{db_index, std::string(key)}, std::move(entry));
 }
 
 std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
