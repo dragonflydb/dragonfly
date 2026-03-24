@@ -1321,9 +1321,6 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
 }
 
 TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
-  absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_lua_auto_async, true);
-
   // The script below contains two commands for which execution can't even be prepared
   // (FIRST/SECOND WRONG). The first is issued with pcall, so its error should be completely
   // ignored, the second one should cause an abort and no further commands should be executed
@@ -1337,6 +1334,35 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
 
   EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
   EXPECT_EQ(Run({"get", "A"}), "2");
+}
+
+TEST_F(MultiEvalTest, LuaAutoAsync) {
+  // Standalone redis.call (discarded return value) should be auto-promoted to acall.
+  // The side effects (key mutations) must still occur correctly.
+
+  // Multiple standalone calls in one script
+  string_view s1 = R"(
+    redis.call('SET', 'A', '1')
+    redis.call('INCR', 'A')
+    redis.call('INCR', 'A')
+  )";
+  Run({"EVAL", s1, "1", "A"});
+  EXPECT_EQ(Run({"get", "A"}), "3");
+
+  // Mixed: standalone call (promoted) and a call whose return value is used
+  string_view s2 = R"(
+    redis.call('SET', 'B', '10')
+    return redis.call('GET', 'B')
+  )";
+  EXPECT_EQ(Run({"EVAL", s2, "1", "B"}), "10");
+
+  // Standalone pcall is also promoted; errors from pcall are suppressed
+  string_view s3 = R"(
+    redis.pcall('SET', 'C', 'hello')
+    redis.pcall('NOSUCHCOMMAND')
+  )";
+  Run({"EVAL", s3, "1", "C"});
+  EXPECT_EQ(Run({"get", "C"}), "hello");
 }
 
 TEST_F(MultiEvalTest, MultiAndEval) {
