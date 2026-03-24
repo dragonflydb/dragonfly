@@ -93,6 +93,11 @@ string SerializeToString(const TieredStorage::StashDescriptor& blobs) {
   return s;
 }
 
+// Return true for object that are not store in small bins.
+bool IsFragmentInSmallBins(const tiering::FragmentRef& fragment) {
+  return fragment.ObjType() == OBJ_LIST;
+}
+
 }  // anonymous namespace
 
 size_t TieredStorage::StashDescriptor::EstimatedSerializedSize() const {
@@ -169,6 +174,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   void DeleteOffloaded(DbIndex dbid, const tiering::DiskSegment& segment);
+  void MarkSegmentFree(DbIndex dbid, const tiering::DiskSegment& segment);
 
  private:
   PrimeValue* Find(DbIndex dbid, string_view key) {
@@ -420,6 +426,14 @@ void TieredStorage::ShardOpManager::DeleteOffloaded(DbIndex dbid,
   stats->tiered_entries--;
 }
 
+void TieredStorage::ShardOpManager::MarkSegmentFree(DbIndex dbid,
+                                                    const tiering::DiskSegment& segment) {
+  auto* stats = GetDbTableStats(dbid);
+  OpManager::MarkSegmentFree(segment);
+  stats->tiered_used_bytes -= segment.length;
+  stats->tiered_entries--;
+}
+
 TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
@@ -507,7 +521,12 @@ void TieredStorage::Delete(DbIndex dbid, FragmentRef fragment_ref) {
     DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
   fragment_ref.ClearOffloaded();
-  op_manager_->DeleteOffloaded(dbid, segment);
+  // If fragment is not using small bins, we can directly mark the segment as free.
+  if (IsFragmentInSmallBins(fragment_ref)) {
+    op_manager_->MarkSegmentFree(dbid, segment);
+  } else {
+    op_manager_->DeleteOffloaded(dbid, segment);
+  }
 }
 
 void TieredStorage::CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {

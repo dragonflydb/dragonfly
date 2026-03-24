@@ -427,6 +427,15 @@ size_t QList::Node::GetLZF(void** data) const {
   return lzf->sz;
 }
 
+void QList::Node::SetExternal(size_t offset, uint32_t size) {
+  DCHECK(entry);
+  zfree(entry);
+  offloaded = 1;
+  entry = nullptr;
+  ext.offset = offset;
+  ext.size = size;
+}
+
 void QList::SetPackedThreshold(unsigned threshold) {
   packed_threshold = threshold;
 }
@@ -435,6 +444,11 @@ size_t QList::DefragIfNeeded(PageUsage* page_usage) {
   size_t reallocated = 0;
 
   for (Node* curr = head_; curr; curr = curr->next) {
+    // Skip offloaded or pending nodes
+    if (curr->offloaded || curr->io_pending) {
+      continue;
+    }
+
     if (!page_usage->IsPageForObjectUnderUtilized(curr->entry)) {
       continue;
     }
@@ -515,15 +529,11 @@ void QList::Clear() noexcept {
   while (len_) {
     Node* next = current->next;
 
-    // Clean up offloaded/pending nodes before freeing.
     if (current->offloaded || current->io_pending) {
       if (tiering_params_ && tiering_params_->delete_cb) {
         tiering_params_->delete_cb(current);
       }
-    }
-
-    // Offloaded nodes don't have entry data.
-    if (!current->offloaded) {
+    } else {
       if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
         quicklistLZF* lzf = (quicklistLZF*)current->entry;
         stats.compressed_bytes -= lzf->sz;
@@ -592,9 +602,15 @@ string QList::Pop(Where where) {
     node = head_->prev;
   }
 
-  /* The head and tail should never be compressed */
-  DCHECK(node->encoding != QUICKLIST_NODE_ENCODING_LZF);
+  // Head/tail are kept RAW by CompressByDepth, but an offloaded compressed node
+  // can become the new head/tail after a series of pops.
+  DCHECK(node->encoding == QUICKLIST_NODE_ENCODING_RAW || node->offloaded || node->io_pending);
   DCHECK(head_->prev->next == nullptr);
+
+  // Try onloading entry if it's offloaded.
+  if (tiering_params_) {
+    AccessForReads(false, node);
+  }
 
   string res;
   if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(node))) {
@@ -1012,8 +1028,11 @@ void QList::CompressByDepth(Node* node) {
   int in_depth = 0;
 
   while (depth++ < compress_) {
-    malloc_size_ += TryDecompressInternal(false, forward);
-    malloc_size_ += TryDecompressInternal(false, reverse);
+    // Offloaded nodes have no entry data yet; skip decompression here.
+    if (!forward->offloaded && !forward->io_pending)
+      malloc_size_ += TryDecompressInternal(false, forward);
+    if (!reverse->offloaded && !reverse->io_pending)
+      malloc_size_ += TryDecompressInternal(false, Reverse);
 
     if (forward == node || reverse == node)
       in_depth = 1;
