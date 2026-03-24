@@ -62,7 +62,7 @@ void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
 
     // Important: we set the ttl bit on the wrapping pointer.
     curr_entry_->SetTtl(true);
-    owner_->ObjDelete(src, false);
+    owner_->ObjDelete(src);
     src = new_obj;
 
     // Because setting TTL requires an extra 4 bytes for the key, the allocated size may push the
@@ -292,7 +292,7 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
     for (unsigned i = 0; i < len; ++i) {
       auto& src = items[i];
       if (src.obj) {
-        ObjDelete(src.obj, src.has_ttl);
+        ObjDelete(src.obj);
         --size_;
         src.obj = nullptr;
       }
@@ -301,7 +301,7 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
         continue;
 
       if (src.ptr.IsObject()) {
-        ObjDelete(src.ptr.Raw(), src.has_ttl);
+        ObjDelete(src.ptr.Raw());
         --size_;
       } else {
         auto& dest = items[dest_id++];
@@ -406,7 +406,7 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
     }
 
     if (has_ttl && ObjExpireTime(obj) <= time_now_) {
-      ObjDelete(obj, true);
+      ObjDelete(obj);
       --size_;
       continue;
     }
@@ -722,7 +722,7 @@ void* DenseSet::Delete(DensePtr* prev, DensePtr* ptr, bool detach) {
   if (detach) {
     return obj;
   }
-  ObjDelete(obj, false);
+  ObjDelete(obj);
   return nullptr;
 }
 

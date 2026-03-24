@@ -114,11 +114,13 @@ class StringMap : public DenseSet {
   bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX,
                    bool keepttl = false);
 
-  // Like AddOrUpdate but on update returns the previous sds entry
-  // instead of deleting it. Caller must free the returned entry via DeleteEntry().
+  using SdsEntry = std::unique_ptr<void, void (*)(void*)>;
+
+  // Like AddOrUpdate but on update returns the previous entry wrapped in SdsEntry
+  // instead of deleting it. The returned SdsEntry automatically frees the entry on destruction.
   // Returns nullptr if a new field was added.
-  sds AddOrExchange(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX,
-                    bool keepttl = false);
+  SdsEntry AddOrExchange(std::string_view field, std::string_view value,
+                         uint32_t ttl_sec = UINT32_MAX, bool keepttl = false);
 
   // Returns true if field was added
   // false, if already exists. In that case no update is done.
@@ -126,14 +128,12 @@ class StringMap : public DenseSet {
 
   bool Erase(std::string_view s1);
 
-  using SdsEntry = std::unique_ptr<char, void (*)(sds)>;
-
   // Removes and returns the sds entry for the given key without freeing it.
   // Returns nullptr if the key was not found.
   SdsEntry Extract(std::string_view s1);
 
   // Frees a StringMap sds entry (key + embedded value).
-  static void DeleteEntry(sds entry);
+  static void DeleteEntry(void* entry);
 
   bool Contains(std::string_view s1) const;
 
@@ -186,8 +186,8 @@ class StringMap : public DenseSet {
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
   size_t ObjectAllocSize(const void* obj) const final;
   uint32_t ObjExpireTime(const void* obj) const final;
-  void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) override;
-  void ObjDelete(void* obj, bool has_ttl) const override;
+  void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) final;
+  void ObjDelete(void* obj) const final;
   void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const final;
 };
 
