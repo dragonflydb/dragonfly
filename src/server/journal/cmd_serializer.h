@@ -32,13 +32,6 @@ class CmdSerializer {
   size_t SerializeEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                         uint64_t expire_ms);
 
-  // Serialize delayed entries. If force is true, blocks until all are resolved.
-  // If force is false, only serializes entries whose futures are already resolved.
-  // If tiered_keys is provided, only serializes entries whose keys are in the set.
-  size_t SerializeDelayedEntries(bool force, std::vector<std::string>* tiered_keys);
-
-  absl::flat_hash_map<std::string, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
-
  private:
   void SerializeCommand(std::string_view cmd, absl::Span<const std::string_view> args);
   void SerializeStickIfNeeded(std::string_view key, const PrimeKey& pk);
@@ -51,7 +44,6 @@ class CmdSerializer {
   size_t SerializeString(std::string_view key, const PrimeValue& pv, uint64_t expire_ms);
   void SerializeRestore(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
                         uint64_t expire_ms);
-  void SerializeExternal(std::string_view key, const PrimeValue& pv, time_t expire_time);
 
   DbSlice* db_slice_;
   FlushSerialized cb_;

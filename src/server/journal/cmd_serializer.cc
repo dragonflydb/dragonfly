@@ -79,6 +79,8 @@ CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
 
 size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
+  DCHECK(!pv.IsExternal());
+
   // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
   size_t commands = 1;
@@ -122,44 +124,6 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
     SerializeExpireIfNeeded(key, expire_ms);
   }
   return commands;
-}
-
-size_t CmdSerializer::SerializeDelayedEntries(bool force,
-                                              std::vector<std::string>* bucket_tiered_keys) {
-  size_t serialized = 0;
-
-  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
-  auto serialize_entry = [&](DelayedEntryIt it) {
-    auto& entry = it->second;
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
-      return;
-    }
-
-    PrimeValue pv{*value};
-    serialized += SerializeEntry(entry->key.ToString(), entry->key, pv, entry->expire);
-    delayed_entries_.erase(it++);
-  };
-
-  if (bucket_tiered_keys) {
-    for (const auto& key : *bucket_tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        serialize_entry(it);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    serialize_entry(it++);
-  }
-
-  return serialized;
 }
 
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
@@ -253,16 +217,7 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
 
 size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
   string str;
-  if (pv.IsExternal()) {
-    if (pv.IsCool()) {
-      pv.GetCool().record->value.GetString(&str);
-    } else {
-      SerializeExternal(key, pv, expire_ms);
-      return 0;
-    }
-  } else {
-    pv.GetString(&str);
-  }
+  pv.GetString(&str);
 
   if (expire_ms) {
     std::string expire_ms_str = to_string(expire_ms);
@@ -296,18 +251,6 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   }
 
   SerializeCommand("RESTORE", args);
-}
-
-void CmdSerializer::SerializeExternal(std::string_view key, const PrimeValue& pv,
-                                      time_t expire_time) {
-  // In cluster mode, db_id is always 0
-  constexpr DbIndex kClusterDbId = 0;
-  auto future = ReadTieredString(kClusterDbId, key, pv, EngineShard::tlocal()->tiered_storage());
-  PrimeKey prime_key{key};
-  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(kClusterDbId, prime_key) : 0;
-  auto entry = std::make_unique<TieredDelayedEntry>(kClusterDbId, std::move(prime_key),
-                                                    std::move(future), expire_time, mc_flags);
-  delayed_entries_.emplace(key, std::move(entry));
 }
 
 }  // namespace dfly
