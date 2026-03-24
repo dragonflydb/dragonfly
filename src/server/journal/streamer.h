@@ -123,6 +123,7 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   void SendFinalize(long attempt);
 
  private:
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;

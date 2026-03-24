@@ -431,7 +431,9 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest) {
     return;
 
   VLOG(1) << "RestoreStreamer start";
-  SerializerBase::RegisterChangeListener();
+  db_array_ = db_slice_->databases();
+  snapshot_version_ = db_slice_->RegisterOnChange(
+      [this](DbIndex dbid, const ChangeReq& req) { OnDbChange(dbid, req); });
 
   JournalStreamer::Start(dest);
 }
@@ -621,6 +623,62 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex db_index, PrimeTable::bucket_i
   // we don't need throttle here, because we throttle after every entry written
 
   return written;
+}
+
+// Ordering invariant (PIT mode, slot migration):
+//   Same as SliceSnapshot - for any key K the baseline must be sent before any journal entry
+//   that mutates K. RestoreStreamer always uses PIT mode (snapshot_version_ != 0) and
+//   serializes-before-mutate via CVCUponInsert (inserts) or ProcessBucket (updates).
+//   big_value_mu_ prevents interleaving with the traversal fiber's bucket serialization.
+void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
+
+  PrimeTable* table = db_slice_->GetTables(0);
+  uint64_t throttle_start = throttle_count_;
+  uint64_t throttle_usec_start = total_throttle_wait_usec_;
+
+  if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (snapshot_version_ == 0) {
+      // If snapshot_version_ is 0, it means that Cancel() was called and we shouldn't proceed.
+      return;
+    }
+    // ProcessBucket acquires big_value_mu_ internally and handles the not-yet-serialized case.
+    if (ProcessBucket(db_index, *bit, true)) {
+      ++stats_.buckets_on_db_update;
+    } else if (EngineShard::tlocal()->tiered_storage()) {
+      // Bucket already serialized; flush pending tiered delayed entries so the journal entry
+      // for this mutation doesn't arrive at the replica before the RESTORE.
+      //
+      // We need to track all keys in bucket with tiering. Even if they are not set as external.
+      // There is a situation when we request externalization of key and key is read - marking it
+      // as not external but not yet flushed. When OnDbChange callback is called we need to flush
+      // it and then write journal changes - so we cannot rely on IsExternal flag.
+      std::lock_guard guard(big_value_mu_);
+      absl::flat_hash_set<string> tiered_keys;
+      string key_buffer;
+      auto it = *bit;
+      for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+        string_view key = it->first.GetSlice(&key_buffer);
+        if (ShouldWrite(key)) {
+          tiered_keys.emplace(key);
+        }
+      }
+      if (!tiered_keys.empty()) {
+        cmd_serializer_->SerializeDelayedEntries(true, &tiered_keys);
+      }
+    }
+  } else {
+    string_view key = get<string_view>(req.change);
+    table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator it) {
+      if (snapshot_version_ != 0) {  // check as lambda can be called several times and may preempt
+        DCHECK_LT(it.GetVersion(), snapshot_version_);
+        if (ProcessBucket(db_index, it, true))
+          ++stats_.buckets_on_db_update;
+      }
+    });
+  }
+  stats_.throttle_on_db_update += throttle_count_ - throttle_start;
+  stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 }
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
