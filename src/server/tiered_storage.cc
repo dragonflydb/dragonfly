@@ -791,7 +791,7 @@ bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts
                    BackPressureFuture* backpressure) {
   if (auto blobs = ts->ShouldStash(*node); blobs) {
     // Increment before stashing; decremented on failure in `ClearStashPending`
-    ql->IncrementNumOffloadedNodes(-1);
+    ql->IncrementNumOffloadedNodes(1);
     node->io_pending = 1;
     ts->StashPartialValue(tiering::ListNodeId{dbid, ql, node}, *blobs, backpressure);
     return true;
