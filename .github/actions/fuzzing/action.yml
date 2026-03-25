@@ -217,8 +217,11 @@ runs:
           exit 0
         fi
 
-        echo "Raw crash directory contents:"
-        ls -la "$CRASHES_DIR"
+        TOTAL_FILES=$(find "$CRASHES_DIR" -maxdepth 1 -type f | wc -l)
+        RECORD_FILES=$(find "$CRASHES_DIR" -maxdepth 1 -name 'RECORD:*' | wc -l)
+        echo "Crash directory: ${TOTAL_FILES} files (${RECORD_FILES} RECORD files for replay)"
+        echo "Crash inputs:"
+        find "$CRASHES_DIR" -maxdepth 1 -type f -name 'id:*' ! -name 'RECORD:*' -exec ls -lh {} +
 
         mkdir -p fuzz/packaged
 
