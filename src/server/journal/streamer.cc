@@ -4,7 +4,6 @@
 
 #include "server/journal/streamer.h"
 
-#include <absl/functional/bind_front.h>
 #include <sys/socket.h>
 
 #include <chrono>
@@ -620,7 +619,7 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
     ProcessDelayedEntries(false, track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
 
   // we don't need throttle here, because we throttle after every entry written
-  return written > 0;
+  return written;
 }
 
 void RestoreStreamer::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
