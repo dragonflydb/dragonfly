@@ -583,7 +583,7 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
 
   unsigned written = 0;
   std::string key_buffer;
-  std::vector<std::pair<DbIndex, std::string>> bucket_tiered_keys;
+  std::vector<DelayedEntryHandler::Key> bucket_tiered_keys;
 
   // Only track tiered keys when needed and flush delayed entries
   // 1. When we have tiered storage
@@ -638,7 +638,7 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const Prim
       WriteEntry(key, pk, pv.GetCool().record->value, expire_ms);
     } else {
       uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(0, pk) : 0;
-      EnqueueDelayedEntry(0, PrimeKey{key}, pv, expire_ms, mc_flags);
+      EnqueueOffloaded(0, PrimeKey{key}, pv, expire_ms, mc_flags);
     }
   } else {
     stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);

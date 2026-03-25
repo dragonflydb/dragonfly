@@ -14,6 +14,58 @@
 
 namespace dfly {
 
+void DelayedEntryHandler::EnqueueOffloaded(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
+                                           time_t expire_time, uint32_t mc_flags) {
+  DCHECK(pv.IsExternal());
+  DCHECK(!pv.IsCool());
+  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
+
+  auto key = pk.ToString();
+  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
+  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
+                                                    expire_time, mc_flags);
+  delayed_entries_.emplace(Key{db_index, std::string(key)}, std::move(entry));
+}
+
+void DelayedEntryHandler::ProcessDelayedEntries(bool force, std::vector<Key>* bucket_tiered_keys,
+                                                ExecutionState* cntx) {
+  const size_t kMaxDelayedEntries = 512;
+  if (delayed_entries_.size() > kMaxDelayedEntries)
+    force |= true;
+
+  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
+  auto serialize_entry = [&](DelayedEntryIt it) {
+    auto& entry = it->second;
+    auto value = entry->value.Get();
+
+    if (!value.has_value()) {
+      cntx->ReportError(make_error_code(std::errc::io_error),
+                        absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
+      return;
+    }
+
+    PrimeValue pv{*value};
+    SerializeFetchedEntry(*entry, pv);
+    delayed_entries_.erase(it++);
+  };
+
+  if (bucket_tiered_keys) {
+    for (const auto& key : *bucket_tiered_keys) {
+      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
+        serialize_entry(it);
+    }
+  }
+
+  // Serialize the delayed entries that are resolved, or all if force it true.
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved()) {
+      ++it;
+      continue;
+    }
+    serialize_entry(it++);
+  }
+}
+
 SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
   DCHECK(db_slice_);
 }
@@ -44,14 +96,14 @@ void SerializerBase::UnregisterChangeListener() {
 
 void SerializerBase::MarkBucketSerializing(BucketIdentity bid) {
   DCHECK(!bucket_states_.contains(bid)) << "Bucket already in transient state";
-  bucket_states_[bid] = {BucketPhase::kSerializing, {}};
+  bucket_states_[bid] = BucketPhase::kSerializing;
 }
 
 void SerializerBase::FinishBucketIteration(BucketIdentity bid,
                                            std::vector<TieredDelayedEntry> delayed) {
   auto it = bucket_states_.find(bid);
   DCHECK(it != bucket_states_.end());
-  DCHECK(it->second.phase == BucketPhase::kSerializing);
+  DCHECK(it->second == BucketPhase::kSerializing);
 
   if (delayed.empty()) {
     // Serializing -> Covered
@@ -60,28 +112,14 @@ void SerializerBase::FinishBucketIteration(BucketIdentity bid,
   } else {
     // Serializing -> DelayedPending
     // TODO: Currently not used
-    it->second.phase = BucketPhase::kDelayedPending;
-    it->second.delayed = std::move(delayed);
+    it->second = BucketPhase::kDelayedPending;
   }
 }
 
 void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
   auto it = bucket_states_.find(bid);
-  DCHECK(it != bucket_states_.end() && it->second.phase == BucketPhase::kDelayedPending);
+  DCHECK(it != bucket_states_.end() && it->second == BucketPhase::kDelayedPending);
   bucket_states_.erase(it);
-}
-
-void SerializerBase::EnqueueDelayedEntry(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
-                                         time_t expire_time, uint32_t mc_flags) {
-  DCHECK(pv.IsExternal());
-  DCHECK(!pv.IsCool());
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
-
-  auto key = pk.ToString();
-  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
-  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
-                                                    expire_time, mc_flags);
-  delayed_entries_.emplace(TieredDelayEntryKey{db_index, std::string(key)}, std::move(entry));
 }
 
 std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
@@ -122,46 +160,6 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
   FinishBucketIteration(*bid, {});
   return true;
-}
-
-void SerializerBase::ProcessDelayedEntries(bool force,
-                                           std::vector<TieredDelayEntryKey>* bucket_tiered_keys,
-                                           ExecutionState* cntx) {
-  const size_t kMaxDelayedEntries = 512;
-  if (delayed_entries_.size() > kMaxDelayedEntries)
-    force |= true;
-
-  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
-  auto serialize_entry = [&](DelayedEntryIt it) {
-    auto& entry = it->second;
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      cntx->ReportError(make_error_code(std::errc::io_error),
-                        absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
-      return;
-    }
-
-    PrimeValue pv{*value};
-    SerializeFetchedEntry(*entry, pv);
-    delayed_entries_.erase(it++);
-  };
-
-  if (bucket_tiered_keys) {
-    for (const auto& key : *bucket_tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        serialize_entry(it);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    serialize_entry(it++);
-  }
 }
 
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {

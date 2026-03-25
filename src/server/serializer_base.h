@@ -21,6 +21,26 @@ namespace dfly {
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
 
+// Handles serialization of offloaded (delayed) entries
+struct DelayedEntryHandler {
+  using Key = std::pair<DbIndex, std::string>;  // Unique identifier of key
+
+  void EnqueueOffloaded(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
+                        uint32_t mc_flags);
+
+  // Must be called periodically to progress on delayed entries. Calls SerializeFetchedEntry.
+  // If force is false, only serializes entries whose futures are already resolved.
+  // If tiered_keys is provided, only serializes entries whose keys are in the set.
+  void ProcessDelayedEntries(bool force, std::vector<Key>* tiered_keys, ExecutionState* cntx);
+
+  // Serialize delayed entry that was fetched with serializer specific implementation
+  virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
+
+ private:
+  // Entries that are waiting for tiered storage reads to complete before they can be serialized.
+  absl::flat_hash_map<Key, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
+};
+
 // SerializerBase owns the DbSlice change-listener registration and a per-bucket
 // state machine that tracks each bucket through:
 //
@@ -31,7 +51,7 @@ using BucketIdentity = uintptr_t;
 //
 // State tracking is purely observational in early PRs: it drives DCHECKs and
 // stats but does not alter the serialization control flow.
-class SerializerBase {
+class SerializerBase : public DelayedEntryHandler {
  public:
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
@@ -61,50 +81,22 @@ class SerializerBase {
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
-  struct BucketState {
-    BucketPhase phase;
-    std::vector<TieredDelayedEntry> delayed;
-  };
-
-  // Tuple <db_index, key> is used as a key to uniquely identify tiered entry on shard.
-  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
-
   // Transition bucket from DelayedPending -> Covered.
   void CompleteBucketDelayed(BucketIdentity bid);
 
-  // Enqueue a offloaded value for read
-  void EnqueueDelayedEntry(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
-                           uint32_t mc_flags);
-
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
-
-  // Serialize delayed entries. If force is true, blocks until all are resolved.
-  // If force is false, only serializes entries whose futures are already resolved.
-  // If tiered_keys is provided, only serializes entries whose keys are in the set.
-  void ProcessDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* tiered_keys,
-                             ExecutionState* cntx);
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
   virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) = 0;
 
-  // Serialize delayed entry that was fetched
-  virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
-
-  // --- Change callbacks ---
-
-  // Called when an existing bucket is about to be mutated.
-  // Default: if unvisited, stamps version, MarkBucketSerializing, DoSerializeBucket,
-  //          FinishBucketIteration.
-  //          If in-flight, increments change_during_serialization (mutex barrier
-  //          preserves the existing serialization behaviour).
-  // Holds big_value_mu_ while running.
+  // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
   void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
 
-  // Called when a new key is about to be inserted.
-  // Default: CVCUponInsert -> OnChange for every touched bucket.
+  // Called when a new key is about to be inserted,
+  // calls CVCUponInsert -> OnChange(bucket_iterator) for every touched bucket.
   void OnChange(DbIndex db_index, std::string_view key);
 
   // --- Shared members (to be moved from subclasses in later PRs) ---
@@ -132,10 +124,7 @@ class SerializerBase {
   // Serializing -> DelayedPending (non-empty delayed).
   void FinishBucketIteration(BucketIdentity bid, std::vector<TieredDelayedEntry> delayed);
 
-  // Entries that are waiting for tiered storage reads to complete before they can be serialized.
-  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
-
-  absl::flat_hash_map<BucketIdentity, BucketState> bucket_states_;
+  absl::flat_hash_map<BucketIdentity, BucketPhase> bucket_states_;
   uint64_t change_cb_id_ = 0;
 };
 

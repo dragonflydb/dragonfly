@@ -19,6 +19,7 @@
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/serializer_base.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/stacktrace.h"
@@ -331,7 +332,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   unsigned result = 0;
 
-  std::vector<TieredDelayEntryKey> bucket_tiered_keys;
+  std::vector<DelayedEntryHandler::Key> bucket_tiered_keys;
   const bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
   const bool track_tiered_keys = push_tiered && tiering_enabled;
 
@@ -366,7 +367,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    EnqueueDelayedEntry(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    EnqueueOffloaded(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
