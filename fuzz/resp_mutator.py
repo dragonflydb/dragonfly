@@ -129,15 +129,15 @@ COMMANDS = [
     # Throttle
     (b"CL.THROTTLE", 5, 5),
     # String (additional)
-    (b"PREPEND", 2, 2), (b"GAT", 1, 5),
+    (b"PREPEND", 2, 2),
     # Key (additional)
-    (b"DELEX", 1, 5), (b"MOVE", 2, 2), (b"RESTORE", 3, 5),
+    (b"DELEX", 1, 3), (b"MOVE", 2, 2), (b"RESTORE", 3, 5),
     (b"TIME", 0, 0), (b"STICK", 1, 5),
-    (b"FIELDEXPIRE", 3, 5), (b"FIELDTTL", 2, 2),
+    (b"FIELDEXPIRE", 3, 7), (b"FIELDTTL", 2, 2),
     # List (additional)
     (b"LINSERT", 4, 4), (b"BRPOPLPUSH", 3, 3),
     # Hash (additional)
-    (b"HEXPIRE", 4, 6), (b"HTTL", 3, 5), (b"HSETEX", 4, 8),
+    (b"HEXPIRE", 4, 8), (b"HTTL", 3, 7), (b"HSETEX", 4, 8),
     # Set (additional)
     (b"SADDEX", 3, 5),
     # Sorted set (additional)
