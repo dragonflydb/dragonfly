@@ -463,6 +463,10 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
 ParseResult<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
   size_t strings_num = parser->Next<size_t>();
 
+  if (!parser->HasError() && !parser->HasAtLeast(strings_num)) {
+    return CreateSyntaxError("bad arguments for SORTBY: specified invalid number of strings"sv);
+  }
+
   aggregate::SortParams sort_params;
   sort_params.fields.reserve(strings_num / 2);
 
