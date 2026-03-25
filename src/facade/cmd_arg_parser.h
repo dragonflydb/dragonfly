@@ -175,7 +175,7 @@ struct CmdArgParser {
   ErrorInfo TakeError();
 
   bool HasAtLeast(size_t i) const {
-    return cur_i_ + i <= args_.size() && !error_;
+    return !error_ && i <= args_.size() - cur_i_;
   }
 
   size_t GetCurrentIndex() const {
