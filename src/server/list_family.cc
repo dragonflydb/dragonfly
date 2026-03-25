@@ -142,7 +142,7 @@ class ListWrapper {
               [ts, db_id = db_id_, ql](QList::Node* node) {
                 if (!ts->IsClosed()) {
                   if (node->io_pending) {
-                    ts->CancelStash(tiering::ListNodeId{db_id, node, ql}, node);
+                    ts->CancelStash(tiering::ListNodeId{db_id, ql, node}, node);
                   } else {
                     // We don't pass QList pointer to delete so we need to decrease
                     // num_offloaded_nodes_ now.
