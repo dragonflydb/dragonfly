@@ -515,6 +515,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && overwrite) {
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
+      // Account for the old value's memory under its original type before destroying it,
+      // since InitSet will free the old value and change the type.
+      add_res.post_updater.ReduceHeapUsage();
     }
 
     // does not store the values, merely sets the encoding.
