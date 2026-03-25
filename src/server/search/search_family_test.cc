@@ -1845,6 +1845,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test SORTBY with a huge nargs value that exceeds available arguments
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "19999999999600", "@name"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {

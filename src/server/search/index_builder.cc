@@ -121,18 +121,15 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
       index_->AddDocToGlobalVectorIndex(*local_id, db_cntx, &pv);
   };
 
-  // Because order of acquiring mutexes for global vector indices is not determined, we must run
-  // all accesses on a single thread through the shard queue to have a single linear order
-  // TODO: this prevents asynchronous indexing for vector fields
-  auto shard_cb = [&] {
-    PrimeTable::Cursor cursor;
-    do {
-      cursor = table->prime.Traverse(cursor, cb);
-      if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
-        util::ThisFiber::Yield();
-    } while (cursor && state_.IsRunning());
-  };
-  shard_set->Await(EngineShard::tlocal()->shard_id(), std::move(shard_cb));
+  // NOTE(global-hnsw-mutex): HNSW (hnsw_alg) index uses a thread-blocking mutex making
+  // AddDocToGlobalVectorIndex non-fiber-suspendable from a fiber point of view. This makes it safe
+  // to perform add keys without locking them while sleeping of a mutex.
+  PrimeTable::Cursor cursor;
+  do {
+    cursor = table->prime.Traverse(cursor, cb);
+    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
+      util::ThisFiber::Yield();
+  } while (cursor && state_.IsRunning());
 }
 
 }  // namespace dfly::search

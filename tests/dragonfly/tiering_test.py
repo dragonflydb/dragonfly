@@ -13,6 +13,7 @@ from .utility import (
     wait_for_replicas_state,
     check_all_replicas_finished,
     LogMonitor,
+    compare_master_replica_keys,
 )
 from .instance import DflyInstance, DflyInstanceFactory
 
@@ -101,32 +102,35 @@ async def test_mixed_append(async_client: aioredis.Redis):
 @pytest.mark.large
 @pytest.mark.exclude_epoll
 @pytest.mark.opt_only
-@dfly_args(
-    {
-        "proactor_threads": 2,
-        "tiered_prefix": "/tmp/tiered/backing_master",
-        "maxmemory": "512MB",
-        "cache_mode": True,
-        "tiered_offload_threshold": "0.6",
-        "tiered_upload_threshold": "0.2",
-        "tiered_storage_write_depth": 1500,
-    }
-)
-async def test_replication(
-    async_client: aioredis.Redis, df_server: DflyInstance, df_factory: DflyInstanceFactory
-):
+@pytest.mark.parametrize("cache_mode", [False, True])
+async def test_tiered_replication_strings_with_append(df_factory: DflyInstanceFactory, cache_mode):
     """
     Test replication with tiered storage for strings
     """
 
+    args = {}
+    if cache_mode:
+        args["cache_mode"] = "true"
+
+    master = df_factory.create(
+        proactor_threads=2,
+        maxmemory="512MB",
+        tiered_prefix="/tmp/tiered/backing_master",
+        tiered_offload_threshold="0.6",
+        tiered_upload_threshold="0.2",
+        tiered_storage_write_depth=1500,
+        **args,
+    )
+    master.start()
+    master_client = master.client()
+
     # Fill master with values
     seeder = DebugPopulateSeeder(key_target=400000, data_size=2000, samples=100, types=["STRING"])
-    await seeder.run(async_client)
+    await seeder.run(master_client)
 
     # Start replica
     replica = df_factory.create(
         proactor_threads=2,
-        cache_mode=True,
         maxmemory="512MB",
         tiered_prefix="/tmp/tiered/backing_replica",
         tiered_offload_threshold="0.5",
@@ -136,25 +140,24 @@ async def test_replication(
     replica_client = replica.client()
 
     # Get some keys and start tasks that append to values
-    keys = await async_client.keys()
+    keys = await master_client.keys()
 
     async def fill_job():
         for i, key in enumerate(keys):
-            await async_client.append(key, f":{i}:")
+            await master_client.append(key, f":{i}:")
             await asyncio.sleep(0.005)  # limit qps
 
     fill_tasks = [asyncio.create_task(fill_job()) for _ in range(3)]
 
     # Start replication
-    await replica_client.replicaof("localhost", df_server.port)
-    logging.info("Waiting for replica to sync")
+    await replica_client.replicaof("localhost", master.port)
 
     # Wait for replication to finish
     try:
         async with async_timeout.timeout(500):
             await wait_for_replicas_state(replica_client)
     except asyncio.TimeoutError:
-        master_info = await async_client.info("ALL")
+        master_info = await master_client.info("ALL")
         replica_info = await replica_client.info("ALL")
         pytest.fail(
             f"Replica did not sync in time. \nmaster: {master_info} \n\nreplica: {replica_info}"
@@ -164,20 +167,20 @@ async def test_replication(
     for task in fill_tasks:
         task.cancel()
     await asyncio.gather(*fill_tasks, return_exceptions=True)
-    await check_all_replicas_finished([replica_client], async_client, timeout=500)
+    await check_all_replicas_finished([replica_client], master_client, timeout=500)
 
-    #
-    # Check that everything is in sync
+    # Check that everything is in sync.
+    # Disable heartbeat during string keys hash calculation to avoid evicition of keys during
+    # which can cause inconsistency.
+    await master_client.execute_command("CONFIG SET enable_heartbeat_eviction false")
     hashes = await asyncio.gather(
-        *(SeederV2.capture(c, types=["STRING"]) for c in [async_client, replica_client])
+        *(SeederV2.capture(c, types=["STRING"]) for c in [master_client, replica_client])
     )
+    await master_client.execute_command("CONFIG SET enable_heartbeat_eviction true")
 
     if len(set(hashes)) != 1:
-        for key in keys:
-            key_master = await async_client.get(key)
-            key_replica = await replica_client.get(key)
-            assert key_master == key_replica
-        assert False, "Inconsistency detected, but key not determined"
+        await compare_master_replica_keys(master_client, replica_client)
+        assert False, "Inconsistency detected. Key doesn't exits on master side."
 
 
 @pytest.mark.large

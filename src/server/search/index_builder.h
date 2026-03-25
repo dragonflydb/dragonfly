@@ -26,8 +26,9 @@ struct IndexBuilder {
   // for HNSW indices (restored from RDB). This flag is passed from PerformPostLoad.
   void Start(const OpArgs& op_args, bool is_restored, std::function<void()> on_complete);
 
-  // Cancel building and wait for worker to finish. Safe to delete after
-  // TODO: Maybe implement nonblocking version?
+  // Cancel building and wait for worker to finish. Safe to delete after.
+  // WARNING: Must NOT be called from the shard's FiberQueue context if VectorLoop
+  // may have dispatched work to the same queue — that would deadlock.
   void Cancel();
 
   // Get fiber reference. Temporary to polyfill sync construction places

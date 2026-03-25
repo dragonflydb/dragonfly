@@ -1092,4 +1092,126 @@ TEST_F(RdbTest, CmsSerialization) {
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(5), IntArg(3), IntArg(9))));
 }
 
+// Tests basic TOPK save/load: verifies that top-k heap items are correctly serialized
+// and restored, maintaining their frequency-based ordering.
+// Uses TOPK.INCRBY with large increments to ensure deterministic counts despite
+// the stochastic HeavyKeeper decay (decay^count ≈ 0 for large counts).
+TEST_F(RdbTest, TopkSerializationBasic) {
+  Run({"TOPK.RESERVE", "topk_small", "3", "50", "7", "0.9"});
+  Run({"TOPK.INCRBY", "topk_small", "foo", "300", "bar", "200", "baz", "400"});
+
+  auto resp = Run({"TOPK.LIST", "topk_small"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("baz", "foo", "bar")));
+
+  Run({"debug", "reload"});
+
+  resp = Run({"TOPK.LIST", "topk_small"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("baz", "foo", "bar")));
+}
+
+// Tests that the Count-Min Sketch counter array is correctly serialized:
+// verifies that existing counters suppress colliding items correctly after load.
+TEST_F(RdbTest, TopkSerializationCounterArrayIntegrity) {
+  Run({"TOPK.RESERVE", "topk_counters", "5", "100", "5", "0.9"});
+  Run({"TOPK.INCRBY", "topk_counters", "alpha", "300", "beta", "200"});
+
+  Run({"debug", "reload"});
+
+  // Verify counts are preserved via TOPK.COUNT, which reads the counter array directly.
+  // If counters weren't restored, these would return 0 (or wrong values).
+  // TOPK.COUNT returns an array with one element per queried item.
+  auto counts = Run({"TOPK.COUNT", "topk_counters", "alpha", "beta"});
+  ASSERT_THAT(counts, ArrLen(2));
+  int64_t alpha_count = counts.GetVec()[0].GetInt().value_or(0);
+  int64_t beta_count = counts.GetVec()[1].GetInt().value_or(0);
+  EXPECT_GE(alpha_count, 1);
+  EXPECT_GE(beta_count, 1);
+  EXPECT_GT(alpha_count, beta_count);
+
+  // Also verify items are still in the heap (heap restoration).
+  EXPECT_THAT(Run({"TOPK.QUERY", "topk_counters", "alpha", "beta"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1))));
+
+  auto resp = Run({"TOPK.LIST", "topk_counters"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("alpha", "beta")));
+}
+
+// Tests that K parameter (max heap size) is preserved after serialization:
+// verifies list size stays at K=3 and eviction works correctly after load.
+TEST_F(RdbTest, TopkSerializationParametersPreserved) {
+  Run({"TOPK.RESERVE", "topk_params", "3", "64", "4", "0.95"});
+  Run({"TOPK.INCRBY", "topk_params", "a", "100", "b", "200", "c", "300"});
+
+  Run({"debug", "reload"});
+
+  auto before = Run({"TOPK.LIST", "topk_params"});
+  ASSERT_THAT(before, ArrLen(3));  // K=3 must be enforced
+
+  // Add a new item heavily. It should evict the lowest item, maintaining K=3.
+  Run({"TOPK.INCRBY", "topk_params", "z", "1000"});
+
+  auto after = Run({"TOPK.LIST", "topk_params"});
+  ASSERT_THAT(after, ArrLen(3));
+  EXPECT_EQ(after.GetVec().front(), "z");  // 'z' should be the new king
+}
+
+// Tests serialization of heap-allocated strings (bypass SSO) to verify correct
+// memory handling for string pointers in the min-heap.
+TEST_F(RdbTest, TopkSerializationExtensive) {
+  Run({"TOPK.RESERVE", "topk_large", "10", "128", "5", "0.9"});
+
+  // Bypass SSO (Small String Optimization) to test memory pointers
+  std::string long_str1(50, 'A');
+  std::string long_str2(60, 'B');
+  std::string long_str3(70, 'C');
+
+  // Use INCRBY with large values to ensure deterministic counts
+  Run({"TOPK.INCRBY", "topk_large", long_str1, "500"});
+  Run({"TOPK.INCRBY", "topk_large", long_str2, "300"});
+  Run({"TOPK.INCRBY", "topk_large", long_str3, "700"});
+
+  Run({"debug", "reload"});
+
+  auto resp = Run({"TOPK.LIST", "topk_large"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(long_str3, long_str1, long_str2)));
+}
+
+// Tests that empty TOPK (zero items in heap) can be saved and loaded correctly:
+// validates TagAllowsEmptyValue() and ensures structure remains functional after load.
+TEST_F(RdbTest, TopkSerializationEmptyEdgeCase) {
+  Run({"TOPK.RESERVE", "topk_empty", "5", "50", "3", "0.9"});
+
+  Run({"debug", "reload"});
+
+  auto resp = Run({"TOPK.LIST", "topk_empty"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // After loading an empty TOPK, adding items must work correctly.
+  Run({"TOPK.INCRBY", "topk_empty", "new_item", "100"});
+  resp = Run({"TOPK.LIST", "topk_empty"});
+  // Run() unwraps single-element arrays to a scalar string
+  EXPECT_EQ(resp, "new_item");
+}
+
+// Tests that the decay parameter (double) is correctly serialized using SaveBinaryDouble/
+// FetchBinaryDouble: critical test for the strict aliasing fix (no reinterpret_cast).
+TEST_F(RdbTest, TopkSerializationDecayParameter) {
+  // Create TOPK with extreme decay values to ensure the double serialization works
+  Run({"TOPK.RESERVE", "topk_decay_low", "5", "50", "3", "0.1"});     // Very aggressive decay
+  Run({"TOPK.RESERVE", "topk_decay_high", "5", "50", "3", "0.999"});  // Minimal decay
+
+  // Use INCRBY with large values to ensure deterministic counts
+  Run({"TOPK.INCRBY", "topk_decay_low", "item1", "500", "item2", "300"});
+  Run({"TOPK.INCRBY", "topk_decay_high", "item3", "500", "item4", "300"});
+
+  Run({"debug", "reload"});
+
+  // Verify both TOPKs loaded successfully and maintain their items
+  auto resp1 = Run({"TOPK.LIST", "topk_decay_low"});
+  EXPECT_THAT(resp1, RespArray(ElementsAre("item1", "item2")));
+
+  auto resp2 = Run({"TOPK.LIST", "topk_decay_high"});
+  EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
+}
+
 }  // namespace dfly

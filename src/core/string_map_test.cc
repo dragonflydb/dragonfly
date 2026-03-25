@@ -283,7 +283,7 @@ TEST_F(StringMapTest, ExtractExisting) {
   ASSERT_TRUE(entry);
 
   // Verify the extracted entry has the correct value
-  sds val = StringMap::GetValue(entry.get());
+  sds val = StringMap::GetValue(static_cast<sds>(entry.get()));
   EXPECT_EQ(string_view(val, sdslen(val)), "v1");
 
   // Verify it was removed from the map
@@ -301,8 +301,8 @@ TEST_F(StringMapTest, ExtractNonExisting) {
 
 TEST_F(StringMapTest, AddOrExchangeNew) {
   // Adding a new field returns nullptr (no previous entry)
-  sds prev = sm_->AddOrExchange("f1", "v1");
-  EXPECT_EQ(prev, nullptr);
+  auto prev = sm_->AddOrExchange("f1", "v1");
+  EXPECT_FALSE(prev);
   EXPECT_TRUE(sm_->Contains("f1"));
   EXPECT_STREQ(sm_->Find("f1")->second, "v1");
 }
@@ -311,27 +311,27 @@ TEST_F(StringMapTest, AddOrExchangeReplace) {
   sm_->AddOrUpdate("f1", "old_value");
   EXPECT_EQ(sm_->UpperBoundSize(), 1u);
 
-  sds prev = sm_->AddOrExchange("f1", "new_value");
-  ASSERT_NE(prev, nullptr);
+  auto prev = sm_->AddOrExchange("f1", "new_value");
+  ASSERT_TRUE(prev);
 
-  // Verify the extracted entry has the old value
-  sds val = StringMap::GetValue(prev);
+  // Verify the returned entry has the old value
+  sds prev_key = static_cast<sds>(prev.get());
+  sds val = StringMap::GetValue(prev_key);
   EXPECT_EQ(string_view(val, sdslen(val)), "old_value");
 
   // Verify map now has the new value
   EXPECT_STREQ(sm_->Find("f1")->second, "new_value");
   EXPECT_EQ(sm_->UpperBoundSize(), 1u);
-
-  StringMap::DeleteEntry(prev);
 }
 
 TEST_F(StringMapTest, AddOrExchangeWithTtl) {
   sm_->AddOrUpdate("f1", "v1", 100);
 
-  sds prev = sm_->AddOrExchange("f1", "v2", 200);
-  ASSERT_NE(prev, nullptr);
+  auto prev = sm_->AddOrExchange("f1", "v2", 200);
+  ASSERT_TRUE(prev);
 
-  sds val = StringMap::GetValue(prev);
+  sds prev_key = static_cast<sds>(prev.get());
+  sds val = StringMap::GetValue(prev_key);
   EXPECT_EQ(string_view(val, sdslen(val)), "v1");
 
   // Make sure new entry has correct value and ttl
@@ -339,8 +339,6 @@ TEST_F(StringMapTest, AddOrExchangeWithTtl) {
   EXPECT_STREQ(it->second, "v2");
   EXPECT_TRUE(it.HasExpiry());
   EXPECT_EQ(it.ExpiryTime(), 200u);
-
-  StringMap::DeleteEntry(prev);
 }
 
 TEST_F(StringMapTest, ExtractMultiple) {

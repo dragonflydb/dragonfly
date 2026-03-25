@@ -418,6 +418,29 @@ TEST_F(QListTest, Tiering) {
   EXPECT_EQ(QList::stats.offload_requests, 9);
 }
 
+TEST_F(QListTest, InsertPivotSplitMergeMallocSize) {
+  QList ql(2, 0);  // fill=2: at most 2 elements per node
+  ql.Push("x", QList::TAIL);
+  ql.Push("b", QList::TAIL);  // ['x','b'] — full node (count == fill)
+
+  // Insert before 'b' on a full node triggers the split path.
+  ql.Insert("b", "x", QList::BEFORE);
+
+  // Verify malloc_size_ matches the actual sum of node sizes.
+  size_t actual_sz = 0;
+  for (auto* n = ql.Head(); n; n = n->next)
+    actual_sz += n->sz;
+  size_t node_overhead = ql.node_count() * sizeof(QList::Node) + znallocx(sizeof(QList));
+  EXPECT_EQ(ql.MallocUsed(false) - node_overhead, actual_sz);
+
+  ql.Pop(QList::TAIL);  // remove 'b' node → 1 node ['x','x']
+
+  // Erase one element; list stays at len==1.
+  // DCHECK_EQ(malloc_size_, head_->sz) at exit of Erase(Iterator) catches the drift.
+  auto it = ql.GetIterator(QList::HEAD);
+  ql.Erase(it);
+}
+
 using FillCompress = tuple<int, unsigned>;
 
 class PrintToFillCompress {
