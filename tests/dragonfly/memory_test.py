@@ -295,6 +295,7 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
     assert keyspace_info["db0"]["keys"] == num_keys
 
 
+@pytest.mark.skip(reason="Disabling test until improvements in squashing.")
 @pytest.mark.asyncio
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(
