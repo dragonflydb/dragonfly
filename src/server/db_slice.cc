@@ -1243,9 +1243,14 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 
   int64_t expire_time = it->first.GetExpireTime();
 
-  // Never do expiration on replica or if expiration is disabled.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
-    return it;
+  if (int64_t(cntx.time_now_ms) < expire_time) {
+    return it;  // Not yet expired.
+  }
+
+  // On replica or if expiration is disabled, don't delete the key but hide it from clients.
+  // The master will send DEL when it expires the key on its side.
+  if (owner_->IsReplica() || !expire_allowed_) {
+    return PrimeIterator{};
   }
 
   string scratch;
