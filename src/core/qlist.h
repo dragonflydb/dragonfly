@@ -218,6 +218,15 @@ class QList {
 
   static void SetPackedThreshold(unsigned threshold);
 
+  // Frees the thread-local ZSTD dictionary state. Must be called once per thread
+  // during service shutdown.
+  static void ShutdownThread();
+
+  // Decompresses a ZSTD-encoded node into dest using the thread-local dict.
+  // Returns false if the node is not ZSTD-encoded or decompression fails.
+  // Used during RDB save to avoid persisting ZSTD bytes as LZF.
+  static bool DecompressZstdNode(const Node* node, std::string* dest);
+
   // Moves nodes away from underused pages by reallocating if the underlying page usage is low.
   // Returns count of nodes reallocated to help in testing.
   size_t DefragIfNeeded(PageUsage* page_usage);
@@ -257,7 +266,7 @@ class QList {
   static __thread Stats stats;
 
  private:
-  bool AllowCompression() const {
+  bool AllowLZFCompression() const {
     return compress_ != 0;
   }
 
@@ -274,8 +283,24 @@ class QList {
   // compressing the node based on its position in the list.
   void CoolOff(Node* node, uint32_t node_id);
 
+  // Like the RecompressOnly free function, but also handles ZSTD dict mode.
+  // Returns the size delta (negative means compression reduced memory usage).
+  ssize_t RecompressNode(Node* node);
+
   void Replace(Iterator it, std::string_view elem);
   void CompressByDepth(Node* node);
+
+  // Trains a ZSTD dictionary from all node data and stores it in thread-local state.
+  // Returns true if a dictionary was successfully trained (or already exists).
+  // Sets dict_learning_failed_ on failure.
+  bool TrainZstdDict();
+
+  // Bulk-compresses all interior nodes using the thread-local ZSTD dictionary.
+  // Sets dict_compress_failed_ if no nodes could be compressed.
+  void CompressWithZstdDict();
+
+  // Compresses a single node using the thread-local ZSTD dictionary.
+  bool CompressNodeWithDict(Node* node);
 
   // Prepares the node for read access.
   void AccessForReads(bool recompress, Node* node);
@@ -294,20 +319,20 @@ class QList {
   void InitIteratorEntry(Iterator* it) const;
 
   Node* head_ = nullptr;
-  size_t malloc_size_ = 0;  // size of the quicklist struct
-  uint32_t count_ = 0;      /* total count of all entries in all listpacks */
-  uint32_t len_ = 0;        /* number of quicklistNodes */
-  int16_t fill_;            /* fill factor for individual nodes */
-  int16_t reserved1_;
+  size_t malloc_size_ = 0;            // size of the quicklist struct
+  uint32_t count_ = 0;                /* total count of all entries in all listpacks */
+  uint32_t len_ = 0;                  /* number of quicklistNodes */
+  int16_t fill_;                      /* fill factor for individual nodes */
+  uint16_t dict_learning_failed_ : 1; /* thread-local dict training failed for this list's data */
+  uint16_t dict_compress_failed_ : 1; /* compression with thread-local dict failed for this list */
+  uint16_t dict_bulk_finished_ : 1;   /* bulk compression done, per-node compression active */
+  uint16_t reserved1_ : 13;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
   uint32_t num_offloaded_nodes_ = 0;
   uint32_t zstd_threshold_ = 0;  // 0 = disabled
   std::unique_ptr<TieringParams> tiering_params_;
-
-  struct ZstdDictState;
-  std::unique_ptr<ZstdDictState> zstd_dict_;
 };
 
 }  // namespace dfly
