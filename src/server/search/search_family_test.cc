@@ -4740,4 +4740,186 @@ TEST_F(SearchFamilyTest, AggregateGroupByHugeNargsDoesNotCrash) {
   EXPECT_THAT(Run({"PING"}), "PONG");
 }
 
+TEST_F(SearchFamilyTest, FtAggregateFilterStringEq) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "10"});
+  Run({"HSET", "h2", "name", "technology", "value", "20"});
+  Run({"HSET", "h3", "name", "cooking", "value", "30"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@name == 'sports'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "total", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterNumericLt) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "0.5"});
+  Run({"HSET", "h2", "name", "b", "value", "0.9"});
+  Run({"HSET", "h3", "name", "c", "value", "0.3"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "AVG", "1", "@value", "AS", "distance",
+                   "FILTER", "@distance < 0.8"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "a", "distance", "0.5"),
+                                         IsMap("name", "c", "distance", "0.3")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterCompound) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "0.5"});
+  Run({"HSET", "h2", "name", "technology", "value", "0.9"});
+  Run({"HSET", "h3", "name", "cooking", "value", "0.3"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "AVG", "1", "@value", "AS", "distance",
+                   "FILTER", "(@name == 'sports' && @distance < 0.8) || @name == 'cooking'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "distance", "0.5"),
+                                         IsMap("name", "cooking", "distance", "0.3")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterEmptyResult) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total > 100"});
+  // clang-format on
+  // When all rows are filtered out, FT.AGGREGATE returns integer 0
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterPipelineOrder) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // FILTER between GROUPBY and SORTBY
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total >= 20",
+                   "SORTBY", "1", "@total"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "b", "total", "20"),
+                                         IsMap("name", "c", "total", "30")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterInvalidExpr) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG"});
+  Run({"HSET", "h1", "name", "a"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "FILTER", "@a =="});
+  EXPECT_THAT(resp, ErrArg("FILTER expression error"));
+
+  // Missing FILTER argument
+  resp = Run({"FT.AGGREGATE", "idx", "*", "FILTER"});
+  EXPECT_THAT(resp, ErrArg("ERR"));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterMultiple) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // Two FILTER steps applied sequentially
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total >= 10",
+                   "FILTER", "@total <= 20"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "a", "total", "10"),
+                                         IsMap("name", "b", "total", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterOnly) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "10"});
+  Run({"HSET", "h2", "name", "tech", "value", "20"});
+
+  // FILTER as the only pipeline step (no GROUPBY)
+  auto resp = Run(
+      {"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@name", "@value", "FILTER", "@name == 'sports'"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "value", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterFuncLower) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "Sports", "value", "10"});
+  Run({"HSET", "h2", "name", "TECH", "value", "20"});
+  Run({"HSET", "h3", "name", "cooking", "value", "30"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "lower(@name) == 'sports'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "Sports", "total", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterAfterLimit) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // SORTBY -> LIMIT 0 2 -> FILTER: filter applies on the limited set
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "SORTBY", "1", "@value",
+                   "LIMIT", "0", "2",
+                   "FILTER", "@value > 15"});
+  // clang-format on
+  // After SORTBY + LIMIT 0 2 we have the 2 smallest values (10, 20); FILTER keeps only 20
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {
+  // Simulates the redisvl semantic routing query pattern:
+  // GROUPBY -> REDUCE AVG -> SORTBY -> FILTER with compound expression
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "route_name", "TAG", "distance", "NUMERIC"});
+  Run({"HSET", "h1", "route_name", "technology", "distance", "0.5"});
+  Run({"HSET", "h2", "route_name", "technology", "distance", "0.7"});
+  Run({"HSET", "h3", "route_name", "sports", "distance", "0.3"});
+  Run({"HSET", "h4", "route_name", "sports", "distance", "0.9"});
+  Run({"HSET", "h5", "route_name", "cooking", "distance", "0.2"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@route_name",
+                     "REDUCE", "AVG", "1", "@distance", "AS", "avg_dist",
+                   "SORTBY", "1", "@avg_dist",
+                   "FILTER",
+                     "(@route_name == 'technology' && @avg_dist < 0.8) || "
+                     "(@route_name == 'sports' && @avg_dist < 0.8) || "
+                     "(@route_name == 'cooking' && @avg_dist < 0.8)"});
+  // clang-format on
+
+  // technology: avg(0.5, 0.7)=0.6 < 0.8
+  // sports: avg(0.3, 0.9)=0.6 < 0.8
+  // cooking: avg(0.2)=0.2 < 0.8
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route_name", "cooking", "avg_dist", "0.2"),
+                                         IsMap("route_name", "technology", "avg_dist", "0.6"),
+                                         IsMap("route_name", "sports", "avg_dist", "0.6")));
+}
+
 }  // namespace dfly
