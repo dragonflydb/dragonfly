@@ -67,10 +67,6 @@ class OpManager {
     return storage_.PrepareStash(length);
   }
 
-  void MarkSegmentFree(DiskSegment segment) {
-    storage_.MarkAsFree(segment.ContainingPages());
-  }
-
   // Stash value to be offloaded. It is opaque to OpManager.
   void Stash(PendingId id, tiering::DiskSegment segment, util::fb2::RegisteredSlice buf);
 

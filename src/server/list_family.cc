@@ -143,6 +143,9 @@ class ListWrapper {
                   if (node->io_pending) {
                     ts->CancelStash(tiering::ListNodeId{db_id, node, ql}, node);
                   } else {
+                    // We don't pass QList pointer to delete so we need to decrease
+                    // num_offloaded_nodes_ now.
+                    ql->IncrementNumOffloadedNodes(-1);
                     ts->Delete(db_id, node);
                   }
                 }
@@ -214,6 +217,8 @@ class ListWrapper {
   }
 
  public:
+  // TODO: passing current dbid of objecte. It could happen that object is moved to
+  // another db so this dbid will be incorrect. Refactor to support moving objects between dbs.
   template <typename T>
   explicit ListWrapper(DbIndex dbid, T t) : db_id_(dbid), impl_(std::forward<T>(t)) {
   }

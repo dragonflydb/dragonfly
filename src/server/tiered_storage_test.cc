@@ -43,13 +43,29 @@ string BuildString(size_t len, char c = 'A') {
   return string(len, c);
 }
 
-// Builds a string using a 128-byte cycling pattern so that LZF can compress it.
-// For len=512 the LZF output is typically ~150 bytes vs 10-20 bytes for a single-char fill.
-// `offset` shifts the starting byte so different items produce distinct values.
-string BuildModeratelyCompressible(size_t len, int offset = 0) {
+// Builds a string whose LZF-compressed size stays above kMinOccupancySize (2 KB), which
+// is required for list nodes to qualify for tiered offloading.
+// The first half uses xorshift pseudo-random bytes (incompressible, stored as literals by
+// LZF); the second half uses the 128-byte cycling pattern so LZF compression still fires
+// but the total compressed output remains above 2 KB.
+// For len=4096 the expected LZF output is ~2300 bytes (well above the 2 KB threshold).
+//
+// Note: AI created function
+//
+string BuildLargeCompressibleValue(size_t len, int seed = 0) {
+  DCHECK_GE(len, 2048u);
   string s(len, 0);
-  for (size_t i = 0; i < len; i++)
-    s[i] = static_cast<char>((i + offset) % 128);
+  // First half: xorshift32 pseudo-random bytes that LZF cannot back-reference.
+  uint32_t state = static_cast<uint32_t>(seed) * 0x9e3779b9u + 1;
+  for (size_t i = 0, half = len / 2; i < half; i++) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    s[i] = static_cast<char>(state & 0xFF);
+  }
+  // Second half: 128-byte cycling pattern (compressible, shifted by seed).
+  for (size_t i = len / 2; i < len; i++)
+    s[i] = static_cast<char>((i + seed * 7) % 128);
   return s;
 }
 
@@ -959,7 +975,7 @@ TEST_F(CompressedListNodeTieringTest, CompressedNodesOffloadAndReload) {
   const int kItems = 8;
   vector<string> expected;
   for (int i = 0; i < kItems; i++) {
-    expected.push_back(BuildModeratelyCompressible(512, i));
+    expected.push_back(BuildLargeCompressibleValue(4096, i));
     Run({"RPUSH", "mylist", expected.back()});
   }
 
@@ -986,7 +1002,7 @@ TEST_F(CompressedListNodeTieringTest, CompressedNodesOffloadAndLIndex) {
   const int kItems = 8;
   vector<string> expected;
   for (int i = 0; i < kItems; i++) {
-    expected.push_back(BuildModeratelyCompressible(512, i));
+    expected.push_back(BuildLargeCompressibleValue(4096, i));
     Run({"RPUSH", "mylist", expected.back()});
   }
 
@@ -1002,7 +1018,7 @@ TEST_F(CompressedListNodeTieringTest, CompressedNodesOffloadAndLPop) {
   const int kItems = 8;
   vector<string> expected;
   for (int i = 0; i < kItems; i++) {
-    expected.push_back(BuildModeratelyCompressible(512, i));
+    expected.push_back(BuildLargeCompressibleValue(4096, i));
     Run({"RPUSH", "mylist", expected.back()});
   }
 
@@ -1019,7 +1035,7 @@ TEST_F(CompressedListNodeTieringTest, CompressedNodesOffloadAndLPop) {
 TEST_F(CompressedListNodeTieringTest, DeleteWhileCompressedNodePending) {
   const int kItems = 8;
   for (int i = 0; i < kItems; i++) {
-    Run({"RPUSH", "mylist", BuildModeratelyCompressible(512, i)});
+    Run({"RPUSH", "mylist", BuildLargeCompressibleValue(4096, i)});
   }
 
   // DEL immediately
@@ -1038,7 +1054,7 @@ TEST_F(CompressedListNodeTieringTest, DeleteWhileCompressedNodePending) {
 TEST_F(CompressedListNodeTieringTest, DeleteAfterCompressedNodesStashed) {
   const int kItems = 8;
   for (int i = 0; i < kItems; i++) {
-    Run({"RPUSH", "mylist", BuildModeratelyCompressible(512, i)});
+    Run({"RPUSH", "mylist", BuildLargeCompressibleValue(4096, i)});
   }
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
@@ -1061,7 +1077,7 @@ TEST_F(CompressedListNodeTieringTest, FlushAllWithCompressedOffloadedNodes) {
 
   for (int l = 0; l < kLists; l++) {
     for (int i = 0; i < kItems; i++) {
-      Run({"RPUSH", absl::StrCat("list", l), BuildModeratelyCompressible(512, i)});
+      Run({"RPUSH", absl::StrCat("list", l), BuildLargeCompressibleValue(4096, i)});
     }
   }
 

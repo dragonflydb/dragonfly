@@ -64,22 +64,23 @@ class QList {
     uint16_t attempted_compress : 1; /* node can't compress; too small */
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
+    uint16_t io_pending : 1;         /* node has pending io operation */
     uint16_t reserved1 : 7;          /* reserved for future use */
 
     bool IsCompressed() const {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
-    // Returns the size of entry data.
+    // Returns the size of entry data. Return size of compressed data for
+    // compressed nodes or size of raw data.
     size_t GetEntrySize() const;
 
     size_t GetLZF(void** data) const;
 
-    struct __attribute__((__packed__)) ExternalRecord {
+    struct ExternalRecord {
       uint32_t size;
       size_t offset;
-    };
-    static_assert(sizeof(ExternalRecord) == 12);
+    } __attribute__((packed));
 
     ExternalRecord ext;
 
@@ -118,6 +119,11 @@ class QList {
 
   void AdjustMallocSize(ssize_t delta) {
     malloc_size_ += delta;
+  }
+
+  // Add to the number of offloaded nodes by one.
+  void IncrementNumOffloadedNodes(int delta) {
+    num_offloaded_nodes_ += delta;
   }
 
   struct TieringParams {
@@ -261,11 +267,6 @@ class QList {
   // 0 disables ZSTD dictionary compression.
   void set_compr_threshold(uint32_t threshold) {
     zstd_threshold_ = threshold;
-  }
-
-  // If offloading node fails or we cancel pendig offload, we need to decrease the counter.
-  void DecreaseNumOffloadedNodes() {
-    num_offloaded_nodes_--;
   }
 
   struct Stats {

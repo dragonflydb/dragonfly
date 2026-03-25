@@ -413,10 +413,16 @@ QList::Stats& QList::Stats::operator+=(const Stats& other) {
 }
 
 size_t QList::Node::GetEntrySize() const {
-  if (encoding == QUICKLIST_NODE_ENCODING_RAW) {
-    return sz;
-  } else {
-    return GetLzf(const_cast<QList::Node*>(this))->sz + sizeof(quicklistLZF);
+  switch (encoding) {
+    case QUICKLIST_NODE_ENCODING_RAW:
+      return sz;
+    case QUICKLIST_NODE_ENCODING_LZF:
+    case QLIST_NODE_ENCODING_ZSTD:
+      return GetLzf(const_cast<QList::Node*>(this))->sz + sizeof(quicklistLZF);
+    default: {
+      LOG(DFATAL) << "Unknown encoding " << encoding;
+      return 0;
+    }
   }
 }
 
@@ -1058,27 +1064,22 @@ void QList::AccessForReads(bool recompress, Node* node) {
   DCHECK(node);
   stats.total_node_reads++;
 
-  if (node->io_pending) {
-    // Offload in progres so cancel it and read the node synchronously.
-    DCHECK(tiering_params_);
-    if (tiering_params_->delete_cb) {
+  if (tiering_params_ && (node->offloaded || node->io_pending)) {
+    // If the nodes is io_pending. Just call the delete callback to cancel stashing.
+    if (node->io_pending && tiering_params_->delete_cb) {
       tiering_params_->delete_cb(node);
     }
-    DCHECK(!node->io_pending);
-    num_offloaded_nodes_--;
-  }
-
-  if (node->offloaded) {
-    DCHECK(tiering_params_);
-    stats.onload_requests++;
-    if (tiering_params_->onload_cb) {
+    // If the nodes is offlodaded. Load the data back to node.
+    if (node->offloaded && tiering_params_->onload_cb) {
+      stats.onload_requests++;
       tiering_params_->onload_cb(node);
     }
-    // After onload_cb returns, the node entry must be restored.
+    // After onload_cb returns, the node entry must be restored and flags cleared.
     DCHECK(!node->offloaded);
+    DCHECK(!node->io_pending);
     DCHECK(node->entry != nullptr);
-    num_offloaded_nodes_--;
   }
+
   if (len_ > 2 && node != head_ && node->next != nullptr) {
     stats.interior_node_reads++;
   }
@@ -1206,7 +1207,6 @@ void QList::DelNode(Node* node) {
   }
 
   if (tiering_params_ && (node->offloaded || node->io_pending)) {
-    num_offloaded_nodes_--;
     if (tiering_params_->delete_cb) {
       tiering_params_->delete_cb(node);
     }
@@ -1247,12 +1247,10 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
 }
 
 void QList::OffloadNode(Node* node) {
-  DCHECK(tiering_params_ && node->offloaded == 0);
-  if (node->io_pending)
-    return;
+  DCHECK(tiering_params_ && node->offloaded == 0 && node->io_pending == 0);
   stats.offload_requests++;
-  if (tiering_params_->offload_cb && tiering_params_->offload_cb(node)) {
-    num_offloaded_nodes_++;
+  if (tiering_params_->offload_cb) {
+    tiering_params_->offload_cb(node);
   }
 }
 
