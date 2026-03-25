@@ -1293,9 +1293,14 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   // TODO: to employ multi-generation update of expire-base and the underlying values.
   int64_t expire_time = ExpireTime(expire_it->second);
 
-  // Never do expiration on replica or if expiration is disabled.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
-    return {it, expire_it};
+  if (int64_t(cntx.time_now_ms) < expire_time) {
+    return {it, expire_it};  // Not yet expired.
+  }
+
+  // On replica or if expiration is disabled, don't delete the key but hide it from clients.
+  // The master will send DEL when it expires the key on its side.
+  if (owner_->IsReplica() || !expire_allowed_) {
+    return {PrimeIterator{}, ExpireIterator{}};
   }
 
   string scratch;
