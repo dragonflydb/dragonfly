@@ -472,6 +472,27 @@ TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   EXPECT_THAT(Run("SCARD key"), IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SDiffStoreExpiredMembers) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Create a set with per-member TTL using SADDEX
+  EXPECT_THAT(Run({"saddex", "src", "1", "a", "b", "c"}), IntArg(3));
+
+  // Create another set for diffing
+  EXPECT_THAT(Run({"sadd", "other", "x"}), IntArg(1));
+
+  // Advance time so all members expire
+  AdvanceTime(2000);
+
+  // SDIFFSTORE should handle expired members gracefully, not crash
+  auto resp = Run({"sdiffstore", "dest", "src", "other"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Also test SDIFF (read-only variant)
+  resp = Run({"sdiff", "src", "other"});
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
+}
+
 TEST_F(SetFamilyTest, SetInter_5590) {
   absl::FlagSaver fs;
   SetTestFlag("num_shards", "2");

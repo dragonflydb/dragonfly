@@ -769,7 +769,10 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
     return true;
   });
 
-  DCHECK(!uniques.empty());  // otherwise the key would not exist.
+  // All members may have expired (per-member TTL via SADDEX), leaving an empty set.
+  if (uniques.empty()) {
+    return StringVec{};
+  }
 
   for (++start; start != end; ++start) {
     auto diff_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
