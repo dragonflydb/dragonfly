@@ -534,6 +534,8 @@ void QList::Clear() noexcept {
   while (len_) {
     Node* next = current->next;
 
+    // If entry is offloaded we should skip freeing its memory.
+    bool free_entry = current->offloaded == 0;
     if (current->offloaded || current->io_pending) {
       if (tiering_params_ && tiering_params_->delete_cb) {
         tiering_params_->delete_cb(current);
@@ -544,6 +546,9 @@ void QList::Clear() noexcept {
         stats.compressed_bytes -= lzf->sz;
         stats.raw_compressed_bytes -= current->sz;
       }
+    }
+
+    if (free_entry) {
       zfree(current->u_.entry);
     }
 
@@ -681,6 +686,10 @@ size_t QList::MallocUsed(bool slow) const {
   size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(QList));
   if (slow) {
     for (Node* node = head_; node; node = node->next) {
+      // Skip offloaded or pending nodes from malloc size calculation
+      if (node->offloaded || node->io_pending) {
+        continue;
+      }
       node_size += zmalloc_usable_size(node->u_.entry);
     }
     return node_size;
