@@ -99,27 +99,13 @@ void SerializerBase::MarkBucketSerializing(BucketIdentity bid) {
   bucket_states_[bid] = BucketPhase::kSerializing;
 }
 
-void SerializerBase::FinishBucketIteration(BucketIdentity bid,
-                                           std::vector<TieredDelayedEntry> delayed) {
+void SerializerBase::FinishBucketIteration(BucketIdentity bid) {
   auto it = bucket_states_.find(bid);
   DCHECK(it != bucket_states_.end());
   DCHECK(it->second == BucketPhase::kSerializing);
 
-  if (delayed.empty()) {
-    // Serializing -> Covered
-    bucket_states_.erase(it);
-    ++stats_.buckets_serialized;
-  } else {
-    // Serializing -> DelayedPending
-    // TODO: Currently not used
-    it->second = BucketPhase::kDelayedPending;
-  }
-}
-
-void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
-  auto it = bucket_states_.find(bid);
-  DCHECK(it != bucket_states_.end() && it->second == BucketPhase::kDelayedPending);
   bucket_states_.erase(it);
+  ++stats_.buckets_serialized;
 }
 
 std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
@@ -158,7 +144,7 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(*bid);
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
-  FinishBucketIteration(*bid, {});
+  FinishBucketIteration(*bid);
   return true;
 }
 

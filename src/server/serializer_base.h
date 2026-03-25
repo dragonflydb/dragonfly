@@ -81,9 +81,6 @@ class SerializerBase : public DelayedEntryHandler {
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
-  // Transition bucket from DelayedPending -> Covered.
-  void CompleteBucketDelayed(BucketIdentity bid);
-
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
@@ -122,7 +119,7 @@ class SerializerBase : public DelayedEntryHandler {
 
   // Transition bucket from Serializing -> Covered (empty delayed) or
   // Serializing -> DelayedPending (non-empty delayed).
-  void FinishBucketIteration(BucketIdentity bid, std::vector<TieredDelayedEntry> delayed);
+  void FinishBucketIteration(BucketIdentity bid);
 
   absl::flat_hash_map<BucketIdentity, BucketPhase> bucket_states_;
   uint64_t change_cb_id_ = 0;
