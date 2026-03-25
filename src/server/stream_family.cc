@@ -2959,26 +2959,16 @@ void JournalConsumerCreationIfNeeded(OpArgs op_args, const ReadOpts& opts, std::
 // creation.
 void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const RecordVec& records,
                                std::string_view key) {
-  if (!op_args.shard->journal()) {
+  if (!op_args.shard->journal() || !opts.read_group || records.empty()) {
     return;
   }
 
-  const bool serve_history = opts.stream_ids.at(key).serve_history;
+  const auto& sitem = opts.stream_ids.at(key);
+  const bool serve_history = sitem.serve_history;
 
   if (serve_history) {
     return;
   }
-
-  // Reading from >
-  auto journal_xgroup = [&opts, op_args](const auto& records, std::string_view key) {
-    if (!records.empty()) {
-      const auto& sitem = opts.stream_ids.at(key);
-      auto id = absl::StrCat(records.back().id.ms, "-", records.back().id.seq);
-      auto entries_read = absl::StrCat(sitem.group->entries_read);
-      CmdArgVec journal_args = {"SETID", key, opts.group_name, id, "ENTRIESREAD", entries_read};
-      RecordJournal(op_args, "XGROUP"sv, journal_args);
-    }
-  };
 
   // If NOACK is *not* set we add entries to PEL. Consumer is created as a side
   // effect of XCLAIM.
@@ -2992,11 +2982,12 @@ void JournalXReadGroupIfNeeded(OpArgs op_args, const ReadOpts& opts, const Recor
 
       RecordJournal(op_args, "XCLAIM"sv, journal_args);
     }
-    journal_xgroup(records, key);
-    return;
   }
 
-  journal_xgroup(records, key);
+  auto id = absl::StrCat(records.back().id.ms, "-", records.back().id.seq);
+  auto entries_read = absl::StrCat(sitem.group->entries_read);
+  CmdArgVec journal_args = {"SETID", key, opts.group_name, id, "ENTRIESREAD", entries_read};
+  RecordJournal(op_args, "XGROUP"sv, journal_args);
 }
 
 // Set is_consumer_new to true if the consumer is created. Only relevant for,

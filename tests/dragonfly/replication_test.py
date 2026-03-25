@@ -4008,6 +4008,42 @@ async def test_xreadgroup_replication(df_factory):
 
 
 """
+Regression test for SIGSEGV when XREAD BLOCK unblocks with replication active.
+JournalXReadGroupIfNeeded accessed sitem.group->entries_read without checking that
+group is non-null (group is always null for XREAD, only set for XREADGROUP).
+"""
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_xread_block_replication_crash_6975(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    master.start()
+    replica.start()
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    await c_master.execute_command("XADD mystream * tmp tmp")
+
+    # Start blocking XREAD - this will crash the server on unblock with replication active
+    # because JournalXReadGroupIfNeeded dereferences a null group pointer
+    read_task = asyncio.create_task(c_master.execute_command("XREAD BLOCK 0 STREAMS mystream $"))
+    await asyncio.sleep(0.1)
+    assert not read_task.done(), "XREAD BLOCK should still be blocking"
+
+    await c_master.execute_command("XADD mystream * field value")
+    result = await read_task
+
+    assert result is not None
+    await check_all_replicas_finished([c_replica], c_master)
+
+
+"""
 Test replication with mismatched dbnum between master and replica.
 """
 
