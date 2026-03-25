@@ -54,7 +54,14 @@ class QList {
   struct Node {
     Node* prev;
     Node* next;
-    unsigned char* entry;
+
+    union U {
+      unsigned char* entry;  // Pointer to the memory value of the node.
+      size_t ext_offset;     // Offset in tiered storage
+    } u_;
+
+    // For offloaded nodes, we store the offset of the value in colder storage
+    // instead of a pointer to the data in memory.
     size_t sz : 48;    /* entry size in bytes */
     size_t count : 16; /* count of items in listpack */
 
@@ -64,28 +71,26 @@ class QList {
     uint16_t attempted_compress : 1; /* node can't compress; too small */
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
+    uint16_t io_pending : 1;         /* node has pending io operation */
     uint16_t reserved1 : 7;          /* reserved for future use */
+
+    uint16_t reserved2; /* more bits to steal for future usage */
+
+    uint32_t ext_size; /* Offloaded size */
 
     bool IsCompressed() const {
       return encoding != QUICKLIST_NODE_ENCODING_RAW;
     }
 
-    // Returns the size of entry data.
+    // Returns the size of entry data. Return size of compressed data for
+    // compressed nodes or size of raw data.
     size_t GetEntrySize() const;
 
     size_t GetLZF(void** data) const;
 
-    struct __attribute__((__packed__)) ExternalRecord {
-      uint32_t size;
-      size_t offset;
-    };
-    static_assert(sizeof(ExternalRecord) == 12);
-
-    ExternalRecord ext;
-
     void SetExternal(size_t offset, uint32_t sz);
     std::pair<size_t, size_t> GetExternalSlice() const {
-      return std::make_pair(size_t(ext.offset), size_t(ext.size));
+      return std::make_pair(size_t(u_.ext_offset), size_t(ext_size));
     }
   };
 
@@ -118,6 +123,11 @@ class QList {
 
   void AdjustMallocSize(ssize_t delta) {
     malloc_size_ += delta;
+  }
+
+  // Add to the number of offloaded nodes by one.
+  void IncrementNumOffloadedNodes(int delta) {
+    num_offloaded_nodes_ += delta;
   }
 
   struct TieringParams {
@@ -231,6 +241,10 @@ class QList {
     return _Tail();
   }
 
+  // Materializes a node that was offloaded to tiered storage back into memory.
+  // No-op if the node is already in memory. Does not decompress the node.
+  void Materialize(Node* node);
+
   // Returns nullptr if quicklist does not fit the necessary requirements
   // to be converted to listpack, and listpack otherwise. The ownership over the listpack
   // blob is moved to the caller.
@@ -261,11 +275,6 @@ class QList {
   // 0 disables ZSTD dictionary compression.
   void set_compr_threshold(uint32_t threshold) {
     zstd_threshold_ = threshold;
-  }
-
-  // If offloading node fails or we cancel pendig offload, we need to decrease the counter.
-  void DecreaseNumOffloadedNodes() {
-    num_offloaded_nodes_--;
   }
 
   struct Stats {

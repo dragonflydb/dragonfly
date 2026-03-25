@@ -48,7 +48,7 @@ struct DiskSegment {
 };
 
 using KeyRef = std::pair<uint16_t /* DbIndex */, std::string_view>;
-using ListNodeId = std::tuple<uint16_t /* DbIndex */, void* /* QList::Node */, void* /* QList */>;
+using ListNodeId = std::tuple<uint16_t /* DbIndex */, void* /* QList */, void* /* QList::Node */>;
 
 // Separate keyspaces are provided:
 // 1. PrimeValues with KeyRef

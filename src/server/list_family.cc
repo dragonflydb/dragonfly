@@ -131,18 +131,22 @@ class ListWrapper {
                 if (!res)
                   return;
 
-                node->entry = static_cast<unsigned char*>(zmalloc(res->size()));
-                memcpy(node->entry, res->data(), res->size());
-
+                // We are going to overwrite node external offset so first call delete.
                 ts->Delete(db_id, node);
+
+                node->u_.entry = static_cast<unsigned char*>(zmalloc(res->size()));
+                memcpy(node->u_.entry, res->data(), res->size());
               },
 
           .delete_cb =
               [ts, db_id = db_id_, ql](QList::Node* node) {
                 if (!ts->IsClosed()) {
                   if (node->io_pending) {
-                    ts->CancelStash(tiering::ListNodeId{db_id, node, ql}, node);
+                    ts->CancelStash(tiering::ListNodeId{db_id, ql, node}, node);
                   } else {
+                    // We don't pass QList pointer to delete so we need to decrease
+                    // num_offloaded_nodes_ now.
+                    ql->IncrementNumOffloadedNodes(-1);
                     ts->Delete(db_id, node);
                   }
                 }
@@ -214,6 +218,8 @@ class ListWrapper {
   }
 
  public:
+  // TODO: passing current dbid of objecte. It could happen that object is moved to
+  // another db so this dbid will be incorrect. Refactor to support moving objects between dbs.
   template <typename T>
   explicit ListWrapper(DbIndex dbid, T t) : db_id_(dbid), impl_(std::forward<T>(t)) {
   }
