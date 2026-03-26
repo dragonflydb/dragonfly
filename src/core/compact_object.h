@@ -31,6 +31,7 @@ constexpr unsigned kEncodingJsonCons = 0;
 constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
+class TOPK;
 class CMS;
 class PageUsage;
 
@@ -118,6 +119,7 @@ class CompactObj {
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
 
+ protected:
   // 0-16 is reserved for inline lengths of string type.
   enum TagEnum : uint8_t {
     INT_TAG = 17,
@@ -127,6 +129,8 @@ class CompactObj {
     JSON_TAG = 21,
     SBF_TAG = 22,
     CMS_TAG = 23,
+    SDS_TTL_TAG = 24,
+    TOPK_TAG = 25,
   };
 
   // String encoding types.
@@ -192,10 +196,6 @@ class CompactObj {
   // For containers - returns number of elements in the container.
   size_t Size() const;
 
-  bool IsRef() const {
-    return mask_bits_.ref;
-  }
-
   std::string_view GetSlice(std::string* scratch) const;
 
   std::string ToString() const {
@@ -206,22 +206,6 @@ class CompactObj {
 
   uint64_t HashCode() const;
   static uint64_t HashCode(std::string_view str);
-
-  bool operator==(const CompactObj& o) const;
-
-  bool operator==(std::string_view sl) const;
-
-  bool operator!=(std::string_view sl) const {
-    return !(*this == sl);
-  }
-
-  friend bool operator!=(const CompactObj& lhs, const CompactObj& rhs) {
-    return !(lhs == rhs);
-  }
-
-  friend bool operator==(std::string_view sl, const CompactObj& o) {
-    return o.operator==(sl);
-  }
 
   bool HasFlag() const {
     return mask_bits_.mc_flag;
@@ -311,6 +295,14 @@ class CompactObj {
 
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
+
+  void SetTOPK(TOPK* topk) {
+    SetMeta(TOPK_TAG);
+    u_.topk = topk;
+  }
+
+  void SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay);
+  TOPK* GetTOPK() const;
 
   void SetCMS(CMS* cms) {
     SetMeta(CMS_TAG);
@@ -435,6 +427,11 @@ class CompactObj {
     return taglen_;
   }
 
+ private:
+  // Returns a string_view corresponding to the serialized encoded blob.
+  // If opt_dest is provided, it may be used to decode directly into the destination buffer.
+  std::string_view GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const;
+
  protected:
   void EncodeString(std::string_view str);
 
@@ -475,6 +472,14 @@ class CompactObj {
     };
   } __attribute__((packed));
   static_assert(sizeof(ExternalPtr) == 16);
+
+  struct SdsTtlString {
+    char* sds_ptr;    // SDS string (length via sdslen)
+    uint64_t exp_ms;  // absolute expiry time in ms
+
+    std::string_view view() const;
+  } __attribute__((packed));
+
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
@@ -505,12 +510,14 @@ class CompactObj {
     SmallString small_str;
     detail::RobjWrapper r_obj;
 
-    // using 'packed' to reduce alignement of U to 1.
+    // using 'packed' to reduce alignment of U to 1.
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
+    TOPK* topk __attribute__((packed));
     CMS* cms __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
+    SdsTtlString sds_ttl;
 
     U() : r_obj() {
     }
@@ -521,8 +528,7 @@ class CompactObj {
   union {
     uint8_t mask_ = 0;
     struct {
-      uint8_t ref : 1;      // Mark objects that don't own their allocation.
-      uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
+      uint8_t unused : 2;
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
@@ -546,7 +552,45 @@ class CompactObj {
   uint8_t encoding_ : 2;  // Encoding of string values
 };
 
-inline bool CompactObj::operator==(std::string_view sv) const {
+struct CompactKey : public CompactObj {
+  CompactKey() : CompactObj(true) {
+  }
+
+  explicit CompactKey(std::string_view str) : CompactObj{str, true} {
+  }
+
+  bool HasExpire() const {
+    return taglen_ == SDS_TTL_TAG;
+  }
+
+  // Embed expire time directly in the key by converting to SDS_TTL_TAG.
+  void SetExpireTime(uint64_t abs_ms);
+
+  // Remove embedded expire time and convert back to optimal string form.
+  bool ClearExpireTime();
+
+  // Read the embedded expire time.
+  // Returns 0 if there is no embedded expire time, otherwise
+  // returns the absolute expire time in ms.
+  uint64_t GetExpireTime() const;
+
+  CompactKey& operator=(std::string_view sv) noexcept {
+    SetString(sv);
+    return *this;
+  }
+
+  bool operator==(std::string_view sl) const;
+
+  bool operator!=(std::string_view sl) const {
+    return !(*this == sl);
+  }
+
+  friend bool operator==(std::string_view sl, const CompactKey& o) {
+    return o.operator==(sl);
+  }
+};
+
+inline bool CompactKey::operator==(std::string_view sv) const {
   if (encoding_)
     return CmpEncoded(sv);
 
@@ -555,33 +599,6 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   }
   return CmpNonInline(sv);
 }
-
-struct CompactKey : public CompactObj {
-  CompactKey() : CompactObj(true) {
-  }
-
-  explicit CompactKey(std::string_view str) : CompactObj{str, true} {
-  }
-
-  CompactKey AsRef() const {
-    CompactKey res;
-    memcpy(&res.u_, &u_, sizeof(u_));
-    res.encoding_ = encoding_;
-    res.taglen_ = taglen_;
-    res.mask_ = mask_;
-    res.mask_bits_.ref = 1;
-
-    return res;
-  }
-
-  bool HasExpire() const {
-    return mask_bits_.expire;
-  }
-
-  void SetExpire(bool e) {
-    mask_bits_.expire = e;
-  }
-};
 
 struct CompactValue : public CompactObj {
   CompactValue() : CompactObj(false) {

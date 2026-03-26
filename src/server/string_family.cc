@@ -128,11 +128,14 @@ OpResult<TResultOrT<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   }
   RETURN_ON_BAD_STATUS(it_res);
 
-  // For external entries we have to enqueue reads because modify operations like append could be
-  // already pending.
-  // TODO(vlad): Optimize to return co.Size() if no modify operations are present
-  // TODO(vlad): Omit decoding string to just query it's length
+  // For external entries we have to enqueue reads if modify operations like append are pending.
+  // If no modify operations are present, we can return co.Size() immediately.
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
+    auto segment = co.GetExternalSlice();
+    if (!op_args.shard->tiered_storage()->HasModificationPending(segment)) {
+      return {co.Size()};
+    }
+
     auto cb = [](string_view s) { return s.size(); };
 
     TieredStorage::TResult<size_t> fut = ReadTiered<size_t>(
@@ -464,12 +467,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
     const int64_t new_tat_ms =
         (new_tat_ns + kMilliSecondToNanoSecond - 1) / kMilliSecondToNanoSecond;
     if (res) {
-      if (IsValid(res->exp_it)) {
-        res->exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
-      } else {
-        db_slice.AddExpire(op_args.db_cntx.db_index, res->it, new_tat_ms);
-      }
-
+      db_slice.AddExpire(op_args.db_cntx.db_index, res->it, new_tat_ms);
       res->it->second.SetInt(new_tat_ns);
     } else {
       PrimeValue pv;
@@ -599,8 +597,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
     // Note - correct behavior is to return TTL before it was updated by GAT,
     // but this is complex to implement so we return the updated TTL.
     if (it->first.HasExpire() && cmd_flags.return_ttl) {
-      auto exp_it = db_slice.GetDBTable(t->GetDbIndex())->expire.Find(it->first);
-      int64_t expire_time_ms = db_slice.ExpireTime(exp_it->second);
+      int64_t expire_time_ms = it->first.GetExpireTime();
       int64_t ttl_ms = expire_time_ms - t->GetDbContext().time_now_ms;
       resp.ttl_sec = ttl_ms > 0 ? static_cast<uint32_t>((ttl_ms + 999) / 1000) : 0;
     }
@@ -723,15 +720,6 @@ cmd::CmdR ExtendGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-// Wrapper to call SetCmd::Set in ScheduleSingleHop
-OpStatus SetGeneric(const SetCmd::SetParams& sparams, string_view key, string_view value,
-                    const CommandContext& ctx) {
-  bool explicit_journal = ctx.cid()->opt_mask() & CO::NO_AUTOJOURNAL;
-  return ctx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
-    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
-  });
-}
-
 cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) {
   bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
 
@@ -779,7 +767,7 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
 
   find_res->post_updater.Run();
 
-  auto update = db_slice.UpdateExpire(ctx, find_res->it, find_res->exp_it, params.expire_params);
+  auto update = db_slice.UpdateExpire(ctx, find_res->it, params.expire_params);
   if (!update.ok()) {
     return update.status();
   }
@@ -876,14 +864,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
-    if (at_ms) {  // Command has an expiry paramater.
-      if (IsValid(it_upd->exp_it)) {
-        // Updated existing expiry information.
-        it_upd->exp_it->second = db_slice.FromAbsoluteTime(at_ms);
-      } else {
-        // Add new expiry information.
-        db_slice.AddExpire(op_args_.db_cntx.db_index, it_upd->it, at_ms);
-      }
+    if (at_ms) {
+      db_slice.AddExpire(op_args_.db_cntx.db_index, it_upd->it, at_ms);
     } else {
       db_slice.RemoveExpire(op_args_.db_cntx.db_index, it_upd->it);
     }
@@ -898,8 +880,9 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   it_upd->post_updater.ReduceHeapUsage();
 
   // Update flags
+  // TODO: avoid calling SetMCFlag if flags are not changed
   prime_value.SetFlag(params.memcache_flags != 0);
-  db_slice.SetMCFlag(op_args_.db_cntx.db_index, key.AsRef(), params.memcache_flags);
+  db_slice.SetMCFlag(op_args_.db_cntx.db_index, key, params.memcache_flags);
 
   // We need to remove the key from search indices, because we are overwriting it to OBJ_STRING
   RemoveKeyFromIndexesIfNeeded(it_upd->it.key(), op_args_.db_cntx, prime_value, shard);
@@ -930,7 +913,7 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
 
   if (params.memcache_flags) {
     it->second.SetFlag(true);
-    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
+    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first, params.memcache_flags);
   }
 
   if (params.flags & SET_STICK) {
@@ -1131,16 +1114,17 @@ cmd::CmdR CmdSet(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 /// (P)SETEX key seconds (milliseconds) value
-void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   string_view cmd_name = cmd_cntx->cid()->name();
 
   CmdArgParser parser{args};
   auto [key, exp_int, value] = parser.Next<string_view, int64_t, string_view>();
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   if (exp_int < 1)
-    return cmd_cntx->SendError(InvalidExpireTime(cmd_name));
+    co_return facade::ErrorReply{InvalidExpireTime(cmd_name)};
 
   DbSlice::ExpireParams expiry{
       .value = exp_int,
@@ -1151,15 +1135,23 @@ void CmdSetExGeneric(CmdArgList args, CommandContext* cmd_cntx) {
   int64_t now_ms = GetCurrentTimeMs();
   auto [_, abs_ms] = expiry.Calculate(now_ms, false);
   if (abs_ms < 0)
-    return cmd_cntx->SendError(InvalidExpireTime("set"));
+    co_return facade::ErrorReply{InvalidExpireTime("set")};
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
   sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-  cmd_cntx->SendError(SetGeneric(sparams, key, value, *cmd_cntx));
+
+  bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
+  };
+
+  OpStatus status = co_await cmd::SingleHop(cb);
+  cmd_cntx->rb()->SendError(status);
+  co_return std::nullopt;
 }
 
-void CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -1168,19 +1160,29 @@ void CmdSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   if (cmd_cntx->mc_command())
     sparams.memcache_flags = cmd_cntx->mc_command()->flags;
 
-  switch (SetGeneric(sparams, key, value, *cmd_cntx)) {
+  bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
+  };
+
+  OpStatus status = co_await cmd::SingleHop(cb);
+  switch (status) {
     case OpStatus::OK:
-      return cmd_cntx->SendLong(1);  // Successfully set the value
+      cmd_cntx->rb()->SendLong(1);  // Successfully set the value
+      break;
     case OpStatus::OUT_OF_MEMORY:
-      return cmd_cntx->SendError(kOutOfMemory);
+      cmd_cntx->rb()->SendError(kOutOfMemory);
+      break;
     case OpStatus::SKIPPED:
-      return cmd_cntx->SendLong(0);  // Existed, zero updates performed
+      cmd_cntx->rb()->SendLong(0);  // Existed, zero updates performed
+      break;
     default:
       LOG(FATAL) << "Invalid result";
   }
+  co_return std::nullopt;
 }
 
-void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1189,10 +1191,11 @@ void CmdGet(CmdArgList args, CommandContext* cmd_cntx) {
     return ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
-void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1204,7 +1207,8 @@ void CmdGetDel(CmdArgList args, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
 void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1247,39 +1251,47 @@ void CmdDigest(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
-void CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   optional<StringResult> prev;
   SetCmd::SetParams sparams{.prev_val = &prev};
 
-  if (OpStatus status = SetGeneric(sparams, key, value, *cmd_cntx); status != OpStatus::OK)
-    return cmd_cntx->SendError(status);
+  bool explicit_journal = cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), explicit_journal).Set(sparams, key, value);
+  };
 
-  GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+  OpStatus status = co_await cmd::SingleHop(cb);
+  if (status != OpStatus::OK) {
+    cmd_cntx->rb()->SendError(status);
+  } else {
+    GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+  }
+  co_return std::nullopt;
 }
 
-void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
-  auto* builder = cmd_cntx->rb();
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
-      RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+      if (auto err = parser.TakeError(); err)
+        co_return err.MakeReply();
 
       if (defined) {
-        return cmd_cntx->SendError(kSyntaxErr, kSyntaxErrType);
+        co_return facade::ErrorReply{kSyntaxErr, kSyntaxErrType};
       }
 
       if (int_arg <= 0) {
-        return cmd_cntx->SendError(InvalidExpireTime("getex"));
+        co_return facade::ErrorReply{InvalidExpireTime("getex")};
       }
 
       exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
@@ -1290,7 +1302,7 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
     } else {
-      return builder->SendError(kSyntaxErr);
+      co_return facade::ErrorReply{kSyntaxErr};
     }
   }
 
@@ -1305,8 +1317,8 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it,
-                                                             it_res->exp_it, exp_params));
+      RETURN_ON_BAD_STATUS(
+          op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params));
     }
 
     // Replicate GETEX as PEXPIREAT or PERSIST
@@ -1323,7 +1335,8 @@ void CmdGetEx(CmdArgList args, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
 cmd::CmdR CmdIncr(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1530,7 +1543,7 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
     auto args = t->GetShardArgs(sid);
     auto op_args = t->GetOpArgs(es);
     for (auto arg_it = args.begin(); arg_it != args.end(); ++arg_it) {
-      auto it = op_args.GetDbSlice().FindReadOnly(t->GetDbContext(), *arg_it).it;
+      auto it = op_args.GetDbSlice().FindReadOnly(t->GetDbContext(), *arg_it);
       ++arg_it;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
@@ -1559,45 +1572,49 @@ void CmdMSetNx(CmdArgList args, CommandContext* cmd_cntx) {
   cmd_cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdStrLen(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
-void CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdGetRange(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
-void CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
+cmd::CmdR CmdSetRange(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
-  auto* builder = cmd_cntx->rb();
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (auto err = parser.TakeError(); err)
+    co_return err.MakeReply();
 
   if (start < 0) {
-    return builder->SendError("offset is out of range");
+    co_return facade::ErrorReply{"offset is out of range"};
   }
 
   if (size_t min_size = start + value.size(); min_size > kMaxStrLen) {
-    return builder->SendError("string exceeds maximum allowed size");
+    co_return facade::ErrorReply{"string exceeds maximum allowed size"};
   }
 
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{builder}.Send(cmd_cntx->tx()->ScheduleSingleHopT(cb));
+  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  co_return std::nullopt;
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
@@ -1730,9 +1747,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
   *registry
       << CI{"SET", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.SetAsyncHandler(
              CmdSet)
-      << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
-      << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetExGeneric)
-      << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
+      << CI{"SETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.SetAsyncHandler(
+             CmdSetExGeneric)
+      << CI{"PSETEX", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.SetAsyncHandler(
+             CmdSetExGeneric)
+      << CI{"SETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdSetNx)
       << CI{"APPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
@@ -1742,19 +1761,19 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
       << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
       << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
-      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Get)
-      << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.HFUNC(GetDel)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
+      << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
-      << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
-             GetEx)
-      << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(GetSet)
+      << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}
+             .SetAsyncHandler(CmdGetEx)
+      << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdGetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
-      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
-      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
-      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-      << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdStrLen)
+      << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)
+      << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)  // Alias for GetRange
+      << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
       << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
       << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}

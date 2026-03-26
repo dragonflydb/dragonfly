@@ -40,9 +40,10 @@ void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats) - sizeof(memory_usage_by_type);
-  static_assert(kDbSz == 64);
+  static_assert(kDbSz == 72);
 
   ADD(inline_keys);
+  ADD(expire_count);
   ADD(obj_memory_usage);
   ADD(tiered_entries);
   ADD(tiered_used_bytes);
@@ -102,7 +103,6 @@ DbTable::SampleUniqueKeys::~SampleUniqueKeys() {
 
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
-      expire(0, detail::ExpireTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr),
       index(db_index) {
   if (IsClusterEnabled()) {
@@ -120,7 +120,6 @@ DbTable::~DbTable() {
 void DbTable::Clear() {
   prime.size();
   prime.Clear();
-  expire.Clear();
   mcflag.Clear();
   stats = DbTableStats{};
 }

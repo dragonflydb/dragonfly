@@ -4,8 +4,13 @@
 
 #include "server/search/aggregator.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "base/logging.h"
 #include "server/search/doc_index.h"
+#include "server/search/filter_driver.h"
+#include "server/search/filter_eval.h"
 
 namespace dfly::aggregate {
 
@@ -17,7 +22,14 @@ ValuesList ExtractFieldsValues(const DocValues& dv, absl::Span<const std::string
   ValuesList out(fields.size());
   for (size_t i = 0; i < fields.size(); i++) {
     auto it = dv.find(fields[i]);
-    out[i] = (it != dv.end()) ? it->second : Value{};
+    if (it != dv.end()) {
+      const Value& v = it->second;
+      // Normalize NaN to monostate so that NaN values group together.
+      if (std::holds_alternative<double>(v) && std::isnan(std::get<double>(v)))
+        out[i] = Value{};
+      else
+        out[i] = v;
+    }
   }
   return out;
 }
@@ -67,38 +79,40 @@ void Aggregator::DoGroup(absl::Span<const std::string> fields, absl::Span<const 
 }
 
 void Aggregator::DoSort(const SortParams& sort_params) {
-  /*
-    Comparator for sorting DocValues by fields.
-    If some of the fields is not present in the DocValues, comparator returns:
-    1. l_it == l.end() && r_it != r.end()
-      asc -> false
-      desc -> false
-    2. l_it != l.end() && r_it == r.end()
-      asc -> true
-      desc -> true
-    3. l_it == l.end() && r_it == r.end()
-      asc -> false
-      desc -> false
-  */
+  // A value is "sortable" if the field is present, not monostate (null), and not NaN.
+  // Unsortable values sort after all sortable ones (regardless of ASC/DESC).
+  // Different types (double vs string) are ordered by variant index
+  // (ASC: doubles before strings, DESC: strings before doubles).
+  auto sortable = [](auto it, auto end) -> const Value* {
+    if (it == end)
+      return nullptr;
+    const Value& v = it->second;
+    if (std::holds_alternative<std::monostate>(v))
+      return nullptr;
+    if (std::holds_alternative<double>(v) && std::isnan(std::get<double>(v)))
+      return nullptr;
+    return &v;
+  };
+
   auto comparator = [&](const DocValues& l, const DocValues& r) {
     for (const auto& [field, order] : sort_params.fields) {
-      auto l_it = l.find(field);
-      auto r_it = r.find(field);
+      const Value* lv = sortable(l.find(field), l.end());
+      const Value* rv = sortable(r.find(field), r.end());
 
-      // If some of the values is not present
-      if (l_it == l.end() || r_it == r.end()) {
-        if (l_it == l.end() && r_it == r.end()) {
+      // Both absent -- equal for this field; one absent -- present sorts first.
+      if (!lv || !rv) {
+        if (!lv && !rv)
           continue;
-        }
-        return l_it != l.end();
+        return lv != nullptr;
       }
 
-      const auto& lv = l_it->second;
-      const auto& rv = r_it->second;
-      if (lv == rv) {
+      // Different types -- order by variant index for strict weak ordering.
+      if (lv->index() != rv->index())
+        return order == SortOrder::ASC ? lv->index() < rv->index() : lv->index() > rv->index();
+
+      if (*lv == *rv)
         continue;
-      }
-      return order == SortOrder::ASC ? lv < rv : lv > rv;
+      return order == SortOrder::ASC ? *lv < *rv : *lv > *rv;
     }
     return false;
   };
@@ -139,11 +153,20 @@ Reducer::Func FindReducerFunc(ReducerFunc name) {
     return std::distance(it, it.end());
   };
 
-  const static auto kSumReducer = [](ValueIterator it) -> double {
+  // Sum only finite numeric (double) values; non-finite (NaN, +/-Inf) and non-numeric are skipped.
+  const static auto kSumReducer = [](ValueIterator it) -> std::pair<double, double> {
     double sum = 0;
-    for (; it != it.end(); ++it)
-      sum += std::holds_alternative<double>(*it) ? std::get<double>(*it) : 0.0;
-    return sum;
+    double count = 0;
+    for (; it != it.end(); ++it) {
+      if (std::holds_alternative<double>(*it)) {
+        double d = std::get<double>(*it);
+        if (std::isfinite(d)) {
+          sum += d;
+          count += 1;
+        }
+      }
+    }
+    return {sum, count};
   };
 
   switch (name) {
@@ -151,16 +174,51 @@ Reducer::Func FindReducerFunc(ReducerFunc name) {
       return [](ValueIterator it) -> Value { return kCountReducer(it); };
     case ReducerFunc::COUNT_DISTINCT:
       return [](ValueIterator it) -> Value {
-        return double(std::unordered_set<Value>(it, it.end()).size());
+        absl::flat_hash_set<Value> seen;
+        for (; it != it.end(); ++it) {
+          // Normalize NaN to monostate to avoid NaN != NaN duplication in the set.
+          if (std::holds_alternative<double>(*it) && std::isnan(std::get<double>(*it)))
+            seen.insert(Value{});
+          else
+            seen.insert(*it);
+        }
+        return static_cast<double>(seen.size());
       };
     case ReducerFunc::SUM:
-      return [](ValueIterator it) -> Value { return kSumReducer(it); };
+      return [](ValueIterator it) -> Value { return kSumReducer(it).first; };
     case ReducerFunc::AVG:
-      return [](ValueIterator it) -> Value { return kSumReducer(it) / kCountReducer(it); };
+      return [](ValueIterator it) -> Value {
+        auto [sum, count] = kSumReducer(it);
+        return count > 0 ? Value{sum / count} : Value{};
+      };
     case ReducerFunc::MAX:
-      return [](ValueIterator it) -> Value { return *std::max_element(it, it.end()); };
+      return [](ValueIterator it) -> Value {
+        Value result{};
+        for (; it != it.end(); ++it) {
+          const Value& v = *it;
+          if (std::holds_alternative<std::monostate>(v))
+            continue;
+          if (std::holds_alternative<double>(v) && std::isnan(std::get<double>(v)))
+            continue;
+          if (std::holds_alternative<std::monostate>(result) || result < v)
+            result = v;
+        }
+        return result;
+      };
     case ReducerFunc::MIN:
-      return [](ValueIterator it) -> Value { return *std::min_element(it, it.end()); };
+      return [](ValueIterator it) -> Value {
+        Value result{};
+        for (; it != it.end(); ++it) {
+          const Value& v = *it;
+          if (std::holds_alternative<std::monostate>(v))
+            continue;
+          if (std::holds_alternative<double>(v) && std::isnan(std::get<double>(v)))
+            continue;
+          if (std::holds_alternative<std::monostate>(result) || v < result)
+            result = v;
+        }
+        return result;
+      };
   }
 
   return nullptr;
@@ -178,6 +236,24 @@ AggregationStep MakeSortStep(SortParams sort_params) {
 
 AggregationStep MakeLimitStep(size_t offset, size_t num) {
   return [=](Aggregator* aggregator) { aggregator->DoLimit(offset, num); };
+}
+
+void Aggregator::DoFilter(const FilterExprNode& expr) {
+  auto& values = result.values;
+  values.erase(
+      std::remove_if(values.begin(), values.end(),
+                     [&](const DocValues& doc) { return !IsTruthy(EvalFilterExpr(expr, doc)); }),
+      values.end());
+}
+
+std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_expr) {
+  FilterParseResult parsed = ParseFilterExpr(raw_expr);
+  if (!std::holds_alternative<FilterExpr>(parsed))
+    return std::get<std::string>(std::move(parsed));
+
+  // Wrap in shared_ptr so the AST can be captured by copy into std::function.
+  auto shared = std::shared_ptr<FilterExprNode>(std::get<FilterExpr>(std::move(parsed)).release());
+  return AggregationStep{[shared](Aggregator* agg) { agg->DoFilter(*shared); }};
 }
 
 AggregationResult Process(std::vector<DocValues> values,

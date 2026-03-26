@@ -8,6 +8,7 @@
 #include <absl/strings/str_format.h>
 
 #include <algorithm>
+#include <atomic>
 #include <string_view>
 
 #include "base/gtest.h"
@@ -1844,6 +1845,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test SORTBY with a huge nargs value that exceeds available arguments
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "19999999999600", "@name"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
@@ -4274,6 +4279,184 @@ TEST_F(SearchFamilyTest, GeoSearchUnits) {
   EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
+TEST_F(SearchFamilyTest, HnswVectorRange) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with an extra numeric field for SORTBY testing
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "val", "NUMERIC"});
+
+  // 10 docs at positions 0..9, val = i*10
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i)), "val",
+         absl::StrFormat("%d", i * 10)});
+  }
+
+  string query_vec = FloatToBytes(5.0f);
+
+  // Basic range: query at 5.0, radius 1.5 → k4 (dist=1), k5 (dist=0), k6 (dist=1)
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+
+  // Score alias is returned in each document by default
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "RETURN", "1", "dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  // Response: [total, key1, [field, val, ...], ...]
+  // Each doc should have "dist" in its fields
+  auto& arr = resp.GetVec();
+  ASSERT_GE(arr.size(), 3u);
+  for (size_t i = 2; i < arr.size(); i += 2) {
+    auto fields = arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    EXPECT_EQ(fields[0].GetString(), "dist");
+  }
+
+  // Large radius — all 10 docs returned
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "20"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 10);
+
+  // SORTBY val ASC — tests that sort_score is populated for non-score SORTBY
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "ASC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& asc_arr = resp.GetVec();
+  // Extract val values from response: [total, key, [val, v1], key, [val, v2], ...]
+  vector<int> vals_asc;
+  for (size_t i = 2; i < asc_arr.size(); i += 2) {
+    auto fields = asc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_asc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_asc, ElementsAre(40, 50, 60));
+
+  // SORTBY val DESC
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "DESC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& desc_arr = resp.GetVec();
+  vector<int> vals_desc;
+  for (size_t i = 2; i < desc_arr.size(); i += 2) {
+    auto fields = desc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_desc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_desc, ElementsAre(60, 50, 40));
+}
+
+TEST_F(SearchFamilyTest, VectorRangeAggregate) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D FLAT index with a TAG field — mirrors semantic routing use case from issue #6802
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+
+  // Two routes: "tech" at positions 1,2,3 and "sports" at positions 7,8,9
+  for (int i : {1, 2, 3}) {
+    Run({"HSET", absl::StrFormat("t%d", i), "vec", FloatToBytes(static_cast<float>(i)), "route",
+         "tech"});
+  }
+  for (int i : {7, 8, 9}) {
+    Run({"HSET", absl::StrFormat("s%d", i), "vec", FloatToBytes(static_cast<float>(i)), "route",
+         "sports"});
+  }
+
+  string query_vec = FloatToBytes(2.0f);  // near "tech" docs (positions 1,2,3)
+
+  // GROUPBY route, REDUCE SUM of distances.
+  // radius=2.5 from pos=2.0 hits t1(dist=1), t2(dist=0), t3(dist=1) — all "tech"
+  // sum of distances = 1+0+1 = 2
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
+           "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  // Large radius — both routes captured; each route has 3 docs
+  resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
+              "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3"),
+                                         IsMap("route", "sports", "cnt", "3")));
+
+  // Zero radius — only exact match (dist=0) is t2
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "1")));
+
+  // No docs in range — FT.AGGREGATE returns 0
+  string far_vec = FloatToBytes(100.0f);
+  resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
+              "cnt"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with a TAG field — same semantic routing use case but with HNSW index
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+
+  for (int i : {1, 2, 3}) {
+    Run({"HSET", absl::StrFormat("t%d", i), "pos", FloatToBytes(static_cast<float>(i)), "route",
+         "tech"});
+  }
+  for (int i : {7, 8, 9}) {
+    Run({"HSET", absl::StrFormat("s%d", i), "pos", FloatToBytes(static_cast<float>(i)), "route",
+         "sports"});
+  }
+
+  string query_vec = FloatToBytes(2.0f);
+
+  // radius=2.5 from pos=2.0 hits t1(dist=1), t2(dist=0), t3(dist=1) → only "tech"
+  // sum of distances = 2
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
+           "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  // Large radius — both routes; each has 3 docs
+  resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
+              "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3"),
+                                         IsMap("route", "sports", "cnt", "3")));
+
+  // Zero radius — only exact match (dist=0) is t2
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "1")));
+
+  // No docs in range — FT.AGGREGATE returns 0
+  string far_vec = FloatToBytes(100.0f);
+  resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
+              "cnt"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 1: Correct geo field definition and usage with HASH
   auto resp =
@@ -4385,6 +4568,358 @@ TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   Run({"JSON.DEL", "j:12"});
   resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
   EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+}
+
+TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
+  // DIM=1 FLOAT32 expects exactly 4 bytes per value.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Insert values with wrong byte lengths (6 and 7 bytes instead of 4).
+  Run({"HSET", "k1", "pos", "AAAAAAA"});  // 7 bytes
+  Run({"HSET", "k2", "pos", "AQAAAA"});   // 6 bytes
+  Run({"HSET", "k3", "pos", "AgAAAA"});   // 6 bytes
+
+  // FT.SEARCH must not crash when serializing the wrong-sized vector fields.
+  auto resp = Run({"FT.SEARCH", "idx", "*", "PARAMS", "2", "vec", "AQAAAA", "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+
+  // Same scenario with 10-byte values and multiple keys.
+  Run({"FT.CREATE", "idx2", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  Run({"HSET", "a1", "v", "aaaaaaaaaa"});  // 10 bytes
+  Run({"HSET", "a2", "v", "bbbbbbbbbb"});
+  Run({"HSET", "a3", "v", "cccccccccc"});
+  Run({"HSET", "a4", "v", "dddddddddd"});
+  Run({"HSET", "a5", "v", "eeeeeeeeee"});
+
+  resp = Run({"FT.SEARCH", "idx2", "*", "PARAMS", "2", "vec", "aaaaaaaaaa", "LIMIT", "0", "100"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+}
+
+TEST_F(SearchFamilyTest, SortBySkipsDocsWithoutSortField) {
+  // KeepTopKSorted skips docs that don't have the sort field, returning fewer sort scores
+  // than result.ids.size(). The loop then accesses sort_scores[i] out-of-bounds.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "valid:1", "val", "123"});
+  Run({"HSET", "valid:2", "val", "456"});
+  Run({"HSET", "valid:3", "val", "789"});
+
+  // These docs are indexed (no prefix restriction) but lack the sort field.
+  // They appear in '*' search results but are skipped by KeepTopKSorted.
+  for (int i = 0; i < 97; i++)
+    Run({"HSET", absl::StrCat("nofield:", i), "txt", "garbage"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", "val", "LIMIT", "0", "100"});
+  auto vec = resp.GetVec();
+
+  // Extract doc keys from the response (indices 1, 3, 5, ...).
+  vector<string> keys;
+  for (size_t i = 1; i < vec.size(); i += 2)
+    keys.push_back(vec[i].GetString());
+
+  EXPECT_THAT(keys, ElementsAre("valid:1", "valid:2", "valid:3"));
+}
+
+TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
+  // Regression test: HSET with inf/nan values on a NUMERIC field used to crash with
+  // DCHECK(std::isfinite(value)) in RangeTree::Add, because absl::SimpleAtod accepts
+  // "inf", "-inf", "nan" etc. as valid doubles.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "doc:1", "val", "inf"});
+  Run({"HSET", "doc:2", "val", "-inf"});
+  Run({"HSET", "doc:3", "val", "+inf"});
+  Run({"HSET", "doc:4", "val", "nan"});
+  Run({"HSET", "doc:5", "val", "42"});  // finite — must still be indexed
+
+  // Non-finite docs are not in the numeric index; only doc:5 should match the range query.
+  auto resp = Run({"FT.SEARCH", "idx", "@val:[-inf +inf]"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
+}
+
+class HnswRaceTest : public BaseFamilyTest {
+ protected:
+  HnswRaceTest() {
+    num_threads_ = 4;
+  }
+};
+
+TEST_F(HnswRaceTest, HnswKnnDeleteRaceCrash) {
+  constexpr int kDim = 128;
+  constexpr int kNumDocs = 5000;
+  // Only delete the K nearest docs to the query: these are guaranteed to appear
+  // in every KNN result, so every deletion is a potential crash trigger.
+  constexpr int kK = 200;
+
+  auto make_vec = [&](float seed) -> std::string {
+    std::string s(kDim * sizeof(float), '\0');
+    for (int j = 0; j < kDim; ++j) {
+      float v = seed + static_cast<float>(j) * 0.001f;
+      memcpy(s.data() + j * sizeof(float), &v, sizeof(float));
+    }
+    return s;
+  };
+
+  Run({"FT.CREATE",
+       "hnsw_race_idx",
+       "ON",
+       "HASH",
+       "PREFIX",
+       "1",
+       "doc:",
+       "SCHEMA",
+       "vec",
+       "VECTOR",
+       "HNSW",
+       "10",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       absl::StrCat(kDim),
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16",
+       "EF_CONSTRUCTION",
+       "200"});
+
+  for (int i = 0; i < kNumDocs; ++i)
+    Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+
+  const std::string kQueryVec = make_vec(0.0f);
+  std::atomic<bool> done{false};
+
+  auto search_fiber = pp_->at(3)->LaunchFiber([&] {
+    for (int i = 0; i < 50 && !done.load(); ++i) {
+      auto resp = Run({"FT.SEARCH", "hnsw_race_idx",
+                       absl::StrCat("*=>[KNN ", kK, " @vec $vec EF_RUNTIME 50000]"), "PARAMS", "2",
+                       "vec", kQueryVec, "DIALECT", "2"});
+      EXPECT_NE(resp.type, RespExpr::ERROR);
+    }
+    done.store(true);
+  });
+
+  auto make_del_fiber = [&](int thread_idx) {
+    return pp_->at(thread_idx)->LaunchFiber([&, thread_idx] {
+      while (!done.load()) {
+        for (int i = 0; i < kK && !done.load(); ++i) {
+          Run({"DEL", absl::StrCat("doc:", i)});
+          Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+        }
+      }
+    });
+  };
+
+  auto del0 = make_del_fiber(0);
+  auto del1 = make_del_fiber(1);
+  auto del2 = make_del_fiber(2);
+
+  search_fiber.Join();
+  del0.Join();
+  del1.Join();
+  del2.Join();
+}
+
+TEST_F(SearchFamilyTest, AggregateGroupByHugeNargsDoesNotCrash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Intentionally invalid float32 value (1 byte instead of 4).
+  Run({"HSET", "d", "vec", "x"});
+
+  // GROUPBY 9999999999999 — after the reserve() cap, the parser sees "REDUCE" where it
+  // expects a field name starting with '@', and returns a syntax error.  Must not crash.
+  auto resp = Run({"FT.AGGREGATE", "idx",
+                   "@vec:[VECTOR_RANGE 0.01 $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS", "2",
+                   "vec", "far", "GROUPBY", "9999999999999", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
+
+  // Server must still be alive and respond correctly after the oversized GROUPBY.
+  EXPECT_THAT(Run({"PING"}), "PONG");
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterStringEq) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "10"});
+  Run({"HSET", "h2", "name", "technology", "value", "20"});
+  Run({"HSET", "h3", "name", "cooking", "value", "30"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@name == 'sports'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "total", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterNumericLt) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "0.5"});
+  Run({"HSET", "h2", "name", "b", "value", "0.9"});
+  Run({"HSET", "h3", "name", "c", "value", "0.3"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "AVG", "1", "@value", "AS", "distance",
+                   "FILTER", "@distance < 0.8"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "a", "distance", "0.5"),
+                                         IsMap("name", "c", "distance", "0.3")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterCompound) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "0.5"});
+  Run({"HSET", "h2", "name", "technology", "value", "0.9"});
+  Run({"HSET", "h3", "name", "cooking", "value", "0.3"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "AVG", "1", "@value", "AS", "distance",
+                   "FILTER", "(@name == 'sports' && @distance < 0.8) || @name == 'cooking'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "distance", "0.5"),
+                                         IsMap("name", "cooking", "distance", "0.3")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterEmptyResult) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total > 100"});
+  // clang-format on
+  // When all rows are filtered out, FT.AGGREGATE returns integer 0
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterPipelineOrder) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // FILTER between GROUPBY and SORTBY
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total >= 20",
+                   "SORTBY", "1", "@total"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "b", "total", "20"),
+                                         IsMap("name", "c", "total", "30")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterInvalidExpr) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG"});
+  Run({"HSET", "h1", "name", "a"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "FILTER", "@a =="});
+  EXPECT_THAT(resp, ErrArg("FILTER expression error"));
+
+  // Missing FILTER argument
+  resp = Run({"FT.AGGREGATE", "idx", "*", "FILTER"});
+  EXPECT_THAT(resp, ErrArg("ERR"));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterMultiple) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // Two FILTER steps applied sequentially
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total >= 10",
+                   "FILTER", "@total <= 20"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "a", "total", "10"),
+                                         IsMap("name", "b", "total", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterOnly) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "10"});
+  Run({"HSET", "h2", "name", "tech", "value", "20"});
+
+  // FILTER as the only pipeline step (no GROUPBY)
+  auto resp = Run(
+      {"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@name", "@value", "FILTER", "@name == 'sports'"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "value", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterFuncLower) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "Sports", "value", "10"});
+  Run({"HSET", "h2", "name", "TECH", "value", "20"});
+  Run({"HSET", "h3", "name", "cooking", "value", "30"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "lower(@name) == 'sports'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "Sports", "total", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterAfterLimit) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // SORTBY -> LIMIT 0 2 -> FILTER: filter applies on the limited set
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "SORTBY", "1", "@value",
+                   "LIMIT", "0", "2",
+                   "FILTER", "@value > 15"});
+  // clang-format on
+  // After SORTBY + LIMIT 0 2 we have the 2 smallest values (10, 20); FILTER keeps only 20
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {
+  // Simulates the redisvl semantic routing query pattern:
+  // GROUPBY -> REDUCE AVG -> SORTBY -> FILTER with compound expression
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "route_name", "TAG", "distance", "NUMERIC"});
+  Run({"HSET", "h1", "route_name", "technology", "distance", "0.5"});
+  Run({"HSET", "h2", "route_name", "technology", "distance", "0.7"});
+  Run({"HSET", "h3", "route_name", "sports", "distance", "0.3"});
+  Run({"HSET", "h4", "route_name", "sports", "distance", "0.9"});
+  Run({"HSET", "h5", "route_name", "cooking", "distance", "0.2"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@route_name",
+                     "REDUCE", "AVG", "1", "@distance", "AS", "avg_dist",
+                   "SORTBY", "1", "@avg_dist",
+                   "FILTER",
+                     "(@route_name == 'technology' && @avg_dist < 0.8) || "
+                     "(@route_name == 'sports' && @avg_dist < 0.8) || "
+                     "(@route_name == 'cooking' && @avg_dist < 0.8)"});
+  // clang-format on
+
+  // technology: avg(0.5, 0.7)=0.6 < 0.8
+  // sports: avg(0.3, 0.9)=0.6 < 0.8
+  // cooking: avg(0.2)=0.2 < 0.8
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route_name", "cooking", "avg_dist", "0.2"),
+                                         IsMap("route_name", "technology", "avg_dist", "0.6"),
+                                         IsMap("route_name", "sports", "avg_dist", "0.6")));
 }
 
 }  // namespace dfly

@@ -2013,10 +2013,8 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   for (size_t i = 0; i < m.db_stats.size(); ++i) {
     AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
                       &db_key_metrics);
-    AppendMetricValue("db_capacity", m.db_stats[i].prime_capacity, {"db", "type"},
-                      {StrCat("db", i), "prime"}, &db_capacity_metrics);
-    AppendMetricValue("db_capacity", m.db_stats[i].expire_capacity, {"db", "type"},
-                      {StrCat("db", i), "expire"}, &db_capacity_metrics);
+    AppendMetricValue("db_capacity", m.db_stats[i].prime_capacity, {"db"}, {StrCat("db", i)},
+                      &db_capacity_metrics);
 
     AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
@@ -2751,7 +2749,7 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
-    auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
+    auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
     if (!IsValid(it)) {
       return OpStatus::KEY_NOTFOUND;
     }
@@ -3163,7 +3161,6 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     }
     append("table_used_memory", total.table_mem_usage);
     append("prime_capacity", total.prime_capacity);
-    append("expire_capacity", total.expire_capacity);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
     append("small_string_bytes", m.small_string_bytes);

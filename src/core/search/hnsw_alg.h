@@ -48,6 +48,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   // Locks operations with element by label value
   mutable std::vector<std::mutex> label_op_locks_;
 
+  // Before changing it, grep for "global-hnsw-mutex" in the codebase!
   std::mutex global;
   std::vector<std::mutex> link_list_locks_;
 
@@ -1486,6 +1487,115 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     stop_condition.filter_results(result);
 
+    return result;
+  }
+
+  // Returns all elements within `radius` distance from query_data.
+  // Adapts the HNSW beam search from Malkov & Yashunin (2018), https://arxiv.org/abs/1603.09320:
+  // Phase 1 is the standard greedy descent to find the level-0 entry point; Phase 2 replaces
+  // the top-k heap with a radius threshold, collecting all nodes with dist <= radius.
+  // The dynamic search boundary starts at max(entry_point_distance, radius) and shrinks as
+  // closer out-of-radius candidates are found; `epsilon` controls the overscan factor
+  // (default 0.01) to improve recall near the boundary.
+  std::vector<std::pair<dist_t, labeltype>> searchRange(const void* query_data, dist_t radius,
+                                                        double epsilon = 0.01) const {
+    std::vector<std::pair<dist_t, labeltype>> result;
+    if (cur_element_count == 0)
+      return result;
+
+    // Phase 1: greedy descent from top level to find the best entry point for level 0.
+    tableint currObj = enterpoint_node_;
+    dist_t curdist =
+        fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+    for (int level = maxlevel_; level > 0; level--) {
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        unsigned int* data = (unsigned int*)get_linklist(currObj, level);
+        int size = getListCount(data);
+        tableint* datal = (tableint*)(data + 1);
+        for (int i = 0; i < size; i++) {
+          tableint cand = datal[i];
+          if (cand >= max_elements_)
+            throw std::runtime_error("cand error");
+          dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+          if (d < curdist) {
+            curdist = d;
+            currObj = cand;
+            changed = true;
+          }
+        }
+      }
+    }
+
+    // Phase 2: range search on bottom layer (level 0) with dynamic search boundary.
+    VisitedList* vl = visited_list_pool_->getFreeVisitedList();
+    vl_type* visited_array = vl->mass;
+    vl_type visited_array_tag = vl->curV;
+
+    std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>,
+                        CompareByFirst>
+        candidate_set;
+
+    // Dynamic range starts at max(entry_point_dist, radius) so we never stop early just
+    // because the entry point is farther than radius.
+    dist_t ep_dist = curdist;
+    dist_t dynamic_range = std::max(ep_dist, radius);
+    dist_t dyn_boundary = static_cast<dist_t>(dynamic_range * (1.0 + epsilon));
+
+    if (!isMarkedDeleted(currObj) && ep_dist <= radius)
+      result.emplace_back(ep_dist, getExternalLabel(currObj));
+
+    candidate_set.emplace(-ep_dist, currObj);
+    visited_array[currObj] = visited_array_tag;
+
+    while (!candidate_set.empty()) {
+      auto curr_pair = candidate_set.top();
+      dist_t curr_dist = -curr_pair.first;
+
+      if (curr_dist > dyn_boundary)
+        break;
+
+      candidate_set.pop();
+      tableint curr_id = curr_pair.second;
+
+      // Shrink dynamic_range: if candidate is between radius and current range, pull the
+      // boundary down toward radius. If candidate is within radius and dynamic_range is
+      // still above radius (entry point was far), clamp to radius so we stop over-scanning.
+      if (curr_dist < dynamic_range) {
+        if (curr_dist >= radius) {
+          dynamic_range = curr_dist;
+        } else if (dynamic_range > radius) {
+          dynamic_range = radius;
+        }
+        dyn_boundary = static_cast<dist_t>(dynamic_range * (1.0 + epsilon));
+      }
+
+      int* data = (int*)get_linklist0(curr_id);
+      size_t size = getListCount((linklistsizeint*)data);
+
+      for (size_t j = 1; j <= size; j++) {
+        tableint candidate_id = *(data + j);
+        if (candidate_id >= max_elements_)
+          throw std::runtime_error("cand error");
+
+        if (j < size)
+          __builtin_prefetch(getDataByInternalId(*(data + j + 1)), 0, 3);
+
+        if (visited_array[candidate_id] == visited_array_tag)
+          continue;
+        visited_array[candidate_id] = visited_array_tag;
+
+        dist_t d = fstdistfunc_(query_data, getDataByInternalId(candidate_id), dist_func_param_);
+        if (d < dyn_boundary) {
+          candidate_set.emplace(-d, candidate_id);
+          if (!isMarkedDeleted(candidate_id) && d <= radius)
+            result.emplace_back(d, getExternalLabel(candidate_id));
+        }
+      }
+    }
+
+    visited_list_pool_->releaseVisitedList(vl);
     return result;
   }
 

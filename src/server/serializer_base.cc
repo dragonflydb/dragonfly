@@ -5,47 +5,58 @@
 #include "server/serializer_base.h"
 
 #include "base/logging.h"
+#include "server/common_types.h"
+#include "server/journal/journal.h"
+#include "server/synchronization.h"
 
 namespace dfly {
 
 SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
+  DCHECK(db_slice_);
 }
 
 SerializerBase::~SerializerBase() {
 }
 
-uint64_t SerializerBase::RegisterChangeListener() {
-  DCHECK(db_slice_);
-  auto cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
-    HandleChangeReq(db_index, req);
+// Ordering invariant:
+//   For any key K, the replica must receive K's baseline value strictly before any journal entry
+//   that mutates K.
+// RegisterChangeListener registers the DbSlice callback that routes mutations through
+//   SerializerBase::OnChange. ConsumeJournalChange runs later on the
+//   same fiber, so the baseline is serialized first. big_value_mu_ prevents this callback path
+//   from interleaving with the traversal fiber's bucket serialization, which may preempt while
+//   emitting large values.
+void SerializerBase::RegisterChangeListener() {
+  db_array_ = db_slice_->databases();  // copy pointers to survive flush
+  auto cb = [this](DbIndex dbid, const ChangeReq& req) {
+    std::visit([&](auto it) { OnChange(dbid, it); }, req.change);
   };
-  snapshot_version_ = db_slice_->RegisterOnChange(std::move(cb));
-  return snapshot_version_;
+  snapshot_version_ = db_slice_->RegisterOnChange(cb);
 }
 
 void SerializerBase::UnregisterChangeListener() {
-  if (snapshot_version_ == 0)
-    return;
-  DCHECK(db_slice_);
-  db_slice_->UnregisterOnChange(snapshot_version_);
-  snapshot_version_ = 0;
+  if (auto version = std::exchange(snapshot_version_, 0); version > 0)
+    db_slice_->UnregisterOnChange(version);
 }
 
 void SerializerBase::MarkBucketSerializing(BucketIdentity bid) {
   DCHECK(!bucket_states_.contains(bid)) << "Bucket already in transient state";
-  bucket_states_.emplace(bid, BucketState{BucketPhase::kSerializing, {}});
+  bucket_states_[bid] = {BucketPhase::kSerializing, {}};
 }
 
 void SerializerBase::FinishBucketIteration(BucketIdentity bid,
                                            std::vector<TieredDelayedEntry> delayed) {
   auto it = bucket_states_.find(bid);
-  DCHECK(it != bucket_states_.end() && it->second.phase == BucketPhase::kSerializing);
+  DCHECK(it != bucket_states_.end());
+  DCHECK(it->second.phase == BucketPhase::kSerializing);
 
   if (delayed.empty()) {
     // Serializing -> Covered
     bucket_states_.erase(it);
+    ++stats_.buckets_serialized;
   } else {
     // Serializing -> DelayedPending
+    // TODO: Currently not used
     it->second.phase = BucketPhase::kDelayedPending;
     it->second.delayed = std::move(delayed);
   }
@@ -57,42 +68,57 @@ void SerializerBase::CompleteBucketDelayed(BucketIdentity bid) {
   bucket_states_.erase(it);
 }
 
-void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::lock_guard guard(big_value_mu_);
-
+std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
+  // Check if bucket is invalid or was already serialized
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     ++stats_.buckets_skipped;
-    return;
+    return std::nullopt;
   }
 
-  BucketIdentity bid = it.bucket_address();
-  if (bucket_states_.contains(bid)) {
+  // Check if this bucket is currently being serialized
+  if (bucket_states_.contains(it.bucket_address())) {
     ++stats_.change_during_serialization;
-    return;
+    return std::nullopt;
+  }
+
+  return it.bucket_address();
+}
+
+bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                   bool on_update) {
+  std::lock_guard guard(big_value_mu_);
+
+  // Check if this bucket should be serialized
+  std::optional<BucketIdentity> bid = ShouldProcessBucket(it);
+  if (!bid)
+    return false;
+
+  // For non updates, flush change to earlier snapshots and acquire serialization latch
+  std::optional<std::lock_guard<LocalLatch>> db_guard;
+  if (!on_update) {
+    db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
+                                             snapshot_version_);
+    db_guard.emplace(*db_slice_->GetLatch());
   }
 
   it.SetVersion(snapshot_version_);
-  MarkBucketSerializing(bid);
-  DoSerializeBucket(db_index, it);
-  FinishBucketIteration(bid, {});
-  ++stats_.buckets_on_change;
+  MarkBucketSerializing(*bid);
+  stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
+  FinishBucketIteration(*bid, {});
+  return true;
 }
 
-void SerializerBase::OnInsert(DbIndex db_index, std::string_view key) {
-  DCHECK(db_slice_);
-  PrimeTable* table = db_slice_->GetTables(db_index).first;
+void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
+  if (ProcessBucket(db_index, it, true))
+    ++stats_.buckets_on_change;
+}
+
+void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
+  PrimeTable* table = db_slice_->GetTables(db_index);
   table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator bit) {
     DCHECK_LT(bit.GetVersion(), snapshot_version_);
     OnChange(db_index, bit);
   });
-}
-
-void SerializerBase::HandleChangeReq(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  if (auto update = req.update(); update) {
-    OnChange(db_index, *update);
-  } else {
-    OnInsert(db_index, std::get<std::string_view>(req.change));
-  }
 }
 
 }  // namespace dfly
