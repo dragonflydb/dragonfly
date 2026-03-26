@@ -52,8 +52,8 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
 
   // Flush all entries of bucket
   if (flush_bucket) {
-    for (auto it = delayed_entries_.lower_bound(flush_bucket);
-         it != delayed_entries_.upper_bound(flush_bucket);) {
+    auto range = delayed_entries_.equal_range(flush_bucket);
+    for (auto it = range.first; it != range.second;) {
       serialize_entry(it++);
     }
   }
@@ -150,11 +150,11 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(it.bucket_address());
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
+  FinishBucketIteration(it.bucket_address());
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
 
-  FinishBucketIteration(it.bucket_address());
   return true;
 }
 

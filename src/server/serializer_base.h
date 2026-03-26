@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "server/db_slice.h"
-#include "server/execution_state.h"
 #include "server/journal/types.h"
 #include "server/synchronization.h"
 #include "server/table.h"

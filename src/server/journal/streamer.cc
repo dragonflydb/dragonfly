@@ -8,8 +8,6 @@
 
 #include <chrono>
 
-#include "server/serializer_base.h"
-
 #ifdef __linux__
 #include <netinet/tcp.h>
 #endif
@@ -483,9 +481,6 @@ void RestoreStreamer::Run() {
       ThrottleIfNeeded();
 
       stats_.buckets_loop += ProcessBucket(0, it, false);
-
-      // We could have delayed entries that are watiting so we want to flush them
-      ProcessDelayedEntries(false, 0, cntx_);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
