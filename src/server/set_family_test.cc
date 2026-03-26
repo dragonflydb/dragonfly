@@ -496,31 +496,32 @@ TEST_F(SetFamilyTest, SetInter_5590) {
   EXPECT_LE(end - start, 100000000);
 }
 
-// SADDEX on a member that was originally added via SADD (without TTL)
-// causes a heap buffer overflow. SADD allocates SDS strings without extra TTL space.
-// When SADDEX later tries to update the same member's TTL via ObjUpdateExpireTime,
-// it writes 4 bytes past the SDS null terminator into unallocated memory, corrupting the heap.
-// The crash typically manifests as SIGSEGV in mi_heap_malloc during a subsequent allocation.
+// Regression test for #6978: SADDEX on a member originally added via SADD (without TTL)
+// caused a heap buffer overflow because SADD allocates SDS without extra TTL space.
+// ObjUpdateExpireTime wrote 4 bytes past the SDS null terminator, corrupting the heap.
 TEST_F(SetFamilyTest, SAddExHeapOverflow_6978) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;
 
   // Case 1: String set (non-integer values).
-  // SADD adds "foobar" without TTL space (via sdsnewlen).
-  // SADDEX then tries to write TTL to "foobar" in-place — heap buffer overflow.
+  // SADD adds "foobar" without TTL space, SADDEX must reallocate with TTL space.
   Run({"sadd", "key1", "foobar"});
-  Run({"saddex", "key1", "100", "foobar"});  // This corrupts the heap
+  EXPECT_EQ(0, CheckedInt({"saddex", "key1", "100", "foobar"}));
+  EXPECT_EQ(1, CheckedInt({"sismember", "key1", "foobar"}));
+  EXPECT_LE(CheckedInt({"fieldttl", "key1", "foobar"}), 100);
 
-  // Trigger allocations to surface the corruption.
+  // Trigger allocations to surface any latent heap corruption.
   for (int i = 0; i < 100; i++) {
     Run({"sadd", "probe", absl::StrCat("value_", i)});
   }
   Run({"del", "probe"});
 
-  // Case 2: IntSet → StringSet conversion path.
-  // SADD creates an intset. SADDEX converts it to StringSet (members without TTL),
-  // then tries to update TTL on the same member — heap buffer overflow.
+  // Case 2: IntSet -> StringSet conversion path.
+  // SADD creates an intset. SADDEX converts to StringSet (members without TTL),
+  // then updates TTL on the same member.
   Run({"sadd", "key2", "1", "2", "3"});
-  Run({"saddex", "key2", "100", "1"});  // Converts intset, then overflows on "1"
+  EXPECT_EQ(0, CheckedInt({"saddex", "key2", "100", "1"}));
+  EXPECT_EQ(1, CheckedInt({"sismember", "key2", "1"}));
+  EXPECT_LE(CheckedInt({"fieldttl", "key2", "1"}), 100);
 
   // Trigger more allocations.
   for (int i = 0; i < 100; i++) {
@@ -529,18 +530,13 @@ TEST_F(SetFamilyTest, SAddExHeapOverflow_6978) {
   Run({"del", "probe2"});
 
   // Case 3: Various string lengths to hit different mimalloc size classes.
-  // Overflow is worst when sdslen + 2 is close to the mimalloc size class boundary.
   for (int len : {6, 14, 22, 30}) {
     string member(len, 'x');
     string key = absl::StrCat("key3_", len);
     Run({"sadd", key, member});
-    Run({"saddex", key, "100", member});
+    EXPECT_EQ(0, CheckedInt({"saddex", key, "100", member}));
+    EXPECT_LE(CheckedInt({"fieldttl", key, member}), 100);
   }
-
-  // If we get here without ASAN/SIGSEGV, the test passes.
-  // With ASAN, the heap-buffer-overflow should be detected at the SADDEX calls above.
-  EXPECT_EQ(1, CheckedInt({"sismember", "key1", "foobar"}));
-  EXPECT_EQ(1, CheckedInt({"sismember", "key2", "1"}));
 }
 
 // Regression test: SUNIONSTORE/SDIFFSTORE/SINTERSTORE overwriting a key of a different type

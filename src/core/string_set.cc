@@ -103,9 +103,8 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
       // Instead, create a new SDS with TTL space and replace the old one.
       sds field = MakeSetSds(span[i], ttl_sec);
       void* old = AddOrReplaceObj(field, true);
-      if (old) {
-        ObjDelete(old);
-      }
+      DCHECK(old != nullptr);  // prev was found, so replacement must happen.
+      ObjDelete(old);
     }
   }
 
