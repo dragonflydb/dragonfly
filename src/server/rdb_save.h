@@ -6,6 +6,8 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
 
+#include "server/rdb_extensions.h"
+
 extern "C" {
 #include "redis/lzfP.h"
 }
@@ -30,6 +32,10 @@ struct HnswNodeData;
 }  // namespace dfly::search
 
 namespace dfly {
+
+// Used for non-baseline data, in particular, journal entries
+// Baseline entries use monotonically increasing IDs starting from 1.
+constexpr uint32_t kNoStreamId = 0;
 
 // keys are RDB_TYPE_xxx constants.
 using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
@@ -179,7 +185,7 @@ class RdbSerializerBase {
                                bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
-  size_t SerializedLen() const;
+  virtual size_t SerializedLen() const;
 
   // Flush internal buffer and return serialized blob.
   virtual std::string Flush(FlushState flush_state);
@@ -190,10 +196,10 @@ class RdbSerializerBase {
   std::error_code WriteRaw(const ::io::Bytes& buf);
 
   // Write journal entry as an embedded journal blob.
-  std::error_code WriteJournalEntry(std::string_view entry);
+  virtual std::error_code WriteJournalEntry(std::string_view entry);
 
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
-  std::error_code SendFullSyncCut();
+  virtual std::error_code SendFullSyncCut();
 
   std::error_code WriteOpcode(uint8_t opcode);
 
@@ -218,6 +224,7 @@ class RdbSerializerBase {
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
   void AllocateCompressorOnce();
+  std::optional<std::string> CompressBlob(std::string_view input);
 
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
 
@@ -239,6 +246,10 @@ class RdbSerializerBase {
   base::PODArray<uint8_t> tmp_buf_;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   size_t number_of_chunks_ = 0;
+
+  // If tagged chunks are set, compression is not done during PrepareFlush on small chunks. Instead
+  // we compress before flush, after appending the memory buffer to stash
+  bool allow_prepare_flush_compression_ = true;
 
   uint64_t serialization_peak_bytes_ = 0;
 };
@@ -279,6 +290,24 @@ class RdbSerializer : public RdbSerializerBase {
   size_t GetTempBufferSize() const override;
   std::error_code SendEofAndChecksum();
 
+  void SetTagEntries(bool tag_entries) {
+    send_tagged_entries_ = tag_entries;
+    allow_prepare_flush_compression_ = !tag_entries;
+  }
+
+  // Sets the current stream ID for tagged chunk output. Stashes any pending data from the
+  // previous stream. Called by snapshot before each SerializeEntry
+  void SetCurrentStreamId(uint32_t stream_id);
+
+  // stash baseline data before journal write
+  std::error_code WriteJournalEntry(std::string_view serialized_entry) override;
+
+  // include stash size with mem buf size
+  size_t SerializedLen() const override;
+
+  // Set raw mode before full sync cut
+  std::error_code SendFullSyncCut() override;
+
  private:
   // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
@@ -300,10 +329,30 @@ class RdbSerializer : public RdbSerializerBase {
   // Might preempt
   void PushToConsumerIfNeeded(FlushState flush_state);
 
+  // Consumes and stores current mem_buf_ content into a stash so that interleaved entries of
+  // different types (Baseline/journal etc) are sent to consumer with correct headers on each
+  // chunk.
+  void StashCurrentBuffer();
+
+  // Tags a given byte series with opcode, stream ID and the size of bytes in 9 byte header.
+  static std::string TagChunk(io::Bytes bytes, uint32_t stream_id);
+
+  // Helper to switche state from tagged chunks to non tagged chunks, eg journal, full sync cut etc
+  // Must be called for any non k-v records to stash the current buffer data first.
+  void SetRawMode();
+
+  std::string FlushImpl(FlushState flush_state);
+  bool DidStreamChange(uint32_t stream_id) const;
+  bool ShouldTagOutputChunk() const;
+
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
+
+  std::string tagged_chunk_stash_;
+  bool send_tagged_entries_ = false;
+  uint32_t current_stream_id_ = kNoStreamId;
 };
 
 }  // namespace dfly

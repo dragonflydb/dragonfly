@@ -187,6 +187,11 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     size_t flushed_under_lock = 0;
   } stats_;
 
+  // Monotonically increasing stream ID for tagged chunk output.
+  // Each SerializeEntry call gets a unique ID starting from 1.
+  // TODO: reuse if exhausted ie uint32_t max
+  uint32_t next_stream_id_ = 1;
+
   SnapshotDataConsumerInterface* consumer_;
   ExecutionState* cntx_;
 };
