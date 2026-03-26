@@ -21,24 +21,22 @@ namespace dfly {
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
 
-// Handles serialization of offloaded (delayed) entries
+// Tracks serialization progress of offloaded (delayed) entries.
 struct DelayedEntryHandler {
-  using Key = std::pair<DbIndex, std::string>;  // Unique identifier of key
-
-  void EnqueueOffloaded(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
-                        uint32_t mc_flags);
+  void EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
+                        time_t expire_time, uint32_t mc_flags);
 
   // Must be called periodically to progress on delayed entries. Calls SerializeFetchedEntry.
   // If force is false, only serializes entries whose futures are already resolved.
-  // If tiered_keys is provided, only serializes entries whose keys are in the set.
-  void ProcessDelayedEntries(bool force, std::vector<Key>* tiered_keys, ExecutionState* cntx);
+  // If flush_bucket is provided, flushes all entries belonging to this bucket.
+  void ProcessDelayedEntries(bool force, BucketIdentity flush_bucket, ExecutionState* cntx);
 
   // Serialize delayed entry that was fetched with serializer specific implementation
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
  private:
   // Entries that are waiting for tiered storage reads to complete before they can be serialized.
-  absl::flat_hash_map<Key, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
+  std::multimap<BucketIdentity, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 };
 
 // SerializerBase owns the DbSlice change-listener registration and a per-bucket
@@ -61,7 +59,7 @@ class SerializerBase : public DelayedEntryHandler {
     uint64_t change_during_serialization = 0;  // change hit an in-flight bucket
   };
 
-  explicit SerializerBase(DbSlice* slice);
+  explicit SerializerBase(DbSlice* slice, ExecutionState* cntx);
   virtual ~SerializerBase();
 
   // Register db_slice change listener and save snapshot it
@@ -99,6 +97,8 @@ class SerializerBase : public DelayedEntryHandler {
   // --- Shared members (to be moved from subclasses in later PRs) ---
 
   DbSlice* const db_slice_;
+  ExecutionState* const base_cntx_;
+
   DbTableArray db_array_;
 
   uint64_t snapshot_version_ = 0;
@@ -107,12 +107,12 @@ class SerializerBase : public DelayedEntryHandler {
 
  private:
   friend class SerializerBaseTest;
-  SerializerBase() : db_slice_(nullptr) {
+  SerializerBase() : db_slice_(nullptr), base_cntx_(nullptr) {
   }
 
   // Return identity if bucket should be processed.
   // Checks bucket validity, version and state
-  std::optional<BucketIdentity> ShouldProcessBucket(PrimeTable::bucket_iterator);
+  bool ShouldProcessBucket(PrimeTable::bucket_iterator);
 
   // Transition bucket from NotVisited -> Serializing.
   void MarkBucketSerializing(BucketIdentity bid);

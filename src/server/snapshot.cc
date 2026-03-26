@@ -49,7 +49,7 @@ constexpr size_t kMinBlobSize = 8_KB;
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
                              SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
                              DflyVersion replica_dfly_version)
-    : SerializerBase(slice),
+    : SerializerBase(slice, cntx),
       compression_mode_(compression_mode),
       replica_dfly_version_(replica_dfly_version),
       consumer_(consumer),
@@ -301,7 +301,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
     // Wait for all the outstanding delayed entries and serialize them as well.
-    ProcessDelayedEntries(true, nullptr, cntx_);
+    ProcessDelayedEntries(true, 0, cntx_);
     PushSerialized(true);
   }  // for (dbindex)
 
@@ -323,34 +323,21 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                         bool on_update) {
-  bool push_tiered = on_update;
   // Version is already stamped by the caller (BucketSaveCb or SerializerBase::OnChange).
   DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
 
-  unsigned result = 0;
-
-  std::vector<DelayedEntryHandler::Key> bucket_tiered_keys;
-  const bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
-  const bool track_tiered_keys = push_tiered && tiering_enabled;
-
+  unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    ++result;
+    ++serialized;
     // might preempt due to big value serialization.
-    SerializeEntry(db_index, it->first, it->second);
-    // Track tiered keys to push them with priority after the loop, but only for callbacks.
-    if (track_tiered_keys && it->second.IsExternal()) {
-      bucket_tiered_keys.emplace_back(db_index, it->first.ToString());
-    }
+    SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
   }
 
-  if (tiering_enabled)
-    ProcessDelayedEntries(false, track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
-
   serialize_bucket_running_ = false;
-  return result;
+  return serialized;
 }
 
 void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
@@ -358,16 +345,17 @@ void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const P
   CHECK(res);
 }
 
-void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
+void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const PrimeKey& pk,
+                                   const PrimeValue& pv) {
   if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
+    return SerializeEntry(bucket, db_indx, pk, pv.GetCool().record->value);
 
   time_t expire_time = pk.GetExpireTime();
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    EnqueueOffloaded(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    EnqueueOffloaded(bucket, db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);

@@ -8,14 +8,16 @@
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
 #include "server/engine_shard.h"
+#include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/synchronization.h"
 #include "server/tiered_storage.h"
 
 namespace dfly {
 
-void DelayedEntryHandler::EnqueueOffloaded(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
-                                           time_t expire_time, uint32_t mc_flags) {
+void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk,
+                                           const PrimeValue& pv, time_t expire_time,
+                                           uint32_t mc_flags) {
   DCHECK(pv.IsExternal());
   DCHECK(!pv.IsCool());
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
@@ -24,17 +26,16 @@ void DelayedEntryHandler::EnqueueOffloaded(DbIndex db_index, PrimeKey pk, const 
   auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
                                                     expire_time, mc_flags);
-  delayed_entries_.emplace(Key{db_index, std::string(key)}, std::move(entry));
+  delayed_entries_.emplace(bucket, std::move(entry));
 }
 
-void DelayedEntryHandler::ProcessDelayedEntries(bool force, std::vector<Key>* bucket_tiered_keys,
+void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush_bucket,
                                                 ExecutionState* cntx) {
   const size_t kMaxDelayedEntries = 512;
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
-  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
-  auto serialize_entry = [&](DelayedEntryIt it) {
+  auto serialize_entry = [&](auto it) {
     auto& entry = it->second;
     auto value = entry->value.Get();
 
@@ -49,25 +50,27 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, std::vector<Key>* bu
     delayed_entries_.erase(it++);
   };
 
-  if (bucket_tiered_keys) {
-    for (const auto& key : *bucket_tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        serialize_entry(it);
+  // Flush all entries of bucket
+  if (flush_bucket) {
+    for (auto it = delayed_entries_.lower_bound(flush_bucket);
+         it != delayed_entries_.upper_bound(flush_bucket);) {
+      serialize_entry(it++);
     }
   }
 
   // Serialize the delayed entries that are resolved, or all if force it true.
   for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    serialize_entry(it++);
+    if (!force && !it->second->value.IsResolved())
+      it++;
+    else
+      serialize_entry(it++);
   }
 }
 
-SerializerBase::SerializerBase(DbSlice* slice) : db_slice_(slice) {
+SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
+    : db_slice_(slice), base_cntx_(cntx) {
   DCHECK(db_slice_);
+  DCHECK(base_cntx_);
 }
 
 SerializerBase::~SerializerBase() {
@@ -108,20 +111,20 @@ void SerializerBase::FinishBucketIteration(BucketIdentity bid) {
   ++stats_.buckets_serialized;
 }
 
-std::optional<BucketIdentity> SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
+bool SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
   // Check if bucket is invalid or was already serialized
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     ++stats_.buckets_skipped;
-    return std::nullopt;
+    return false;
   }
 
   // Check if this bucket is currently being serialized
   if (bucket_states_.contains(it.bucket_address())) {
     ++stats_.change_during_serialization;
-    return std::nullopt;
+    return false;
   }
 
-  return it.bucket_address();
+  return true;
 }
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
@@ -129,9 +132,12 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   std::lock_guard guard(big_value_mu_);
 
   // Check if this bucket should be serialized
-  std::optional<BucketIdentity> bid = ShouldProcessBucket(it);
-  if (!bid)
+  if (!ShouldProcessBucket(it)) {
+    // Force flush all delayed entries in the touched bucket
+    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
+      ProcessDelayedEntries(false, it.is_done() ? 0 : it.bucket_address(), base_cntx_);
     return false;
+  }
 
   // For non updates, flush change to earlier snapshots and acquire serialization latch
   std::optional<std::lock_guard<LocalLatch>> db_guard;
@@ -142,9 +148,13 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   }
 
   it.SetVersion(snapshot_version_);
-  MarkBucketSerializing(*bid);
+  MarkBucketSerializing(it.bucket_address());
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
-  FinishBucketIteration(*bid);
+
+  if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
+    ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
+
+  FinishBucketIteration(it.bucket_address());
   return true;
 }
 

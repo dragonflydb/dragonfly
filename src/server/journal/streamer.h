@@ -135,8 +135,8 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   // Returns true if any entry was actually written
   bool WriteBucket(PrimeTable::bucket_iterator it, bool on_db_change);
 
-  void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                  uint64_t expire_ms);
+  void WriteEntry(BucketIdentity bucket, std::string_view key, const PrimeKey& pk,
+                  const PrimeValue& pv, uint64_t expire_ms);
 
   struct Stats {
     uint64_t buckets_loop = 0;

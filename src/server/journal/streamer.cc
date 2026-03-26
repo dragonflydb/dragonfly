@@ -8,6 +8,8 @@
 
 #include <chrono>
 
+#include "server/serializer_base.h"
+
 #ifdef __linux__
 #include <netinet/tcp.h>
 #endif
@@ -412,7 +414,7 @@ bool JournalStreamer::IsStalled() const {
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx)
-    : JournalStreamer(cntx, {}), SerializerBase(slice), my_slots_(std::move(slots)) {
+    : JournalStreamer(cntx, {}), SerializerBase(slice, cntx), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
@@ -483,7 +485,7 @@ void RestoreStreamer::Run() {
       stats_.buckets_loop += ProcessBucket(0, it, false);
 
       // We could have delayed entries that are watiting so we want to flush them
-      ProcessDelayedEntries(false, nullptr, cntx_);
+      ProcessDelayedEntries(false, 0, cntx_);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
@@ -499,7 +501,7 @@ void RestoreStreamer::Run() {
   // Force serialize of all delayed entries.
   {
     std::lock_guard guard(big_value_mu_);
-    ProcessDelayedEntries(true, nullptr, cntx_);
+    ProcessDelayedEntries(true, 0, cntx_);
   }
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
@@ -582,18 +584,6 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
 
   unsigned written = 0;
   std::string key_buffer;
-  std::vector<DelayedEntryHandler::Key> bucket_tiered_keys;
-
-  // Only track tiered keys when needed and flush delayed entries
-  // 1. When we have tiered storage
-  // 2. We're called from a OnDbChange callback
-  //
-  // We need to track all keys in bucket with tiering. Even if they are not set as external. There
-  // is situation when we request externalization of key and key is read - marking it as not
-  // external but not yet flushed. When OnDbChange callback is called we need to flush it and than
-  // write journal changes - so we cannot realy on IsExternal flag and need to track all keys.
-  bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
-  const bool track_tiered_keys = tiering_enabled && on_update;
 
   base::CpuTimeGuard guard(&cpu_aggregator_);
 
@@ -603,20 +593,12 @@ unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::buck
     if (ShouldWrite(key)) {
       ++shard_stats.total_migrated_keys;
       uint64_t expire = it->first.GetExpireTime();
-      WriteEntry(key, it->first, pv, expire);
-
-      // Track tiered keys that will need delayed entry flushing
-      if (track_tiered_keys && it->second.IsExternal())
-        bucket_tiered_keys.emplace_back(0, key);
-
+      WriteEntry(it.bucket_address(), key, it->first, pv, expire);
       ++written;
     } else {
       stats_.keys_skipped++;
     }
   }
-
-  if (tiering_enabled)
-    ProcessDelayedEntries(false, track_tiered_keys ? &bucket_tiered_keys : nullptr, cntx_);
 
   // we don't need throttle here, because we throttle after every entry written
   return written;
@@ -630,14 +612,14 @@ void RestoreStreamer::SerializeFetchedEntry(const TieredDelayedEntry& tde, const
 // stats_.throttle_on_db_update += throttle_count_ - throttle_start;
 // stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
 
-void RestoreStreamer::WriteEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                                 uint64_t expire_ms) {
+void RestoreStreamer::WriteEntry(BucketIdentity bucket, string_view key, const PrimeKey& pk,
+                                 const PrimeValue& pv, uint64_t expire_ms) {
   if (pv.IsExternal()) {
     if (pv.IsCool()) {
-      WriteEntry(key, pk, pv.GetCool().record->value, expire_ms);
+      WriteEntry(bucket, key, pk, pv.GetCool().record->value, expire_ms);
     } else {
       uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(0, pk) : 0;
-      EnqueueOffloaded(0, PrimeKey{key}, pv, expire_ms, mc_flags);
+      EnqueueOffloaded(bucket, 0, PrimeKey{key}, pv, expire_ms, mc_flags);
     }
   } else {
     stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);

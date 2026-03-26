@@ -124,7 +124,8 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
+  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                      const PrimeValue& pv);
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
