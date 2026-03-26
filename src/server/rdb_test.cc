@@ -1218,4 +1218,81 @@ TEST_F(RdbTest, TopkSerializationDecayParameter) {
   EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
 }
 
+namespace {
+std::string WrapInRdb(std::string_view body) {
+  std::string out = absl::StrFormat("REDIS%04d", RDB_SER_VERSION);
+  out.append(body);
+  out.push_back(static_cast<char>(RDB_OPCODE_EOF));
+  constexpr uint8_t checksum[8] = {0};
+  out.append(reinterpret_cast<const char*>(checksum), sizeof(checksum));
+  return out;
+}
+
+std::error_code LoadRdbBytes(Service* service, const std::string& rdb) {
+  io::BytesSource src{io::Buffer(rdb)};
+  RdbLoadContext load_context;
+  RdbLoader loader(service, &load_context);
+  return loader.Load(&src);
+}
+}  // namespace
+
+TEST_F(RdbTest, InterleavedSplitEntryRoundTrips) {
+  // run everything on shard-0 explicitly
+  SetFlag(&FLAGS_num_shards, 1);
+  ResetService();
+
+  for (int i = 0; i < 200; ++i) {
+    auto resp = Run({"HSET", "A", StrCat("field:", i), std::string(128, 'x')});
+    EXPECT_THAT(resp, IntArg(1));
+  }
+
+  std::string body;
+
+  const auto test = [&] {
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    auto& db = cntx.GetDbSlice(0);
+
+    auto a_it = db.FindReadOnly(cntx, "A", OBJ_HASH);
+    ASSERT_TRUE(a_it.ok());
+
+    PrimeKey a_key{"A"};
+    const PrimeValue& a_value = a_it.value()->second;
+
+    PrimeKey b_key{"B"};
+    PrimeValue b_value{"small"};
+
+    bool injected_b = false;
+    RdbSerializer serializer(
+        CompressionMode::NONE,
+        [&](std::string blob) {
+          body += blob;
+
+          // Add b in the middle while a is yielded, but just once
+          if (!injected_b) {
+            injected_b = true;
+            ASSERT_TRUE(serializer.SaveEntry(b_key, b_value, 0, 0, 0).has_value());
+          }
+        },
+        256);
+
+    serializer.SetTagEntries(true);
+
+    auto res = serializer.SaveEntry(a_key, a_value, 0, 0, 0);
+    ASSERT_TRUE(res.has_value());
+
+    body += serializer.Flush(RdbSerializerBase::FlushState::kFlushEndEntry);
+  };
+
+  pp_->at(0)->Await(test);
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbBytes(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(CheckedInt({"HLEN", "A"}), 200);
+  EXPECT_EQ(Run({"HGET", "A", "field:0"}), std::string(128, 'x'));
+  EXPECT_EQ(Run({"GET", "B"}), "small");
+}
+
 }  // namespace dfly
