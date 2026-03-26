@@ -496,4 +496,46 @@ TEST_F(SetFamilyTest, SetInter_5590) {
   EXPECT_LE(end - start, 100000000);
 }
 
+// Regression test: SUNIONSTORE/SDIFFSTORE/SINTERSTORE overwriting a key of a different type
+// must properly decrement the old type's memory counter before switching to OBJ_SET.
+// Without the ReduceHeapUsage() call in OpAdd, the old type's counter is never decremented,
+// leading to "Encountered underflow memory usage" errors.
+TEST_F(SetFamilyTest, StoreOverwritesNonSetKeyAccounting) {
+  // Create a list key that will be overwritten
+  Run({"rpush", "dest", "a", "b", "c"});
+  // Create a source set
+  Run({"sadd", "src", "x", "y", "z"});
+
+  Metrics before = GetMetrics();
+  ASSERT_FALSE(before.db_stats.empty());
+  const size_t list_before = before.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  ASSERT_GT(list_before, 0u);
+
+  // SUNIONSTORE overwrites "dest" (a list) with a set
+  auto resp = Run({"sunionstore", "dest", "src"});
+  EXPECT_THAT(resp, IntArg(3));
+  EXPECT_EQ(Run({"type", "dest"}), "set");
+
+  Metrics after = GetMetrics();
+  const size_t list_after = after.db_stats[0].memory_usage_by_type[OBJ_LIST];
+  const size_t set_after = after.db_stats[0].memory_usage_by_type[OBJ_SET];
+  EXPECT_EQ(list_after, 0u) << "Old list memory must be fully decremented";
+  EXPECT_GT(set_after, 0u) << "New set memory must be tracked";
+
+  // Also test SDIFFSTORE
+  Run({"rpush", "dest2", "a", "b"});
+  Run({"sdiffstore", "dest2", "src"});
+  EXPECT_EQ(Run({"type", "dest2"}), "set");
+  Metrics after2 = GetMetrics();
+  EXPECT_EQ(after2.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+
+  // And SINTERSTORE
+  Run({"rpush", "dest3", "a", "b"});
+  Run({"sadd", "src2", "x", "y"});
+  Run({"sinterstore", "dest3", "src", "src2"});
+  EXPECT_EQ(Run({"type", "dest3"}), "set");
+  Metrics after3 = GetMetrics();
+  EXPECT_EQ(after3.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
+}
+
 }  // namespace dfly
