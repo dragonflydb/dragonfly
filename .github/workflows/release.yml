@@ -63,7 +63,7 @@ jobs:
           - name: debian
             container: ubuntu-dev:20-gcc14
           - name: rpm
-            container: fedora:30
+            container: fedora:30-gcc14
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
@@ -88,8 +88,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
 
-          # set WITH_SIMSIMD=OFF for fedora:30
-          if [ "${{ matrix.container }}" == 'fedora:30' ]; then
+          if [ "${{ matrix.name }}" == 'rpm' ]; then
             export WITH_SIMSIMD="OFF"
           fi
           ./tools/release.sh
@@ -104,7 +103,7 @@ jobs:
 
     - name: Run regression tests
       # Fedora 30 has older python packages, so this fails during requirements installation.
-      if: matrix.container != 'fedora:30'
+      if: matrix.name != 'rpm'
       uses: ./.github/actions/regression-tests
       with:
         dfly-executable: dragonfly-x86_64
