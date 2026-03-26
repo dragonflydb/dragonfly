@@ -513,49 +513,6 @@ TEST_F(SetFamilyTest, SetInter_5590) {
   EXPECT_LE(end - start, 100000000);
 }
 
-// Regression test for #6978: SADDEX on a member originally added via SADD (without TTL)
-// caused a heap buffer overflow because SADD allocates SDS without extra TTL space.
-// ObjUpdateExpireTime wrote 4 bytes past the SDS null terminator, corrupting the heap.
-TEST_F(SetFamilyTest, SAddExHeapOverflow_6978) {
-  TEST_current_time_ms = kMemberExpiryBase * 1000;
-
-  // Case 1: String set (non-integer values).
-  // SADD adds "foobar" without TTL space, SADDEX must reallocate with TTL space.
-  Run({"sadd", "key1", "foobar"});
-  EXPECT_EQ(0, CheckedInt({"saddex", "key1", "100", "foobar"}));
-  EXPECT_EQ(1, CheckedInt({"sismember", "key1", "foobar"}));
-  EXPECT_LE(CheckedInt({"fieldttl", "key1", "foobar"}), 100);
-
-  // Trigger allocations to surface any latent heap corruption.
-  for (int i = 0; i < 100; i++) {
-    Run({"sadd", "probe", absl::StrCat("value_", i)});
-  }
-  Run({"del", "probe"});
-
-  // Case 2: IntSet -> StringSet conversion path.
-  // SADD creates an intset. SADDEX converts to StringSet (members without TTL),
-  // then updates TTL on the same member.
-  Run({"sadd", "key2", "1", "2", "3"});
-  EXPECT_EQ(0, CheckedInt({"saddex", "key2", "100", "1"}));
-  EXPECT_EQ(1, CheckedInt({"sismember", "key2", "1"}));
-  EXPECT_LE(CheckedInt({"fieldttl", "key2", "1"}), 100);
-
-  // Trigger more allocations.
-  for (int i = 0; i < 100; i++) {
-    Run({"sadd", "probe2", absl::StrCat("val_", i)});
-  }
-  Run({"del", "probe2"});
-
-  // Case 3: Various string lengths to hit different mimalloc size classes.
-  for (int len : {6, 14, 22, 30}) {
-    string member(len, 'x');
-    string key = absl::StrCat("key3_", len);
-    Run({"sadd", key, member});
-    EXPECT_EQ(0, CheckedInt({"saddex", key, "100", member}));
-    EXPECT_LE(CheckedInt({"fieldttl", key, member}), 100);
-  }
-}
-
 // Regression test: SUNIONSTORE/SDIFFSTORE/SINTERSTORE overwriting a key of a different type
 // must properly decrement the old type's memory counter before switching to OBJ_SET.
 // Without the ReduceHeapUsage() call in OpAdd, the old type's counter is never decremented,

@@ -484,6 +484,37 @@ TEST_F(StringSetTest, Ttl) {
   }
 }
 
+// Regression: AddMany with TTL on a member originally added without TTL must
+// reallocate the SDS with TTL space. Before the fix, ObjUpdateExpireTime wrote
+// 4 bytes past the SDS null terminator causing a heap buffer overflow.
+TEST_F(StringSetTest, AddBatchTtlOverflow) {
+  // Add members without TTL (allocated via sdsnewlen, no extra space).
+  EXPECT_TRUE(ss_->Add("foobar"sv));
+  EXPECT_TRUE(ss_->Add("short"sv));
+
+  // AddMany with TTL on the same members — before the fix this overflowed.
+  string_view members[] = {"foobar"sv, "short"sv};
+  ss_->AddMany(absl::MakeSpan(members), 100, false);
+
+  // Verify members are present and have TTL.
+  auto it = ss_->Find("foobar"sv);
+  ASSERT_NE(it, ss_->end());
+  EXPECT_TRUE(it.HasExpiry());
+  EXPECT_EQ(100u, it.ExpiryTime());
+
+  it = ss_->Find("short"sv);
+  ASSERT_NE(it, ss_->end());
+  EXPECT_TRUE(it.HasExpiry());
+
+  // Various string lengths to hit different mimalloc size classes.
+  string strs[] = {string(6, 'x'), string(14, 'x'), string(22, 'x'), string(30, 'x')};
+  for (auto& s : strs) {
+    EXPECT_TRUE(ss_->Add(string_view{s}));
+  }
+  string_view sv_members[] = {strs[0], strs[1], strs[2], strs[3]};
+  ss_->AddMany(absl::MakeSpan(sv_members), 200, false);
+}
+
 TEST_F(StringSetTest, Grow) {
   for (size_t j = 0; j < 10; ++j) {
     for (size_t i = 0; i < 4098; ++i) {
