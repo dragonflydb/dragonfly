@@ -515,6 +515,29 @@ TEST_F(StringSetTest, AddBatchTtlOverflow) {
   ss_->AddMany(absl::MakeSpan(sv_members), 200, false);
 }
 
+// Regression: AddOrReplaceObj must set expiration_used_ when replacing with a TTL entry.
+// Without this, iterating the set skips lazy expiry and expired members stay visible.
+TEST_F(StringSetTest, AddOrReplaceObjSetsExpirationUsed) {
+  // Add member without TTL.
+  EXPECT_TRUE(ss_->Add("key"sv));
+  EXPECT_FALSE(ss_->ExpirationUsed());
+
+  // Replace with TTL via AddMany — this calls AddOrReplaceObj internally.
+  string_view members[] = {"key"sv};
+  ss_->AddMany(absl::MakeSpan(members), 1, false);
+
+  // expiration_used_ must be set so lazy expiry kicks in.
+  EXPECT_TRUE(ss_->ExpirationUsed());
+
+  // Advance time past expiry and iterate — the expired member must be skipped.
+  ss_->set_time(2);
+  unsigned count = 0;
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    ++count;
+  }
+  EXPECT_EQ(0u, count);
+}
+
 TEST_F(StringSetTest, Grow) {
   for (size_t j = 0; j < 10; ++j) {
     for (size_t i = 0; i < 4098; ++i) {
