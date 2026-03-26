@@ -19,7 +19,6 @@
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
 #include "server/search/global_hnsw_index.h"
-#include "server/serializer_base.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/stacktrace.h"

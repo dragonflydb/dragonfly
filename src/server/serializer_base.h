@@ -17,6 +17,8 @@
 
 namespace dfly {
 
+class ExecutionState;
+
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
