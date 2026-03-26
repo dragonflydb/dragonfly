@@ -496,6 +496,53 @@ TEST_F(SetFamilyTest, SetInter_5590) {
   EXPECT_LE(end - start, 100000000);
 }
 
+// SADDEX on a member that was originally added via SADD (without TTL)
+// causes a heap buffer overflow. SADD allocates SDS strings without extra TTL space.
+// When SADDEX later tries to update the same member's TTL via ObjUpdateExpireTime,
+// it writes 4 bytes past the SDS null terminator into unallocated memory, corrupting the heap.
+// The crash typically manifests as SIGSEGV in mi_heap_malloc during a subsequent allocation.
+TEST_F(SetFamilyTest, SAddExHeapOverflow_6978) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Case 1: String set (non-integer values).
+  // SADD adds "foobar" without TTL space (via sdsnewlen).
+  // SADDEX then tries to write TTL to "foobar" in-place — heap buffer overflow.
+  Run({"sadd", "key1", "foobar"});
+  Run({"saddex", "key1", "100", "foobar"});  // This corrupts the heap
+
+  // Trigger allocations to surface the corruption.
+  for (int i = 0; i < 100; i++) {
+    Run({"sadd", "probe", absl::StrCat("value_", i)});
+  }
+  Run({"del", "probe"});
+
+  // Case 2: IntSet → StringSet conversion path.
+  // SADD creates an intset. SADDEX converts it to StringSet (members without TTL),
+  // then tries to update TTL on the same member — heap buffer overflow.
+  Run({"sadd", "key2", "1", "2", "3"});
+  Run({"saddex", "key2", "100", "1"});  // Converts intset, then overflows on "1"
+
+  // Trigger more allocations.
+  for (int i = 0; i < 100; i++) {
+    Run({"sadd", "probe2", absl::StrCat("val_", i)});
+  }
+  Run({"del", "probe2"});
+
+  // Case 3: Various string lengths to hit different mimalloc size classes.
+  // Overflow is worst when sdslen + 2 is close to the mimalloc size class boundary.
+  for (int len : {6, 14, 22, 30}) {
+    string member(len, 'x');
+    string key = absl::StrCat("key3_", len);
+    Run({"sadd", key, member});
+    Run({"saddex", key, "100", member});
+  }
+
+  // If we get here without ASAN/SIGSEGV, the test passes.
+  // With ASAN, the heap-buffer-overflow should be detected at the SADDEX calls above.
+  EXPECT_EQ(1, CheckedInt({"sismember", "key1", "foobar"}));
+  EXPECT_EQ(1, CheckedInt({"sismember", "key2", "1"}));
+}
+
 // Regression test: SUNIONSTORE/SDIFFSTORE/SINTERSTORE overwriting a key of a different type
 // must properly decrement the old type's memory counter before switching to OBJ_SET.
 // Without the ReduceHeapUsage() call in OpAdd, the old type's counter is never decremented,

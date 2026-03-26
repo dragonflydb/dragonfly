@@ -97,7 +97,15 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
       sds field = MakeSetSds(span[i], ttl_sec);
       AddUnique(field, has_ttl, hash[i]);
     } else if (has_ttl && !keepttl) {
-      ObjUpdateExpireTime(prev, ttl_sec);
+      // We must not call ObjUpdateExpireTime directly on prev because the existing SDS
+      // may have been allocated without TTL space (e.g., via SADD which uses sdsnewlen).
+      // Writing 4 TTL bytes past the null terminator would cause a heap buffer overflow.
+      // Instead, create a new SDS with TTL space and replace the old one.
+      sds field = MakeSetSds(span[i], ttl_sec);
+      void* old = AddOrReplaceObj(field, true);
+      if (old) {
+        ObjDelete(old);
+      }
     }
   }
 
@@ -209,7 +217,7 @@ pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, PageUsage* page
 
   if (has_ttl) {
     sds res = AllocSdsWithSpace(key_len, sizeof(uint32_t));
-    std::memcpy(res, key, key_len + sizeof(uint32_t));
+    std::memcpy(res, key, key_len + 1 + sizeof(uint32_t));  // +1 for null terminator
     return {res, true};
   }
 
