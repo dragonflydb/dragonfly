@@ -196,6 +196,13 @@ if(WITH_SIMSIMD)
   )
 endif()
 
+add_third_party(
+  pcre2
+  URL https://github.com/PCRE2Project/pcre2/archive/refs/tags/pcre2-10.44.tar.gz
+  CMAKE_PASS_FLAGS "-DPCRE2_BUILD_PCRE2GREP=OFF -DPCRE2_BUILD_TESTS=OFF
+                    -DBUILD_SHARED_LIBS=OFF -DPCRE2_SUPPORT_JIT=ON"
+  LIB libpcre2-8.a
+)
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
