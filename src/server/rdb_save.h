@@ -33,10 +33,6 @@ struct HnswNodeData;
 
 namespace dfly {
 
-// Used for non-baseline data, in particular, journal entries
-// Baseline entries use monotonically increasing IDs starting from 1.
-constexpr uint32_t kNoStreamId = 0;
-
 // keys are RDB_TYPE_xxx constants.
 using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 
@@ -295,10 +291,6 @@ class RdbSerializer : public RdbSerializerBase {
     allow_prepare_flush_compression_ = !tag_entries;
   }
 
-  // Sets the current stream ID for tagged chunk output. Stashes any pending data from the
-  // previous stream. Called by snapshot before each SerializeEntry
-  void SetCurrentStreamId(uint32_t stream_id);
-
   // stash baseline data before journal write
   std::error_code WriteJournalEntry(std::string_view serialized_entry) override;
 
@@ -341,18 +333,29 @@ class RdbSerializer : public RdbSerializerBase {
   // Must be called for any non k-v records to stash the current buffer data first.
   void SetRawMode();
 
+  uint32_t AllocateStreamId();
+  std::string FinalizeCurrentRecord(FlushState flush_state);
+
   std::string FlushImpl(FlushState flush_state);
-  bool DidStreamChange(uint32_t stream_id) const;
-  bool ShouldTagOutputChunk() const;
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
 
-  std::string tagged_chunk_stash_;
+  std::vector<std::string> pending_records_;
+  uint64_t pending_record_bytes_ = 0;
   bool send_tagged_entries_ = false;
-  uint32_t current_stream_id_ = kNoStreamId;
+
+  uint32_t next_stream_id_ = 1;
+
+  struct ActiveEntry {
+    enum class Kind : uint8_t { None, Baseline, Raw } kind = Kind::None;
+    bool chunked = false;
+    std::optional<uint32_t> stream_id = std::nullopt;
+  };
+
+  ActiveEntry active_entry_;
 };
 
 }  // namespace dfly

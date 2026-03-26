@@ -277,6 +277,12 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return 0;
   }
 
+  if (mem_buf_.InputLen() > 0)
+    StashCurrentBuffer();
+
+  active_entry_ = {
+      .kind = ActiveEntry::Kind::Baseline, .chunked = false, .stream_id = std::nullopt};
+
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   auto ec = SelectDb(dbid);
   if (ec) {
@@ -952,28 +958,21 @@ string RdbSerializer::Flush(FlushState flush_state) {
 }
 
 string RdbSerializer::FlushImpl(FlushState flush_state) {
-  string res = RdbSerializerBase::Flush(flush_state);
-
-  if (send_tagged_entries_) {
-    if (!res.empty()) {
-      if (ShouldTagOutputChunk()) {
-        tagged_chunk_stash_.append(TagChunk(
-            {reinterpret_cast<const unsigned char*>(res.data()), res.size()}, current_stream_id_));
-      } else {
-        // any non-baseline data identified with opcode and contiguous, append raw.
-        tagged_chunk_stash_.append(res);
-      }
-    }
-    res = std::move(tagged_chunk_stash_);
-    tagged_chunk_stash_.clear();
+  if (string res = FinalizeCurrentRecord(flush_state); !res.empty()) {
+    pending_record_bytes_ += res.size();
+    pending_records_.push_back(std::move(res));
   }
+
+  std::string out = absl::StrJoin(pending_records_, "");
+  pending_records_.clear();
+  pending_record_bytes_ = 0;
 
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
   // snapshot)
   last_entry_db_index_ = kInvalidDbId;
 
-  return res;
+  return out;
 }
 
 namespace {
@@ -1913,19 +1912,12 @@ size_t RdbSerializer::GetTempBufferSize() const {
 }
 
 size_t RdbSerializer::SerializedLen() const {
-  return RdbSerializerBase::SerializedLen() + tagged_chunk_stash_.size();
+  return RdbSerializerBase::SerializedLen() + pending_record_bytes_;
 }
 
 std::error_code RdbSerializer::SendFullSyncCut() {
   SetRawMode();
   return RdbSerializerBase::SendFullSyncCut();
-}
-
-void RdbSerializer::SetCurrentStreamId(uint32_t stream_id) {
-  if (DidStreamChange(stream_id)) {
-    StashCurrentBuffer();
-    current_stream_id_ = stream_id;
-  }
 }
 
 error_code RdbSerializer::WriteJournalEntry(string_view serialized_entry) {
@@ -1937,22 +1929,21 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
   if (consume_fun_ && SerializedLen() > flush_threshold_) {
     string blob = Flush(flush_state);
     DCHECK(!blob.empty());  // SerializedLen() > 0.
-    const auto saved_stream_id = current_stream_id_;
+    const auto saved_entry = active_entry_;
     consume_fun_(std::move(blob));
-
-    // Stream ID changed while fiber yielded in consume_fun_. Stash the data written during yield
-    // and restore our pre-yield stream ID.
-    if (DidStreamChange(saved_stream_id)) {
+    if (mem_buf_.InputLen() > 0)
       StashCurrentBuffer();
-      current_stream_id_ = saved_stream_id;
-    }
+    active_entry_ = saved_entry;
   }
 }
 
 void RdbSerializer::StashCurrentBuffer() {
   if (mem_buf_.InputLen() == 0)
     return;
-  tagged_chunk_stash_ = FlushImpl(FlushState::kFlushEndEntry);
+  if (auto record = FinalizeCurrentRecord(FlushState::kFlushEndEntry); !record.empty()) {
+    pending_record_bytes_ += record.size();
+    pending_records_.push_back(std::move(record));
+  }
 }
 
 std::string RdbSerializer::TagChunk(Bytes bytes, uint32_t stream_id) {
@@ -1969,18 +1960,47 @@ std::string RdbSerializer::TagChunk(Bytes bytes, uint32_t stream_id) {
 }
 
 void RdbSerializer::SetRawMode() {
-  if (DidStreamChange(kNoStreamId)) {
+  if (active_entry_.kind != ActiveEntry::Kind::Raw)
     StashCurrentBuffer();
-    current_stream_id_ = kNoStreamId;
+  active_entry_ = {.kind = ActiveEntry::Kind::Raw, .chunked = false, .stream_id = std::nullopt};
+}
+
+uint32_t RdbSerializer::AllocateStreamId() {
+  return next_stream_id_++;
+}
+
+std::string RdbSerializer::FinalizeCurrentRecord(FlushState flush_state) {
+  if (mem_buf_.InputLen() == 0) {
+    return {};
   }
-}
 
-bool RdbSerializer::DidStreamChange(uint32_t stream_id) const {
-  return send_tagged_entries_ && stream_id != current_stream_id_;
-}
+  auto blob = RdbSerializerBase::Flush(flush_state);
+  if (active_entry_.kind == ActiveEntry::Kind::Raw) {
+    return blob;
+  }
 
-bool RdbSerializer::ShouldTagOutputChunk() const {
-  return send_tagged_entries_ && current_stream_id_ != kNoStreamId;
+  DCHECK(active_entry_.kind == ActiveEntry::Kind::Baseline);
+
+  if (flush_state == FlushState::kFlushMidEntry) {
+    if (!active_entry_.chunked) {
+      active_entry_.chunked = true;
+      active_entry_.stream_id = AllocateStreamId();
+    }
+
+    const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
+    return TagChunk(bytes, *active_entry_.stream_id);
+  }
+
+  if (active_entry_.chunked) {
+    const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
+    blob = TagChunk(bytes, *active_entry_.stream_id);
+  }
+
+  // Reset active entry, current baseline entry is finished
+  active_entry_ = {};
+
+  // Do not tag unsplit baseline
+  return blob;
 }
 
 }  // namespace dfly
