@@ -19,7 +19,7 @@ jobs:
           - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: {cxx: g++, c: gcc}
-            cxx_flags: "-fprofile-arcs -ftest-coverage"
+            cxx_flags: "-fprofile-arcs -ftest-coverage -fprofile-update=atomic"
     timeout-minutes: 300
     container:
       image: ghcr.io/romange/${{ matrix.container }}
