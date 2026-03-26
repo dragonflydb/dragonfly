@@ -472,6 +472,23 @@ TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
   EXPECT_THAT(Run("SCARD key"), IntArg(0));
 }
 
+// Regression: SPOP on a set where all members have expired via lazy expiry
+// must return nil, not crash with DCHECK on empty result.
+TEST_F(SetFamilyTest, SPopAllExpired) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Add a member without TTL, then update it with TTL via SADDEX.
+  Run({"sadd", "key", "member"});
+  EXPECT_EQ(0, CheckedInt({"saddex", "key", "1", "member"}));
+
+  // Advance time so the member expires.
+  AdvanceTime(2000);
+
+  // SPOP should return nil (key effectively empty), not crash.
+  auto resp = Run({"spop", "key"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 TEST_F(SetFamilyTest, SetInter_5590) {
   absl::FlagSaver fs;
   SetTestFlag("num_shards", "2");

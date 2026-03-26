@@ -944,6 +944,11 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     // Delete the set as it is now empty
     db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
+    // All members may have expired during iteration (lazy expiry), leaving the result empty.
+    if (result.empty()) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+
     // Replicate as DEL.
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
