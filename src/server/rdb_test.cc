@@ -1237,8 +1237,10 @@ std::error_code LoadRdbBytes(Service* service, const std::string& rdb) {
 }  // namespace
 
 TEST_F(RdbTest, InterleavedSplitEntryRoundTrips) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "false");
   // run everything on shard-0 explicitly
-  SetFlag(&FLAGS_num_shards, 1);
+  SetTestFlag("num_shards", "1");
   ResetService();
 
   for (int i = 0; i < 200; ++i) {

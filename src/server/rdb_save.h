@@ -334,6 +334,15 @@ class RdbSerializer : public RdbSerializerBase {
   void SetRawMode();
 
   uint32_t AllocateStreamId();
+
+  // Applies wire format on a single blob read from the memory buffer before it is sent to
+  // consumer or stashed. If the blob is any of the following:
+  // 1. A journal entry
+  // 2. A non data entry (journal offset, full sync cut etc)
+  // 3. A data entry which was never split
+  // That data is eventually sent to consumer as it is.
+  // If the blob is part of a data entry which might have been split, then a tagged header is
+  // applied to it, which includes a unique key id which will be used by the loader to reassemble.
   std::string FinalizeCurrentRecord(FlushState flush_state);
 
   std::string FlushImpl(FlushState flush_state);
@@ -350,9 +359,15 @@ class RdbSerializer : public RdbSerializerBase {
   uint32_t next_stream_id_ = 1;
 
   struct ActiveEntry {
-    enum class Kind : uint8_t { None, Baseline, Raw } kind = Kind::None;
+    enum class Kind : uint8_t { Baseline, Raw } kind = Kind::Raw;
     bool chunked = false;
     std::optional<uint32_t> stream_id = std::nullopt;
+
+    void Reset(Kind k) {
+      kind = k;
+      chunked = false;
+      stream_id = std::nullopt;
+    }
   };
 
   ActiveEntry active_entry_;

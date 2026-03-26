@@ -277,11 +277,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return 0;
   }
 
-  if (mem_buf_.InputLen() > 0)
-    StashCurrentBuffer();
+  // If mem buf contains data, stash it before we begin this entry.
+  StashCurrentBuffer();
 
-  active_entry_ = {
-      .kind = ActiveEntry::Kind::Baseline, .chunked = false, .stream_id = std::nullopt};
+  active_entry_.Reset(ActiveEntry::Kind::Baseline);
 
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   auto ec = SelectDb(dbid);
@@ -1933,13 +1932,19 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
     consume_fun_(std::move(blob));
     if (mem_buf_.InputLen() > 0)
       StashCurrentBuffer();
+    // Restore saved entry if we yielded during consume_fun_, restores the tagging information
+    // (ActiveEntry::chunked, ActiveEntry::stream_id)
     active_entry_ = saved_entry;
   }
 }
 
 void RdbSerializer::StashCurrentBuffer() {
+  if (!send_tagged_entries_)
+    return;
+
   if (mem_buf_.InputLen() == 0)
     return;
+
   if (auto record = FinalizeCurrentRecord(FlushState::kFlushEndEntry); !record.empty()) {
     pending_record_bytes_ += record.size();
     pending_records_.push_back(std::move(record));
@@ -1962,7 +1967,7 @@ std::string RdbSerializer::TagChunk(Bytes bytes, uint32_t stream_id) {
 void RdbSerializer::SetRawMode() {
   if (active_entry_.kind != ActiveEntry::Kind::Raw)
     StashCurrentBuffer();
-  active_entry_ = {.kind = ActiveEntry::Kind::Raw, .chunked = false, .stream_id = std::nullopt};
+  active_entry_.Reset(ActiveEntry::Kind::Raw);
 }
 
 uint32_t RdbSerializer::AllocateStreamId() {
@@ -1975,31 +1980,37 @@ std::string RdbSerializer::FinalizeCurrentRecord(FlushState flush_state) {
   }
 
   auto blob = RdbSerializerBase::Flush(flush_state);
-  if (active_entry_.kind == ActiveEntry::Kind::Raw) {
+  if (!send_tagged_entries_) {
+    if (flush_state == FlushState::kFlushEndEntry)
+      active_entry_.Reset(ActiveEntry::Kind::Raw);
+    // not tagged entry always returns blob as it is
     return blob;
   }
 
-  DCHECK(active_entry_.kind == ActiveEntry::Kind::Baseline);
+  if (active_entry_.kind == ActiveEntry::Kind::Raw)
+    return blob;
+
+  auto do_tag = [&] {
+    const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
+    return TagChunk(bytes, *active_entry_.stream_id);
+  };
 
   if (flush_state == FlushState::kFlushMidEntry) {
+    // Mark the current entry as chunked. It will now always be tagged, any future chunks going out
+    // for this entry will be tagged too
     if (!active_entry_.chunked) {
       active_entry_.chunked = true;
       active_entry_.stream_id = AllocateStreamId();
     }
-
-    const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
-    return TagChunk(bytes, *active_entry_.stream_id);
+    return do_tag();
   }
 
   if (active_entry_.chunked) {
-    const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
-    blob = TagChunk(bytes, *active_entry_.stream_id);
+    blob = do_tag();
   }
 
   // Reset active entry, current baseline entry is finished
-  active_entry_ = {};
-
-  // Do not tag unsplit baseline
+  active_entry_.Reset(ActiveEntry::Kind::Raw);
   return blob;
 }
 
