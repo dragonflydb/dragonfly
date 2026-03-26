@@ -1077,4 +1077,171 @@ static void BM_QListUncompress(benchmark::State& state) {
 }
 BENCHMARK(BM_QListUncompress)->ArgsProduct({{1, 4, 0}});
 
+class QListZstdTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    SetupMalloc();
+  }
+
+  void TearDown() override {
+    // Reset thread-local ZSTD dictionary between tests so each test starts clean.
+    QList::ShutdownThread();
+  }
+
+  // Generate Celery-like JSON entries.
+  void PopulateWithCeleryData(QList& ql, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+      string id = to_string(100000 + i);
+      string entry =
+          "{\"body\": \"W10=\", \"content-encoding\": \"utf-8\", "
+          "\"content-type\": \"application/json\", "
+          "\"headers\": {\"lang\": \"py\", \"task\": \"process_job\", "
+          "\"id\": \"b3e4b923-8a77-4053-aff0-" +
+          id +
+          "\", \"shadow\": null, \"eta\": null, "
+          "\"expires\": null, \"group\": null, \"retries\": 0, "
+          "\"timelimit\": [null, null], "
+          "\"root_id\": \"b3e4b923-8a77-4053-aff0-" +
+          id +
+          "\", \"parent_id\": null, "
+          "\"argsrepr\": \"('job" +
+          to_string(i) +
+          "',)\", \"kwargsrepr\": \"{}\", "
+          "\"origin\": \"gen917779@hut\"}, "
+          "\"properties\": {\"correlation_id\": \"b3e4b923\", "
+          "\"reply_to\": \"9933040c\", \"delivery_mode\": 2, "
+          "\"delivery_info\": {\"exchange\": \"\", \"routing_key\": \"my_queue\"}, "
+          "\"priority\": 0}}";
+      ql.Push(entry, QList::TAIL);
+    }
+  }
+};
+
+TEST_F(QListZstdTest, CompressAndReadAll) {
+  QList ql(-1, 0);            // 4KB nodes, no depth-based compression (ZSTD dict replaces it)
+  ql.set_compr_threshold(1);  // threshold 1 = trigger as soon as possible
+  PopulateWithCeleryData(ql, 500);
+
+  size_t after = ql.MallocUsed(true);
+  LOG(INFO) << "Node count: " << ql.node_count() << ", total entries: " << ql.Size()
+            << ", MallocUsed: " << after;
+
+  // Verify all entries are readable.
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        EXPECT_NE(e.data(), nullptr);
+        EXPECT_GT(e.view().size(), 100u);
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, 500u);
+}
+
+TEST_F(QListZstdTest, PushAfterCompress) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  // Push new entries after compression.
+  ql.Push("new_head_entry", QList::HEAD);
+  ql.Push("new_tail_entry", QList::TAIL);
+  EXPECT_EQ(ql.Size(), 502u);
+
+  // Verify head and tail are readable.
+  auto it = ql.GetIterator(QList::HEAD);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.Get().view(), "new_head_entry");
+
+  it = ql.GetIterator(QList::TAIL);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.Get().view(), "new_tail_entry");
+}
+
+TEST_F(QListZstdTest, PopAfterCompress) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  EXPECT_EQ(ql.Size(), 500u);
+
+  string head = ql.Pop(QList::HEAD);
+  string tail = ql.Pop(QList::TAIL);
+  EXPECT_EQ(ql.Size(), 498u);
+  EXPECT_FALSE(head.empty());
+  EXPECT_FALSE(tail.empty());
+}
+
+TEST_F(QListZstdTest, SmallListSkipped) {
+  QList ql(-2, 0);  // compress=0 so ZSTD path is active (LZF disabled)
+  PopulateWithCeleryData(ql, 5);
+
+  size_t size = ql.MallocUsed(true);
+  // Set threshold higher than the list size — dict should not be trained.
+  ql.set_compr_threshold(size + 1000);
+
+  auto initial_compressions = QList::stats.zstd_dict_compressions;
+  PopulateWithCeleryData(ql, 5);
+  EXPECT_EQ(initial_compressions, QList::stats.zstd_dict_compressions);
+}
+
+TEST_F(QListZstdTest, IndexAccess) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  // Access by positive index.
+  auto it = ql.GetIterator(50);
+  ASSERT_TRUE(it.Valid());
+  auto entry = it.Get();
+  EXPECT_NE(entry.data(), nullptr);
+  EXPECT_GT(entry.view().size(), 100u);
+
+  // Access by negative index (from tail).
+  it = ql.GetIterator(-1);
+  ASSERT_TRUE(it.Valid());
+  entry = it.Get();
+  EXPECT_NE(entry.data(), nullptr);
+}
+
+TEST_F(QListZstdTest, IncrementalCompression) {
+  // Verify that a newly interior node gets compressed incrementally.
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  // Head and tail must be uncompressed.
+  EXPECT_EQ(ql.Head()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  EXPECT_EQ(ql.Tail()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  // Remember the old head node — it will become interior after a head push
+  // that creates a new node.
+  const QList::Node* old_head = ql.Head();
+
+  // Push enough data to force a new head node (fill=-1 means 4KB nodes).
+  for (int i = 0; i < 20; ++i) {
+    ql.Push("padding_head_" + to_string(i), QList::HEAD);
+  }
+
+  // The old head should now be an interior node and compressed.
+  // (It's not head_ anymore, and it's not tail.)
+  EXPECT_NE(ql.Head(), old_head);
+  EXPECT_TRUE(old_head->IsCompressed());
+
+  // New head/tail must remain uncompressed.
+  EXPECT_EQ(ql.Head()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  EXPECT_EQ(ql.Tail()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  // Verify all entries are still readable.
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, ql.Size());
+}
+
 }  // namespace dfly
