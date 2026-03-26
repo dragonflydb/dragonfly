@@ -13,6 +13,7 @@
 #include "base/flags.h"
 #include "core/huff_coder.h"
 #include "core/page_usage/page_usage_stats.h"
+#include "core/qlist.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -589,6 +590,7 @@ void EngineShard::DestroyThreadLocal() {
 
   shard_->Shutdown();
 
+  QList::ShutdownThread();
   detail::InternedString::ResetPool();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();

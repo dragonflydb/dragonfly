@@ -391,6 +391,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
+
   const QList::Node* node = ql->Head();
   size_t len = ql->node_count();
 
@@ -402,7 +403,19 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
     // Use listpack encoding
     RETURN_ON_ERR(SaveLen(node->container));
-    if (node->IsCompressed()) {
+    if (node->encoding == QLIST_NODE_ENCODING_ZSTD) {
+      // ZSTD-compressed nodes cannot be saved using RDB LZF encoding — the loader would
+      // call lzf_decompress on ZSTD bytes and corrupt the data. Decompress to raw first.
+      std::string raw;
+      if (!QList::DecompressZstdNode(node, &raw)) {
+        return make_error_code(errc::invalid_argument);
+      }
+      RETURN_ON_ERR(SaveString(string_view{raw.data(), raw.size()}));
+      FlushState flush_state = FlushState::kFlushMidEntry;
+      if (node->next == nullptr)
+        flush_state = FlushState::kFlushEndEntry;
+      PushToConsumerIfNeeded(flush_state);
+    } else if (node->IsCompressed()) {
       void* data;
       size_t compress_len = node->GetLZF(&data);
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));

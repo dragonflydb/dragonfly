@@ -555,4 +555,52 @@ TEST_F(SetFamilyTest, StoreOverwritesNonSetKeyAccounting) {
   EXPECT_EQ(after3.db_stats[0].memory_usage_by_type[OBJ_LIST], 0u);
 }
 
+// Regression test for #6973: SDIFF/SDIFFSTORE crash when all set members
+// have expired via per-member TTL, leaving the key present but the set empty.
+TEST_F(SetFamilyTest, SDiffAllMembersExpired) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Add members with a short TTL.
+  Run({"saddex", "src", "1", "a", "b", "c"});
+  Run({"sadd", "other", "x"});
+
+  // Advance time so all members in "src" expire.
+  AdvanceTime(2000);
+
+  // SDIFF should return empty (like KEY_NOTFOUND), not crash.
+  auto resp = Run({"sdiff", "src", "other"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // The key must be deleted after lazy expiry emptied the set.
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+
+  // SDIFFSTORE should store nothing and return 0.
+  Run({"saddex", "src", "1", "a", "b", "c"});
+  AdvanceTime(2000);
+  resp = Run({"sdiffstore", "dest", "src", "other"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+}
+
+// Verify key deletion after lazy member expiry for SUNION and SINTER.
+TEST_F(SetFamilyTest, SetOpsDeleteEmptyAfterExpiry) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "s1", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  // SUNION triggers iteration which expires all members — key should be deleted.
+  auto resp = Run({"sunion", "s1"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "s1"}), IntArg(0));
+
+  Run({"saddex", "s2", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  // SINTER single-key path — same behavior.
+  resp = Run({"sinter", "s2"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "s2"}), IntArg(0));
+}
+
 }  // namespace dfly
