@@ -53,7 +53,7 @@ pair<void*, bool> ScoreMap::AddOrUpdate(string_view field, double value) {
   // Replace the whole entry.
   sds prev_entry = (sds)AddOrReplaceObj(newkey, false);
   if (prev_entry) {
-    ObjDelete(prev_entry, false);
+    ObjDelete(prev_entry);
     return {newkey, false};
   }
 
@@ -133,7 +133,7 @@ void ScoreMap::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
   // Should not reach.
 }
 
-void ScoreMap::ObjDelete(void* obj, bool has_ttl) const {
+void ScoreMap::ObjDelete(void* obj) const {
   sds s1 = (sds)obj;
   sdsfree(s1);
 }

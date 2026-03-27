@@ -335,7 +335,8 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   if (bin.fragmented) {
     // Trigger read to signal need for defragmentation. NotifyFetched will handle it.
     DVLOG(2) << "Enqueueing bin defragmentation for: " << bin.segment.offset;
-    Enqueue(kFragmentedBin, bin.segment, tiering::BareDecoder{}, [](auto res) {});
+    Enqueue(
+        kFragmentedBin, bin.segment, tiering::BareDecoder{}, [](auto res) {}, true);
   }
 
   return false;
@@ -384,12 +385,17 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
+bool TieredStorage::HasModificationPending(tiering::DiskSegment segment) const {
+  return op_manager_->HasModificationPending(segment);
+}
+
 void TieredStorage::ReadInternal(DbIndex dbid, std::string_view key,
                                  const tiering::DiskSegment& segment,
                                  const tiering::Decoder& decoder,
-                                 std::function<void(io::Result<tiering::Decoder*>)> cb) {
+                                 std::function<void(io::Result<tiering::Decoder*>)> cb,
+                                 bool read_only) {
   // TODO: improve performance by avoiding one more function wrap
-  op_manager_->Enqueue(KeyRef(dbid, key), segment, decoder, std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), segment, decoder, std::move(cb), read_only);
 }
 
 void TieredStorage::Stash(DbIndex dbid, string_view key, const StashDescriptor& blobs,
@@ -715,7 +721,8 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
   auto cb = [future, modf = std::move(modf)](io::Result<tiering::StringDecoder*> res) mutable {
     future.Resolve(res.transform([&modf](auto* d) { return modf(d->Write()); }));
   };
-  ts->Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb));
+  ts->Read(dbid, key, value.GetExternalSlice(), tiering::StringDecoder{value}, std::move(cb),
+           false);
 
   return future;
 }

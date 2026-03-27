@@ -76,7 +76,7 @@ endif()
 
 # Optionally compile extension commands
 if (WITH_EXTENSION_CMDS)
-  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc json_family.cc)
+  list(APPEND DF_FAMILY_SRCS geo_family.cc hll_family.cc bitops_family.cc bloom_family.cc topk_family.cc cms_family.cc json_family.cc)
   add_definitions(-DWITH_EXTENSION_CMDS)
 endif()
 
@@ -118,7 +118,7 @@ if (WITH_GCP)
 endif()
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
-         redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath
+         redis_lib ${AWS_LIB} ${GCP_LIB} azure_lib jsonpath ${DF_FILTER_LIB}
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons TRDP::zstd TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
@@ -154,6 +154,8 @@ helio_cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(string_stats_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(topk_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(cms_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
@@ -170,7 +172,8 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
 if (WITH_SEARCH)
   helio_cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
   helio_cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
+  helio_cxx_test(search/filter_expr_test dfly_test_lib LABELS DFLY)
   helio_cxx_test(search/index_join_test dfly_test_lib LABELS DFLY)
 
-  add_dependencies(check_dfly search_family_test aggregator_test index_join_test)
+  add_dependencies(check_dfly search_family_test aggregator_test filter_expr_test index_join_test)
 endif()

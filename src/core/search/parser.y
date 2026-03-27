@@ -62,6 +62,8 @@ double toDouble(string_view src);
   KNN         "KNN"
   AS          "AS"
   EF_RUNTIME  "EF_RUNTIME"
+  VECTOR_RANGE      "VECTOR_RANGE"
+  YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
 ;
 
 %token AND_OP
@@ -86,6 +88,8 @@ double toDouble(string_view src);
 %nterm <std::string> opt_knn_alias
 %nterm <std::string> geounit
 %nterm <std::optional<size_t>> opt_ef_runtime
+%nterm <AstVectorRangeNode> vector_range_query
+%nterm <double> vec_range_radius
 
 %printer { yyo << $$; } <*>;
 
@@ -96,6 +100,8 @@ final_query:
       { driver->Set(std::move($1)); }
   | filter ARROW knn_query
       { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
+  | vector_range_query
+      { driver->Set(std::move($1)); }
 
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET
@@ -123,6 +129,28 @@ opt_knn_alias:
 opt_ef_runtime:
   /* empty */ { $$ = std::nullopt; }
   | EF_RUNTIME UINT32 { $$ = toUint32($2); }
+
+vector_range_query:
+  FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET ARROW LCURLBR YIELD_DISTANCE_AS COLON TERM RCURLBR
+    {
+      double radius = $5;
+      auto field = std::move($1);
+      auto alias = std::move($12);
+      auto vec_result = BytesToFtVectorSafe($6);
+      if (!vec_result) {
+        auto empty_vec = std::make_unique<float[]>(0);
+        $$ = AstVectorRangeNode(std::move(field), radius,
+                                {std::move(empty_vec), size_t{0}}, std::move(alias));
+      } else {
+        $$ = AstVectorRangeNode(std::move(field), radius, std::move(*vec_result),
+                                std::move(alias));
+      }
+    }
+
+vec_range_radius:
+  DOUBLE  { $$ = toDouble($1); }
+  | UINT32 { $$ = static_cast<double>(toUint32($1)); }
+  | TERM   { double v = 0; if (!absl::SimpleAtod($1, &v)) YYABORT; $$ = v; }
 
 filter:
   search_expr               { $$ = std::move($1); }

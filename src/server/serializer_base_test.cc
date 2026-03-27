@@ -12,7 +12,7 @@ namespace dfly {
 
 class SerializerBaseTest : public BaseFamilyTest, public SerializerBase {
  public:
-  SerializerBaseTest() : SerializerBase(nullptr) {
+  SerializerBaseTest() {
   }
 
  protected:
@@ -22,10 +22,11 @@ class SerializerBaseTest : public BaseFamilyTest, public SerializerBase {
   using SerializerBase::MarkBucketSerializing;
 
   size_t BucketCount() const {
-    return BucketStateCountForTesting();
+    return bucket_states_.size();
   }
 
-  unsigned DoSerializeBucket(DbIndex /*db_index*/, PrimeTable::bucket_iterator /*it*/) override {
+  unsigned SerializeBucket(DbIndex /*db_index*/, PrimeTable::bucket_iterator /*it*/,
+                           bool /* on_update */) override {
     return 0;
   }
 };

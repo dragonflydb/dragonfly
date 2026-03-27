@@ -13,6 +13,7 @@ from .utility import *
 from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
+from redis.exceptions import MovedError
 from .proxy import Proxy
 from .seeder import Seeder, SeederBase, DebugPopulateSeeder
 
@@ -256,7 +257,9 @@ class TestEmulated:
 
     def test_cluster_help_command(self, cluster_client: redis.RedisCluster):
         # `target_nodes` is necessary because CLUSTER HELP is not mapped on redis-py
-        res = cluster_client.execute_command("CLUSTER HELP", target_nodes=redis.RedisCluster.RANDOM)
+        res = cluster_client.execute_command(
+            "CLUSTER", "HELP", target_nodes=redis.RedisCluster.RANDOM
+        )
         assert "HELP" in res
         assert "SLOTS" in res
 
@@ -677,10 +680,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert (await c_nodes[0].get("KEY0")) == "value"
 
     # Make sure that "KEY1" is not owned by node1
-    with pytest.raises(redis.exceptions.ResponseError) as e:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as e:
         await c_nodes[1].set("KEY1", "value")
 
-    assert e.value.args[0] == f"MOVED 5259 localhost:{nodes[0].port}"
+    assert e.value.args[0].endswith(f"5259 localhost:{nodes[0].port}")
 
     # And that node1 only has 1 key ("KEY2")
     assert await c_nodes[1].execute_command("DBSIZE") == 1
@@ -705,10 +708,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert await c_nodes[1].execute_command("DBSIZE") == 1
 
     # Now node0 should reply with MOVED for "KEY1"
-    with pytest.raises(redis.exceptions.ResponseError) as e:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as e:
         await c_nodes[0].set("KEY1", "value")
 
-    assert e.value.args[0] == f"MOVED 5259 localhost:{nodes[1].port}"
+    assert e.value.args[0].endswith(f"5259 localhost:{nodes[1].port}")
 
     # And node1 should own it and allow using it
     assert await c_nodes[1].set("KEY1", "value")
@@ -836,11 +839,11 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         assert await c_replica.execute_command("dbsize") == 2
 
         # The replica should still reply with MOVED, despite having that key.
-        with pytest.raises(redis.exceptions.ResponseError) as e:
+        with pytest.raises((MovedError, aioredis.ResponseError)) as e:
             await c_replica.get("key2")
             assert False, "Should not be able to get key on non-owner cluster node"
 
-        assert re.match(r"MOVED \d+ localhost:1111", e.value.args[0])
+        assert re.search(r"\d+ localhost:1111", e.value.args[0])
 
         await push_config(replica_config, [c_master_admin])
         await check_all_replicas_finished([c_replica], c_master)
@@ -994,9 +997,8 @@ async def test_cluster_blocking_command(df_server):
     await c_master.lpush("keep-local", "WORKS")
 
     assert (await v1) == ("keep-local", "WORKS")
-    with pytest.raises(aioredis.ResponseError) as e_info:
+    with pytest.raises(MovedError) as e_info:
         await v2
-    assert "MOVED" in str(e_info.value)
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1029,13 +1031,13 @@ async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
     logging.debug("remove finished migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    with pytest.raises(aioredis.ResponseError) as set_e_info:
+    with pytest.raises(MovedError) as set_e_info:
         await set_task
-    assert f"MOVED 3037 127.0.0.1:{instances[1].port}" == str(set_e_info.value)
+    assert f"3037 127.0.0.1:{instances[1].port}" == str(set_e_info.value)
 
-    with pytest.raises(aioredis.ResponseError) as list_e_info:
+    with pytest.raises(MovedError) as list_e_info:
         await list_task
-    assert f"MOVED 7141 127.0.0.1:{instances[1].port}" == str(list_e_info.value)
+    assert f"7141 127.0.0.1:{instances[1].port}" == str(list_e_info.value)
 
 
 @pytest.mark.parametrize("set_cluster_node_id", [True, False])
@@ -1165,8 +1167,8 @@ async def test_cluster_native_client(
     for c in c_replicas:
         try:
             assert await c.get("key0")
-        except redis.exceptions.ResponseError as e:
-            assert e.args[0].startswith("MOVED")
+        except MovedError as e:
+            pass
 
     # Push new config
     config = f"""
@@ -2788,9 +2790,10 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
-    with pytest.raises(aioredis.ResponseError) as e_info:
+    with pytest.raises(MovedError) as e_info:
         await nodes[0].client.get("x")
-    assert f"MOVED 16287 127.0.0.1:{instances[1].port}" == str(e_info.value)
+
+    assert f"16287 127.0.0.1:{instances[1].port}" == str(e_info.value)
 
     nodes[0].migrations = []
     # cancel migration for the source node to get the original data from it
@@ -3059,10 +3062,10 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
 
     await push_config(json.dumps(generate_config(nodes_info)), [node.client for node in nodes_info])
     # channel name kostas crc is at slot 2883 which is part of the first node.
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as moved_error:
         await c_nodes[1].execute_command("SSUBSCRIBE kostas")
 
-    assert str(moved_error.value) == f"MOVED 2833 127.0.0.1:{nodes[0].port}"
+    assert str(moved_error.value).endswith(f"2833 127.0.0.1:{nodes[0].port}")
 
     node_a = ClusterNode("localhost", nodes[0].port)
     node_b = ClusterNode("localhost", nodes[1].port)
@@ -3213,10 +3216,10 @@ async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
 
     # channel name kostas crc is at slot 2883 which is part of the second now.
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as moved_error:
         await c_nodes[0].execute_command("SSUBSCRIBE kostas")
 
-    assert str(moved_error.value) == f"MOVED 2833 127.0.0.1:{instances[1].port}"
+    assert str(moved_error.value).endswith(f"2833 127.0.0.1:{instances[1].port}")
 
     # Consume subscription message result from above
     message = consumer.get_sharded_message(target_node=node_a)
@@ -3272,15 +3275,15 @@ async def test_readonly_replication(
         json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
     )
 
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as moved_error:
         await r1_node.client.execute_command("GET X")
 
-    assert str(moved_error.value) == f"MOVED 7165 127.0.0.1:{instances[0].port}"
+    assert str(moved_error.value).endswith(f"7165 127.0.0.1:{instances[0].port}")
 
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as moved_error:
         await r1_node.client.execute_command("GET Y")
 
-    assert str(moved_error.value) == f"MOVED 3036 127.0.0.1:{instances[0].port}"
+    assert str(moved_error.value).endswith(f"3036 127.0.0.1:{instances[0].port}")
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
@@ -3313,7 +3316,6 @@ async def test_cancel_blocking_cmd_during_mygration_finalization(df_factory: Dfl
 
     with pytest.raises(aioredis.ResponseError) as e_info:
         await blpop_task
-        assert "MOVED" in str(e_info.value)
 
     assert await c_nodes[1].type("list") == "none"
 
@@ -3421,15 +3423,15 @@ async def test_replica_takeover_moved(
     assert await r1.client.execute_command("GET X") == "1"
     assert await r1.client.execute_command("REPLTAKEOVER 20") == "OK"
 
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as moved_error:
         await m1.client.execute_command("GET X")
 
-    assert str(moved_error.value) == f"MOVED 7165 127.0.0.1:{r1.instance.port}"
+    assert str(moved_error.value).endswith(f"7165 127.0.0.1:{r1.instance.port}")
 
-    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+    with pytest.raises((MovedError, aioredis.ResponseError)) as moved_error:
         await m1.client.execute_command("GET FOOX")
 
-    assert str(moved_error.value) == f"MOVED 16022 127.0.0.1:{m2.instance.port}"
+    assert str(moved_error.value).endswith(f"16022 127.0.0.1:{m2.instance.port}")
 
     # Try write command on the new master. It should succeed because during takeover,
     # we updated the config as well

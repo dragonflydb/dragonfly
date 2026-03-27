@@ -10,6 +10,7 @@
 
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "core/search/base.h"
 #include "facade/reply_builder.h"
@@ -20,7 +21,7 @@ enum class SortOrder;
 }
 
 namespace dfly::aggregate {
-
+struct FilterExprNode;
 struct Reducer;
 
 using Value = ::dfly::search::SortableValue;
@@ -34,7 +35,7 @@ struct AggregationResult {
   std::vector<DocValues> values;
 
   // Fields from values to be printed
-  absl::flat_hash_set<std::string_view> fields_to_print;
+  absl::flat_hash_set<std::string> fields_to_print;
 };
 
 struct SortParams {
@@ -57,6 +58,7 @@ struct Aggregator {
   void DoGroup(absl::Span<const std::string> fields, absl::Span<const Reducer> reducers);
   void DoSort(const SortParams& sort_params);
   void DoLimit(size_t offset, size_t num);
+  void DoFilter(const FilterExprNode& expr);
 
   AggregationResult result;
 };
@@ -81,7 +83,8 @@ struct ValueIterator {
   ValueIterator& operator++();
 
   bool operator==(const ValueIterator& other) const {
-    return values_.size() == other.values_.size();
+    return values_.size() == other.values_.size() &&
+           (values_.empty() || values_.data() == other.values_.data());
   }
 
   bool operator!=(const ValueIterator& other) const {
@@ -118,6 +121,10 @@ AggregationStep MakeSortStep(SortParams sort_params);
 
 // Make `LIMIT offset num` step
 AggregationStep MakeLimitStep(size_t offset, size_t num);
+
+// Make `FILTER "expr"` step.
+// Parses the expression string immediately; returns an error message on parse failure.
+std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_expr);
 
 // Process values with given steps
 AggregationResult Process(std::vector<DocValues> values,

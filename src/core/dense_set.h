@@ -277,7 +277,7 @@ class DenseSet {
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
   virtual uint32_t ObjExpireTime(const void* obj) const = 0;
   virtual void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) = 0;
-  virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
+  virtual void ObjDelete(void* obj) const = 0;
   virtual void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const = 0;
 
   void CollectExpired();
@@ -289,6 +289,16 @@ class DenseSet {
       return true;
     }
     return false;
+  }
+
+  // Like EraseInternal but returns the detached object instead of deleting it.
+  // Returns nullptr if the object was not found.
+  void* DetachInternal(void* obj, uint32_t cookie) {
+    auto [prev, found] = Find(obj, BucketId(obj, cookie), cookie);
+    if (found) {
+      return Delete(prev, found, true);
+    }
+    return nullptr;
   }
 
   void* FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const;
@@ -400,7 +410,8 @@ class DenseSet {
 
   // Deletes the object pointed by ptr and removes it from the set.
   // If ptr is a link then it will be deleted internally.
-  void Delete(DensePtr* prev, DensePtr* ptr);
+  // If detach is true, returns the raw object instead of calling ObjDelete.
+  void* Delete(DensePtr* prev, DensePtr* ptr, bool detach = false);
 
   // Processes a single bucket during Shrink, relocating elements as needed.
   void ShrinkBucket(size_t bucket_idx);
