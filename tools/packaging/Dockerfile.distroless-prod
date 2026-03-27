@@ -33,8 +33,10 @@ COPY --from=builder /build/syslibs/ /
 VOLUME /data
 WORKDIR /data
 
-# Use httpcheck for plain HTTP (default). For TLS deployments, override with:
-#   CMD ["/usr/local/bin/httpscheck", "https://localhost:6379/healthz"]
+# Health check against the /healthz HTTP endpoint (returns 200 when server is ACTIVE).
+# Default assumes plain HTTP on port 6379. Override at runtime if needed:
+#   TLS:          docker run --health-cmd '/usr/local/bin/httpscheck https://localhost:6379/healthz' ...
+#   Custom port:  docker run --health-cmd '/usr/local/bin/httpcheck http://localhost:6380/healthz' ...
 HEALTHCHECK --start-period=30s --interval=15s --timeout=5s --retries=3 \
   CMD ["/usr/local/bin/httpcheck", "http://localhost:6379/healthz"]
 

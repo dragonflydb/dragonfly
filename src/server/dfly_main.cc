@@ -21,15 +21,13 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#ifdef __linux__
+#include <grp.h>
+#include <pwd.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
-
-#ifdef __linux__
-#include <grp.h>
-#include <pwd.h>
-
 #include <filesystem>
 
 #include "util/fibers/uring_proactor.h"
