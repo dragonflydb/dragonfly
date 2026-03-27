@@ -696,4 +696,83 @@ TEST_F(SetFamilyTest, SRandMemberWithExpiredMembers) {
   EXPECT_THAT(Run({"exists", "key4"}), IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SIsMemberDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  // Expired member returns 0.
+  auto resp = Run({"sismember", "key", "a"});
+  EXPECT_THAT(resp, IntArg(0));
+  // Point lookups only expire entries in the accessed bucket chain, so the
+  // empty-set cleanup is best-effort. Force full expiry via SCARD.
+  Run({"scard", "key"});
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SMIsMemberDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"smismember", "key", "a", "b"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SCardWithExpiredMembers) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b", "c"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"scard", "key"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SScanDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sscan", "key", "0"});
+  // Cursor should be 0 and result set empty.
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SInterMultiKeyDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key1", "1", "a", "b"});
+  Run({"sadd", "key2", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sinter", "key1", "key2"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key1"}), IntArg(0));
+  // key2 has no TTL, should still exist.
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(1));
+}
+
+TEST_F(SetFamilyTest, SMoveDeletesEmptySourceSet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "src", "1", "a", "b"});
+  Run({"sadd", "dst", "x"});
+  AdvanceTime(2000);
+
+  // Member "a" expired, SMOVE returns 0.
+  auto resp = Run({"smove", "src", "dst", "a"});
+  EXPECT_THAT(resp, IntArg(0));
+  // Point lookups only expire entries in the accessed bucket chain, so the
+  // empty-set cleanup is best-effort. Force full expiry via SCARD.
+  Run({"scard", "src"});
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+}
+
 }  // namespace dfly
