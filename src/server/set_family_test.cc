@@ -631,4 +631,27 @@ TEST_F(SetFamilyTest, SPopWithExpiredMembers) {
   EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SPopSingleArgExpiredCase2) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    string key = absl::StrCat("key", attempt);
+
+    Run({"sadd", key, "live"});
+    Run({"saddex", key, "1", "a", "b", "c"});
+
+    // Let TTL members expire.
+    AdvanceTime(2000);
+
+    auto resp = Run({"spop", key});
+    // Must be either "live" or nil — never a DCHECK crash.
+    if (resp.type == RespExpr::NIL) {
+      // The live member must still be in the set.
+      EXPECT_THAT(Run({"sismember", key, "live"}), IntArg(1));
+      continue;
+    }
+    EXPECT_THAT(resp, "live");
+  }
+}
+
 }  // namespace dfly
