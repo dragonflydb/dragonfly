@@ -58,7 +58,7 @@ class DiskBackedQueue {
   using AsyncPopCallback = std::function<void(io::Result<size_t>)>;
 
   // Async read variant. Callback is invoked with Result containing bytes read or error.
-  // No-op if a pop is already in-flight or the backing store is empty.
+  // Must only be called when no pop is already in-flight and the backing store is non-empty.
   void PopAsync(io::MutableBytes out, AsyncPopCallback cb);
 
   // Check if backing store (on-disk bytes) is empty.

@@ -72,7 +72,7 @@ struct DiskBackedQueue::Impl {
   }
 
   void MaybeFlushQueue() {
-    if (write_in_flight || write_queue.empty())
+    if (cancelled || write_in_flight || write_queue.empty())
       return;
 
     write_in_flight = true;
@@ -93,6 +93,7 @@ struct DiskBackedQueue::Impl {
         ec = {-res, std::system_category()};
         LOG(ERROR) << "Failed to offload chunk of size " << size
                    << " to backing with error: " << ec;
+        cancelled = true;
       } else if (!cancelled) {
         write_offset += size;
         total_backing_bytes += size;
@@ -104,6 +105,7 @@ struct DiskBackedQueue::Impl {
 
       // Chain next write before invoking cb, so IsActive() reflects
       // the true state when the callback notifies the connection.
+      // MaybeFlushQueue is a no-op when cancelled.
       if (!ec && !write_queue.empty())
         MaybeFlushQueue();
 
@@ -161,16 +163,6 @@ void DiskBackedQueue::Cancel() {
   impl_->cancelled = true;
   impl_->queued_bytes = 0;
   impl_->total_backing_bytes = 0;
-
-  // Drain all pending (not-yet-submitted) writes synchronously.
-  // The at-most-one already-submitted write/pop CQE will still arrive; its
-  // callback checks cancelled and skips accounting, then clears the in-flight flag.
-  const auto cancel_ec = std::make_error_code(std::errc::operation_canceled);
-  while (!impl_->write_queue.empty()) {
-    AsyncPushCallback cb = std::move(impl_->write_queue.front().cb);
-    impl_->write_queue.pop_front();
-    cb(cancel_ec);
-  }
 }
 
 bool DiskBackedQueue::IsActive() const {
@@ -201,8 +193,9 @@ void DiskBackedQueue::PushAsync(Chunk chunk, AsyncPushCallback cb) {
 }
 
 void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
-  if (impl_->pop_in_flight || impl_->total_backing_bytes == 0)
-    return;
+  DCHECK(!impl_->pop_in_flight);
+  DCHECK(!impl_->cancelled);
+  DCHECK_GT(impl_->total_backing_bytes, 0u);
 
   const size_t to_read = std::min(impl_->total_backing_bytes, out.size());
   const size_t offset = impl_->next_read_offset;
@@ -224,6 +217,7 @@ void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
       std::error_code ec{-res, std::system_category()};
       LOG(ERROR) << "Could not load item at offset " << offset << " of size " << to_read
                  << " from disk with error: " << ec.value() << " " << ec.message();
+      impl_->cancelled = true;
       cb(nonstd::make_unexpected(ec));
       return;
     }

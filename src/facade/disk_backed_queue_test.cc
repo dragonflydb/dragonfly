@@ -26,6 +26,16 @@ namespace {
 
 using namespace facade;
 
+DiskBackedQueue::Chunk MakeChunk(const std::string& s) {
+  DiskBackedQueue::Chunk chunk;
+  chunk.data.assign(s.begin(), s.end());
+  return chunk;
+}
+
+io::MutableBytes AsMutableBytes(std::string& s) {
+  return io::MutableBytes(reinterpret_cast<uint8_t*>(s.data()), s.size());
+}
+
 class DiskBackedQueueTest : public testing::Test {
  protected:
   void SetUp() override {
@@ -53,10 +63,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleReleasesSpace) {
     std::string data(12288, 'x');
     {
       util::fb2::Done done;
-      DiskBackedQueue::Chunk chunk;
-      chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
-                        reinterpret_cast<uint8_t*>(data.data()) + data.size());
-      backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+      backing.PushAsync(MakeChunk(data), [&done](std::error_code ec) {
         ASSERT_FALSE(ec);
         done.Notify();
       });
@@ -67,7 +74,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleReleasesSpace) {
     std::string results;
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
       util::fb2::Done done;
       backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
         ASSERT_TRUE(res);
@@ -101,10 +108,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleAdvancesOffset) {
     std::string data(32768, 'y');
     {
       util::fb2::Done done;
-      DiskBackedQueue::Chunk chunk;
-      chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
-                        reinterpret_cast<uint8_t*>(data.data()) + data.size());
-      backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+      backing.PushAsync(MakeChunk(data), [&done](std::error_code ec) {
         ASSERT_FALSE(ec);
         done.Notify();
       });
@@ -114,7 +118,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleAdvancesOffset) {
     // Read exactly 4096 bytes (1 page).
     {
       std::string buf(4096, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
       util::fb2::Done done;
       backing.PopAsync(out, [&done](io::Result<size_t> res) {
         ASSERT_TRUE(res);
@@ -150,10 +154,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     std::string data(10000, 'z');
     {
       util::fb2::Done done;
-      DiskBackedQueue::Chunk chunk;
-      chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
-                        reinterpret_cast<uint8_t*>(data.data()) + data.size());
-      backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+      backing.PushAsync(MakeChunk(data), [&done](std::error_code ec) {
         ASSERT_FALSE(ec);
         done.Notify();
       });
@@ -166,7 +167,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     std::string results;
     {
       std::string buf(3000, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
       util::fb2::Done done;
       backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
         ASSERT_TRUE(res);
@@ -189,7 +190,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     // Now the first page (0-4095) should be punched.
     {
       std::string buf(2000, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
       util::fb2::Done done;
       backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
         ASSERT_TRUE(res);
@@ -212,7 +213,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     // Now the first two pages (0-8191) should be punched.
     {
       std::string buf(3500, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
       util::fb2::Done done;
       backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
         ASSERT_TRUE(res);
@@ -232,7 +233,7 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     // Read remaining data and verify results match.
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
       util::fb2::Done done;
       backing.PopAsync(out, [&done, &results, &buf](io::Result<size_t> res) {
         ASSERT_TRUE(res);
@@ -262,12 +263,8 @@ TEST_F(DiskBackedQueueTest, AsyncReadWrite) {
     util::fb2::Fiber write_fiber = util::fb2::Fiber("writer", [&]() {
       for (size_t i = 0; i < 100; ++i) {
         auto cmd = absl::StrCat("SET FOO", i, " BAR");
-        DiskBackedQueue::Chunk chunk;
-        chunk.data.assign(reinterpret_cast<const uint8_t*>(cmd.data()),
-                          reinterpret_cast<const uint8_t*>(cmd.data()) + cmd.size());
-
         util::fb2::Done done;
-        backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+        backing.PushAsync(MakeChunk(cmd), [&done](std::error_code ec) {
           EXPECT_FALSE(ec);
           done.Notify();
         });
@@ -282,7 +279,7 @@ TEST_F(DiskBackedQueueTest, AsyncReadWrite) {
     util::fb2::Fiber read_fiber = util::fb2::Fiber("reader", [&]() {
       while (!backing.Empty()) {
         std::string buf(1024, 'c');
-        auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+        auto bytes = AsMutableBytes(buf);
 
         util::fb2::Done done;
         backing.PopAsync(bytes, [&done, &results, &buf](io::Result<size_t> res) {
@@ -312,10 +309,7 @@ TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
     std::string data(12288, 'x');
 
     util::fb2::Done write_done;
-    DiskBackedQueue::Chunk chunk;
-    chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
-                      reinterpret_cast<uint8_t*>(data.data()) + data.size());
-    backing.PushAsync(std::move(chunk), [&write_done](std::error_code ec) {
+    backing.PushAsync(MakeChunk(data), [&write_done](std::error_code ec) {
       ASSERT_FALSE(ec);
       write_done.Notify();
     });
@@ -325,7 +319,7 @@ TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
     std::string results;
     while (!backing.Empty()) {
       std::string buf(4096, '\0');
-      auto out = io::MutableBytes(reinterpret_cast<uint8_t*>(buf.data()), buf.size());
+      auto out = AsMutableBytes(buf);
 
       util::fb2::Done read_done;
       backing.PopAsync(out, [&read_done, &results, &buf](io::Result<size_t> res) {
