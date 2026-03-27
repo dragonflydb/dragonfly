@@ -284,7 +284,7 @@ class Connection : public util::Connection {
   // Returns true if data was offloaded; false means caller should fall through to io_buf_.
   bool MaybeOffloadToDisk(size_t len, const uint8_t* data);
 
-  void CheckIoBufCapacity(bool is_iobuf_full, io::IoBuf& buf);
+  void CheckIoBufCapacity(bool is_iobuf_full);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -368,12 +368,12 @@ class Connection : public util::Connection {
   // Returns true if one or more commands were parsed from the read buffer,
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
-  bool ParseMCBatch(io::IoBuf& buf);
+  bool ParseMCBatch();
 
-  bool ParseRedisBatch(io::IoBuf& buf);
+  bool ParseRedisBatch();
 
-  // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
-  ParserStatus ParseLoop(io::IoBuf& buf);
+  // Call appropriate ParseBatch function, proceed with Execute and Reply all while input remains.
+  ParserStatus ParseLoop();
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
@@ -427,9 +427,7 @@ class Connection : public util::Connection {
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
-  // parser input: fed exclusively from disk pops (or socket_buf_ when disk empty)
   io::IoBuf io_buf_;
-  io::IoBuf socket_buf_;
   std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
