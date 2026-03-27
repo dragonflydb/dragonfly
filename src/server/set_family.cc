@@ -990,7 +990,21 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   auto [removed, is_empty] = RemoveSet(db_cntx, result, &co);
   find_res->post_updater.Run();
 
-  CHECK(!is_empty);
+  // Lazy per-member TTL expiry during RandMemberSet iteration may have emptied
+  // the set (Size() includes expired members, but iteration skips them).
+  if (is_empty) {
+    db_slice.DelMutable(db_cntx, std::move(*find_res));
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    }
+    // Return KEY_NOTFOUND when nothing was actually popped so that CmdSPop
+    // replies with NULL for the single-arg form instead of dereferencing an
+    // empty vector.
+    if (result.empty()) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+    return result;
+  }
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (removed && op_args.shard->journal()) {

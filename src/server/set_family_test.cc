@@ -586,4 +586,32 @@ TEST_F(SetFamilyTest, SetOpsDeleteEmptyAfterExpiry) {
   EXPECT_THAT(Run({"exists", "s2"}), IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SPopWithExpiredMembers) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Add members with a short TTL. After expiry Size() still reports them.
+  Run({"saddex", "key", "1", "a", "b", "c"});
+
+  // Let all members expire.
+  AdvanceTime(2000);
+
+  // SPOP 2: Size()=3 (stale), picks_count=min(2,3)=2 < 3 → CASE 2.
+  // Iteration lazy-expires all 3 → set becomes empty → CHECK(!is_empty) crash.
+  auto resp = Run({"spop", "key", "2"});
+  // All members are expired, so nothing is actually popped.
+  ASSERT_THAT(resp, ArrLen(0));
+
+  // The key should be deleted after lazy expiry emptied the set.
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // Single-arg form: SPOP key (no count). Must return NULL, not crash on
+  // empty vector dereference.
+  Run({"saddex", "key2", "1", "x", "y"});
+  AdvanceTime(2000);
+
+  resp = Run({"spop", "key2"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
+}
+
 }  // namespace dfly
