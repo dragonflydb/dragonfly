@@ -84,8 +84,8 @@ std::error_code DiskBackedQueue::Close() {
 
     std::string backing = absl::StrCat(absl::GetFlag(FLAGS_disk_backpressure_folder), id_);
     int errc = unlink(backing.c_str());
-    LOG_IF(ERROR, errc != 0) << "Failed to unlink backing file: "
-                             << std::error_code{errc, std::system_category()};
+    LOG_IF(ERROR, errc == -1) << "Failed to unlink backing file: "
+                              << std::error_code{errno, std::system_category()};
     return ec;
   }
 
@@ -94,6 +94,10 @@ std::error_code DiskBackedQueue::Close() {
 
 bool DiskBackedQueue::Empty() const {
   return impl_->total_backing_bytes == 0;
+}
+
+size_t DiskBackedQueue::TotalBytes() const {
+  return total_backing_bytes_;
 }
 
 bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
