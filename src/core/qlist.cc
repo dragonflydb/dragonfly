@@ -1019,7 +1019,7 @@ void QList::CompressByDepth(Node* node) {
       size_t sz = node->sz;
       if (CompressNodeWithDict(node)) {
         node->recompress = 0;
-        malloc_size_ += ssize_t(((quicklistLZF*)node->entry)->sz) - sz;
+        malloc_size_ += ssize_t(((quicklistLZF*)node->u_.entry)->sz) - sz;
       }
     }
     return;
@@ -1046,7 +1046,7 @@ void QList::CompressByDepth(Node* node) {
     if (!forward->offloaded && !forward->io_pending)
       malloc_size_ += TryDecompressInternal(false, forward);
     if (!reverse->offloaded && !reverse->io_pending)
-      malloc_size_ += TryDecompressInternal(false, Reverse);
+      malloc_size_ += TryDecompressInternal(false, reverse);
 
     if (forward == node || reverse == node)
       in_depth = 1;
@@ -1063,9 +1063,13 @@ void QList::CompressByDepth(Node* node) {
   if (!in_depth && node) {
     malloc_size_ += TryCompress(node);
   }
-  /* At this point, forward and reverse are one node beyond depth */
-  malloc_size_ += TryCompress(forward);
-  malloc_size_ += TryCompress(reverse);
+  /* At this point, forward and reverse are one node beyond depth.
+   * Skip offloaded/io_pending nodes: their u_.entry is not a valid
+   * in-memory pointer and must not be passed to lzf_compress. */
+  if (!forward->offloaded && !forward->io_pending)
+    malloc_size_ += TryCompress(forward);
+  if (!reverse->offloaded && !reverse->io_pending)
+    malloc_size_ += TryCompress(reverse);
 }
 
 void QList::Materialize(Node* node) {
@@ -1582,15 +1586,6 @@ auto QList::Iterator::Get() const -> Entry {
   return ptr ? Entry(reinterpret_cast<char*>(ptr), sz) : Entry(val);
 }
 
-void QList::Node::SetExternal(size_t offset, uint32_t size) {
-  DCHECK(entry);
-  zfree(entry);
-  offloaded = 1;
-  entry = nullptr;
-  ext.offset = offset;
-  ext.size = size;
-}
-
 bool QList::TrainZstdDict() {
   DCHECK_GE(malloc_size_, zstd_threshold_);
   DCHECK_GE(len_, 2u);
@@ -1607,7 +1602,7 @@ bool QList::TrainZstdDict() {
 
   for (Node* node = head_; node; node = node->next) {
     DCHECK_EQ(node->encoding, QUICKLIST_NODE_ENCODING_RAW);
-    data_pieces.emplace_back(node->entry, size_t(node->sz));
+    data_pieces.emplace_back(node->u_.entry, size_t(node->sz));
   }
 
   // Estimate compressibility.
@@ -1677,7 +1672,7 @@ bool QList::CompressNodeWithDict(Node* node) {
   size_t bound = ZSTD_compressBound(node->sz);
   quicklistLZF* dest = (quicklistLZF*)zmalloc(sizeof(quicklistLZF) + bound);
   ZSTD_CCtx_reset(tl_zstd_dict->cctx, ZSTD_reset_session_only);
-  size_t csz = ZSTD_compress_usingCDict(tl_zstd_dict->cctx, dest->compressed, bound, node->entry,
+  size_t csz = ZSTD_compress_usingCDict(tl_zstd_dict->cctx, dest->compressed, bound, node->u_.entry,
                                         node->sz, tl_zstd_dict->cdict);
   CHECK(!ZSTD_isError(csz)) << ZSTD_getErrorName(csz);
 
@@ -1695,8 +1690,8 @@ bool QList::CompressNodeWithDict(Node* node) {
   stats.raw_compressed_bytes += node->sz;
   stats.zstd_dict_compressions++;
 
-  zfree(node->entry);
-  node->entry = (unsigned char*)dest;
+  zfree(node->u_.entry);
+  node->u_.entry = (unsigned char*)dest;
   node->encoding = QLIST_NODE_ENCODING_ZSTD;
   return true;
 }
@@ -1709,7 +1704,7 @@ ssize_t QList::RecompressNode(Node* node) {
     size_t sz = node->sz;
     if (CompressNodeWithDict(node)) {
       node->recompress = 0;
-      return ssize_t(((quicklistLZF*)node->entry)->sz) - sz;
+      return ssize_t(((quicklistLZF*)node->u_.entry)->sz) - sz;
     }
   } else if (CompressRaw(node)) {
     return ssize_t(GetLzf(node)->sz) - node->sz;
@@ -1724,7 +1719,7 @@ bool QList::DecompressZstdNode(const Node* node, std::string* dest) {
     LOG(DFATAL) << "ZSTD-compressed node found but no thread-local dict during save";
     return false;
   }
-  const quicklistLZF* lzf = (const quicklistLZF*)node->entry;
+  const quicklistLZF* lzf = (const quicklistLZF*)node->u_.entry;
   dest->resize(node->sz);
   ZSTD_DCtx_reset(tl_zstd_dict->dctx, ZSTD_reset_session_only);
   size_t dsz = ZSTD_decompress_usingDDict(tl_zstd_dict->dctx, dest->data(), dest->size(),

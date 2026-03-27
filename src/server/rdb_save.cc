@@ -404,7 +404,6 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     // Materialize the node if it was offloaded to tiered storage, so that we can access its
     // content. We have to drop const qualifier to update the node.
     ql->Materialize(const_cast<QList::Node*>(node));
-    if (node->IsCompressed()) {
     if (node->encoding == QLIST_NODE_ENCODING_ZSTD) {
       // ZSTD-compressed nodes cannot be saved using RDB LZF encoding — the loader would
       // call lzf_decompress on ZSTD bytes and corrupt the data. Decompress to raw first.
