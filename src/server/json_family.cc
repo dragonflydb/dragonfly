@@ -1066,8 +1066,13 @@ void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* v
 
   if (val->is_double() || num_is_double) {
     *val = result;
-  } else {
+  } else if (result >= 0) {
     *val = static_cast<uint64_t>(result);
+  } else if (result >= static_cast<double>(std::numeric_limits<int64_t>::min())) {
+    *val = static_cast<int64_t>(result);
+  } else {
+    *overflow = true;
+    return;
   }
   *overflow = false;
 }
