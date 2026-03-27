@@ -280,6 +280,10 @@ class Connection : public util::Connection {
 
   void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
+  // Pushes [data, data+len) to the disk queue in ≤kMaxChunkSize chunks.
+  // Returns true if data was offloaded; false means caller should fall through to io_buf_.
+  bool MaybeOffloadToDisk(size_t len, const uint8_t* data);
+
   void CheckIoBufCapacity(bool is_iobuf_full, io::IoBuf& buf);
 
   // Main loop reading client messages and passing requests to dispatch queue.
@@ -340,7 +344,6 @@ class Connection : public util::Connection {
   // Lazily initialises disk_queue_. Returns false on error and disk_queue_ stays null.
   bool InitDiskQueueIfNeeded();
 
-  void HandleSocketBackpressure(size_t offload_threshold);
   void DrainDiskQueue(size_t offload_threshold);
 
   void IncreaseConnStats();
@@ -417,8 +420,8 @@ class Connection : public util::Connection {
   // Disk-backed offload queue for IoLoopV2 pipeline backpressure.
   // Lazily created when the parsed command queue exceeds the offload threshold.
   std::unique_ptr<DiskBackedQueue> disk_queue_;
-  bool disk_push_in_flight_ = false;
-  bool disk_pop_in_flight_ = false;
+  // Cached value of FLAGS_pipeline_disk_offload_threshold, set at IoLoopV2 startup.
+  size_t offload_threshold_ = 0;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;

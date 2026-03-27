@@ -1090,9 +1090,9 @@ void Connection::ConnectionFlow() {
 
   ++local_stats_.read_cnt;
 
-  // For the old IoLoop path, promote CheckForHttpProto bytes from socket_buf_ to io_buf_.
-  // IoLoopV2 reads socket_buf_ directly via its active_buf pointer, so no copy is needed.
-  if (socket_buf_.InputLen() > 0 && !ioloop_v2_) {
+  // Promote any bytes read during CheckForHttpProto from socket_buf_ to io_buf_.
+  // Both the old IoLoop and IoLoopV2 parse from io_buf_ exclusively.
+  if (socket_buf_.InputLen() > 0) {
     UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
       io_buf_.Reserve(socket_buf_.InputLen());
       io_buf_.WriteAndCommit(socket_buf_.InputBuffer().data(), socket_buf_.InputLen());
@@ -1165,8 +1165,12 @@ void Connection::ConnectionFlow() {
   }
 
   if (disk_queue_) {
-    if (disk_push_in_flight_ || disk_pop_in_flight_) {
-      io_event_.await([this] { return !disk_push_in_flight_ && !disk_pop_in_flight_; });
+    // Cancel pending (queued but not-yet-submitted) writes immediately.
+    // This leaves at most one in-flight write CQE and one in-flight pop CQE,
+    // both of which will complete quickly without draining the full queue.
+    disk_queue_->Cancel();
+    if (disk_queue_->IsActive()) {
+      io_event_.await([this] { return !disk_queue_->IsActive(); });
     }
     std::ignore = disk_queue_->Close();
     disk_queue_.reset();
@@ -1377,7 +1381,7 @@ auto Connection::ParseLoop(io::IoBuf& buf) -> ParserStatus {
       VLOG(3) << "Offload triggered. offload_threshold=" << offload_threshold
               << " buf_len=" << buf.InputLen() << " parsed_head_=" << parsed_head_
               << " parsed_to_execute_=" << parsed_to_execute_;
-      HandleSocketBackpressure(offload_threshold);
+      // New recvs are routed to chunks by DoReadOnRecv; no explicit push needed here.
       if (!ExecuteBatch())
         return ERROR;
       if (!ReplyBatch())
@@ -2603,61 +2607,20 @@ void Connection::EnsureMemoryBudget(unsigned tid) {
   thread_queue_backpressure[tid].EnsureBelowLimit();
 }
 
-void Connection::HandleSocketBackpressure(size_t offload_threshold) {
-  DCHECK_GT(offload_threshold, 0u);
-
-  if (parsed_cmd_q_bytes_ < offload_threshold)
-    return;
-
-  if (disk_push_in_flight_ || socket_buf_.InputLen() == 0)
-    return;
-
-  if (!InitDiskQueueIfNeeded())
-    return;
-
-  if (!disk_queue_->HasEnoughBackingSpaceFor(socket_buf_.InputLen()))
-    return;
-
-  const size_t to_offload = socket_buf_.InputLen();
-  disk_push_in_flight_ = true;
-
-  // We intentionally defer ConsumeInput until the write completes rather than deep-copying
-  // the buffer. This is safe because socket_buf_.AppendBuffer() starts after the in-flight
-  // InputBuffer bytes, so incoming recv data written via CommitWrite never overlaps the region
-  // io_uring is reading. Calling ConsumeInput here would reset offs_/size_ to 0, making
-  // AppendBuffer() alias the same memory io_uring is still reading, and would allow Reserve()
-  // to free that memory. Any path that would Reserve socket_buf_ (WriteAndCommit with
-  // insufficient AppendLen, or CheckIoBufCapacity) checks disk_push_in_flight_ and skips.
-  disk_queue_->PushAsync(socket_buf_.InputBuffer(), [this, to_offload](std::error_code ec) {
-    disk_push_in_flight_ = false;
-    if (ec) {
-      LOG(ERROR) << "Disk offload write failed: " << ec.message();
-      // Should we abort the connection ?
-    } else {
-      socket_buf_.ConsumeInput(to_offload);
-      VLOG(3) << "Offloaded " << to_offload << " bytes to disk for connection " << id_;
-    }
-    io_event_.notify();
-  });
-}
-
 void Connection::DrainDiskQueue(size_t offload_threshold) {
   if (offload_threshold == 0 || !disk_queue_ || disk_queue_->Empty())
     return;
-  if (disk_pop_in_flight_ || io_buf_.AppendLen() == 0)
+  if (disk_queue_->IsPopInFlight() || io_buf_.AppendLen() == 0)
     return;
   if (parsed_cmd_q_bytes_ >= offload_threshold)
     return;
 
-  disk_pop_in_flight_ = true;
   disk_queue_->PopAsync(io_buf_.AppendBuffer(), [this](io::Result<size_t> res) {
-    disk_pop_in_flight_ = false;
     if (res) {
       io_buf_.CommitWrite(*res);
       VLOG(3) << "Restored " << *res << " bytes from disk for connection " << id_;
     } else {
       LOG(ERROR) << "Disk offload read failed: " << res.error().message();
-      // Should we abort the connection ?
     }
     io_event_.notify();
   });
@@ -2707,6 +2670,29 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
+bool Connection::MaybeOffloadToDisk(size_t len, const uint8_t* data) {
+  if (offload_threshold_ == 0 || !disk_queue_)
+    return false;
+  if (!disk_queue_->IsActive() && parsed_cmd_q_bytes_ < offload_threshold_)
+    return false;
+
+  const uint8_t* src = data;
+  size_t remaining = len;
+  while (remaining > 0) {
+    size_t chunk_size = std::min(remaining, DiskBackedQueue::kMaxChunkSize);
+    DiskBackedQueue::Chunk chunk;
+    chunk.data.assign(src, src + chunk_size);
+    src += chunk_size;
+    remaining -= chunk_size;
+    disk_queue_->PushAsync(std::move(chunk), [this](std::error_code ec) {
+      if (ec)
+        io_ec_ = ec;
+      io_event_.notify();
+    });
+  }
+  return true;
+}
+
 void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) {
   if (std::holds_alternative<std::error_code>(n.read_result)) {
     io_ec_ = std::get<std::error_code>(n.read_result);
@@ -2720,57 +2706,90 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
       return;
     }
 
-    if (socket_buf_.AppendLen() == 0) {
-      // We will try to offload socket_buf_ to disk in HandleSocketBackpressure.
+    // Check if we should offload before doing a TryRecv (IsDraining blocks the recv entirely).
+    auto should_offload = [this]() {
+      if (offload_threshold_ == 0 || !disk_queue_)
+        return false;
+      return disk_queue_->IsActive() || parsed_cmd_q_bytes_ >= offload_threshold_;
+    };
+
+    if (should_offload()) {
+      // During the drain window block socket reads (MaybeOffloadToDisk returns true
+      // without pushing), so TCP backpressure builds until the queue fully empties.
+      if (disk_queue_->IsDraining())
+        return;
+
+      // Don't recv if backing store is too full to accept a max-size chunk.
+      if (!disk_queue_->HasEnoughBackingSpaceFor(DiskBackedQueue::kMaxChunkSize))
+        return;
+
+      DiskBackedQueue::Chunk chunk;
+      chunk.data.resize(DiskBackedQueue::kMaxChunkSize);
+      io::Result<size_t> res = socket_->TryRecv({chunk.data.data(), chunk.data.size()});
+
+      if (!res) {
+        auto ec = res.error();
+        if (ec != errc::resource_unavailable_try_again && ec != errc::operation_would_block)
+          io_ec_ = ec;
+        return;
+      }
+      if (*res == 0) {
+        io_ec_ = make_error_code(errc::connection_aborted);
+        return;
+      }
+      chunk.data.resize(*res);
+      VLOG(3) << "Offloaded " << *res << " bytes to disk for connection " << id_;
+      disk_queue_->PushAsync(std::move(chunk), [this](std::error_code ec) {
+        if (ec)
+          io_ec_ = ec;
+        io_event_.notify();
+      });
       return;
     }
 
-    // Writes go to AppendBuffer which starts after the in-flight InputBuffer region,
-    // so they never overlap the memory io_uring is reading during a push. Safe to proceed.
-    io::MutableBytes buf = socket_buf_.AppendBuffer();
+    // Normal path: recv directly into io_buf_.
+    // A recv call can return fewer bytes than requested even if the socket buffer actually
+    // contains enough data to satisfy the full request.
+    // TODO: maybe worth looping here and trying another recv call until it fails with
+    // EAGAIN or EWOULDBLOCK. The problem there is that we need to handle resizing if
+    // AppendBuffer is zero.
+    if (io_buf_.AppendLen() == 0)
+      return;
+
+    io::MutableBytes buf = io_buf_.AppendBuffer();
     io::Result<size_t> res = socket_->TryRecv(buf);
 
     if (res) {
       if (*res > 0) {
-        // A recv call can return fewer bytes than requested even if the
-        // socket buffer actually contains enough data to satisfy the full request.
-        // TODO maybe worth looping here and try another recv call until it fails
-        // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
-        // resizing if AppendBuffer is zero.
-        socket_buf_.CommitWrite(*res);
+        io_buf_.CommitWrite(*res);
         return;
       }
-      // *res == 0
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
 
-    // error path (!res)
     auto ec = res.error();
-    // EAGAIN and EWOULDBLOCK
-    if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
-      return;
-    }
+    if (ec != errc::resource_unavailable_try_again && ec != errc::operation_would_block)
+      io_ec_ = ec;
 
-    io_ec_ = ec;
-  } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
+  } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    // WriteAndCommit may call Reserve() if AppendLen() < buf.size(), which would free the
-    // backing allocation that io_uring is still reading during an in-flight push. Skip.
-    if (disk_push_in_flight_ && socket_buf_.AppendLen() < buf.size())
-      return;
-    UpdateIoBufCapacity(socket_buf_, &tl_facade_stats->conn_stats,
-                        [&]() { socket_buf_.WriteAndCommit(buf.data(), buf.size()); });
+
+    if (MaybeOffloadToDisk(buf.size(), buf.data())) {
+    } else {
+      // TODO: if a pop CQE is in-flight writing into io_buf_, WriteAndCommit races with it.
+      UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
+                          [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
+    }
   } else {
     LOG(FATAL) << "Should not reach here";
   }
 }
 
 void Connection::CheckIoBufCapacity(bool is_iobuf_full, io::IoBuf& buf) {
-  // Reserve() frees the backing allocation, which is unsafe while io_uring has a reference:
-  //   io_buf_    is pinned by an in-flight disk pop  (PopAsync reads into it)
-  //   socket_buf_ is pinned by an in-flight disk push (PushAsync reads from it)
-  if ((disk_pop_in_flight_ && &buf == &io_buf_) || (disk_push_in_flight_ && &buf == &socket_buf_))
+  // Reserve() frees the backing allocation, which is unsafe while io_uring is writing
+  // into io_buf_.AppendBuffer() during an in-flight pop CQE.
+  if (disk_queue_ && disk_queue_->IsPopInFlight() && &buf == &io_buf_)
     return;
 
   auto& conn_stats = tl_facade_stats->conn_stats;
@@ -2829,7 +2848,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 #endif
   }
 
-  const size_t offload_threshold = GetFlag(FLAGS_pipeline_disk_offload_threshold);
+  offload_threshold_ = GetFlag(FLAGS_pipeline_disk_offload_threshold);
+  const size_t offload_threshold = offload_threshold_;
 
   VLOG(2) << "IoLoopV2 starting: offload_threshold=" << offload_threshold << " conn_id=" << id_;
 
@@ -2840,20 +2860,15 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
             << " disk_queue_set=" << (disk_queue_ != nullptr);
   }
 
-  peer->RegisterOnRecv([this, offload_threshold](const FiberSocketBase::RecvNotification& n) {
-    DVLOG(2) << "Calling DoReadOnRecv socket_buf_len: " << socket_buf_.InputLen();
+  peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
+    // DoReadOnRecv routes bytes to io_buf_ (queue inactive) or a Chunk (queue active).
+    // Offload routing is decided inside DoReadOnRecv via offload_threshold_.
+    DVLOG(2) << "Calling DoReadOnRecv io_buf_len: " << io_buf_.InputLen();
     DoReadOnRecv(n);
-    // The recv callback runs in the proactor event loop as a plain function (no fiber context).
-    // This cb can fire multiple times before io_event_.notify() ever reaches and wakes up
-    // the connection (we don't have any gurantees what runs next) so I opportunistically
-    // attempt to offload to disk here (if it's possible).
-    VLOG(4) << "recv callback fired: offload_threshold=" << offload_threshold
+    VLOG(4) << "recv callback fired: offload_threshold_=" << offload_threshold_
             << " disk_queue_=" << (disk_queue_ != nullptr)
             << " parsed_cmd_q_bytes_=" << parsed_cmd_q_bytes_
             << " io_buf_len=" << io_buf_.InputLen();
-    if (offload_threshold > 0 && disk_queue_) {
-      HandleSocketBackpressure(offload_threshold);
-    }
     io_event_.notify();
   });
 
@@ -2863,11 +2878,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto ioevent_cb = [this]() { io_event_.notify(); };
   util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};  // takes callback by reference
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
-
-  // active_buf points to whichever buffer the parser should read from this iteration:
-  //   &io_buf_     when disk data is present or a pop is in-flight (io_buf_ is the sink)
-  //   &socket_buf_ otherwise (no disk involvement; parse socket bytes without copying)
-  io::IoBuf* active_buf = &socket_buf_;
 
   do {
     HandleMigrateRequest();
@@ -2879,13 +2889,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     DrainDiskQueue(offload_threshold);
 
-    // Recompute active_buf every iteration after DrainDiskQueue may have changed disk state.
-    active_buf = (io_buf_.InputLen() > 0 || disk_pop_in_flight_) ? &io_buf_ : &socket_buf_;
+    const bool pop_in_flight = disk_queue_ && disk_queue_->IsPopInFlight();
 
-    // Enter the await block when the active buffer is empty OR when a disk pop is in-flight.
-    // The in-flight case: PopAsync owns io_buf_.AppendBuffer() until the CQE fires.
-    if (active_buf->InputLen() == 0 || disk_pop_in_flight_) {
-      if (active_buf->InputLen() == 0 && !disk_pop_in_flight_) {
+    // Enter the await block when io_buf_ is empty or a pop CQE is in-flight.
+    // The in-flight case: PopAsync owns io_buf_.AppendBuffer() until the CQE fires;
+    // we must not parse the partially-written region.
+    if (io_buf_.InputLen() == 0 || pop_in_flight) {
+      if (io_buf_.InputLen() == 0 && !pop_in_flight) {
         // Poll again for readiness. The event handler registered above is edge triggered.
         // We should read from the socket until EAGAIN or EWOULDBLOCK to make sure we consume
         // all available data. See "Do I need to continuously read/write" question under
@@ -2893,27 +2903,17 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // The exception is when we use io_uring with multishot recv enabled, in which case
         // we rely on the kernel to keep feeding us data until multishot is disabled.
         DoReadOnRecv(FiberSocketBase::RecvNotification{true});
-        if (offload_threshold > 0 && disk_queue_) {
-          VLOG(2) << "post-manual-read check: parsed_cmd_q_bytes_=" << parsed_cmd_q_bytes_
-                  << " socket_buf_len=" << socket_buf_.InputLen()
-                  << " disk_push_in_flight_=" << disk_push_in_flight_;
-          HandleSocketBackpressure(offload_threshold);
-        }
       }
       io_event_.await([this, offload_threshold]() {
         // TODO: optimize CanReply with looking up waiter key
         bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
         bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
-        // Wake when disk pop completes so we can parse the restored bytes.
-        bool disk_op_done = !disk_push_in_flight_ && !disk_pop_in_flight_;
+        bool pop_in_flight = disk_queue_ && disk_queue_->IsPopInFlight();
         // Wake to drain disk once the pipeline queue has room again.
         bool can_drain_disk = offload_threshold > 0 && disk_queue_ && !disk_queue_->Empty() &&
-                              parsed_cmd_q_bytes_ < offload_threshold && disk_op_done;
-        // Wake when there is parseable data: disk bytes in io_buf_, or socket bytes when
-        // disk is fully drained (active_buf will be re-evaluated on the next iteration).
-        bool disk_empty = !disk_queue_ || disk_queue_->Empty();
-        bool can_parse = (io_buf_.InputLen() > 0 || (socket_buf_.InputLen() > 0 && disk_empty)) &&
-                         !disk_pop_in_flight_;
+                              parsed_cmd_q_bytes_ < offload_threshold && !pop_in_flight;
+        // Wake when there is parseable data in io_buf_ and no pop is writing into it.
+        bool can_parse = io_buf_.InputLen() > 0 && !pop_in_flight;
         return can_parse || cmd_ready || cmd_executable || io_ec_ || can_drain_disk;
       });
     }
@@ -2924,16 +2924,17 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     phase_ = PROCESS;
-    bool is_iobuf_full = active_buf->AppendLen() == 0;
+    bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     // When over the offload threshold with no commands left to dispatch, force the
     // await path so the fiber yields and lets shard completions be processed.
-    // Without this, recv keeps refilling the buffer and we spin forever.
+    // Without this, new recvs keep routing to chunks but we spin without yielding.
     bool force_await = offload_threshold > 0 && parsed_cmd_q_bytes_ >= offload_threshold &&
                        parsed_to_execute_ == nullptr;
 
-    if (active_buf->InputLen() > 0 && !force_await && !disk_pop_in_flight_) {
-      parse_status = ParseLoop(*active_buf);
+    const bool cur_pop_in_flight = disk_queue_ && disk_queue_->IsPopInFlight();
+    if (io_buf_.InputLen() > 0 && !force_await && !cur_pop_in_flight) {
+      parse_status = ParseLoop(io_buf_);
     } else {
       parse_status = NEED_MORE;
 
@@ -2943,15 +2944,11 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         ReplyBatch();
       }
 
-      // When force_await is active we cannot parse even if active_buf or socket_buf_ has data.
-      // Push any pending socket bytes to disk so TCP keeps flowing, then yield until either
-      // a command finishes (cmd_ready) or the queue drains below the threshold. Without this
-      // yield the fiber spins: the await block is skipped (active_buf non-empty), parse is
-      // skipped (force_await), and nothing makes progress.
-      if (force_await && (io_buf_.InputLen() > 0 || socket_buf_.InputLen() > 0)) {
-        HandleSocketBackpressure(offload_threshold);
+      // When force_await is active we cannot parse even if io_buf_ has data.
+      // New recvs are already routed to chunks by DoReadOnRecv (no explicit push needed).
+      // Yield until a command finishes or the queue drains below the threshold.
+      if (force_await) {
         VLOG(2) << "force_await spin-guard: yielding for cmd completion or queue drain"
-                << " disk_push_in_flight_=" << disk_push_in_flight_
                 << " parsed_cmd_q_bytes_=" << parsed_cmd_q_bytes_;
         io_event_.await([this, offload_threshold]() {
           bool cmd_ready =
@@ -2968,7 +2965,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-      CheckIoBufCapacity(is_iobuf_full, *active_buf);
+      CheckIoBufCapacity(is_iobuf_full, io_buf_);
     } else if (parse_status != OK) {
       break;
     }

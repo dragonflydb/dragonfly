@@ -53,11 +53,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleReleasesSpace) {
     std::string data(12288, 'x');
     {
       util::fb2::Done done;
-      backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
-                        [&done](std::error_code ec) {
-                          ASSERT_FALSE(ec);
-                          done.Notify();
-                        });
+      DiskBackedQueue::Chunk chunk;
+      chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
+                        reinterpret_cast<uint8_t*>(data.data()) + data.size());
+      backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+        ASSERT_FALSE(ec);
+        done.Notify();
+      });
       done.Wait();
     }
 
@@ -99,11 +101,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleAdvancesOffset) {
     std::string data(32768, 'y');
     {
       util::fb2::Done done;
-      backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
-                        [&done](std::error_code ec) {
-                          ASSERT_FALSE(ec);
-                          done.Notify();
-                        });
+      DiskBackedQueue::Chunk chunk;
+      chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
+                        reinterpret_cast<uint8_t*>(data.data()) + data.size());
+      backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+        ASSERT_FALSE(ec);
+        done.Notify();
+      });
       done.Wait();
     }
 
@@ -146,11 +150,13 @@ TEST_F(DiskBackedQueueTest, PunchHoleUnalignedReadsAndWrites) {
     std::string data(10000, 'z');
     {
       util::fb2::Done done;
-      backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
-                        [&done](std::error_code ec) {
-                          ASSERT_FALSE(ec);
-                          done.Notify();
-                        });
+      DiskBackedQueue::Chunk chunk;
+      chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
+                        reinterpret_cast<uint8_t*>(data.data()) + data.size());
+      backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
+        ASSERT_FALSE(ec);
+        done.Notify();
+      });
       done.Wait();
     }
 
@@ -256,10 +262,12 @@ TEST_F(DiskBackedQueueTest, AsyncReadWrite) {
     util::fb2::Fiber write_fiber = util::fb2::Fiber("writer", [&]() {
       for (size_t i = 0; i < 100; ++i) {
         auto cmd = absl::StrCat("SET FOO", i, " BAR");
-        auto bytes = io::MutableBytes(reinterpret_cast<uint8_t*>(cmd.data()), cmd.size());
+        DiskBackedQueue::Chunk chunk;
+        chunk.data.assign(reinterpret_cast<const uint8_t*>(cmd.data()),
+                          reinterpret_cast<const uint8_t*>(cmd.data()) + cmd.size());
 
         util::fb2::Done done;
-        backing.PushAsync(bytes, [&done](std::error_code ec) {
+        backing.PushAsync(std::move(chunk), [&done](std::error_code ec) {
           EXPECT_FALSE(ec);
           done.Notify();
         });
@@ -304,11 +312,13 @@ TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
     std::string data(12288, 'x');
 
     util::fb2::Done write_done;
-    backing.PushAsync(io::MutableBytes(reinterpret_cast<uint8_t*>(data.data()), data.size()),
-                      [&write_done](std::error_code ec) {
-                        ASSERT_FALSE(ec);
-                        write_done.Notify();
-                      });
+    DiskBackedQueue::Chunk chunk;
+    chunk.data.assign(reinterpret_cast<uint8_t*>(data.data()),
+                      reinterpret_cast<uint8_t*>(data.data()) + data.size());
+    backing.PushAsync(std::move(chunk), [&write_done](std::error_code ec) {
+      ASSERT_FALSE(ec);
+      write_done.Notify();
+    });
     write_done.Wait();
 
     // Async read all data back in 4096-byte chunks
