@@ -4282,3 +4282,58 @@ async def test_rm_replication(df_factory: DflyInstanceFactory):
     # RM must be rejected on replica (it's a write command)
     with pytest.raises((aioredis.ResponseError, aioredis.ReadOnlyError)):
         await c_replica.execute_command("RM", 0)
+
+
+@pytest.mark.parametrize(
+    "trigger_cmd",
+    [
+        ["SMEMBERS", "myset"],
+        ["SUNION", "myset", "other"],
+        ["SDIFF", "myset", "other"],
+    ],
+    ids=["smembers", "sunion", "sdiff"],
+)
+async def test_set_member_expiry_replication(df_factory: DflyInstanceFactory, trigger_cmd):
+    """
+    Verify that lazy set-member expiry on master is replicated to the replica.
+
+    When all members of a StringSet expire via lazy expiry (triggered by a read),
+    DeleteSetIfEmpty removes the key on master but does not journal the deletion.
+    This causes the replica to retain a stale key that no longer exists on master.
+    """
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Set up replication before writing data to avoid race with TTL
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Add set members with a short TTL (2 seconds)
+    await c_master.execute_command("SADDEX", "myset", "2", "a", "b", "c")
+    assert await c_master.scard("myset") == 3
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.scard("myset") == 3
+
+    # Wait for members to expire
+    await asyncio.sleep(2)
+
+    # Trigger lazy expiry on master via a read command.
+    # Each variant exercises a different DeleteSetIfEmpty call site.
+    await c_master.execute_command(*trigger_cmd)
+
+    # The key should be gone on master
+    assert await c_master.exists("myset") == 0
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.exists("myset") == 0, (
+        f"Replica still has 'myset' after lazy expiry triggered by {trigger_cmd[0]}. "
+        "DeleteSetIfEmpty must journal the deletion so the replica stays in sync."
+    )
