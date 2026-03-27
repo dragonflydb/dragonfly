@@ -1011,6 +1011,13 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     return result;
   }
 
+  // Lazy expiry may have removed all picked members even though the set is
+  // not fully empty yet (Size() counts stale entries). Return KEY_NOTFOUND so
+  // CmdSPop replies with NULL instead of dereferencing an empty vector.
+  if (result.empty()) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (removed && op_args.shard->journal()) {
     vector<string_view> mapped(result.size() + 1);
