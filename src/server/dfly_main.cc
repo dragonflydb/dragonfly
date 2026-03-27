@@ -106,8 +106,8 @@ ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
 #ifdef __linux__
 ABSL_FLAG(string, user, "",
           "If not empty - drop privileges to this user (and their primary group) after binding "
-          "ports. Accepts username or numeric uid, optionally with ':gid' or ':groupname'. "
-          "Also chowns the data directory to this user.");
+          "ports. Accepts username or numeric uid. "
+          "If --dir is set, chowns the data directory to this user.");
 #endif
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many buffer ring entries to allocate per thread for io_uring receive operations. "
@@ -221,80 +221,38 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
 }
 
 #ifdef __linux__
-// Parses --user flag value and drops privileges to the specified user/group.
+// Drops privileges to the specified user (username or numeric uid).
 // Must be called after ports are bound (so we can bind privileged ports first)
 // and BEFORE service.Init() to avoid racing with background snapshot loading.
 // Returns false on failure.
 bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
-  // Parse "user[:group]" — group part is optional.
-  string uname = user_spec;
-  string gname;
-  auto colon = user_spec.find(':');
-  if (colon != string::npos) {
-    uname = user_spec.substr(0, colon);
-    gname = user_spec.substr(colon + 1);
-  }
-
-  // Resolve uid.
+  // Resolve user — accept username or numeric uid.
   uid_t uid;
   struct passwd* pw = nullptr;
-  if (absl::SimpleAtoi(uname, &uid)) {
+  if (absl::SimpleAtoi(user_spec, &uid)) {
     pw = getpwuid(uid);
   } else {
-    pw = getpwnam(uname.c_str());
-    if (!pw) {
-      LOG(ERROR) << "--user: unknown user '" << uname << "'";
-      return false;
-    }
-    uid = pw->pw_uid;
+    pw = getpwnam(user_spec.c_str());
   }
-
-  // Resolve gid — use explicit group if given, otherwise primary group of user.
-  gid_t gid;
-  if (!gname.empty()) {
-    struct group* gr = nullptr;
-    if (!absl::SimpleAtoi(gname, &gid)) {
-      gr = getgrnam(gname.c_str());
-      if (!gr) {
-        LOG(ERROR) << "--user: unknown group '" << gname << "'";
-        return false;
-      }
-      gid = gr->gr_gid;
-    }
-  } else if (pw) {
-    gid = pw->pw_gid;
-  } else {
-    // uid was numeric and getpwuid failed — cannot determine default gid.
-    LOG(ERROR) << "--user: cannot determine group for uid " << uid
-               << "; specify it explicitly as --user=" << uid << ":<gid>";
+  if (!pw) {
+    LOG(ERROR) << "--user: unknown user '" << user_spec << "'";
     return false;
   }
+  uid = pw->pw_uid;
+  gid_t gid = pw->pw_gid;
 
   // Recursively chown the data directory so the new user can access existing snapshots.
-  // Fall back to CWD when --dir is not set (e.g. container uses WORKDIR /data).
-  // Use lchown (not chown) to avoid following symlinks outside the data directory.
-  string effective_dir = data_dir;
-  if (effective_dir.empty()) {
-    std::error_code cwd_ec;
-    auto cwd = std::filesystem::current_path(cwd_ec);
-    if (!cwd_ec)
-      effective_dir = cwd.string();
-  }
-  // Refuse to chown filesystem roots — this would recursively chown the entire filesystem.
-  if (effective_dir == "/" || effective_dir == "//") {
-    LOG(WARNING) << "--user: refusing to chown '" << effective_dir << "'; pass --dir explicitly";
-    effective_dir.clear();
-  }
-  if (!effective_dir.empty()) {
+  // Only when --dir is explicitly set. Uses lchown to avoid following symlinks.
+  if (!data_dir.empty()) {
     namespace fs = std::filesystem;
     auto do_chown = [&](const fs::path& p) {
       if (lchown(p.c_str(), uid, gid) != 0) {
         LOG(WARNING) << "lchown(" << p << ") failed: " << strerror(errno);
       }
     };
-    do_chown(effective_dir);
+    do_chown(data_dir);
     std::error_code ec;
-    fs::recursive_directory_iterator it(effective_dir, ec);
+    fs::recursive_directory_iterator it(data_dir, ec);
     if (!ec) {
       for (const auto& entry : it)
         do_chown(entry.path());
@@ -303,17 +261,9 @@ bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
 
   // Drop supplementary groups first, then gid, then uid.
   // Order is critical: after setuid we no longer have permission to call setgid.
-  const char* username = pw ? pw->pw_name : nullptr;
-  if (username) {
-    if (initgroups(username, gid) != 0) {
-      LOG(ERROR) << "initgroups failed: " << strerror(errno);
-      return false;
-    }
-  } else {
-    if (setgroups(0, nullptr) != 0) {
-      LOG(ERROR) << "setgroups failed: " << strerror(errno);
-      return false;
-    }
+  if (initgroups(pw->pw_name, gid) != 0) {
+    LOG(ERROR) << "initgroups failed: " << strerror(errno);
+    return false;
   }
 
   if (setgid(gid) != 0) {
