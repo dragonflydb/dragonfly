@@ -398,7 +398,7 @@ class Connection : public util::Connection {
   // messages (e.g., PubSub, Monitor, Migration requests, Checkpoints) processed
   // by the AsyncFiber.
   std::deque<MessageHandle> dispatch_q_;    // dispatch queue
-  util::fb2::CondVarAny cnd_;               // dispatch queue waker
+  util::fb2::EventCount dispatch_ec_;        // dispatch queue waker
   util::fb2::Fiber async_fb_;               // async fiber (if started)
   size_t dispatch_q_bytes_ = 0;             // total bytes in dispatch queue
   size_t dispatch_q_subscriber_bytes_ = 0;  // total bytes from subscribers in dispatch queue

@@ -1125,7 +1125,7 @@ void Connection::ConnectionFlow() {
 
   // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
-  cnd_.notify_one();
+  dispatch_ec_.notify();
   phase_ = SHUTTING_DOWN;
   VLOG(2) << "Before dispatch_fb.join()";
   async_fb_.JoinIfNeeded();
@@ -1252,7 +1252,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
     // We might have blocked the dispatch queue from processing, wake it up.
     if (HasPendingMessages())
-      cnd_.notify_one();
+      dispatch_ec_.notify();
   }
 }
 
@@ -1368,7 +1368,7 @@ void Connection::OnBreakCb(int32_t mask) {
 
   cc_->conn_closing = true;
   BreakOnce(mask);
-  cnd_.notify_one();  // Notify dispatch fiber.
+  dispatch_ec_.notify();  // Notify dispatch fiber.
 }
 
 void Connection::HandleMigrateRequest() {
@@ -1749,7 +1749,6 @@ void Connection::AsyncFiber() {
   AsyncOperations async_op{reply_builder_.get(), this};
   size_t squashing_threshold = GetFlag(FLAGS_pipeline_squash);
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
-  fb2::NoOpLock noop_lk;
   QueueBackpressure& qbp = GetQueueBackpressure();
   auto& conn_stats = tl_facade_stats->conn_stats;
   uint32_t dispatch_q_cmd_processed = 0;
@@ -1757,7 +1756,7 @@ void Connection::AsyncFiber() {
 
   while (!reply_builder_->GetError()) {
     DCHECK_EQ(socket()->proactor(), ProactorBase::me());
-    cnd_.wait(noop_lk, [this] {
+    dispatch_ec_.await([this] {
       if (cc_->conn_closing)
         return true;
 
@@ -2047,7 +2046,7 @@ void Connection::SendAsync(MessageHandle msg) {
       request_shutdown_ = true;
       // We don't shutdown here. The reason is that TLS socket is preemptive
       // and SendAsync is atomic.
-      cnd_.notify_one();
+      dispatch_ec_.notify();
       return;
     }
   }
@@ -2082,7 +2081,7 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   if (should_notify && !cc_->sync_dispatch) {
-    cnd_.notify_one();
+    dispatch_ec_.notify();
   }
 }
 
@@ -2452,7 +2451,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
   // AsyncFiber for Memcache only wakes up on dispatch_q_, notify only redis as this is the parse
   // commands queue.
   if ((!cc_->sync_dispatch) && (protocol_ == Protocol::REDIS)) {
-    cnd_.notify_one();
+    dispatch_ec_.notify();
   }
 }
 
