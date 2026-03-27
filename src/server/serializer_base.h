@@ -16,9 +16,29 @@
 
 namespace dfly {
 
+class ExecutionState;
+
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
+
+// Tracks serialization progress of offloaded (delayed) entries.
+struct DelayedEntryHandler {
+  void EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
+                        time_t expire_time, uint32_t mc_flags);
+
+  // Must be called periodically to progress on delayed entries. Calls SerializeFetchedEntry.
+  // If force is false, only serializes entries whose futures are already resolved.
+  // If flush_bucket is provided, flushes all entries belonging to this bucket.
+  void ProcessDelayedEntries(bool force, BucketIdentity flush_bucket, ExecutionState* cntx);
+
+  // Serialize delayed entry that was fetched with serializer specific implementation
+  virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
+
+ private:
+  // Entries that are waiting for tiered storage reads to complete before they can be serialized.
+  std::multimap<BucketIdentity, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
+};
 
 // SerializerBase owns the DbSlice change-listener registration and a per-bucket
 // state machine that tracks each bucket through:
@@ -30,7 +50,7 @@ using BucketIdentity = uintptr_t;
 //
 // State tracking is purely observational in early PRs: it drives DCHECKs and
 // stats but does not alter the serialization control flow.
-class SerializerBase {
+class SerializerBase : public DelayedEntryHandler {
  public:
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
@@ -40,7 +60,7 @@ class SerializerBase {
     uint64_t change_during_serialization = 0;  // change hit an in-flight bucket
   };
 
-  explicit SerializerBase(DbSlice* slice);
+  explicit SerializerBase(DbSlice* slice, ExecutionState* cntx);
   virtual ~SerializerBase();
 
   // Register db_slice change listener and save snapshot it
@@ -60,14 +80,6 @@ class SerializerBase {
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
-  struct BucketState {
-    BucketPhase phase;
-    std::vector<TieredDelayedEntry> delayed;
-  };
-
-  // Transition bucket from DelayedPending -> Covered.
-  void CompleteBucketDelayed(BucketIdentity bid);
-
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
@@ -76,45 +88,41 @@ class SerializerBase {
   virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) = 0;
 
-  // --- Change callbacks ---
-
-  // Called when an existing bucket is about to be mutated.
-  // Default: if unvisited, stamps version, MarkBucketSerializing, DoSerializeBucket,
-  //          FinishBucketIteration.
-  //          If in-flight, increments change_during_serialization (mutex barrier
-  //          preserves the existing serialization behaviour).
-  // Holds big_value_mu_ while running.
+  // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
   void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
 
-  // Called when a new key is about to be inserted.
-  // Default: CVCUponInsert -> OnChange for every touched bucket.
+  // Called when a new key is about to be inserted,
+  // calls CVCUponInsert -> OnChange(bucket_iterator) for every touched bucket.
   void OnChange(DbIndex db_index, std::string_view key);
 
   // --- Shared members (to be moved from subclasses in later PRs) ---
 
   DbSlice* const db_slice_;
+  ExecutionState* const base_cntx_;
+
   DbTableArray db_array_;
+
   uint64_t snapshot_version_ = 0;
   ThreadLocalMutex big_value_mu_;
   Stats stats_;
 
  private:
   friend class SerializerBaseTest;
-  SerializerBase() : db_slice_(nullptr) {
+  SerializerBase() : db_slice_(nullptr), base_cntx_(nullptr) {
   }
 
   // Return identity if bucket should be processed.
   // Checks bucket validity, version and state
-  std::optional<BucketIdentity> ShouldProcessBucket(PrimeTable::bucket_iterator);
+  bool ShouldProcessBucket(PrimeTable::bucket_iterator);
 
   // Transition bucket from NotVisited -> Serializing.
   void MarkBucketSerializing(BucketIdentity bid);
 
   // Transition bucket from Serializing -> Covered (empty delayed) or
   // Serializing -> DelayedPending (non-empty delayed).
-  void FinishBucketIteration(BucketIdentity bid, std::vector<TieredDelayedEntry> delayed);
+  void FinishBucketIteration(BucketIdentity bid);
 
-  absl::flat_hash_map<BucketIdentity, BucketState> bucket_states_;
+  absl::flat_hash_map<BucketIdentity, BucketPhase> bucket_states_;
   uint64_t change_cb_id_ = 0;
 };
 
