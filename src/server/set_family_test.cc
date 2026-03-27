@@ -654,4 +654,46 @@ TEST_F(SetFamilyTest, SPopSingleArgExpiredCase2) {
   }
 }
 
+// Regression test: SRANDMEMBER crashes (SIGSEGV) when all set members have
+// expired via per-member TTL.  OpRandMember reads co.Size() before lazy expiry,
+// then RandMemberStrSetPicky dereferences GetRandomMember() on an empty set.
+// To hit the RandMemberStrSetPicky path we need picks_count*5 < UpperBoundSize(),
+// so with count=1 we need at least 6 members.
+TEST_F(SetFamilyTest, SRandMemberWithExpiredMembers) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // 6+ members so UpperBoundSize() > 5, triggering the RandMemberStrSetPicky path.
+  Run({"saddex", "key", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  // Without count — should return NIL, not crash.
+  auto resp = Run({"srandmember", "key"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+
+  // With positive count — unique picks path.
+  Run({"saddex", "key2", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  resp = Run({"srandmember", "key2", "1"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
+
+  // With negative count — non-unique picks, picky path (count*5 < UpperBoundSize).
+  Run({"saddex", "key3", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  resp = Run({"srandmember", "key3", "-1"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key3"}), IntArg(0));
+
+  // Large negative count — exercises the iteration path (picks_count*5 >= UpperBoundSize).
+  Run({"saddex", "key4", "1", "a", "b", "c", "d", "e", "f"});
+  AdvanceTime(2000);
+
+  resp = Run({"srandmember", "key4", "-25"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key4"}), IntArg(0));
+}
+
 }  // namespace dfly
