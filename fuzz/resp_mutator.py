@@ -128,6 +128,45 @@ COMMANDS = [
     (b"FT.INFO", 1, 1), (b"FT.ALTER", 3, 8),
     # Throttle
     (b"CL.THROTTLE", 5, 5),
+    # String (additional)
+    (b"PREPEND", 2, 2),
+    # Key (additional)
+    (b"DELEX", 1, 3), (b"MOVE", 2, 2), (b"RESTORE", 3, 5),
+    (b"TIME", 0, 0), (b"STICK", 1, 5),
+    (b"FIELDEXPIRE", 3, 7), (b"FIELDTTL", 2, 2),
+    # List (additional)
+    (b"LINSERT", 4, 4), (b"BRPOPLPUSH", 3, 3),
+    # Hash (additional)
+    (b"HEXPIRE", 4, 8), (b"HTTL", 3, 7), (b"HSETEX", 4, 8),
+    # Set (additional)
+    (b"SADDEX", 3, 5),
+    # Sorted set (additional)
+    (b"ZINTER", 2, 6), (b"ZUNION", 2, 6),
+    (b"ZINTERSTORE", 3, 6), (b"ZUNIONSTORE", 3, 6),
+    (b"ZINTERCARD", 2, 5),
+    # Stream (additional)
+    (b"XPENDING", 2, 7), (b"XSETID", 2, 2),
+    # Geo (additional)
+    (b"GEORADIUS", 5, 10), (b"GEORADIUS_RO", 5, 10),
+    (b"GEORADIUSBYMEMBER", 4, 9), (b"GEORADIUSBYMEMBER_RO", 4, 9),
+    # Bitops (additional)
+    (b"BITFIELD_RO", 1, 7),
+    # Count-Min Sketch
+    (b"CMS.INITBYDIM", 3, 3), (b"CMS.INITBYPROB", 3, 3),
+    (b"CMS.INCRBY", 3, 7), (b"CMS.QUERY", 2, 5),
+    (b"CMS.INFO", 1, 1), (b"CMS.MERGE", 3, 7),
+    # Top-K
+    (b"TOPK.RESERVE", 2, 5), (b"TOPK.ADD", 2, 5),
+    (b"TOPK.INCRBY", 3, 7), (b"TOPK.QUERY", 2, 5),
+    (b"TOPK.COUNT", 2, 5), (b"TOPK.LIST", 1, 2),
+    (b"TOPK.INFO", 1, 1),
+    # JSON (additional)
+    (b"JSON.MSET", 3, 9), (b"JSON.NUMMULTBY", 3, 3),
+    (b"JSON.DEBUG", 1, 3), (b"JSON.FORGET", 1, 2),
+    # Search (additional)
+    (b"FT.AGGREGATE", 2, 12), (b"FT.PROFILE", 3, 12),
+    (b"FT.TAGVALS", 2, 2), (b"FT.SYNDUMP", 1, 1),
+    (b"FT.SYNUPDATE", 3, 6), (b"FT.CONFIG", 2, 4),
 ]
 # fmt: on
 
