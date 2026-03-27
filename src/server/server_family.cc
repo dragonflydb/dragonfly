@@ -295,11 +295,20 @@ string UnknownCmd(string cmd, CmdArgList args) {
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (detail::IsS3Path(uri)) {
+#if defined(WITH_AWS) || defined(WITH_AWS_CLOUD)
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-    return std::make_shared<detail::AwsS3SnapshotStorage>(
+#endif
+    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+    auto ec = shard_set->pool()->GetNextProactor()->Await(
+        [&] { return aws->Init(detail::kBucketConnectMs); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize AWS S3 snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return aws;
 #else
     LOG(ERROR) << "Compiled without AWS support";
     exit(1);
