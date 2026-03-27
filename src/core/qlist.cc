@@ -571,7 +571,7 @@ string QList::Pop(Where where) {
   }
 
   /* The head and tail should never be compressed */
-  DCHECK(node->encoding != QUICKLIST_NODE_ENCODING_LZF);
+  DCHECK_EQ(node->encoding, QUICKLIST_NODE_ENCODING_RAW);
   DCHECK(head_->prev->next == nullptr);
 
   string res;
@@ -1151,6 +1151,17 @@ void QList::DelNode(Node* node) {
    * now have compressed nodes needing to be decompressed. */
   CompressByDepth(NULL);
 
+  // Head and tail must always be uncompressed. A deletion may promote a
+  // ZSTD-compressed interior node to head or tail.
+  if (head_) {
+    if (head_->IsCompressed()) {
+      malloc_size_ += TryDecompressInternal(false, head_);
+    }
+    if (head_->prev->IsCompressed()) {
+      malloc_size_ += TryDecompressInternal(false, head_->prev);
+    }
+  }
+
   zfree(node->entry);
   zfree(node);
 }
@@ -1526,28 +1537,25 @@ bool QList::TrainZstdDict() {
 void QList::CompressWithZstdDict() {
   DCHECK(tl_zstd_dict);
 
-  // Bulk-compress all interior nodes.
+  // Bulk-compress all interior nodes, tracking memory delta.
   bool any_compressed = false;
   bool any_attempted = false;
   for (Node* node = head_; node; node = node->next) {
     if (node == head_ || node->next == nullptr)
       continue;
-    any_attempted = true;
-    if (CompressNodeWithDict(node))
+    if (node->encoding == QUICKLIST_NODE_ENCODING_RAW && node->sz >= MIN_COMPRESS_BYTES)
+      any_attempted = true;
+    size_t prev_size = zmalloc_usable_size(node->entry);
+    if (CompressNodeWithDict(node)) {
       any_compressed = true;
+      malloc_size_ += zmalloc_usable_size(node->entry) - prev_size;
+    }
   }
 
   // Only mark failure if we actually tried to compress nodes and all failed.
   if (any_attempted && !any_compressed) {
     dict_compress_failed_ = 1;
   }
-
-  // Recalculate malloc_size_.
-  malloc_size_ = 0;
-  for (Node* node = head_; node; node = node->next) {
-    malloc_size_ += zmalloc_usable_size(node->entry) + sizeof(Node);
-  }
-  malloc_size_ += znallocx(sizeof(QList));
 }
 
 bool QList::CompressNodeWithDict(Node* node) {
@@ -1558,6 +1566,8 @@ bool QList::CompressNodeWithDict(Node* node) {
   if (node->sz < MIN_COMPRESS_BYTES)
     return false;
 
+  stats.compression_attempts++;
+
   size_t bound = ZSTD_compressBound(node->sz);
   quicklistLZF* dest = (quicklistLZF*)zmalloc(sizeof(quicklistLZF) + bound);
   ZSTD_CCtx_reset(tl_zstd_dict->cctx, ZSTD_reset_session_only);
@@ -1565,8 +1575,11 @@ bool QList::CompressNodeWithDict(Node* node) {
                                         node->sz, tl_zstd_dict->cdict);
   CHECK(!ZSTD_isError(csz)) << ZSTD_getErrorName(csz);
 
-  if (csz + MIN_COMPRESS_IMPROVE >= node->sz) {
+  // Reject if absolute improvement is too small or ratio is not good enough.
+  // The ratio check (30% savings required) avoids storing incompressible blobs.
+  if (csz + MIN_COMPRESS_IMPROVE >= node->sz || csz > node->sz * 7 / 10) {
     zfree(dest);
+    stats.bad_compression_attempts++;
     return false;
   }
 

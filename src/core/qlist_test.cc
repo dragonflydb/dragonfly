@@ -10,6 +10,8 @@
 #include <gmock/gmock.h>
 #include <mimalloc.h>
 
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
@@ -1173,6 +1175,29 @@ TEST_F(QListZstdTest, PopAfterCompress) {
   EXPECT_FALSE(tail.empty());
 }
 
+TEST_F(QListZstdTest, PopDrainsHeadNode) {
+  QList ql(-1, 0);  // fill=-1 means 4KB nodes
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  unsigned initial_nodes = ql.node_count();
+  ASSERT_GE(initial_nodes, 3u);
+
+  // Pop enough elements from HEAD to delete the head node entirely,
+  // promoting a formerly-compressed interior node to head.
+  while (ql.node_count() == initial_nodes) {
+    string val = ql.Pop(QList::HEAD);
+    ASSERT_FALSE(val.empty());
+  }
+  // Head node was deleted and a new head was promoted.
+  EXPECT_EQ(ql.node_count(), initial_nodes - 1);
+
+  // Continue popping — the new head must be decompressed and valid.
+  string val = ql.Pop(QList::HEAD);
+  EXPECT_FALSE(val.empty());
+  EXPECT_GT(val.size(), 100u);
+}
+
 TEST_F(QListZstdTest, SmallListSkipped) {
   QList ql(-2, 0);  // compress=0 so ZSTD path is active (LZF disabled)
   PopulateWithCeleryData(ql, 5);
@@ -1242,6 +1267,67 @@ TEST_F(QListZstdTest, IncrementalCompression) {
       },
       0, -1);
   EXPECT_EQ(count, ql.Size());
+}
+
+TEST_F(QListZstdTest, IncompressibleDataNotCompressed) {
+  // Train a dictionary with compressible Celery data.
+  QList ql_train(-1, 0);
+  ql_train.set_compr_threshold(1);
+  PopulateWithCeleryData(ql_train, 500);
+
+  // Dictionary is now trained in thread-local state.
+  // Create a new list with random (incompressible) data.
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+
+  auto initial_bad = QList::stats.bad_compression_attempts;
+  auto initial_attempts = QList::stats.compression_attempts;
+
+  // Push random binary data - should not compress well with the Celery-trained dict.
+  std::mt19937 rng(42);
+  for (unsigned i = 0; i < 200; ++i) {
+    string random_blob(512, '\0');
+    for (auto& c : random_blob) {
+      c = static_cast<char>(rng() % 256);
+    }
+    ql.Push(random_blob, QList::TAIL);
+  }
+
+  // Verify that compression was attempted but mostly rejected.
+  uint64_t attempts = QList::stats.compression_attempts - initial_attempts;
+  uint64_t bad = QList::stats.bad_compression_attempts - initial_bad;
+  EXPECT_GT(attempts, 0u);
+  EXPECT_GT(bad, 0u);
+
+  // Verify data integrity.
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, ql.Size());
+}
+
+TEST_F(QListZstdTest, StatsTracking) {
+  auto initial_attempts = QList::stats.compression_attempts;
+  auto initial_successes = QList::stats.zstd_dict_compressions;
+  auto initial_bad = QList::stats.bad_compression_attempts;
+
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  uint64_t attempts = QList::stats.compression_attempts - initial_attempts;
+  uint64_t successes = QList::stats.zstd_dict_compressions - initial_successes;
+  uint64_t bad = QList::stats.bad_compression_attempts - initial_bad;
+
+  EXPECT_GT(attempts, 0u);
+  EXPECT_GT(successes, 0u);
+  EXPECT_EQ(attempts, successes + bad);
+  // For Celery data, compression should be very effective.
+  EXPECT_GT(successes, bad);
 }
 
 }  // namespace dfly
