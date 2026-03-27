@@ -105,7 +105,7 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
     // The HNSW loader expects all nodes for an index to be readable in one pass.
     push_fun_();
   }
-#endif
 }
+#endif
 
 }  // namespace dfly
