@@ -1219,6 +1219,7 @@ TEST_F(RdbTest, TopkSerializationDecayParameter) {
 }
 
 namespace {
+
 std::string WrapInRdb(std::string_view body) {
   std::string out = absl::StrFormat("REDIS%04d", RDB_SER_VERSION);
   out.append(body);
@@ -1228,73 +1229,124 @@ std::string WrapInRdb(std::string_view body) {
   return out;
 }
 
-std::error_code LoadRdbBytes(Service* service, const std::string& rdb) {
+std::error_code LoadRdbBytes(Service* service, const std::string& rdb,
+                             uint64_t expected_journal_offset) {
   io::BytesSource src{io::Buffer(rdb)};
   RdbLoadContext load_context;
   RdbLoader loader(service, &load_context);
-  return loader.Load(&src);
+  auto ec = loader.Load(&src);
+  EXPECT_EQ(loader.journal_offset(), expected_journal_offset);
+  return ec;
 }
+
 }  // namespace
 
-TEST_F(RdbTest, InterleavedSplitEntryRoundTrips) {
-  absl::FlagSaver fs;
-  SetTestFlag("cache_mode", "false");
-  // run everything on shard-0 explicitly
-  SetTestFlag("num_shards", "1");
-  ResetService();
-
-  for (int i = 0; i < 200; ++i) {
-    auto resp = Run({"HSET", "A", StrCat("field:", i), std::string(128, 'x')});
-    EXPECT_THAT(resp, IntArg(1));
-  }
-
-  std::string body;
-
-  const auto test = [&] {
-    DbContext cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
-    auto& db = cntx.GetDbSlice(0);
-
-    auto a_it = db.FindReadOnly(cntx, "A", OBJ_HASH);
-    ASSERT_TRUE(a_it.ok());
-
-    PrimeKey a_key{"A"};
-    const PrimeValue& a_value = a_it.value()->second;
-
-    PrimeKey b_key{"B"};
-    PrimeValue b_value{"small"};
-
-    bool injected_b = false;
-    RdbSerializer serializer(
-        CompressionMode::NONE,
-        [&](std::string blob) {
-          body += blob;
-
-          // Add b in the middle while a is yielded, but just once
-          if (!injected_b) {
-            injected_b = true;
-            ASSERT_TRUE(serializer.SaveEntry(b_key, b_value, 0, 0, 0).has_value());
-          }
-        },
-        256);
-
-    serializer.SetTagEntries(true);
-
-    auto res = serializer.SaveEntry(a_key, a_value, 0, 0, 0);
-    ASSERT_TRUE(res.has_value());
-
-    body += serializer.Flush(RdbSerializerBase::FlushState::kFlushEndEntry);
+struct Interleave {
+  struct Pending {
+    string key;
+    const PrimeValue* value;
   };
 
-  pp_->at(0)->Await(test);
+  vector<Pending> queued;
+  size_t next = 0;
+  string body;
+  RdbSerializer* serializer = nullptr;
+  uint64_t last_journal_offset = 0;
+
+  void operator()(string blob) {
+    body += blob;
+    if (next >= queued.size())
+      return;
+
+    // add a journal offset before chunk
+    last_journal_offset += 100;
+    ASSERT_FALSE(serializer->SendJournalOffset(last_journal_offset));
+    const auto& entry = queued[next++];
+    // There are no fibers, just use recursion to interleave A-chunk -> B-chunk -> C-chunk ...
+    auto res = serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0);
+    ASSERT_TRUE(res.has_value());
+
+    // Add a ping so journal entry is interleaved too
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    writer.Write(journal::Entry{journal::Op::PING, 0, std::nullopt});
+    ASSERT_FALSE(serializer->WriteJournalEntry(std::move(sink).str()));
+  }
+
+  void AddKey(std::string_view key, DbContext& ctx) {
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, key, OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+    queued.push_back(Pending{{key.data(), key.size()}, &it.value()->second});
+  }
+};
+
+template <typename F> void DoForRange(char from, char to, F f) {
+  for (char a = from; a <= to; ++a)
+    f(string{a});
+}
+
+TEST_F(RdbTest, NestedLargeEntriesRoundTrip) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "false");
+  SetTestFlag("num_shards", "1");
+  SetTestFlag("serialization_tagged_chunks", "true");
+  ResetService();
+
+  // A-Z causes stack margin error
+  char from = 'A';
+  char to = 'F';
+
+  // Make some keys small enough to fit in one chunk with no push to consumer mid entry
+  auto get_key_size = [](string s) {
+    if ((s[0] - 'A') % 3 == 2)
+      return 4;
+    return 200;
+  };
+
+  DoForRange(from, to, [&](string a) {
+    for (int i = 0; i < get_key_size(a); ++i)
+      EXPECT_THAT(Run({"HSET", a, StrCat("field:", i), std::string(128, a[0])}), IntArg(1));
+  });
+
+  std::string body;
+  uint64_t last_journal_offset = 0;
+  pp_->at(0)->Await([&] {
+    DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+
+    Interleave harness;
+
+    DoForRange(from + 1, to, [&](string a) { harness.AddKey(a, ctx); });
+
+    RdbSerializer serializer(
+        CompressionMode::NONE, [&](std::string blob) { harness(std::move(blob)); }, 256);
+
+    harness.serializer = &serializer;
+    serializer.SetTagEntries(true);
+
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, string{from}, OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+    // kick off with A, the harness is already primed to continue B-F
+    ASSERT_TRUE(
+        serializer.SaveEntry(PrimeKey{string{from}}, it.value()->second, 0, 0, 0).has_value());
+    harness.body += serializer.Flush(RdbSerializerBase::FlushState::kFlushEndEntry);
+    body = std::move(harness.body);
+    last_journal_offset = harness.last_journal_offset;
+  });
 
   EXPECT_EQ(Run({"FLUSHALL"}), "OK");
 
-  const auto ec = pp_->at(0)->Await([&] { return LoadRdbBytes(service_.get(), WrapInRdb(body)); });
+  auto ec = pp_->at(0)->Await(
+      [&] { return LoadRdbBytes(service_.get(), WrapInRdb(body), last_journal_offset); });
   ASSERT_FALSE(ec) << ec.message();
 
-  EXPECT_EQ(CheckedInt({"HLEN", "A"}), 200);
-  EXPECT_EQ(Run({"HGET", "A", "field:0"}), std::string(128, 'x'));
-  EXPECT_EQ(Run({"GET", "B"}), "small");
+  DoForRange(from, to, [&](string a) {
+    const auto size = get_key_size(a);
+    EXPECT_EQ(CheckedInt({"HLEN", a}), size);
+    for (int i = 0; i < size; ++i)
+      EXPECT_EQ(Run({"HGET", a, StrCat("field:", i)}), std::string(128, a[0]));
+  });
 }
 
 }  // namespace dfly
