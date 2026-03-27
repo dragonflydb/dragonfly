@@ -4314,7 +4314,7 @@ async def test_set_member_expiry_replication(df_factory: DflyInstanceFactory, tr
     await wait_available_async(c_replica)
 
     # Add set members with a short TTL (2 seconds)
-    await c_master.execute_command("SADDEX", "myset", "2", "a", "b", "c")
+    await c_master.execute_command("SADDEX", "myset", "1", "a", "b", "c")
     assert await c_master.scard("myset") == 3
 
     await check_all_replicas_finished([c_replica], c_master)
@@ -4322,7 +4322,7 @@ async def test_set_member_expiry_replication(df_factory: DflyInstanceFactory, tr
     assert await c_replica.scard("myset") == 3
 
     # Wait for members to expire
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
 
     # Trigger lazy expiry on master via a read command.
     # Each variant exercises a different DeleteSetIfEmpty call site.

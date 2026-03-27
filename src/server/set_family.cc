@@ -67,7 +67,9 @@ bool DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view k
 
   if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
     db_slice.DelMutable(db_cntx, std::move(*res));
-    RecordDelete(db_cntx.db_index, key);
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
     return true;
   }
   return false;
