@@ -70,9 +70,7 @@ auto FragmentRef::GetDescr(const QList::Node* node) -> SerializationDescr {
 }
 
 auto FragmentRef::GetSerializationDescr() const -> SerializationDescr {
-  return std::visit(Overloaded{[](CompactValue* pv) { return GetDescr(pv); },
-                               [](QList::Node* node) { return GetDescr(node); }},
-                    val_);
+  return std::visit([](auto* val) { return GetDescr(val); }, val_);
 }
 
 TieredCoolRecord* FragmentRef::GetCoolRecord() const {

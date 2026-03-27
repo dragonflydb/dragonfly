@@ -82,6 +82,49 @@ using time_point = Transaction::time_point;
 
 namespace {
 
+auto NodeOffloadCb(TieredStorage* ts, DbIndex db_id, QList* ql) {
+  return [ts, db_id, ql](QList::Node* node) { return StashListNode(db_id, node, ql, ts, nullptr); };
+}
+
+auto NodeOnloadCb(TieredStorage* ts, DbIndex db_id, QList* ql) {
+  return [ts, db_id, ql](QList::Node* node) {
+    util::fb2::Future<io::Result<std::string>> node_entry;
+    ReadTieredListNode(
+        db_id, node, ql, node->GetExternalSlice(),
+        [node_entry](io::Result<std::string_view> res) mutable {
+          node_entry.Resolve(res.transform([](std::string_view sv) { return std::string{sv}; }));
+        },
+        ts);
+
+    auto res = node_entry.Get();
+
+    if (!res)
+      return;
+
+    // We are going to overwrite node external offset so first call delete.
+    ts->Delete(db_id, node);
+
+    node->u_.entry = static_cast<unsigned char*>(zmalloc(res->size()));
+    memcpy(node->u_.entry, res->data(), res->size());
+  };
+}
+
+// Delete
+auto NodeDeleteCb(TieredStorage* ts, DbIndex db_id, QList* ql) {
+  return [ts, db_id, ql](QList::Node* node) {
+    if (!ts->IsClosed()) {
+      if (node->io_pending) {
+        ts->CancelStash(tiering::ListNodeId{db_id, ql, node}, node);
+      } else {
+        // We don't pass QList pointer to delete so we need to decrease
+        // num_offloaded_nodes_ now.
+        ql->IncrementNumOffloadedNodes(-1);
+        ts->Delete(db_id, node);
+      }
+    }
+  };
+}
+
 class ListWrapper {
   using LP = detail::ListPack;
 
@@ -106,51 +149,13 @@ class ListWrapper {
 
     if (GetFlag(FLAGS_list_tiering_threshold) > 0 && EngineShard::tlocal()->tiered_storage()) {
       TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+
       QList::TieringParams params{
-
           .node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold),
-
-          .offload_cb =
-              [ts, db_id = db_id_, ql](QList::Node* node) {
-                return StashListNode(db_id, node, ql, ts, nullptr);
-              },
-
-          .onload_cb =
-              [ts, db_id = db_id_, ql](QList::Node* node) {
-                util::fb2::Future<io::Result<std::string>> node_entry;
-                ReadTieredListNode(
-                    db_id, node, ql, node->GetExternalSlice(),
-                    [node_entry](io::Result<std::string_view> res) mutable {
-                      node_entry.Resolve(
-                          res.transform([](std::string_view sv) { return std::string{sv}; }));
-                    },
-                    ts);
-
-                auto res = node_entry.Get();
-
-                if (!res)
-                  return;
-
-                // We are going to overwrite node external offset so first call delete.
-                ts->Delete(db_id, node);
-
-                node->u_.entry = static_cast<unsigned char*>(zmalloc(res->size()));
-                memcpy(node->u_.entry, res->data(), res->size());
-              },
-
-          .delete_cb =
-              [ts, db_id = db_id_, ql](QList::Node* node) {
-                if (!ts->IsClosed()) {
-                  if (node->io_pending) {
-                    ts->CancelStash(tiering::ListNodeId{db_id, ql, node}, node);
-                  } else {
-                    // We don't pass QList pointer to delete so we need to decrease
-                    // num_offloaded_nodes_ now.
-                    ql->IncrementNumOffloadedNodes(-1);
-                    ts->Delete(db_id, node);
-                  }
-                }
-              }};
+          .offload_cb = NodeOffloadCb(ts, db_id_, ql),
+          .onload_cb = NodeOnloadCb(ts, db_id_, ql),
+          .delete_cb = NodeDeleteCb(ts, db_id_, ql),
+      };
 
       ql->SetTieringParams(params);
     }
