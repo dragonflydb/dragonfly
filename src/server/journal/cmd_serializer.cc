@@ -79,7 +79,7 @@ CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
 
 size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
-  DCHECK(!pv.IsExternal());
+  DCHECK(!pv.IsExternal());  // Delayed entries are handled separately
 
   // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;

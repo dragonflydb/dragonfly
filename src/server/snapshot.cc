@@ -300,7 +300,11 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
     // Wait for all the outstanding delayed entries and serialize them as well.
-    ProcessDelayedEntries(true, 0, cntx_);
+    {
+      std::lock_guard guard(big_value_mu_);
+      ProcessDelayedEntries(true, 0, cntx_);
+    }
+
     PushSerialized(true);
   }  // for (dbindex)
 

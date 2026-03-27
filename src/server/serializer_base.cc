@@ -134,8 +134,8 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   // Check if this bucket should be serialized
   if (!ShouldProcessBucket(it)) {
     // Force flush all delayed entries in the touched bucket
-    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
-      ProcessDelayedEntries(false, it.is_done() ? 0 : it.bucket_address(), base_cntx_);
+    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update && !it.is_done())
+      ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
     return false;
   }
 
@@ -152,7 +152,7 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
   FinishBucketIteration(it.bucket_address());
 
-  if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
+  if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
 
   return true;
