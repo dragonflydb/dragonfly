@@ -45,6 +45,20 @@ namespace dfly {
 
 static const auto kMatchNil = ArgType(RespExpr::NIL);
 
+class LogSink : public google::LogSink {
+ public:
+  void send(google::LogSeverity severity, const char* full_filename, const char* base_filename,
+            int line, const struct tm* tm_time, const char* message, size_t message_len) override {
+    logs_.push_back(string(message, message_len));
+  }
+  const vector<string>& GetLogs() const {
+    return logs_;
+  }
+
+ private:
+  vector<string> logs_;
+};
+
 class RdbTest : public BaseFamilyTest {
  protected:
   void SetUp();
@@ -1214,6 +1228,31 @@ TEST_F(RdbTest, TopkSerializationDecayParameter) {
 
   auto resp2 = Run({"TOPK.LIST", "topk_decay_high"});
   EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
+}
+
+TEST_F(RdbTest, HashFieldDuplicationStats) {
+  LogSink log_sink;
+  google::AddLogSink(&log_sink);
+
+  // Create 5000 hashes with the same 5 field names to generate high duplication.
+  // Use large values (250 bytes each) to exceed the listpack threshold,
+  // forcing StringMap encoding so hashes are saved as RDB_TYPE_HASH (tracked by HLL).
+  const string kLargeVal(100, 'x');
+  constexpr int kNumHashes = 5000;
+  for (int i = 0; i < kNumHashes; ++i) {
+    Run({"hset", StrCat("hash:", i), "name", kLargeVal, "email", kLargeVal, "age", kLargeVal,
+         "city", kLargeVal, "country", kLargeVal});
+  }
+
+  // Trigger RDB save + load to exercise CreateObjectOnShard HLL tracking
+  Run({"debug", "reload"});
+
+  google::RemoveLogSink(&log_sink);
+
+  // Verify at least one duplication stats log message was emitted
+  const auto& logs = log_sink.GetLogs();
+  EXPECT_THAT(logs, Contains(HasSubstr("Hash field duplication stats")));
+  google::RemoveLogSink(&log_sink);
 }
 
 }  // namespace dfly
