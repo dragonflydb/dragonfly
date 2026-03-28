@@ -520,10 +520,12 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
   return {};
 }
 
-#ifdef WITH_AWS
+#if defined(WITH_AWS_CLOUD) || defined(WITH_AWS)
+
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
                                            bool ec2_metadata, bool sign_payload) {
   shard_set->pool()->GetNextProactor()->Await([&] {
+#ifdef WITH_AWS
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
     }
@@ -544,11 +546,33 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
     std::shared_ptr<Aws::S3::S3EndpointProviderBase> endpoint_provider =
         std::make_shared<aws::S3EndpointProvider>(endpoint, https);
     s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
+#endif
   });
+}
+
+AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
+#if defined(WITH_AWS_CLOUD) && !defined(WITH_AWS)
+  util::http::TlsClient::FreeContext(ctx_);
+#endif
+}
+
+error_code AwsS3SnapshotStorage::Init(unsigned connect_ms) {
+#if defined(WITH_AWS_CLOUD) && !defined(WITH_AWS)
+  error_code ec = creds_provider_.Init(connect_ms);
+  if (ec)
+    return ec;
+
+  ctx_ = util::http::TlsClient::CreateSslContext();
+  if (!ctx_) {
+    return make_error_code(std::errc::operation_not_permitted);
+  }
+#endif
+  return {};
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
+#ifdef WITH_AWS
   optional<pair<string, string>> bucket_path = GetBucketPath(path);
   if (!bucket_path) {
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
@@ -571,16 +595,26 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
         result = std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
       });
   fb.Join();
+
   return result;
+#else
+  return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
+#endif
 }
 
 io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
+  VLOG(1) << "Opening S3 read file: " << path;
+
+#ifdef WITH_AWS
   std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
   if (!bucket_path) {
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
   }
   auto [bucket, key] = *bucket_path;
   return new aws::S3ReadFile(bucket, key, s3_);
+#else
+  return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
+#endif
 }
 
 io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string_view dir,
@@ -607,6 +641,8 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
 
 io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
     const string& load_path) {
+  VLOG(1) << "Expanding S3 path: " << load_path;
+
   optional<pair<string, string>> bucket_path = GetBucketPath(load_path);
   if (!bucket_path) {
     return nonstd::make_unexpected(
@@ -652,6 +688,8 @@ error_code AwsS3SnapshotStorage::CheckPath(const std::string& path) {
 
 io::Result<std::vector<AwsS3SnapshotStorage::SnapStat>, GenericError>
 AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view prefix) {
+  VLOG(1) << "Listing S3 objects in bucket: " << bucket_name << " with prefix: " << prefix;
+
   // Each list objects request has a 1000 object limit, so page through the
   // objects if needed.
   std::string continuation_token;
@@ -660,6 +698,7 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   // We use a random proactor because this function might be called from the main thread.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
 
+#if defined(WITH_AWS)
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
@@ -715,9 +754,34 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
                                                   outcome.GetError().GetExceptionName()});
     }
   } while (!continuation_token.empty());
+#elif defined(WITH_AWS_CLOUD)
+  string adjusted_prefix;
+  if (!prefix.empty()) {
+    if (prefix.back() == '/') {
+      adjusted_prefix = prefix;
+    } else {
+      adjusted_prefix = absl::StrCat(prefix, "/");
+    }
+  }
+
+  error_code ec = proactor->Await([&]() -> error_code {
+    cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
+    return s3.List(bucket_name, adjusted_prefix, false, 1000,
+                   [&keys](const cloud::StorageListItem& item) {
+                     keys.emplace_back(string(item.key), item.mtime_ns);
+                   });
+  });
+
+  if (ec) {
+    return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
+  }
+#else
+  return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
+#endif
   return keys;
 }
-#endif
+
+#endif  // WITH_AWS_CLOUD || WITH_AWS
 
 #ifdef __linux__
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
