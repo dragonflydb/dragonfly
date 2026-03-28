@@ -7,6 +7,7 @@
 #include <absl/container/inlined_vector.h>
 
 #include <cstdint>
+#include <ranges>
 #include <string_view>
 
 namespace cmn {
@@ -20,59 +21,6 @@ class BackedArguments {
 
   BackedArguments() {
   }
-
-  class iterator {
-   public:
-    using iterator_category = std::random_access_iterator_tag;
-    using value_type = std::string_view;
-    using difference_type = std::ptrdiff_t;
-    using pointer = const std::string_view*;
-    using reference = std::string_view;
-
-    iterator(const BackedArguments* ba, size_t index) : ba_(ba), index_(index) {
-    }
-
-    iterator& operator++() {
-      ++index_;
-      return *this;
-    }
-
-    iterator& operator--() {
-      --index_;
-      return *this;
-    }
-
-    iterator& operator+=(int delta) {
-      index_ += delta;
-      return *this;
-    }
-
-    iterator operator+(int delta) const {
-      iterator res(*this);
-      res += delta;
-      return res;
-    }
-
-    ptrdiff_t operator-(iterator other) const {
-      return ptrdiff_t(index_) - ptrdiff_t(other.index_);
-    }
-
-    bool operator==(const iterator& other) const {
-      return index_ == other.index_ && ba_ == other.ba_;
-    }
-
-    bool operator!=(const iterator& other) const {
-      return !(*this == other);
-    }
-
-    std::string_view operator*() const {
-      return ba_->at(index_);
-    }
-
-   private:
-    const BackedArguments* ba_;
-    size_t index_;
-  };
 
   // Construct the arguments from iterator range.
   // TODO: In general we could get away without the len argument,
@@ -100,8 +48,11 @@ class BackedArguments {
     storage_.swap(other.storage_);
   }
 
-  // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
-  using StorageType = absl::InlinedVector<char, kStorageCap>;
+  auto view(size_t from = 0) const {
+    assert(from <= size());
+    return std::views::iota(from, size()) |
+           std::views::transform([this](size_t i) { return at(i); });
+  }
 
   std::string_view Front() const {
     return std::string_view{storage_.data(), elem_len(0)};
@@ -138,14 +89,6 @@ class BackedArguments {
     return at(index);
   }
 
-  iterator begin() const {
-    return {this, 0};
-  }
-
-  iterator end() const {
-    return {this, offsets_.size()};
-  }
-
   void clear() {
     // Clear the contents without deallocating memory. clear() deallocates inlined_vector.
     offsets_.resize(0);
@@ -180,7 +123,9 @@ class BackedArguments {
 
  protected:
   absl::InlinedVector<uint32_t, kLenCap> offsets_;
-  StorageType storage_;
+
+  // The capacity is chosen so that we allocate a fully utilized (128 bytes) block.
+  absl::InlinedVector<char, kStorageCap> storage_;
 };
 
 static_assert(sizeof(BackedArguments) == 128);
