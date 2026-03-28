@@ -21,8 +21,19 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <unistd.h>
+
 #ifdef __linux__
+#include <grp.h>
+#include <pwd.h>
+
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
+
 #include "util/fibers/uring_proactor.h"
+
+ABSL_DECLARE_FLAG(std::string, dir);
 #endif
 
 #include <mimalloc.h>
@@ -36,7 +47,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 #include <thread>
 #endif
@@ -92,6 +102,12 @@ ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
 ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
+#ifdef __linux__
+ABSL_FLAG(string, user, "",
+          "If not empty - drop privileges to this user (and their primary group) after binding "
+          "ports. Accepts username or numeric uid. "
+          "If --dir is set, chowns the data directory to this user.");
+#endif
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many buffer ring entries to allocate per thread for io_uring receive operations. "
           "Relevant only for modern kernels with io_uring enabled");
@@ -202,6 +218,86 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
   res->SetConnFiberStackSize(kFiberDefaultStackSize);
   return res;
 }
+
+#ifdef __linux__
+// Drops privileges to the specified user (username or numeric uid).
+// Must be called after ports are bound (so we can bind privileged ports first)
+// and BEFORE service.Init() to avoid racing with background snapshot loading.
+// Returns false on failure.
+bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
+  // Resolve user — accept username or numeric uid.
+  // For numeric UIDs not in /etc/passwd (common in distroless containers),
+  // fall back to using the raw UID with gid=uid and no supplementary groups.
+  uid_t uid;
+  gid_t gid;
+  struct passwd* pw = nullptr;
+  if (absl::SimpleAtoi(user_spec, &uid)) {
+    pw = getpwuid(uid);  // may be NULL for UIDs not in /etc/passwd
+  } else {
+    pw = getpwnam(user_spec.c_str());
+    if (!pw) {
+      LOG(ERROR) << "--user: unknown user '" << user_spec << "'";
+      return false;
+    }
+  }
+
+  if (pw) {
+    uid = pw->pw_uid;
+    gid = pw->pw_gid;
+  } else {
+    // Numeric UID without passwd entry — use uid as gid.
+    gid = uid;
+    LOG(INFO) << "--user: uid " << uid << " not in /etc/passwd, using gid=" << gid;
+  }
+
+  // Recursively chown the data directory so the new user can access existing snapshots.
+  // Only when --dir is explicitly set. Uses lchown to avoid following symlinks.
+  if (!data_dir.empty()) {
+    namespace fs = std::filesystem;
+    auto do_chown = [&](const fs::path& p) {
+      if (lchown(p.c_str(), uid, gid) != 0) {
+        LOG(WARNING) << "lchown(" << p << ") failed: " << strerror(errno);
+      }
+    };
+    do_chown(data_dir);
+    std::error_code ec;
+    fs::recursive_directory_iterator it(data_dir, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      do_chown(it->path());
+    }
+    if (ec) {
+      LOG(WARNING) << "Error iterating " << data_dir << ": " << ec.message();
+    }
+  }
+
+  // Drop supplementary groups first, then gid, then uid.
+  // Order is critical: after setuid we no longer have permission to call setgid.
+  if (pw) {
+    if (initgroups(pw->pw_name, gid) != 0) {
+      LOG(ERROR) << "initgroups failed: " << strerror(errno);
+      return false;
+    }
+  } else {
+    if (setgroups(0, nullptr) != 0) {
+      LOG(ERROR) << "setgroups failed: " << strerror(errno);
+      return false;
+    }
+  }
+
+  if (setgid(gid) != 0) {
+    LOG(ERROR) << "setgid(" << gid << ") failed: " << strerror(errno);
+    return false;
+  }
+
+  if (setuid(uid) != 0) {
+    LOG(ERROR) << "setuid(" << uid << ") failed: " << strerror(errno);
+    return false;
+  }
+
+  LOG(INFO) << "Dropped privileges to uid=" << uid << " gid=" << gid;
+  return true;
+}
+#endif  // __linux__
 
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = absl::GetFlag(FLAGS_maxmemory);
@@ -351,6 +447,15 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
     listeners.push_back(listener.release());
   }
+
+#ifdef __linux__
+  // Drop privileges after ports are bound but BEFORE service.Init() to avoid
+  // racing with background snapshot loading that starts inside service.Init().
+  const string user_flag = GetFlag(FLAGS_user);
+  if (!user_flag.empty() && !DropPrivilegesToUser(user_flag, GetFlag(FLAGS_dir))) {
+    exit(1);
+  }
+#endif
 
   service.Init(acceptor, listeners);
 

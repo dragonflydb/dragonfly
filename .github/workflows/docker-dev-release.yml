@@ -19,7 +19,7 @@ jobs:
     name: Build and Push ${{matrix.flavor}} ${{ matrix.os.arch }} image
     strategy:
       matrix:
-        flavor: [alpine,ubuntu]
+        flavor: [alpine,ubuntu,distroless]
         os:
           - image: ubuntu-24.04
             arch: amd64
@@ -167,7 +167,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        flavor: [alpine,ubuntu]
+        flavor: [alpine,ubuntu,distroless]
     steps:
       - name: checkout
         uses: actions/checkout@v6
