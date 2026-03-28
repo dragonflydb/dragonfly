@@ -2405,8 +2405,8 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   }
   if (total_fields > 0) {
     uint64_t unique_est = static_cast<uint64_t>(hll::EstimateCardinality(merged_regs.data()));
-    LOG(INFO) << "RDB load hash field stats: ~" << unique_est << " unique field names out of "
-              << total_fields << " total across all hashes";
+    LOG(INFO) << "Hash field duplication stats: " << unique_est << " unique fields out of "
+              << total_fields << " total";
   }
 
   absl::Duration dur = absl::Now() - start_time;
