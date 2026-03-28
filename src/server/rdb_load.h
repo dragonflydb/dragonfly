@@ -206,6 +206,18 @@ class RdbLoaderBase {
 
   std::error_code EnsureReadInternal(size_t min_to_read);
 
+  // Wrapper to consume n bytes from mem buf, and also decrement remaining_payload_bytes if a chunk
+  // read is in progress
+  std::error_code ConsumeInput(size_t n);
+
+  // If reading a chunk, deducts n bytes from size with error checking. No op if chunk is not being
+  // read such as journal data etc
+  std::error_code ConsumeChunkBudget(size_t n);
+
+  bool ChunkBudgetExhausted() const {
+    return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
+  }
+
   static void CopyStreamId(const StreamID& src, struct streamID* dest);
 
   base::IoBuf* mem_buf_ = nullptr;
@@ -220,6 +232,19 @@ class RdbLoaderBase {
   std::optional<uint64_t> journal_offset_ = std::nullopt;
   RdbVersion rdb_version_ = RDB_VERSION;
   PendingRead pending_read_;
+
+  // Tracks the id and size of a chunked read, if one is in progress
+  struct ActiveTaggedChunk {
+    // Mapped to a db and key
+    uint32_t stream_id;
+    // How many bytes remaining in the current chunk. Required to know when to stop reading the
+    // chunk
+    uint32_t remaining_payload_bytes;
+  };
+
+  // Is set to current chunk being parsed. nullopt means the data being parsed is not chunk, but a
+  // full entry
+  std::optional<ActiveTaggedChunk> current_chunk_state_ = std::nullopt;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -324,7 +349,18 @@ class RdbLoader : protected RdbLoaderBase {
 
   struct ObjSettings;
 
+  struct StreamState;
+
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+
+  // Loads a partially chunked value. the key and maybe part of the value has already been loaded by
+  // LoadKeyValPair. The state is restored from stream_states_ map.
+  std::error_code LoadValueChunk();
+
+  std::error_code ReadAndDispatchObject(int object_type, std::string& key,
+                                        const ObjSettings& obj_settings, DbIndex db_index,
+                                        bool* finalized);
+
   // Returns whether to discard the read key pair.
   bool ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const;
 
@@ -396,11 +432,17 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
-  // Map of currently chunked big values
-  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_chunked_;
+  // Map of currently chunked big values, keyed by (db index, key) to avoid
+  // collisions when the same key name exists in different databases, and we
+  // receive chunked data from >1 db with the same key name
+  using ChunkedKey = std::pair<DbIndex, std::string>;
+  std::unordered_map<ChunkedKey, std::unique_ptr<PrimeValue>, absl::Hash<ChunkedKey>> now_chunked_;
   base::SpinLock now_chunked_mu_;  // guards now_chunked_
 
   std::string last_key_loaded_;
+
+  // Maps stream id to partially streamed (chunked) key, value
+  absl::flat_hash_map<uint32_t, StreamState> stream_states_;
 };
 
 }  // namespace dfly
