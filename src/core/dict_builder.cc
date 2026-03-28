@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "core/hll_estimator.h"
 
 namespace dfly {
 
@@ -29,45 +30,6 @@ inline uint32_t HashDmer(const uint8_t* data) {
   constexpr uint64_t kPrime6Bytes = 227718039650203ULL;
   uint64_t hash64 = ((val << 16) * kPrime6Bytes) >> 32;
   return static_cast<uint32_t>(hash64);
-}
-
-constexpr unsigned kRegisterLen = 1024;
-constexpr uint32_t kRegisterMask = kRegisterLen - 1;
-constexpr unsigned kRegisterBits = 10;
-constexpr unsigned kRankBits = 32 - kRegisterBits;
-
-inline void UpdateHllRegister(uint32_t h, uint8_t* registers) {
-  uint32_t index = h & kRegisterMask;
-  // Use upper bits for rank calculation, ensuring it's never zero
-  uint32_t w = (h >> kRegisterBits) | (1u << kRankBits);
-  uint8_t rank = countr_zero(w) + 1;
-  registers[index] = std::max(registers[index], rank);
-}
-
-double EstimateHllCardinality(const uint8_t* registers) {
-  double sum = 0.0;
-  int zero_registers = 0;
-  for (unsigned i = 0; i < kRegisterLen; ++i) {
-    if (registers[i] == 0) {
-      zero_registers++;
-    }
-    sum += 1.0 / (1 << registers[i]);
-  }
-
-  // alpha_m * m^2 where m = kRegisterLen
-  // Constants from original HyperLogLog paper (Flajolet et al.)
-  constexpr double kAlphaInf = 0.7213;
-  constexpr double kAlphaCorrection = 1.079;
-  constexpr double kM = static_cast<double>(kRegisterLen);
-  constexpr double kAlphaM2 = (kAlphaInf / (1.0 + kAlphaCorrection / kM)) * (kM * kM);
-  double estimate = kAlphaM2 / sum;
-
-  // Small range correction
-  constexpr double kSmallRangeThreshold = 2.5 * kM;
-  if (estimate <= kSmallRangeThreshold && zero_registers > 0) {
-    estimate = kM * std::log(kM / zero_registers);
-  }
-  return estimate;
 }
 
 uint32_t CalculateFreqTableSize(absl::Span<const std::pair<const uint8_t*, size_t>> data_pieces) {
@@ -159,7 +121,7 @@ double EstimateCompressibility(absl::Span<const std::pair<const uint8_t*, size_t
                                unsigned step) {
   DCHECK_GT(step, 0u);
 
-  unique_ptr<uint8_t[]> registers(new uint8_t[kRegisterLen]());
+  unique_ptr<uint8_t[]> registers(new uint8_t[hll::kRegisterLen]());
   uint64_t total_dmers = 0;
 
   for (const auto& [data, sz] : data_pieces) {
@@ -167,7 +129,7 @@ double EstimateCompressibility(absl::Span<const std::pair<const uint8_t*, size_t
       continue;
     size_t limit = sz - kDmerLength + 1;
     for (size_t i = 0; i < limit; i += step) {
-      UpdateHllRegister(HashDmer(data + i), registers.get());
+      hll::UpdateRegister(HashDmer(data + i), registers.get());
       ++total_dmers;
     }
   }
@@ -176,7 +138,7 @@ double EstimateCompressibility(absl::Span<const std::pair<const uint8_t*, size_t
     return 1.0;  // No d-mers - we consider it incompressible
   }
 
-  double estimate = EstimateHllCardinality(registers.get());
+  double estimate = hll::EstimateCardinality(registers.get());
   double ratio = estimate / static_cast<double>(total_dmers);
   return std::min(ratio, 1.0);
 }

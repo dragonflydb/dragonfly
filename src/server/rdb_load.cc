@@ -180,6 +180,16 @@ DbSlice& GetCurrentDbSlice() {
   return namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 }
 
+// FNV-1a 32-bit hash for variable-length field names (used with HLL).
+uint32_t HashFieldName(std::string_view sv) {
+  uint32_t h = 2166136261u;
+  for (unsigned char c : sv) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
 }  // namespace
 
 class RdbLoaderBase::OpaqueObjLoader {
@@ -2027,7 +2037,8 @@ RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       deserialize_hnsw_index_{GetFlag(FLAGS_deserialize_hnsw_index)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
-      shard_buf_{shard_set->size()} {
+      shard_buf_{shard_set->size()},
+      per_shard_hll_(shard_set->size()) {
 }
 
 RdbLoader::~RdbLoader() {
@@ -2384,6 +2395,19 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   }
 
   now_chunked_.clear();
+
+  // Merge per-shard HLL registers and log hash field duplication stats.
+  std::array<uint8_t, hll::kRegisterLen> merged_regs{};
+  uint64_t total_fields = 0;
+  for (const auto& shard_state : per_shard_hll_) {
+    hll::MergeRegisters(shard_state.registers.data(), merged_regs.data());
+    total_fields += shard_state.total_fields;
+  }
+  if (total_fields > 0) {
+    uint64_t unique_est = static_cast<uint64_t>(hll::EstimateCardinality(merged_regs.data()));
+    LOG(INFO) << "RDB load hash field stats: ~" << unique_est << " unique field names out of "
+              << total_fields << " total across all hashes";
+  }
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -2765,6 +2789,34 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
         return;
       }
       config_copy.append = false;
+    }
+  }
+
+  // Track hash field names via HLL for duplication detection across all hash objects.
+  // Only process non-appended items to avoid double-counting chunked hashes.
+  int rdb_type = item->val.rdb_type;
+  if ((rdb_type == RDB_TYPE_HASH || rdb_type == RDB_TYPE_HASH_WITH_EXPIRY) &&
+      (!item->load_config.chunked || !item->load_config.append)) {
+    if (auto* trace_ptr = std::get_if<std::unique_ptr<LoadTrace>>(&item->val.obj);
+        trace_ptr && *trace_ptr) {
+      const LoadTrace* trace = trace_ptr->get();
+      const size_t step = (rdb_type == RDB_TYPE_HASH_WITH_EXPIRY) ? 3 : 2;
+      EngineShard* es = EngineShard::tlocal();
+      DCHECK(es);
+      ShardHllState& hll_state = per_shard_hll_[es->shard_id()];
+      for (size_t i = 0; i < trace->arr.size(); i += step) {
+        const RdbVariant& var = trace->arr[i].rdb_var;
+        if (auto* pod = std::get_if<base::PODArray<char>>(&var); pod) {
+          std::string_view sv{pod->data(), pod->size()};
+          hll::UpdateRegister(HashFieldName(sv), hll_state.registers.data());
+          ++hll_state.total_fields;
+        } else if (std::holds_alternative<long long>(var)) {
+          auto str = absl::StrCat(std::get<long long>(var));
+          hll::UpdateRegister(HashFieldName(str), hll_state.registers.data());
+          ++hll_state.total_fields;
+        }
+        // LzfString fields are rare for field names; skipped for simplicity.
+      }
     }
   }
 
