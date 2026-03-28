@@ -2054,6 +2054,20 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
   AppendMetricValue("list_reads", m.qlist_stats.interior_node_reads, {"type"}, {"interior"},
                     &resp->body());
 
+  AppendMetricHeader("list_compression_attempts", "List compression attempts", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("list_compression_attempts", m.qlist_stats.compression_attempts, {"type"},
+                    {"total"}, &resp->body());
+  AppendMetricValue("list_compression_attempts", m.qlist_stats.bad_compression_attempts, {"type"},
+                    {"fail"}, &resp->body());
+
+  AppendMetricHeader("list_compressed_bytes", "List compressed bytes", MetricType::GAUGE,
+                     &resp->body());
+  AppendMetricValue("list_compressed_bytes", m.qlist_stats.compressed_bytes, {"type"},
+                    {"compressed"}, &resp->body());
+  AppendMetricValue("list_compressed_bytes", m.qlist_stats.raw_compressed_bytes, {"type"}, {"raw"},
+                    &resp->body());
+
   // Tiered metrics
   {
     AppendMetricWithoutLabels("tiered_entries", "Tiered entries", total.tiered_entries,
