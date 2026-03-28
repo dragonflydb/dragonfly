@@ -342,6 +342,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       LOG(WARNING) << "Couldn't connect to " << cf_->MyID() << " : " << migration_info_.node_info.id
                    << " attempt " << attempt << ": " << ec.message()
                    << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+      Finish(GenericError(ec, "Finalize reconnect failed"));
       return false;
     }
   }

@@ -1480,8 +1480,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@pytest.mark.exclude_epoll
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 5})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 100})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(
