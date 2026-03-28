@@ -363,7 +363,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   // Start the acceptor loop and wait for the server to shutdown.
   acceptor->Run();
-  google::FlushLogFiles(google::INFO);  // Flush the header.
+  base::FlushLogs();
 
   acceptor->Wait();
 

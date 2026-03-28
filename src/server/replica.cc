@@ -14,7 +14,6 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/flags/flag.h>
 #include <absl/functional/bind_front.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
@@ -24,6 +23,7 @@ extern "C" {
 #include <memory>
 #include <utility>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"

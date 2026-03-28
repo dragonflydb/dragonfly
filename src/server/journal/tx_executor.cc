@@ -108,8 +108,9 @@ bool TransactionReader::NextTxData(JournalReader* reader, ExecutionState* cntx,
 
   if (lsn_.has_value() && dest->opcode == journal::Op::LSN) {
     DCHECK_NE(dest->lsn, 0u);
-    LOG_IF_EVERY_N(WARNING, dest->lsn != *lsn_, 10000)
-        << "master lsn:" << dest->lsn << " replica lsn" << *lsn_;
+    if (dest->lsn != *lsn_) {
+      LOG_EVERY_T(WARNING, 2) << "master lsn:" << dest->lsn << " replica lsn" << *lsn_;
+    }
     DCHECK_EQ(dest->lsn, *lsn_);
   }
   return true;
