@@ -10,7 +10,6 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/flags/flag.h>
 #include <absl/functional/bind_front.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
@@ -19,6 +18,7 @@ extern "C" {
 #include <boost/asio/ip/tcp.hpp>
 #include <string>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
