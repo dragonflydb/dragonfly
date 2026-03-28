@@ -1963,9 +1963,10 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
-    if (auto* cid = registry_.Find(cmd); cid != nullptr) {
+    if (auto [cid, tail] = registry_.FindExtended(cmd, ca.args.subspan(1)); cid != nullptr) {
       auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
+
+      info->async_cmds.emplace_back(cid, tail.ToSlice(nullptr), reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ca.args[0]);
