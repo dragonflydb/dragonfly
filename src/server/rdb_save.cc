@@ -403,6 +403,9 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
 
     // Use listpack encoding
     RETURN_ON_ERR(SaveLen(node->container));
+    // Materialize the node if it was offloaded to tiered storage, so that we can access its
+    // content. We have to drop const qualifier to update the node.
+    ql->Materialize(const_cast<QList::Node*>(node));
     if (node->encoding == QLIST_NODE_ENCODING_ZSTD) {
       // ZSTD-compressed nodes cannot be saved using RDB LZF encoding — the loader would
       // call lzf_decompress on ZSTD bytes and corrupt the data. Decompress to raw first.
@@ -420,7 +423,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
       size_t compress_len = node->GetLZF(&data);
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
-      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      RETURN_ON_ERR(SaveString(node->u_.entry, node->sz));
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (node->next == nullptr)
         flush_state = FlushState::kFlushEndEntry;

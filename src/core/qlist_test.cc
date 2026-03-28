@@ -110,15 +110,15 @@ static int ql_verify(const QList& ql, uint32_t nc, uint32_t count, uint32_t head
     return 0;
   }
 
-  if (head_count != ql.Head()->count && head_count != lpLength(ql.Head()->entry)) {
+  if (head_count != ql.Head()->count && head_count != lpLength(ql.Head()->u_.entry)) {
     LOG(ERROR) << absl::StrFormat("head count wrong: expected %u got cached %u vs. actual %lu",
-                                  head_count, ql.Head()->count, lpLength(ql.Head()->entry));
+                                  head_count, ql.Head()->count, lpLength(ql.Head()->u_.entry));
     errors++;
   }
 
-  if (tail_count != ql.Tail()->count && tail_count != lpLength(ql.Tail()->entry)) {
+  if (tail_count != ql.Tail()->count && tail_count != lpLength(ql.Tail()->u_.entry)) {
     LOG(ERROR) << "tail count wrong: expected " << tail_count << "got cached " << ql.Tail()->count
-               << " vs. actual " << lpLength(ql.Tail()->entry);
+               << " vs. actual " << lpLength(ql.Tail()->u_.entry);
     errors++;
   }
 
@@ -411,10 +411,30 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
 
 TEST_F(QListTest, Tiering) {
   QList::stats.offload_requests = 0;
-  ql_.SetTieringParams(QList::TieringParams{.node_depth_threshold = 1});
+
+  // Simulate tiering setup where we mark offloaded nodes as pending so that
+  // throttling logic works correctly. We need to free memory manually in the
+  // delete callback.
+  QList::TieringParams params{.node_depth_threshold = 1,
+                              .offload_cb =
+                                  [](QList::Node* node) {
+                                    node->io_pending = 1;
+                                    return true;
+                                  },
+                              .onload_cb = nullptr,
+                              .delete_cb =
+                                  [](QList::Node* node) {
+                                    zfree(node->u_.entry);
+                                    node->u_.entry = nullptr;
+                                    node->io_pending = 0;
+                                  }};
+
+  ql_.SetTieringParams(params);
+
   for (int i = 0; i < 8000; i++) {
     ql_.Push(absl::StrCat("value", i), QList::TAIL);
   }
+
   EXPECT_EQ(QList::stats.offload_requests, 9);
 }
 
