@@ -21,10 +21,11 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <unistd.h>
+
 #ifdef __linux__
 #include <grp.h>
 #include <pwd.h>
-#include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
@@ -225,19 +226,29 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
 // Returns false on failure.
 bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
   // Resolve user — accept username or numeric uid.
+  // For numeric UIDs not in /etc/passwd (common in distroless containers),
+  // fall back to using the raw UID with gid=uid and no supplementary groups.
   uid_t uid;
+  gid_t gid;
   struct passwd* pw = nullptr;
   if (absl::SimpleAtoi(user_spec, &uid)) {
-    pw = getpwuid(uid);
+    pw = getpwuid(uid);  // may be NULL for UIDs not in /etc/passwd
   } else {
     pw = getpwnam(user_spec.c_str());
+    if (!pw) {
+      LOG(ERROR) << "--user: unknown user '" << user_spec << "'";
+      return false;
+    }
   }
-  if (!pw) {
-    LOG(ERROR) << "--user: unknown user '" << user_spec << "'";
-    return false;
+
+  if (pw) {
+    uid = pw->pw_uid;
+    gid = pw->pw_gid;
+  } else {
+    // Numeric UID without passwd entry — use uid as gid.
+    gid = uid;
+    LOG(INFO) << "--user: uid " << uid << " not in /etc/passwd, using gid=" << gid;
   }
-  uid = pw->pw_uid;
-  gid_t gid = pw->pw_gid;
 
   // Recursively chown the data directory so the new user can access existing snapshots.
   // Only when --dir is explicitly set. Uses lchown to avoid following symlinks.
@@ -251,17 +262,26 @@ bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
     do_chown(data_dir);
     std::error_code ec;
     fs::recursive_directory_iterator it(data_dir, ec);
-    if (!ec) {
-      for (const auto& entry : it)
-        do_chown(entry.path());
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      do_chown(it->path());
+    }
+    if (ec) {
+      LOG(WARNING) << "Error iterating " << data_dir << ": " << ec.message();
     }
   }
 
   // Drop supplementary groups first, then gid, then uid.
   // Order is critical: after setuid we no longer have permission to call setgid.
-  if (initgroups(pw->pw_name, gid) != 0) {
-    LOG(ERROR) << "initgroups failed: " << strerror(errno);
-    return false;
+  if (pw) {
+    if (initgroups(pw->pw_name, gid) != 0) {
+      LOG(ERROR) << "initgroups failed: " << strerror(errno);
+      return false;
+    }
+  } else {
+    if (setgroups(0, nullptr) != 0) {
+      LOG(ERROR) << "setgroups failed: " << strerror(errno);
+      return false;
+    }
   }
 
   if (setgid(gid) != 0) {

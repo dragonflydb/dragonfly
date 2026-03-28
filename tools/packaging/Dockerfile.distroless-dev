@@ -41,9 +41,12 @@ VOLUME /data
 WORKDIR /data
 
 # Health check against the /healthz HTTP endpoint (returns 200 when server is ACTIVE).
+# Requires primary_port_http_enabled=true (the default).
 # Default assumes plain HTTP on port 6379. Override at runtime if needed:
 #   TLS:          docker run --health-cmd '/usr/local/bin/httpscheck https://localhost:6379/healthz' ...
 #   Custom port:  docker run --health-cmd '/usr/local/bin/httpcheck http://localhost:6380/healthz' ...
+# Note: during snapshot loading /healthz returns 503. For large snapshots increase --start-period
+# (e.g. --health-start-period=5m) to avoid premature "unhealthy" status.
 HEALTHCHECK --start-period=30s --interval=15s --timeout=5s --retries=3 \
   CMD ["/usr/local/bin/httpcheck", "http://localhost:6379/healthz"]
 
