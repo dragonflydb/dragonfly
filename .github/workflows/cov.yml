@@ -19,7 +19,7 @@ jobs:
           - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: {cxx: g++, c: gcc}
-            cxx_flags: "-fprofile-arcs -ftest-coverage"
+            cxx_flags: "-fprofile-arcs -ftest-coverage -fprofile-update=atomic"
     timeout-minutes: 300
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -49,7 +49,7 @@ jobs:
           uname -a
           cmake --version
           mkdir -p ${{github.workspace}}/build
-          apt update && apt install -y lcov pip
+          apt update && apt install -y lcov python3-pip
       - name: Cache build deps
         id: cache-deps
         uses: actions/cache@v5
@@ -61,9 +61,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-deps-${{ github.base_ref }}-
 
+      - name: Install Python test requirements
+        shell: bash
+        run: |
+          cd ${GITHUB_WORKSPACE}/tests
+          # https://peps.python.org/pep-0668/#keep-the-marker-file-in-container-images
+          if compgen -G '/usr/lib/python3.*/EXTERNALLY-MANAGED' > /dev/null; then
+            pip3 install --break-system-packages -r dragonfly/requirements.txt
+          else
+            pip3 install -r dragonfly/requirements.txt
+          fi
+
       - name: Configure CMake
         run: |
-          pip install -r tests/dragonfly/requirements.txt
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
             -GNinja \
@@ -74,6 +84,7 @@ jobs:
             -L
           pwd
           cd build && pwd
+
       - name: Build
         run: |
           cd $GITHUB_WORKSPACE/build
@@ -94,7 +105,7 @@ jobs:
       - name: Generate Coverage Report
         run: |
           cd $GITHUB_WORKSPACE/build
-          lcov -c -d . -o main_coverage.info
+          lcov -c -d . -o main_coverage.info --ignore-errors mismatch
           lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*'
           genhtml main_coverage.info --ignore-errors source --output-directory covout -p $GITHUB_WORKSPACE
           ls ./
