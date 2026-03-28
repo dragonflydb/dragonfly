@@ -300,7 +300,10 @@ StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
 
   size_t tries = 0;
   while (picks.size() < count && tries++ < count * 2) {
-    auto member = *strset->GetRandomMember();
+    auto it = strset->GetRandomMember();
+    if (it == strset->end())
+      break;
+    sds member = *it;
     picks.insert(picks.end(), {member, sdslen(member)});
   }
 
@@ -915,13 +918,14 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 }
 
 OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, int count) {
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto& db_slice = op_args.GetDbSlice();
+  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
-  const CompactObj& co = find_res.value()->second;
+  const PrimeValue& pv = find_res.value()->second;
 
-  const std::uint32_t size = co.Size();
+  const std::uint32_t size = pv.Size();
   const bool picks_are_unique = count >= 0;
   const std::uint32_t picks_count =
       picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size) : std::abs(count);
@@ -934,7 +938,13 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
     }
   }();
 
-  return RandMemberSet(op_args.db_cntx, co, *generator, picks_count);
+  auto result = RandMemberSet(op_args.db_cntx, pv, *generator, picks_count);
+
+  // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
+  // we must not reference it afterwards.
+  DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
+
+  return result;
 }
 
 // count - how many elements to pop.
