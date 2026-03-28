@@ -605,6 +605,19 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
       db.stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
+
+    // On replica, ExpireIfNeeded returns a valid iterator for expired keys (since replicas
+    // don't delete — they wait for DEL from master). For read operations, hide these expired
+    // keys from clients. For mutable operations (replication writes), we must return the
+    // valid iterator so SET/overwrite can proceed without conflicts.
+    if (stats_mode == UpdateStatsMode::kReadStats && (owner_->IsReplica() || !expire_allowed_)) {
+      int64_t expire_time = it->first.GetExpireTime();
+      if (int64_t(cntx.time_now_ms) >= expire_time) {
+        events_.misses += miss_weight;
+        db.stats.events.misses += miss_weight;
+        return OpStatus::KEY_NOTFOUND;
+      }
+    }
   }
 
   DCHECK(IsValid(it));
