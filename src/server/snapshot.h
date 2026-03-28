@@ -4,10 +4,9 @@
 
 #pragma once
 
-#include <deque>
-
-#include "server/db_slice.h"
+#include "server/journal/types.h"
 #include "server/rdb_save.h"
+#include "server/serializer_base.h"
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -25,12 +24,12 @@ using DocId = uint32_t;
 }  // namespace search
 
 // ┌────────────────┐   ┌─────────────┐
-// │IterateBucketsFb│   │  OnDbChange │
+// │IterateBucketsFb│   │  OnChange   │
 // └──────┬─────────┘   └─┬───────────┘
-//        │               │            OnDbChange forces whole bucket to be
+//        │               │            OnChange forces whole bucket to be
 //        ▼               ▼            serialized if iterate didn't reach it yet
 // ┌──────────────────────────┐
-// │     SerializeBucket      │        Both might fall back to a temporary serializer
+// │     DoSerializeBucket    │        Both might fall back to a temporary serializer
 // └────────────┬─────────────┘        if default is used on another db index
 //              │
 //              |                      Socket is left open in journal streaming mode
@@ -51,7 +50,7 @@ using DocId = uint32_t;
 // and submitting all values to an output sink.
 // In journal streaming mode, the snapshot continues submitting changes
 // over the sink until explicitly stopped.
-class SliceSnapshot : public journal::JournalConsumerInterface {
+class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInterface {
  public:
   // Represents a target sink for receiving snapshot data. Specifically designed
   // to send data to RdbSaver wrapping up a file shard or a socket.
@@ -100,8 +99,8 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Journal listener
-  void ConsumeJournalChange(const journal::JournalChangeItem& item);
-  void ThrottleIfNeeded();
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
+  void ThrottleIfNeeded() final;
 
  private:
   [[maybe_unused]] void SerializeIndexMapping(
@@ -114,34 +113,24 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Serialize HNSW global indices for shard 0 only
   void SerializeGlobalHnswIndices();
 
-  // Main snapshotting fiber that iterates over all buckets in the db slice
-  // and submits them to SerializeBucket.
+  // Main snapshotting fiber that iterates over all buckets in the db slice.
   void IterateBucketsFb(bool send_full_sync_cut);
 
-  // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
-
   // Serialize single bucket.
-  // Returns number of serialized entries, updates bucket version to snapshot version.
+  // Returns number of serialized entries.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
-                           bool push_tracked_tiered_keys);
+                           bool on_update) override;
+
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
-
-  // DbChange listener
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
-
-  // DbSlice moved listener
-  void OnMoved(DbIndex db_index, const DbSlice::MovedItemsVec& items);
-  bool IsPositionSerialized(DbIndex db_index, PrimeTable::Cursor cursor);
+  void SerializeEntry(BucketIdentity bucket, DbIndex db_index, const PrimeKey& pk,
+                      const PrimeValue& pv);
 
   // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
-  void SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv, time_t expire_time,
-                         uint32_t mc_flags);
 
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
@@ -152,59 +141,31 @@ class SliceSnapshot : public journal::JournalConsumerInterface {
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
 
-  // Tuple <db_index, key> is used as a key to uniquely identify tiered entry on shard.
-  using TieredDelayEntryKey = std::pair<DbIndex, std::string>;
-
-  // Serialize delayed entries.
-  // If bucket_tiered_keys is provided we should serialize these keys forcefully.
-  // Other entries can be serialized if they are resolved, but we don't wait for them unless force
-  // is true.
-  void PushDelayedEntries(bool force, std::vector<TieredDelayEntryKey>* bucket_tiered_keys);
-
-  DbSlice* db_slice_;
-  const DbTableArray db_array_;
   PrimeTable::Cursor snapshot_cursor_;
-  DbIndex snapshot_db_index_ = 0;
 
   std::unique_ptr<RdbSerializer> serializer_;
 
-  // Delayed entries that are waiting for tiered storage reads to complete before they can be
-  // serialized.
-  absl::flat_hash_map<TieredDelayEntryKey, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
-
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
+  uint32_t journal_cb_id_ = 0;
 
-  util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
+  util::fb2::Fiber snapshot_fb_;
   util::fb2::CondVarAny seq_cond_;
 
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
-  // version upper bound for entries that should be saved (not included).
-  uint64_t snapshot_version_;
-  uint64_t moved_cb_id_ = 0;
-  uint32_t journal_cb_id_ = 0;
-  uint32_t moved_cb_id = 0;
-
   bool use_background_mode_ = false;
-  bool use_snapshot_version_ = true;
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
-    size_t loop_serialized = 0;
     size_t skipped = 0;
-    size_t side_saved = 0;
-    size_t savecb_calls = 0;
     size_t keys_total = 0;
     size_t jounal_changes = 0;
-    size_t moved_saved = 0;
     size_t flushed_under_lock = 0;
   } stats_;
-
-  ThreadLocalMutex big_value_mu_;
 
   SnapshotDataConsumerInterface* consumer_;
   ExecutionState* cntx_;

@@ -13,6 +13,7 @@
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
+#include "core/search/ast_expr.h"
 #include "core/search/indices.h"
 #include "core/search/stateless_allocator.h"
 #include "server/db_slice.h"
@@ -36,7 +37,7 @@ template <typename F>
 void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
-  auto [prime_table, _] = db_slice.GetTables(op_args.db_cntx.db_index);
+  auto* prime_table = db_slice.GetTables(op_args.db_cntx.db_index);
 
   string scratch;
   auto cb = [&](PrimeTable::iterator it) {
@@ -695,6 +696,8 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 
 optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
                                                               const OpArgs& op_args) const {
+  if (!key_index_.IsValid(id))
+    return std::nullopt;
   auto& db_slice = op_args.GetDbSlice();
   string_view key = key_index_.Get(id);
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
@@ -852,11 +855,45 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   if (!search_results.error.empty())
     return {};
 
+  // Build distance lookup for FLAT VECTOR_RANGE so the YIELD_DISTANCE_AS alias is
+  // available in the aggregation pipeline. HNSW VECTOR_RANGE uses LoadHnswRangeDocsForAggregator.
+  absl::flat_hash_map<DocId, float> knn_score_map;
+  std::string score_alias;
+  if (auto* vr = search_algo->GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
+    score_alias = vr->score_alias;
+    knn_score_map.reserve(search_results.knn_scores.size());
+    for (auto& [doc_id, dist] : search_results.knn_scores)
+      knn_score_map[doc_id] = dist;
+  }
+
+  return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map);
+}
+
+vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
+    const OpArgs& op_args, const AggregateParams& params,
+    absl::Span<const std::pair<search::DocId, float>> doc_distances,
+    std::string_view score_alias) const {
+  vector<DocId> ids;
+  absl::flat_hash_map<DocId, float> score_map;
+  ids.reserve(doc_distances.size());
+  score_map.reserve(doc_distances.size());
+  for (auto& [doc_id, dist] : doc_distances) {
+    ids.push_back(doc_id);
+    score_map[doc_id] = dist;
+  }
+  return LoadDocEntriesWithScores(op_args, params, ids, score_alias, score_map);
+}
+
+vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
+    const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
+    std::string_view score_alias,
+    const absl::flat_hash_map<search::DocId, float>& score_map) const {
   auto [fields_to_load, sort_indicies] =
       PreprocessAggregateFields(base_->schema, params, params.load_fields);
 
-  vector<absl::flat_hash_map<string, search::SortableValue>> out;
-  for (DocId doc : search_results.ids) {
+  vector<SearchDocData> out;
+  out.reserve(ids.size());
+  for (DocId doc : ids) {
     auto entry = LoadEntry(doc, op_args);
     if (!entry)
       continue;
@@ -864,17 +901,20 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
-    for (const auto& [fident, fname] : sort_indicies) {
+    for (const auto& [fident, fname] : sort_indicies)
       extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc, fident);
-    }
 
     SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
-
     out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
                      make_move_iterator(extracted_sort_indicies.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
-  }
 
+    if (!score_alias.empty()) {
+      auto it = score_map.find(doc);
+      if (it != score_map.end())
+        out.back()[string{score_alias}] = static_cast<double>(it->second);
+    }
+  }
   return out;
 }
 

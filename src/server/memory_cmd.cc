@@ -458,7 +458,7 @@ void MemoryCmd::Usage(std::string_view key, bool account_key_memory_usage) {
   ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief(
       [key, account_key_memory_usage, this, sid]() -> ssize_t {
         auto& db_slice = cmd_cntx_->server_conn_cntx()->ns->GetDbSlice(sid);
-        auto [pt, exp_t] = db_slice.GetTables(cmd_cntx_->server_conn_cntx()->db_index());
+        auto* pt = db_slice.GetTables(cmd_cntx_->server_conn_cntx()->db_index());
         PrimeIterator it = pt->Find(key);
         if (IsValid(it)) {
           return MemoryUsage(it, account_key_memory_usage);

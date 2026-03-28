@@ -54,6 +54,24 @@ bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
 }
 
+// After iterating a StringSet with set_time(), lazy member expiry may have emptied it.
+// Per Redis semantics empty collections must not exist as keys, so delete the stale key.
+// Returns true if the key was deleted.
+bool DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view key,
+                      const PrimeValue& pv) {
+  if (!IsDenseEncoding(pv))
+    return false;
+
+  if (StringSet* ss = (StringSet*)pv.RObjPtr(); !ss->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    return true;
+  }
+  return false;
+}
+
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
   long long llval;
   *added = false;
@@ -282,7 +300,10 @@ StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
 
   size_t tries = 0;
   while (picks.size() < count && tries++ < count * 2) {
-    auto member = *strset->GetRandomMember();
+    auto it = strset->GetRandomMember();
+    if (it == strset->end())
+      break;
+    sds member = *it;
     picks.insert(picks.end(), {member, sdslen(member)});
   }
 
@@ -515,6 +536,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && overwrite) {
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
+      // Account for the old value's memory under its original type before destroying it,
+      // since InitSet will free the old value and change the type.
+      add_res.post_updater.ReduceHeapUsage();
     }
 
     // does not store the values, merely sets the encoding.
@@ -722,8 +746,9 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
   DCHECK(start != end);
   absl::flat_hash_set<string> uniques;
 
+  auto& db_slice = op_args.GetDbSlice();
   for (; start != end; ++start) {
-    auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
+    auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
@@ -734,6 +759,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
         uniques.emplace(ce.ToString());
         return true;
       });
+      DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv);
       continue;
     }
 
@@ -769,7 +795,11 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
     return true;
   });
 
-  DCHECK(!uniques.empty());  // otherwise the key would not exist.
+  // Lazy per-member TTL expiry during iteration may have emptied the set.
+  // Delete the stale key and return KEY_NOTFOUND per Redis empty-key semantics.
+  if (DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
 
   for (++start; start != end; ++start) {
     auto diff_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
@@ -780,7 +810,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
       continue;  // KEY_NOTFOUND
     }
 
-    SetType st2{diff_res.value()->second.RObjPtr(), diff_res.value()->second.Encoding()};
+    const PrimeValue& diff_pv = diff_res.value()->second;
+    SetType st2{diff_pv.RObjPtr(), diff_pv.Encoding()};
     if (st2.second == kEncodingIntSet) {
       int ii = 0;
       intset* is = (intset*)st2.first;
@@ -793,6 +824,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
       }
     } else {
       DiffStrSet(op_args.db_cntx, st2, &uniques);
+      DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, diff_pv);
     }
   }
 
@@ -827,6 +859,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
                                   result.push_back(ce.ToString());
                                   return true;
                                 });
+    DeleteSetIfEmpty(db_slice, t->GetDbContext(), *it, pv);
     return result;
   }
 
@@ -885,13 +918,14 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 }
 
 OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, int count) {
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto& db_slice = op_args.GetDbSlice();
+  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
-  const CompactObj& co = find_res.value()->second;
+  const PrimeValue& pv = find_res.value()->second;
 
-  const std::uint32_t size = co.Size();
+  const std::uint32_t size = pv.Size();
   const bool picks_are_unique = count >= 0;
   const std::uint32_t picks_count =
       picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size) : std::abs(count);
@@ -904,7 +938,13 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
     }
   }();
 
-  return RandMemberSet(op_args.db_cntx, co, *generator, picks_count);
+  auto result = RandMemberSet(op_args.db_cntx, pv, *generator, picks_count);
+
+  // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
+  // we must not reference it afterwards.
+  DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
+
+  return result;
 }
 
 // count - how many elements to pop.
@@ -941,6 +981,11 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     // Delete the set as it is now empty
     db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
+    // All members may have expired during iteration (lazy expiry), leaving the result empty.
+    if (result.empty()) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+
     // Replicate as DEL.
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
@@ -960,7 +1005,28 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   auto [removed, is_empty] = RemoveSet(db_cntx, result, &co);
   find_res->post_updater.Run();
 
-  CHECK(!is_empty);
+  // Lazy per-member TTL expiry during RandMemberSet iteration may have emptied
+  // the set (Size() includes expired members, but iteration skips them).
+  if (is_empty) {
+    db_slice.DelMutable(db_cntx, std::move(*find_res));
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    }
+    // Return KEY_NOTFOUND when nothing was actually popped so that CmdSPop
+    // replies with NULL for the single-arg form instead of dereferencing an
+    // empty vector.
+    if (result.empty()) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+    return result;
+  }
+
+  // Lazy expiry may have removed all picked members even though the set is
+  // not fully empty yet (Size() counts stale entries). Return KEY_NOTFOUND so
+  // CmdSPop replies with NULL instead of dereferencing an empty vector.
+  if (result.empty()) {
+    return OpStatus::KEY_NOTFOUND;
+  }
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (removed && op_args.shard->journal()) {

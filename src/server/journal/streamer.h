@@ -10,6 +10,7 @@
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/pending_buf.h"
+#include "server/serializer_base.h"
 #include "server/synchronization.h"
 #include "util/fiber_socket_base.h"
 
@@ -107,7 +108,7 @@ class CmdSerializer;
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
 // Only handles relevant slots, while ignoring all others.
-class RestoreStreamer : public JournalStreamer {
+class RestoreStreamer : public JournalStreamer, public SerializerBase {
  public:
   RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx);
   ~RestoreStreamer() override;
@@ -122,39 +123,34 @@ class RestoreStreamer : public JournalStreamer {
   void SendFinalize(long attempt);
 
  private:
-  void OnDbChange(DbIndex db_index, const ChangeReq& req);
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                           bool on_update) override;
+
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
+
   bool ShouldWrite(const journal::JournalChangeItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
   // Returns true if any entry was actually written
-  bool WriteBucket(PrimeTable::bucket_iterator it, const ExpireTable& expire_table,
-                   bool on_db_change);
+  bool WriteBucket(PrimeTable::bucket_iterator it, bool on_db_change);
 
-  void WriteEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                  uint64_t expire_ms);
+  void WriteEntry(BucketIdentity bucket, std::string_view key, const PrimeKey& pk,
+                  const PrimeValue& pv, uint64_t expire_ms);
 
   struct Stats {
-    uint64_t buckets_skipped = 0;
-    uint64_t buckets_written = 0;
     uint64_t buckets_loop = 0;
-    uint64_t buckets_on_db_update = 0;
     uint64_t throttle_on_db_update = 0;
     uint64_t throttle_usec_on_db_update = 0;
-    uint64_t keys_written = 0;
     uint64_t keys_skipped = 0;
     uint64_t commands = 0;
     uint64_t iter_skips = 0;
   };
 
-  DbSlice* db_slice_;
-  DbTableArray db_array_;
-  uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
 
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
-  ThreadLocalMutex big_value_mu_;
   Stats stats_;
   base::RealTimeAggregator cpu_aggregator_;
 };

@@ -109,17 +109,17 @@ class StringSet : public DenseSet {
   }
 
  protected:
-  uint64_t Hash(const void* ptr, uint32_t cookie) const override;
+  uint64_t Hash(const void* ptr, uint32_t cookie) const final;
 
   unsigned AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec, bool keepttl);
 
-  bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const override;
+  bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
 
-  size_t ObjectAllocSize(const void* s1) const override;
-  uint32_t ObjExpireTime(const void* obj) const override;
-  void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) override;
-  void ObjDelete(void* obj, bool has_ttl) const override;
-  void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const override;
+  size_t ObjectAllocSize(const void* s1) const final;
+  uint32_t ObjExpireTime(const void* obj) const final;
+  void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) final;
+  void ObjDelete(void* obj) const final;
+  void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const final;
   sds MakeSetSds(std::string_view src, uint32_t ttl_sec) const;
 
  private:

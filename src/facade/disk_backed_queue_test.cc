@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#ifdef __linux__
+
 #include "facade/disk_backed_queue.h"
 
 #include <absl/strings/str_cat.h>
@@ -338,3 +340,5 @@ TEST_F(DiskBackedQueueTest, AsyncPunchHole) {
 
 }  // namespace
 }  // namespace dfly
+
+#endif  // __linux__

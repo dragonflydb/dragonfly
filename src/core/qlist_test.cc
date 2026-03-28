@@ -418,17 +418,38 @@ TEST_F(QListTest, Tiering) {
   EXPECT_EQ(QList::stats.offload_requests, 9);
 }
 
-using FillCompress = tuple<int, unsigned, QList::COMPR_METHOD>;
+TEST_F(QListTest, InsertPivotSplitMergeMallocSize) {
+  QList ql(2, 0);  // fill=2: at most 2 elements per node
+  ql.Push("x", QList::TAIL);
+  ql.Push("b", QList::TAIL);  // ['x','b'] — full node (count == fill)
+
+  // Insert before 'b' on a full node triggers the split path.
+  ql.Insert("b", "x", QList::BEFORE);
+
+  // Verify malloc_size_ matches the actual sum of node sizes.
+  size_t actual_sz = 0;
+  for (auto* n = ql.Head(); n; n = n->next)
+    actual_sz += n->sz;
+  size_t node_overhead = ql.node_count() * sizeof(QList::Node) + znallocx(sizeof(QList));
+  EXPECT_EQ(ql.MallocUsed(false) - node_overhead, actual_sz);
+
+  ql.Pop(QList::TAIL);  // remove 'b' node → 1 node ['x','x']
+
+  // Erase one element; list stays at len==1.
+  // DCHECK_EQ(malloc_size_, head_->sz) at exit of Erase(Iterator) catches the drift.
+  auto it = ql.GetIterator(QList::HEAD);
+  ql.Erase(it);
+}
+
+using FillCompress = tuple<int, unsigned>;
 
 class PrintToFillCompress {
  public:
   std::string operator()(const TestParamInfo<FillCompress>& info) const {
     int fill = get<0>(info.param);
     int compress = get<1>(info.param);
-    QList::COMPR_METHOD method = get<2>(info.param);
     string fill_str = fill >= 0 ? absl::StrCat("f", fill) : absl::StrCat("fminus", -fill);
-    string method_str = method == QList::LZF ? "lzf" : "lz4";
-    return absl::StrCat(fill_str, "compr", compress, method_str);
+    return absl::StrCat(fill_str, "compr", compress);
   }
 };
 
@@ -436,13 +457,13 @@ class OptionsTest : public QListTest, public WithParamInterface<FillCompress> {}
 
 INSTANTIATE_TEST_SUITE_P(Matrix, OptionsTest,
                          Combine(Values(-5, -4, -3, -2, -1, 0, 1, 2, 32, 66, 128, 999),
-                                 Values(0, 1, 2, 3, 4, 5, 6, 10), Values(QList::LZF, QList::LZ4)),
+                                 Values(0, 1, 2, 3, 4, 5, 6, 10)),
                          PrintToFillCompress());
 
 TEST_P(OptionsTest, Numbers) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
-  ql_.set_compr_method(method);
+
   array<int64_t, 5000> nums;
 
   for (unsigned i = 0; i < nums.size(); i++) {
@@ -464,9 +485,8 @@ TEST_P(OptionsTest, Numbers) {
 }
 
 TEST_P(OptionsTest, NumbersIndex) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
-  ql_.set_compr_method(method);
 
   long long nums[5000];
   for (int i = 0; i < 760; i++) {
@@ -485,9 +505,9 @@ TEST_P(OptionsTest, NumbersIndex) {
 }
 
 TEST_P(OptionsTest, DelRangeA) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
-  ql_.set_compr_method(method);
+
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
     nums[i] = -5157318210846258176 + i;
@@ -510,9 +530,8 @@ TEST_P(OptionsTest, DelRangeA) {
 }
 
 TEST_P(OptionsTest, DelRangeB) {
-  auto [fill, _, method] = GetParam();
+  auto [fill, _] = GetParam();
   ql_ = QList(fill, QUICKLIST_NOCOMPRESS);  // ignore compress parameter
-  ql_.set_compr_method(method);
 
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
@@ -550,9 +569,8 @@ TEST_P(OptionsTest, DelRangeB) {
 }
 
 TEST_P(OptionsTest, DelRangeC) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
-  ql_.set_compr_method(method);
 
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
@@ -575,9 +593,8 @@ TEST_P(OptionsTest, DelRangeC) {
 }
 
 TEST_P(OptionsTest, DelRangeD) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
-  ql_.set_compr_method(method);
 
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
@@ -593,9 +610,8 @@ TEST_P(OptionsTest, DelRangeD) {
 }
 
 TEST_P(OptionsTest, DelRangeNode) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(-2, compress);
-  ql_.set_compr_method(method);
 
   for (int i = 0; i < 32; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -606,9 +622,8 @@ TEST_P(OptionsTest, DelRangeNode) {
 }
 
 TEST_P(OptionsTest, DelRangeNodeOverflow) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(-2, compress);
-  ql_.set_compr_method(method);
 
   for (int i = 0; i < 32; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -618,7 +633,7 @@ TEST_P(OptionsTest, DelRangeNodeOverflow) {
 }
 
 TEST_P(OptionsTest, DelRangeMiddle100of500) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 500; i++)
@@ -630,7 +645,7 @@ TEST_P(OptionsTest, DelRangeMiddle100of500) {
 }
 
 TEST_P(OptionsTest, DelLessFillAcrossNodes) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 500; i++)
@@ -641,7 +656,7 @@ TEST_P(OptionsTest, DelLessFillAcrossNodes) {
 }
 
 TEST_P(OptionsTest, DelNegOne) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -651,7 +666,7 @@ TEST_P(OptionsTest, DelNegOne) {
 }
 
 TEST_P(OptionsTest, DelNegOneOverflow) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -663,7 +678,7 @@ TEST_P(OptionsTest, DelNegOneOverflow) {
 }
 
 TEST_P(OptionsTest, DelNeg100From500) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -676,7 +691,7 @@ TEST_P(OptionsTest, DelNeg100From500) {
 }
 
 TEST_P(OptionsTest, DelMin10_5_from50) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 50; i++)
@@ -687,7 +702,7 @@ TEST_P(OptionsTest, DelMin10_5_from50) {
 }
 
 TEST_P(OptionsTest, DelElems) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
 
   const char* words[] = {"abc", "foo", "bar", "foobar", "foobared", "zap", "bar", "test", "foo"};
@@ -735,7 +750,7 @@ TEST_P(OptionsTest, DelElems) {
 }
 
 TEST_P(OptionsTest, IterateReverse) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 500; i++)
@@ -752,7 +767,7 @@ TEST_P(OptionsTest, IterateReverse) {
 }
 
 TEST_P(OptionsTest, Iterate500) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -780,7 +795,7 @@ TEST_P(OptionsTest, Iterate500) {
 }
 
 TEST_P(OptionsTest, IterateAfterOne) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(-2, compress);
   ql_.Push("hello", QList::HEAD);
 
@@ -801,7 +816,7 @@ TEST_P(OptionsTest, IterateAfterOne) {
 }
 
 TEST_P(OptionsTest, IterateDelete) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
 
   ql_.Push("abc", QList::TAIL);
@@ -823,7 +838,7 @@ TEST_P(OptionsTest, IterateDelete) {
 }
 
 TEST_P(OptionsTest, InsertBeforeOne) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(-2, compress);
 
   ql_.Push("hello", QList::HEAD);
@@ -843,7 +858,7 @@ TEST_P(OptionsTest, InsertBeforeOne) {
 }
 
 TEST_P(OptionsTest, InsertWithHeadFull) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(4, compress);
 
   for (int i = 0; i < 10; i++)
@@ -859,7 +874,7 @@ TEST_P(OptionsTest, InsertWithHeadFull) {
 }
 
 TEST_P(OptionsTest, InsertWithTailFull) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(4, compress);
   for (int i = 0; i < 10; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -874,7 +889,7 @@ TEST_P(OptionsTest, InsertWithTailFull) {
 }
 
 TEST_P(OptionsTest, InsertOnceWhileIterating) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
 
   ql_.Push("abc", QList::TAIL);
@@ -900,7 +915,7 @@ TEST_P(OptionsTest, InsertOnceWhileIterating) {
 }
 
 TEST_P(OptionsTest, InsertBefore250NewInMiddleOf500Elements) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
   for (int i = 0; i < 500; i++) {
     string val = StrCat("hello", i);
@@ -920,7 +935,7 @@ TEST_P(OptionsTest, InsertBefore250NewInMiddleOf500Elements) {
 }
 
 TEST_P(OptionsTest, InsertAfter250NewInMiddleOf500Elements) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -939,7 +954,7 @@ TEST_P(OptionsTest, InsertAfter250NewInMiddleOf500Elements) {
 }
 
 TEST_P(OptionsTest, NextPlain) {
-  auto [_, compress, method] = GetParam();
+  auto [_, compress] = GetParam();
   ql_ = QList(-2, compress);
 
   QList::SetPackedThreshold(3);
@@ -960,7 +975,7 @@ TEST_P(OptionsTest, NextPlain) {
 }
 
 TEST_P(OptionsTest, IndexFrom500) {
-  auto [fill, compress, method] = GetParam();
+  auto [fill, compress] = GetParam();
   ql_ = QList(fill, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -1003,8 +1018,7 @@ static void BM_QListCompress(benchmark::State& state) {
 
   VLOG(1) << "Read " << lines.size() << " lines " << state.range(0);
   while (state.KeepRunning()) {
-    QList ql(-2, state.range(0));  // uses differrent compression modes, see below.
-    ql.set_compr_method(state.range(1) == 0 ? QList::LZF : QList::LZ4);
+    QList ql(-2, state.range(0));
 
     for (const string& l : lines) {
       ql.Push(l, QList::TAIL);
@@ -1014,9 +1028,9 @@ static void BM_QListCompress(benchmark::State& state) {
   CHECK_EQ(0, zmalloc_used_memory_tl);
 }
 BENCHMARK(BM_QListCompress)
-    ->ArgsProduct({{1, 4, 0}, {0, 1}});  // x - compression depth, y compression method.
-                                         // x = 0 no compression, 1 - compress all nodes but edges,
-                                         // 4 - compress all but 4 nodes from edges.
+    ->ArgsProduct({{1, 4, 0}});  // compression depth:
+                                 // 0 - no compression, 1 - compress all nodes but edges,
+                                 // 4 - compress all but 4 nodes from edges.
 
 static void BM_QListUncompress(benchmark::State& state) {
   SetupMalloc();
@@ -1027,7 +1041,6 @@ static void BM_QListUncompress(benchmark::State& state) {
   io::LineReader lr(*src, TAKE_OWNERSHIP);
   string_view line;
   QList ql(-2, state.range(0));
-  ql.set_compr_method(state.range(1) == 0 ? QList::LZF : QList::LZ4);
   QList::stats.compression_attempts = 0;
 
   CHECK_EQ(QList::stats.compressed_bytes, 0u);
@@ -1062,6 +1075,173 @@ static void BM_QListUncompress(benchmark::State& state) {
     CHECK_EQ(line_len, actual_len);
   }
 }
-BENCHMARK(BM_QListUncompress)->ArgsProduct({{1, 4, 0}, {0, 1}});
+BENCHMARK(BM_QListUncompress)->ArgsProduct({{1, 4, 0}});
+
+class QListZstdTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    SetupMalloc();
+  }
+
+  void TearDown() override {
+    // Reset thread-local ZSTD dictionary between tests so each test starts clean.
+    QList::ShutdownThread();
+  }
+
+  // Generate Celery-like JSON entries.
+  void PopulateWithCeleryData(QList& ql, unsigned count) {
+    for (unsigned i = 0; i < count; ++i) {
+      string id = to_string(100000 + i);
+      string entry =
+          "{\"body\": \"W10=\", \"content-encoding\": \"utf-8\", "
+          "\"content-type\": \"application/json\", "
+          "\"headers\": {\"lang\": \"py\", \"task\": \"process_job\", "
+          "\"id\": \"b3e4b923-8a77-4053-aff0-" +
+          id +
+          "\", \"shadow\": null, \"eta\": null, "
+          "\"expires\": null, \"group\": null, \"retries\": 0, "
+          "\"timelimit\": [null, null], "
+          "\"root_id\": \"b3e4b923-8a77-4053-aff0-" +
+          id +
+          "\", \"parent_id\": null, "
+          "\"argsrepr\": \"('job" +
+          to_string(i) +
+          "',)\", \"kwargsrepr\": \"{}\", "
+          "\"origin\": \"gen917779@hut\"}, "
+          "\"properties\": {\"correlation_id\": \"b3e4b923\", "
+          "\"reply_to\": \"9933040c\", \"delivery_mode\": 2, "
+          "\"delivery_info\": {\"exchange\": \"\", \"routing_key\": \"my_queue\"}, "
+          "\"priority\": 0}}";
+      ql.Push(entry, QList::TAIL);
+    }
+  }
+};
+
+TEST_F(QListZstdTest, CompressAndReadAll) {
+  QList ql(-1, 0);            // 4KB nodes, no depth-based compression (ZSTD dict replaces it)
+  ql.set_compr_threshold(1);  // threshold 1 = trigger as soon as possible
+  PopulateWithCeleryData(ql, 500);
+
+  size_t after = ql.MallocUsed(true);
+  LOG(INFO) << "Node count: " << ql.node_count() << ", total entries: " << ql.Size()
+            << ", MallocUsed: " << after;
+
+  // Verify all entries are readable.
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        EXPECT_NE(e.data(), nullptr);
+        EXPECT_GT(e.view().size(), 100u);
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, 500u);
+}
+
+TEST_F(QListZstdTest, PushAfterCompress) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  // Push new entries after compression.
+  ql.Push("new_head_entry", QList::HEAD);
+  ql.Push("new_tail_entry", QList::TAIL);
+  EXPECT_EQ(ql.Size(), 502u);
+
+  // Verify head and tail are readable.
+  auto it = ql.GetIterator(QList::HEAD);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.Get().view(), "new_head_entry");
+
+  it = ql.GetIterator(QList::TAIL);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.Get().view(), "new_tail_entry");
+}
+
+TEST_F(QListZstdTest, PopAfterCompress) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  EXPECT_EQ(ql.Size(), 500u);
+
+  string head = ql.Pop(QList::HEAD);
+  string tail = ql.Pop(QList::TAIL);
+  EXPECT_EQ(ql.Size(), 498u);
+  EXPECT_FALSE(head.empty());
+  EXPECT_FALSE(tail.empty());
+}
+
+TEST_F(QListZstdTest, SmallListSkipped) {
+  QList ql(-2, 0);  // compress=0 so ZSTD path is active (LZF disabled)
+  PopulateWithCeleryData(ql, 5);
+
+  size_t size = ql.MallocUsed(true);
+  // Set threshold higher than the list size — dict should not be trained.
+  ql.set_compr_threshold(size + 1000);
+
+  auto initial_compressions = QList::stats.zstd_dict_compressions;
+  PopulateWithCeleryData(ql, 5);
+  EXPECT_EQ(initial_compressions, QList::stats.zstd_dict_compressions);
+}
+
+TEST_F(QListZstdTest, IndexAccess) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  // Access by positive index.
+  auto it = ql.GetIterator(50);
+  ASSERT_TRUE(it.Valid());
+  auto entry = it.Get();
+  EXPECT_NE(entry.data(), nullptr);
+  EXPECT_GT(entry.view().size(), 100u);
+
+  // Access by negative index (from tail).
+  it = ql.GetIterator(-1);
+  ASSERT_TRUE(it.Valid());
+  entry = it.Get();
+  EXPECT_NE(entry.data(), nullptr);
+}
+
+TEST_F(QListZstdTest, IncrementalCompression) {
+  // Verify that a newly interior node gets compressed incrementally.
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+
+  // Head and tail must be uncompressed.
+  EXPECT_EQ(ql.Head()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  EXPECT_EQ(ql.Tail()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  // Remember the old head node — it will become interior after a head push
+  // that creates a new node.
+  const QList::Node* old_head = ql.Head();
+
+  // Push enough data to force a new head node (fill=-1 means 4KB nodes).
+  for (int i = 0; i < 20; ++i) {
+    ql.Push("padding_head_" + to_string(i), QList::HEAD);
+  }
+
+  // The old head should now be an interior node and compressed.
+  // (It's not head_ anymore, and it's not tail.)
+  EXPECT_NE(ql.Head(), old_head);
+  EXPECT_TRUE(old_head->IsCompressed());
+
+  // New head/tail must remain uncompressed.
+  EXPECT_EQ(ql.Head()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+  EXPECT_EQ(ql.Tail()->encoding, QUICKLIST_NODE_ENCODING_RAW);
+
+  // Verify all entries are still readable.
+  unsigned count = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        ++count;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(count, ql.Size());
+}
 
 }  // namespace dfly

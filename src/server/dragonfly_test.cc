@@ -1018,6 +1018,49 @@ TEST_F(DflyEngineTest, MemoryKeys) {
   EXPECT_GT(metrics.db_stats[0].memory_usage_by_type[OBJ_KEY], 100000);
 }
 
+// Verify that inline_keys, expire_count, and OBJ_KEY memory stay consistent
+// when expire is added/removed on inline keys (regression for memory underflow bug).
+TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
+  // Keys short enough to be stored inline (kInlineLen = 16).
+  constexpr int kCount = 10;
+  for (int i = 0; i < kCount; i++)
+    Run({"set", absl::StrCat("k", i), "v"});
+
+  auto stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, kCount);
+  EXPECT_EQ(stats.expire_count, 0u);
+  EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+
+  // Setting expire transitions inline -> SDS_TTL_TAG (heap-allocated).
+  for (int i = 0; i < kCount; i++)
+    Run({"expire", absl::StrCat("k", i), "3600"});
+
+  stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, 0u);
+  EXPECT_EQ(stats.expire_count, kCount);
+  EXPECT_GT(stats.memory_usage_by_type[OBJ_KEY], 0);
+
+  // PERSIST transitions SDS_TTL_TAG -> inline again.
+  for (int i = 0; i < kCount; i++)
+    Run({"persist", absl::StrCat("k", i)});
+
+  stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, kCount);
+  EXPECT_EQ(stats.expire_count, 0u);
+  EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+
+  // Re-expire then delete: prior bug caused memory accounting underflow on deletion.
+  for (int i = 0; i < kCount; i++)
+    Run({"expire", absl::StrCat("k", i), "3600"});
+  for (int i = 0; i < kCount; i++)
+    Run({"del", absl::StrCat("k", i)});
+
+  stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, 0u);
+  EXPECT_EQ(stats.expire_count, 0u);
+  EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+}
+
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {

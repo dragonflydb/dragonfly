@@ -58,7 +58,10 @@ def celery_worker(celery_app):
     # Must explicitly stop the daemon to prevent it from entering a tight
     # reconnection spin loop when the test abruptly destroys the Redis socket.
     worker.stop()
-    t.join()
+    # Use a timeout because the worker thread may be blocked on socket.recv()
+    # in the kombu event loop and never notice the stop flag.
+    # The thread is a daemon, so it will be cleaned up on process exit.
+    t.join(timeout=10)
 
 
 async def test_celery_push_jobs(async_client: aioredis.Redis, celery_app):
@@ -70,6 +73,8 @@ async def test_celery_push_jobs(async_client: aioredis.Redis, celery_app):
 
     queue_len = await async_client.llen("my_queue")
     assert queue_len == 200
+    mem_usage = await async_client.memory_usage("my_queue")
+    logging.info(f"Queue 'my_queue' MEMORY USAGE: {mem_usage:,} bytes ({queue_len} jobs)")
 
 
 def test_celery_inspect(celery_app, celery_worker):

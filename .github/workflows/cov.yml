@@ -16,7 +16,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - container: "ubuntu-dev:20-gcc14"
+          - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: {cxx: g++, c: gcc}
             cxx_flags: "-fprofile-arcs -ftest-coverage"
@@ -101,13 +101,13 @@ jobs:
           echo ls covout
           ls covout/
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: build/main_coverage.info
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: build/covout/

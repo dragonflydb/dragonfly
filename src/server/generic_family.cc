@@ -93,13 +93,6 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg, bool ignore_crc = 
   return version;
 }
 
-template <typename It> int64_t GetExpireTime(const DbSlice& db_slice, const It& exp_it) {
-  if (!IsValid(exp_it))
-    return 0;
-
-  return db_slice.ExpireTime(exp_it->second);
-}
-
 class InMemSource : public ::io::Source {
  public:
   explicit InMemSource(std::string_view buf) : buf_(buf) {
@@ -459,13 +452,13 @@ OpStatus Renamer::FinalizeRename() {
 
 bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
-  auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
+  auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
   return IsValid(it);
 }
 
 void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
-  auto [it, exp_it] = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
+  auto it = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
 
   src_found_ = IsValid(it);
   if (!src_found_) {
@@ -475,8 +468,9 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   OpResult<string> res = DumpToString(src_key_, it->second, t->GetOpArgs(shard));
   if (res.ok()) {
     optional rdb_version = GetRdbVersion(*res);
-    serialized_value_ = SerializedValue{std::move(*res), rdb_version,
-                                        GetExpireTime(db_slice, exp_it), it->first.IsSticky()};
+    int64_t exp_time = it->first.GetExpireTime();
+    serialized_value_ =
+        SerializedValue{std::move(*res), rdb_version, exp_time, it->first.IsSticky()};
   } else {
     serialized_value_ = res.status();
   }
@@ -573,18 +567,14 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
   if (!IsValid(res.it)) {
     return OpStatus::KEY_NOTFOUND;
   } else {
-    if (IsValid(res.exp_it)) {
-      // The SKIPPED not really used, just placeholder for error
-      return db_slice.UpdateExpire(op_args.db_cntx.db_index, res.it, 0) ? OpStatus::OK
-                                                                        : OpStatus::SKIPPED;
-    }
-    return OpStatus::SKIPPED;  // fall though - key does not have expiry
+    bool cleared = db_slice.RemoveExpire(op_args.db_cntx.db_index, res.it);
+    return cleared ? OpStatus::OK : OpStatus::SKIPPED;
   }
 }
 
 OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
-  auto [it, _] = db_slice.FindReadOnly(op_args.db_cntx, key);
+  auto it = db_slice.FindReadOnly(op_args.db_cntx, key);
 
   if (IsValid(it))
     return DumpToString(key, it->second, op_args);
@@ -638,7 +628,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
   if (prime_it->first.HasExpire()) {
-    it = db_slice.ExpireIfNeeded(op_args.db_cntx, it).it;
+    it = db_slice.ExpireIfNeeded(op_args.db_cntx, it);
     if (!IsValid(it))
       return false;
   }
@@ -691,7 +681,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
           << db_slice.DbSize(op_args.db_cntx.db_index);
 
   PrimeTable::Cursor cur{*cursor};
-  auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
+  auto* prime_table = db_slice.GetTables(op_args.db_cntx.db_index);
 
   const auto start_cycles = base::CycleClock::Now();
 
@@ -845,7 +835,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   }
 
   find_res.post_updater.Run();
-  auto res = db_slice.UpdateExpire(op_args.db_cntx, find_res.it, find_res.exp_it, params);
+  auto res = db_slice.UpdateExpire(op_args.db_cntx, find_res.it, params);
 
   // If the value was deleted, replicate as DEL.
   // Else, replicate as PEXPIREAT with exact time.
@@ -866,7 +856,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
 OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
                                      CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
-  auto [it, expire_it, auto_updater, is_new] = db_slice.FindMutable(op_args.db_cntx, key);
+  auto [it, auto_updater, is_new] = db_slice.FindMutable(op_args.db_cntx, key);
 
   if (!IsValid(it) || (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)) {
     std::vector<long> res(values.size(), -2);
@@ -887,7 +877,7 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
 OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
-  auto [it, expire_it] = db_slice.FindReadOnly(db_cntx, key);
+  auto it = db_slice.FindReadOnly(db_cntx, key);
   if (!IsValid(it))
     return -2;
 
@@ -933,14 +923,14 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
 
 OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view key) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
-  auto [it, expire_it] = db_slice.FindReadOnly(t->GetDbContext(), key);
+  auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  if (!IsValid(expire_it))
+  if (!it->first.HasExpire())
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it->second);
+  int64_t ttl_ms = it->first.GetExpireTime();
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
   return ttl_ms;
 }
@@ -963,16 +953,13 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   DbContext target_cntx = op_args.db_cntx;
   target_cntx.db_index = target_db;
   auto to_res = db_slice.FindReadOnly(target_cntx, key);
-  if (IsValid(to_res.it))
+  if (IsValid(to_res))
     return OpStatus::KEY_EXISTS;
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
+  uint64_t exp_ts = from_res.it->first.GetExpireTime();
   from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
-
-  // Restore expire flag after std::move.
-  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
 
   db_slice.Del(op_args.db_cntx, from_res.it);
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
@@ -1013,24 +1000,22 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   RemoveKeyFromIndexesIfNeeded(from_key, op_args.db_cntx, from_res.it->second, op_args.shard);
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = GetExpireTime(db_slice, from_res.exp_it);
+  uint64_t exp_ts = from_res.it->first.GetExpireTime();
   from_res.post_updater.ReduceHeapUsage();
 
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
 
-  // Restore the expire flag on 'from' so we could delete it from expire table.
-  from_res.it->first.SetExpire(IsValid(from_res.exp_it));
-
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     to_res.it->second = std::move(from_obj);
-    to_res.it->first.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
 
-    // It is guaranteed that UpdateExpire() call does not erase the element because then
-    // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
-    // therefore we can delete 'from_it'.
-    db_slice.UpdateExpire(op_args.db_cntx.db_index, to_res.it, exp_ts);
+    if (exp_ts) {
+      db_slice.AddExpire(op_args.db_cntx.db_index, to_res.it, exp_ts);
+    } else {
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, to_res.it);
+    }
+
     to_res.it->first.SetSticky(sticky);
     to_res.post_updater.Run();
 
@@ -1638,7 +1623,7 @@ OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_v
                                             SortEntryList* dest) {
   using namespace container_utils;
 
-  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -1668,7 +1653,7 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
                                                                         std::string_view key) {
   using namespace container_utils;
 
-  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -1690,7 +1675,7 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
 // Fetch a string value from a key (for BY pattern lookups)
 // TODO: does not support tiering.
 string OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
-  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it) || it->second.ObjType() != OBJ_STRING) {
     return {};  // Missing key defaults to empty string
   }
@@ -1705,7 +1690,7 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   // If we are about to overwrite an existing indexed document (HASH/JSON),
   // remove it from search indices first to avoid duplicate entries.
-  auto existing = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  auto existing = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (IsValid(existing)) {
     RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing->second, op_args.shard);
   }
@@ -2424,7 +2409,7 @@ void GenericFamily::Type(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
-    auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
+    auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
     if (!it.is_done()) {
       return it->second.ObjType();
     } else {
@@ -2552,7 +2537,7 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArg
 
   for (string_view key : keys) {
     auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key);
-    res += IsValid(find_res.it);
+    res += IsValid(find_res);
   }
   return res;
 }
@@ -2570,8 +2555,7 @@ void GenericFamily::RandomKey(CmdArgList args, CommandContext* cmd_cntx) {
 
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
-        auto [prime_table, expire_table] =
-            cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
+        auto* prime_table = cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
         if (prime_table->size() == 0) {
           return;
         }

@@ -48,8 +48,7 @@ constexpr size_t kMinBlobSize = 8_KB;
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
                              SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
                              DflyVersion replica_dfly_version)
-    : db_slice_(slice),
-      db_array_(slice->databases()),
+    : SerializerBase(slice, cntx),
       compression_mode_(compression_mode),
       replica_dfly_version_(replica_dfly_version),
       consumer_(consumer),
@@ -77,22 +76,11 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
-  auto db_cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
-    OnDbChange(db_index, req);
-  };
-
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
-  snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
+  SerializerBase::RegisterChangeListener();
 
   if (stream_journal) {
-    use_snapshot_version_ = absl::GetFlag(FLAGS_point_in_time_snapshot);
     journal_cb_id_ = journal::RegisterConsumer(this);
-    if (!use_snapshot_version_) {
-      auto moved_cb = [this](DbIndex db_index, const DbSlice::MovedItemsVec& items) {
-        OnMoved(db_index, items);
-      };
-      moved_cb_id_ = db_slice_->RegisterOnMove(std::move(moved_cb));
-    }
   }
 
   size_t flush_threshold = 0;
@@ -120,10 +108,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     SerializeIndexMappings();
     SerializeGlobalHnswIndices();
     this->IterateBucketsFb(stream_journal);
-    db_slice_->UnregisterOnChange(snapshot_version_);
-    if (!use_snapshot_version_) {
-      db_slice_->UnregisterOnMoved(moved_cb_id_);
-    }
+    UnregisterChangeListener();
     consumer_->Finalize();
     VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
   });
@@ -279,25 +264,24 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
 
-  for (DbIndex snapshot_db_index_ = 0; snapshot_db_index_ < db_array_.size();
-       ++snapshot_db_index_) {
+  for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
     if (!cntx_->IsRunning())
       return;
 
-    if (!db_array_[snapshot_db_index_])
+    if (!db_array_[snapshot_db_indx])
       continue;
 
-    PrimeTable* pt = &db_array_[snapshot_db_index_]->prime;
-    VLOG(1) << "Start traversing " << pt->size() << " items for index " << snapshot_db_index_;
+    PrimeTable* pt = &db_array_[snapshot_db_indx]->prime;
+    VLOG(1) << "Start traversing " << pt->size() << " items for index " << snapshot_db_indx;
 
     do {
       if (!cntx_->IsRunning()) {
         return;
       }
 
-      snapshot_cursor_ = pt->TraverseBuckets(
-          snapshot_cursor_,
-          [this, &snapshot_db_index_](auto it) { return BucketSaveCb(snapshot_db_index_, it); });
+      snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
+        return ProcessBucket(snapshot_db_indx, it, false);
+      });
 
       if (use_background_mode_) {
         // Yielding for background fibers has low overhead if the time slice isn't used up.
@@ -316,7 +300,11 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
     // Wait for all the outstanding delayed entries and serialize them as well.
-    PushDelayedEntries(true, nullptr);
+    {
+      std::lock_guard guard(big_value_mu_);
+      ProcessDelayedEntries(true, 0, cntx_);
+    }
+
     PushSerialized(true);
   }  // for (dbindex)
 
@@ -326,103 +314,52 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     PushSerialized(true);
   }
 
-  // serialized + side_saved must be equal to the total saved.
-  VLOG(1) << "Exit SnapshotSerializer loop_serialized: " << stats_.loop_serialized
-          << ", side_saved " << stats_.side_saved << ", cbcalls " << stats_.savecb_calls
-          << ", journal_saved " << stats_.jounal_changes << ", moved_saved " << stats_.moved_saved
-          << ", flushed_under_lock " << stats_.flushed_under_lock;
-}
+  if (VLOG_IS_ON(1)) {
+    auto stats = SerializerBase::GetStats();
 
-bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::lock_guard guard(big_value_mu_);
-
-  ++stats_.savecb_calls;
-
-  if (use_snapshot_version_) {
-    if (it.GetVersion() >= snapshot_version_) {
-      // either has been already serialized or added after snapshotting started.
-      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at "
-               << it.GetVersion();
-      ++stats_.skipped;
-      return false;
-    }
-
-    db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
-                                             snapshot_version_);
+    // serialized + side_saved must be equal to the total saved.
+    VLOG(1) << "Exit SnapshotSerializer total_serialized: " << stats.keys_serialized
+            << ", buckets side saved " << stats.buckets_on_change << ", total bucket saved "
+            << stats.buckets_serialized << ", journal_saved " << stats_.jounal_changes;
   }
-
-  auto* latch = db_slice_->GetLatch();
-
-  // Locking this never preempts. We merely just increment the underline counter such that
-  // if SerializeBucket preempts, Heartbeat() won't run because the blocking counter is not
-  // zero.
-  std::lock_guard latch_guard(*latch);
-
-  stats_.loop_serialized += SerializeBucket(db_index, it, false);
-
-  return false;
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                        bool push_tiered) {
-  if (use_snapshot_version_) {
-    DCHECK_LT(it.GetVersion(), snapshot_version_);
-    it.SetVersion(snapshot_version_);
-  }
+                                        bool on_update) {
+  // Version is already stamped by the caller (BucketSaveCb or SerializerBase::OnChange).
+  DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
 
-  unsigned result = 0;
-
-  std::vector<TieredDelayEntryKey> bucket_tiered_keys;
-  const bool tiering_enabled = EngineShard::tlocal()->tiered_storage() != nullptr;
-  const bool track_tiered_keys = push_tiered && tiering_enabled;
-
+  unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    ++result;
+    ++serialized;
     // might preempt due to big value serialization.
-    SerializeEntry(db_index, it->first, it->second);
-    // Track tiered keys to push them with priority after the loop, but only for callbacks.
-    if (track_tiered_keys && it->second.IsExternal()) {
-      bucket_tiered_keys.emplace_back(db_index, it->first.ToString());
-    }
-  }
-
-  if (tiering_enabled) {
-    // Push tracked tiered keys forcefully. If there are too many delayed entries
-    // accumulated we should also push them forcefully.
-    const size_t kMaxDelayedEntries = 512;
-    PushDelayedEntries(delayed_entries_.size() > kMaxDelayedEntries,
-                       track_tiered_keys ? &bucket_tiered_keys : nullptr);
+    SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
   }
 
   serialize_bucket_running_ = false;
-  return result;
+  return serialized;
 }
 
-void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
-  if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
+void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
+  CHECK(res);
+}
 
-  time_t expire_time = 0;
-  if (pk.HasExpire()) {
-    auto eit = db_array_[db_indx]->expire.Find(pk);
-    if (!IsValid(eit)) {
-      LOG(DFATAL) << "Internal error, entry " << pk.ToString()
-                  << " not found in expire table, db_index: " << db_indx
-                  << ", expire table size: " << db_array_[db_indx]->expire.size()
-                  << ", prime table size: " << db_array_[db_indx]->prime.size()
-                  << util::fb2::GetStacktrace();
-    } else {
-      expire_time = db_slice_->ExpireTime(eit->second);
-    }
-  }
+void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const PrimeKey& pk,
+                                   const PrimeValue& pv) {
+  if (pv.IsExternal() && pv.IsCool())
+    return SerializeEntry(bucket, db_indx, pk, pv.GetCool().record->value);
+
+  time_t expire_time = pk.GetExpireTime();
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
     // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    EnqueueOffloaded(bucket, db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    ++type_freq_map_[RDB_TYPE_STRING];
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
@@ -479,6 +416,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 
 size_t SliceSnapshot::FlushSerialized() {
   std::string blob = serializer_->Flush(RdbSerializerBase::FlushState::kFlushEndEntry);
+
   size_t serialized = blob.size();
   HandleFlushData(std::move(blob));
   return serialized;
@@ -490,132 +428,10 @@ bool SliceSnapshot::PushSerialized(bool force) {
   return FlushSerialized();
 }
 
-void SliceSnapshot::PushDelayedEntries(bool force,
-                                       std::vector<TieredDelayEntryKey>* bucket_tiered_keys) {
-  using DelayedEntryIt = decltype(delayed_entries_)::iterator;
-
-  // Serializes a single delayed entry. Resolves the tiered read future, write the
-  // key/value and removes the entry from the map.
-  auto serialize_entry = [this](DelayedEntryIt it) {
-    auto& entry = it->second;
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      cntx_->ReportError(make_error_code(errc::io_error),
-                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
-      return;
-    }
-
-    PrimeValue pv{*value};
-    auto res = serializer_->SaveEntry(entry->key, pv, entry->expire, entry->mc_flags, entry->dbid);
-    CHECK(res);
-
-    delayed_entries_.erase(it);
-
-    // If we have serialized enough data we should push it to avoid building
-    // up a large blob in memory.
-    PushSerialized(false);
-  };
-
-  // When tiered_keys are provided, we should serialize the entries matching the keys.
-  if (bucket_tiered_keys) {
-    for (const auto& key : *bucket_tiered_keys) {
-      if (auto it = delayed_entries_.find(key); it != delayed_entries_.end())
-        serialize_entry(it);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved()) {
-      ++it;
-      continue;
-    }
-    serialize_entry(it++);
-  }
-
-  // If we need to serialize all entries (force=true), we should push
-  // leftover serialized data after the loop.
-  PushSerialized(force);
-}
-
-void SliceSnapshot::SerializeExternal(DbIndex db_index, PrimeKey pk, const PrimeValue& pv,
-                                      time_t expire_time, uint32_t mc_flags) {
-  // We prefer avoid blocking, so we just schedule a tiered read and append
-  // it to the delayed entries.
-  auto key = pk.ToString();
-  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
-  auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
-                                                    expire_time, mc_flags);
-  delayed_entries_.emplace(std::make_pair(db_index, key), std::move(entry));
-  ++type_freq_map_[RDB_TYPE_STRING];
-}
-
-// Ordering invariant (both modes):
-//   For any key K, the replica must receive K's baseline value strictly before any journal entry
-//   that mutates K. This is required for baseline-dependent journal entries (e.g., HSET, LPUSH)
-//   which cannot be replayed without the prior value.
-//
-// PIT mode: enforced by serialize-before-mutate. OnDbChange serializes the bucket before the
-//   mutation commits; ConsumeJournalChange runs after the mutation on the same fiber, so the
-//   baseline is always first. big_value_mu_ prevents interleaving with the traversal fiber's
-//   SerializeBucket (which can preempt via consume_fun_).
-//
-// Non-PIT mode: OnDbChange only acquires big_value_mu_ as a barrier — no serialization. The
-//   mutex prevents journaling mutations from slipping in the middle of bucket serialization
-//   on the traversal fiber — see ConsumeJournalChange for details. OnMoved handles items
-//   displaced across the traversal cursor.
-void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  std::lock_guard guard(big_value_mu_);
-  if (use_snapshot_version_) {
-    PrimeTable* table = db_slice_->GetTables(db_index).first;
-    const PrimeTable::bucket_iterator* bit = req.update();
-
-    if (bit) {
-      if (!bit->is_done() && bit->GetVersion() < snapshot_version_) {
-        stats_.side_saved += SerializeBucket(db_index, *bit, true);
-      }
-    } else {
-      string_view key = get<string_view>(req.change);
-      table->CVCUponInsert(snapshot_version_, key,
-                           [this, db_index](PrimeTable::bucket_iterator it) {
-                             DCHECK_LT(it.GetVersion(), snapshot_version_);
-                             stats_.side_saved += SerializeBucket(db_index, it, true);
-                           });
-    }
-  }
-}
-
-bool SliceSnapshot::IsPositionSerialized(DbIndex id, PrimeTable::Cursor cursor) {
-  uint8_t depth = db_slice_->GetTables(id).first->depth();
-
-  return id < snapshot_db_index_ ||
-         (id == snapshot_db_index_ &&
-          (cursor.bucket_id() < snapshot_cursor_.bucket_id() ||
-           (cursor.bucket_id() == snapshot_cursor_.bucket_id() &&
-            cursor.segment_id(depth) < snapshot_cursor_.segment_id(depth))));
-}
-
-void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
-  std::lock_guard barrier(big_value_mu_);
-  DCHECK(!use_snapshot_version_);
-  for (const auto& item_cursors : items) {
-    // If item was moved from a bucket that was serialized to a bucket that was not serialized
-    // serialize the moved item.
-    const PrimeTable::Cursor& dest = item_cursors.second;
-    const PrimeTable::Cursor& source = item_cursors.first;
-    if (IsPositionSerialized(id, dest) && !IsPositionSerialized(id, source)) {
-      PrimeTable::bucket_iterator bit = db_slice_->GetTables(id).first->CursorToBucketIt(dest);
-      ++stats_.moved_saved;
-      SerializeBucket(id, bit, true);
-    }
-  }
-}
-
 // big_value_mu_ prevents expiry/eviction DEL journal entries from interleaving with an
 // in-progress SaveEntry for a large value. SaveEntry may yield mid-entry (emitting chunks
 // across multiple scheduler turns); expiry paths emit DEL via RecordDelete directly,
-// bypassing OnDbChange. Without the lock, such a DEL could be written between two chunks
+// bypassing OnChange. Without the lock, such a DEL could be written between two chunks
 // of the same entry, producing an invalid wire format for the downstream consumer.
 //
 // Note: even if the protocol were extended to support interleaved chunks, the lock would
@@ -624,7 +440,7 @@ void SliceSnapshot::OnMoved(DbIndex id, const DbSlice::MovedItemsVec& items) {
 // in the design doc addresses this without a shard-wide lock.
 //
 // Note: for transaction-driven mutations, baseline-before-journal ordering is already
-// guaranteed by call order on the mutation fiber (OnDbChange precedes ConsumeJournalChange);
+// guaranteed by call order on the mutation fiber (OnChange precedes ConsumeJournalChange);
 // big_value_mu_ is not needed for that ordering.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   std::lock_guard barrier(big_value_mu_);
@@ -657,7 +473,7 @@ size_t SliceSnapshot::GetTempBuffersSize() const {
 }
 
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
-  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total};
+  return {SerializerBase::GetStats().keys_serialized, stats_.keys_total};
 }
 
 }  // namespace dfly

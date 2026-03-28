@@ -12,21 +12,24 @@ namespace dfly {
 
 class SerializerBaseTest : public BaseFamilyTest, public SerializerBase {
  public:
-  SerializerBaseTest() : SerializerBase(nullptr) {
+  SerializerBaseTest() {
   }
 
  protected:
   using SerializerBase::BucketPhase;
-  using SerializerBase::CompleteBucketDelayed;
   using SerializerBase::FinishBucketIteration;
   using SerializerBase::MarkBucketSerializing;
 
   size_t BucketCount() const {
-    return BucketStateCountForTesting();
+    return bucket_states_.size();
   }
 
-  unsigned DoSerializeBucket(DbIndex /*db_index*/, PrimeTable::bucket_iterator /*it*/) override {
+  unsigned SerializeBucket(DbIndex /*db_index*/, PrimeTable::bucket_iterator /*it*/,
+                           bool /* on_update */) override {
     return 0;
+  }
+
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
   }
 };
 
@@ -39,24 +42,7 @@ TEST_F(SerializerBaseTest, MarkThenFinishNoneDelayed) {
   MarkBucketSerializing(bid);
   EXPECT_EQ(1u, BucketCount());
 
-  FinishBucketIteration(bid, {});
-  EXPECT_EQ(0u, BucketCount());
-}
-
-TEST_F(SerializerBaseTest, MarkThenFinishWithDelayedThenComplete) {
-  constexpr BucketIdentity bid = 0x2000;
-
-  MarkBucketSerializing(bid);
-  EXPECT_EQ(1u, BucketCount());
-
-  // Simulate one delayed (tiered) entry.
-  std::vector<TieredDelayedEntry> delayed;
-  delayed.push_back({});
-  FinishBucketIteration(bid, std::move(delayed));
-
-  EXPECT_EQ(1u, BucketCount());
-
-  CompleteBucketDelayed(bid);
+  FinishBucketIteration(bid);
   EXPECT_EQ(0u, BucketCount());
 }
 
@@ -70,19 +56,8 @@ TEST_F(SerializerBaseTest, MultipleBucketsIndependent) {
   MarkBucketSerializing(bid3);
   EXPECT_EQ(3u, BucketCount());
 
-  FinishBucketIteration(bid2, {});
+  FinishBucketIteration(bid2);
   EXPECT_EQ(2u, BucketCount());
-
-  std::vector<TieredDelayedEntry> d;
-  d.push_back({});
-  FinishBucketIteration(bid1, std::move(d));
-  EXPECT_EQ(2u, BucketCount());
-
-  FinishBucketIteration(bid3, {});
-  EXPECT_EQ(1u, BucketCount());
-
-  CompleteBucketDelayed(bid1);
-  EXPECT_EQ(0u, BucketCount());
 }
 
 }  // namespace dfly

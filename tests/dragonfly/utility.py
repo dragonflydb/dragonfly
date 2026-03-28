@@ -49,6 +49,32 @@ def batch_fill_data(client, gen, batch_size=100):
         client.mset({k: v for k, v, in group})
 
 
+async def get_all_keys(client, BATCH_SIZE=5000):
+    cursor = 0
+    keys = []
+
+    while True:
+        cursor, batch = await client.scan(cursor=cursor, count=BATCH_SIZE)
+        keys.extend(batch)
+        if cursor == 0:
+            break
+
+    return keys
+
+
+async def compare_master_replica_keys(master_client, replica_client, BATCH_SIZE=500):
+    keys = await get_all_keys(master_client)
+
+    for i in range(0, len(keys), BATCH_SIZE):
+        batch = keys[i : i + BATCH_SIZE]
+
+        master_vals = await master_client.mget(batch)
+        replica_vals = await replica_client.mget(batch)
+
+        for key, m, r in zip(batch, master_vals, replica_vals):
+            assert m == r, f"Key {key} mismatch: master='{m}', replica='{r}'"
+
+
 async def tick_timer(func, timeout=5, step=0.1):
     """
     Async generator with automatic break when all asserts pass
