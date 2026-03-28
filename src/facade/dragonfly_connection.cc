@@ -1334,6 +1334,12 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
   return ERROR;
 }
 
+void Connection::ParseFromBuffer() {
+  auto parse_func =
+      protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
+  (this->*parse_func)();
+}
+
 auto Connection::ParseLoop() -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
@@ -2287,8 +2293,17 @@ bool Connection::ParseMCBatch() {
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
-    if (result == MemcacheParser::INPUT_PENDING)
+    if (result == MemcacheParser::INPUT_PENDING) {
+      DVLOG(1) << "ParseMCBatch INPUT_PENDING: consumed=" << consumed
+               << " input_left=" << io_buf_.InputLen() << " append_len=" << io_buf_.AppendLen()
+               << " parsed_q_len=" << parsed_cmd_q_len_ << " head=" << (void*)parsed_head_
+               << " exec=" << (void*)parsed_to_execute_;
+      if (io_buf_.AppendLen() == 0) {
+        DVLOG(1) << "ParseMCBatch INPUT_PENDING while io_buf append space is exhausted; "
+                    "awaiting additional recv callback after buffer growth/consumption";
+      }
       return false;
+    }
 
     // We push the command to the parsed queue even in case of parse errors,
     // so that we can reply in order.
@@ -2599,41 +2614,48 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
       return;
     }
 
-    if (io_buf_.AppendLen() == 0) {
-      // We will regrow in IoLoopV2
-      return;
-    }
-
-    io::MutableBytes buf = io_buf_.AppendBuffer();
-    io::Result<size_t> res = socket_->TryRecv(buf);
-
-    if (res) {
-      if (*res > 0) {
-        // A recv call can return fewer bytes than requested even if the
-        // socket buffer actually contains enough data to satisfy the full request.
-        // TODO maybe worth looping here and try another recv call until it fails
-        // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
-        // resizing if AppendBuffer is zero.
-        io_buf_.CommitWrite(*res);
+    while (true) {
+      if (io_buf_.AppendLen() == 0) {
+        DCHECK_GT(io_buf_.InputLen(), 0u);
+        DVLOG(1) << "DoReadOnRecv early-return: io_buf full before TryRecv, input_len="
+                 << io_buf_.InputLen() << " append_len=" << io_buf_.AppendLen()
+                 << " parsed_q_len=" << parsed_cmd_q_len_ << " head=" << (void*)parsed_head_
+                 << " exec=" << (void*)parsed_to_execute_;
+        // We will regrow in IoLoopV2
         return;
       }
-      // *res == 0
-      io_ec_ = make_error_code(errc::connection_aborted);
+
+      io::MutableBytes buf = io_buf_.AppendBuffer();
+      io::Result<size_t> res = socket_->TryRecv(buf);
+
+      if (res) {
+        if (*res > 0) {
+          LOG(INFO) << "RecvNoti: read " << *res << "B, iobuf_after=" << io_buf_.InputLen() + *res;
+          io_buf_.CommitWrite(*res);
+          ParseFromBuffer();
+          continue;
+        }
+        // *res == 0
+        io_ec_ = make_error_code(errc::connection_aborted);
+        return;
+      }
+
+      // error path (!res)
+      auto ec = res.error();
+      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
+        LOG(INFO) << "RecvNoti: EAGAIN";
+        return;
+      }
+
+      io_ec_ = ec;
       return;
     }
-
-    // error path (!res)
-    auto ec = res.error();
-    // EAGAIN and EWOULDBLOCK
-    if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
-      return;
-    }
-
-    io_ec_ = ec;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
+    LOG(INFO) << "ProvidedBuf: " << buf.size() << "B";
     UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
                         [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
+    ParseFromBuffer();
   } else {
     LOG(FATAL) << "Should not reach here";
   }
@@ -2698,7 +2720,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
-    DoReadOnRecv(n);
+    LOG(INFO) << "OnRecv callback fired";
+    DoReadOnRecv(n);  // reads and parses
     io_event_.notify();
   });
 
@@ -2718,20 +2741,40 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     if (io_buf_.InputLen() == 0) {
-      // Poll again for readiness. The event handler registered above is edge triggered
-      // We should read from the socket until EAGAIN or EWOULDBLOCK
-      // to make sure we consume all available data.
-      // See "Do I need to continuously read/write" question
-      // under https://man7.org/linux/man-pages/man7/epoll.7.html
-      // The exception is when we use io_uring with multishot recv enabled, in which case
-      // we rely on the kernel to keep feeding us data until we multishot is disabled.
-      DoReadOnRecv(FiberSocketBase::RecvNotification{true});
+      DoReadOnRecv(FiberSocketBase::RecvNotification{true});  // reads and parses
+
+      LOG(INFO) << "V2loop iobuf=" << io_buf_.InputLen() << " head=" << (void*)parsed_head_
+                << " exec=" << (void*)parsed_to_execute_ << " qlen=" << parsed_cmd_q_len_;
+
+      bool cmd_executable_before = parsed_head_ && parsed_head_ == parsed_to_execute_;
+      bool cmd_ready_before = !cmd_executable_before && parsed_head_ && parsed_head_->CanReply();
+      DVLOG(1) << "IoLoopV2 await-enter: iobuf=" << io_buf_.InputLen()
+               << " append=" << io_buf_.AppendLen() << " head=" << (void*)parsed_head_
+               << " exec=" << (void*)parsed_to_execute_ << " qlen=" << parsed_cmd_q_len_
+               << " cmd_ready=" << cmd_ready_before << " cmd_executable=" << cmd_executable_before
+               << " io_ec=" << io_ec_.value();
+
       io_event_.await([this]() {
-        // TODO: optimize CanReply with looking up waiter key
         bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
         bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
-        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || io_ec_;
+        return cmd_ready || cmd_executable || io_ec_;
       });
+
+      bool cmd_executable_after = parsed_head_ && parsed_head_ == parsed_to_execute_;
+      bool cmd_ready_after = !cmd_executable_after && parsed_head_ && parsed_head_->CanReply();
+      DVLOG(1) << "IoLoopV2 await-exit: iobuf=" << io_buf_.InputLen()
+               << " append=" << io_buf_.AppendLen() << " head=" << (void*)parsed_head_
+               << " exec=" << (void*)parsed_to_execute_ << " qlen=" << parsed_cmd_q_len_
+               << " cmd_ready=" << cmd_ready_after << " cmd_executable=" << cmd_executable_after
+               << " io_ec=" << io_ec_.value();
+
+      DVLOG(1) << "IoLoopV2 wake: iobuf=" << io_buf_.InputLen() << " append=" << io_buf_.AppendLen()
+               << " head=" << (void*)parsed_head_ << " exec=" << (void*)parsed_to_execute_
+               << " qlen=" << parsed_cmd_q_len_ << " io_ec=" << io_ec_.value();
+    } else {
+      LOG(INFO) << "V2loop SKIP-AWAIT iobuf=" << io_buf_.InputLen()
+                << " head=" << (void*)parsed_head_ << " exec=" << (void*)parsed_to_execute_
+                << " qlen=" << parsed_cmd_q_len_;
     }
 
     if (io_ec_) {
@@ -2742,17 +2785,18 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
-    if (io_buf_.InputLen() > 0) {
-      parse_status = ParseLoop();
-    } else {
-      parse_status = NEED_MORE;
+    // ParseFromBuffer was already called in DoReadOnRecv, but ParseMCBatch caps the queue at 128
+    // commands. If the buffer still has data, parse the next batch before executing.
+    if (io_buf_.InputLen() > 0)
+      ParseFromBuffer();
 
-      if (parsed_head_) {
-        if (parsed_head_ == parsed_to_execute_)
-          ExecuteBatch();
-        ReplyBatch();
-      }
+    parse_status = NEED_MORE;
+    if (parsed_head_ == parsed_to_execute_) {
+      if (!ExecuteBatch())
+        parse_status = ERROR;
     }
+    if (parse_status != ERROR && !ReplyBatch())
+      parse_status = ERROR;
 
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();

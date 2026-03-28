@@ -362,6 +362,10 @@ class Connection : public util::Connection {
 
   bool ParseRedisBatch();
 
+  // Call the appropriate ParseMCBatch or ParseRedisBatch based on the protocol.
+  // Only CPU-bound work; must not perform I/O or fiber suspension.
+  void ParseFromBuffer();
+
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
   ParserStatus ParseLoop();
 

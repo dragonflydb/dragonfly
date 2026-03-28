@@ -88,6 +88,13 @@ class TestMemcached:
 
         assert False, "Pipelining not detected"
 
+    def test_get_many(self, memcached_client: MCClient):
+        """Regression: multi-key GET must complete in IoLoopV2."""
+        keys = [f"k{i}" for i in range(100)]
+        for k in keys:
+            memcached_client.set(k, k)
+        assert memcached_client.get_many(keys) == {k: k.encode() for k in keys}
+
     def test_noreply_alternating(self, memcached_client: MCClient):
         """
         Assert alternating noreply works correctly, will cause many dispatch queue emptyings.
