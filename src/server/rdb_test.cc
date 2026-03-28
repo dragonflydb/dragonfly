@@ -1214,4 +1214,66 @@ TEST_F(RdbTest, TopkSerializationDecayParameter) {
   EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
 }
 
+TEST_F(RdbTest, HashFieldDuplicationStats) {
+  class LogSink : public google::LogSink {
+   public:
+    void send(google::LogSeverity severity, const char* full_filename, const char* base_filename,
+              int line, const struct tm* tm_time, const char* message,
+              size_t message_len) override {
+      logs_.push_back(string(message, message_len));
+    }
+    const vector<string>& GetLogs() const { return logs_; }
+
+   private:
+    vector<string> logs_;
+  };
+
+  LogSink log_sink;
+  google::AddLogSink(&log_sink);
+
+  // Create 50 hashes with the same 5 field names to generate high duplication.
+  // Use large values (250 bytes each) to exceed the listpack threshold (1024 bytes),
+  // forcing StringMap encoding so hashes are saved as RDB_TYPE_HASH (tracked by HLL).
+  const string kLargeVal(250, 'x');
+  constexpr int kNumHashes = 50;
+  for (int i = 0; i < kNumHashes; ++i) {
+    Run({"hset", StrCat("hash:", i), "name", kLargeVal, "email", kLargeVal, "age", kLargeVal,
+         "city", kLargeVal, "country", kLargeVal});
+  }
+
+  // Trigger RDB save + load to exercise CreateObjectOnShard HLL tracking
+  Run({"debug", "reload"});
+
+  google::RemoveLogSink(&log_sink);
+
+  // Verify at least one duplication stats log message was emitted
+  const auto& logs = log_sink.GetLogs();
+  EXPECT_THAT(logs, Contains(HasSubstr("Hash field duplication stats")));
+
+  // DFS format uses per-shard files, so multiple RdbLoader instances may log independently.
+  // Collect all stats messages and verify aggregate numbers.
+  uint64_t total_fields_sum = 0;
+  for (const string& msg : logs) {
+    auto pos = msg.find("Hash field duplication stats: ");
+    if (pos == string::npos)
+      continue;
+
+    // Parse: "Hash field duplication stats: N unique fields out of M total"
+    const string prefix = "Hash field duplication stats: ";
+    size_t start = pos + prefix.size();
+    int unique_count = stoi(msg.substr(start));
+    // Unique fields per loader should be close to 5 (allow range 3-15 for HLL approximation)
+    EXPECT_GE(unique_count, 3);
+    EXPECT_LE(unique_count, 15);
+
+    auto out_of_pos = msg.find(" out of ", start);
+    ASSERT_NE(out_of_pos, string::npos);
+    uint64_t shard_total = stoull(msg.substr(out_of_pos + 8));
+    total_fields_sum += shard_total;
+  }
+
+  // Total across all loaders should equal 50 hashes * 5 fields = 250
+  EXPECT_EQ(total_fields_sum, 250u);
+}
+
 }  // namespace dfly
