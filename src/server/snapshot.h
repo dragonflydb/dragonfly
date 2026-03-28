@@ -103,16 +103,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   void ThrottleIfNeeded() final;
 
  private:
-  [[maybe_unused]] void SerializeIndexMapping(
-      uint32_t shard_id, std::string_view index_name,
-      const std::vector<std::pair<std::string, search::DocId>>& mappings);
-
-  // Serialize ShardDocIndex key-to-DocId mappings for all search indices on this shard
-  void SerializeIndexMappings();
-
-  // Serialize HNSW global indices for shard 0 only
-  void SerializeGlobalHnswIndices();
-
   // Main snapshotting fiber that iterates over all buckets in the db slice.
   void IterateBucketsFb(bool send_full_sync_cut);
 
