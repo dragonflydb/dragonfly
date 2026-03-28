@@ -665,6 +665,18 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       continue;
     }
 
+    // FILTER "expr"
+    if (parser->Check("FILTER")) {
+      std::string filter_expr{parser->Next<std::string_view>()};
+      auto step_or_err = aggregate::MakeFilterStep(filter_expr);
+      if (std::holds_alternative<std::string>(step_or_err)) {
+        return CreateSyntaxError(
+            absl::StrCat("FILTER expression error: ", std::get<std::string>(step_or_err)));
+      }
+      params.steps.push_back(std::move(std::get<aggregate::AggregationStep>(step_or_err)));
+      continue;
+    }
+
     // PARAMS
     if (parser->Check("PARAMS")) {
       params.params = ParseQueryParams(parser);

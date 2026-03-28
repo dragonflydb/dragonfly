@@ -793,8 +793,10 @@ void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
   DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
   if (dptr) {  // replace existing object.
     // A bit confusing design: ttl bit is located on the wrapping pointer,
-    // therefore we must set ttl bit before unrapping below.
+    // therefore we must set ttl bit before unwrapping below.
     dptr->SetTtl(has_ttl);
+    if (has_ttl)
+      expiration_used_ = true;
 
     if (dptr->IsLink())  // unwrap the pointer.
       dptr = dptr->AsLink();
