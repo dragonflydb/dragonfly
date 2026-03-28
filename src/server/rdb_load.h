@@ -14,6 +14,7 @@ extern "C" {
 
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
+#include "core/hll_estimator.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_index.h"
 #include "io/io.h"
@@ -377,6 +378,15 @@ class RdbLoader : protected RdbLoaderBase {
   size_t table_used_memory_ = 0;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
+
+  // Per-shard HLL state for detecting duplicated hash field names during RDB load.
+  // Each shard thread writes to its own slot, avoiding contention.
+  struct ShardHllState {
+    std::unique_ptr<HllEstimator> hll;
+    uint64_t total_fields = 0;
+    uint64_t last_estimate = 0;
+  };
+  std::vector<ShardHllState> per_shard_hll_;
 
   size_t keys_loaded_ = 0;
   double load_time_ = 0;
