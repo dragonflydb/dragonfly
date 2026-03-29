@@ -685,7 +685,7 @@ void Connection::OnPostMigrateThread() {
 
   if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-      DoReadOnRecv(n);
+      NotifyOnRecv(n);
       io_event_.notify();
     });
   }
@@ -2400,12 +2400,12 @@ bool Connection::ExecuteBatch() {
 
 bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
-  while (HasInFlightCommands() && parsed_head_->CanReply()) {
+  while (HasDispatchedCommands() && parsed_head_->CanReply()) {
     current_wait_.reset();  // we must free waiter before proceeding with other commands
     auto* cmd = parsed_head_;
     parsed_head_ = cmd->next;
     cmd->SendReply();
-    ReleaseParsedCommand(cmd, HasInFlightCommands() /* is_pipelined */);
+    ReleaseParsedCommand(cmd, HasDispatchedCommands() /* is_pipelined */);
     if (reply_builder_->GetError())
       return false;
   }
@@ -2588,7 +2588,7 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
-void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) {
+void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) {
   if (std::holds_alternative<std::error_code>(n.read_result)) {
     io_ec_ = std::get<std::error_code>(n.read_result);
     return;
@@ -2608,6 +2608,34 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
                         [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
   } else {
     LOG(FATAL) << "Should not reach here";
+  }
+}
+
+void Connection::ReadPendingInput() {
+  // Drain available socket data into io_buf_.
+  io::MutableBytes buf = io_buf_.AppendBuffer();
+  // A recv call can return fewer bytes than requested even if the
+  // socket buffer actually contains enough data to satisfy the full request.
+  while (!buf.empty()) {
+    io::Result<size_t> res = socket_->TryRecv(buf);
+    if (!res) {
+      auto ec = res.error();
+      // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
+      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
+        pending_input_ = false;
+      else
+        io_ec_ = ec;
+      break;
+    }
+
+    if (*res == 0) {
+      io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
+      pending_input_ = false;
+      break;
+    }
+
+    io_buf_.CommitWrite(*res);
+    buf = io_buf_.AppendBuffer();
   }
 }
 
@@ -2675,7 +2703,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
-    DoReadOnRecv(n);
+    NotifyOnRecv(n);
     io_event_.notify();
   });
 
@@ -2690,41 +2718,19 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     HandleMigrateRequest();
 
     // Register completion for current head if its pending and we don't wait on current_wait_.
-    if (HasInFlightCommands() && !current_wait_.has_value()) {
+    if (HasDispatchedCommands() && !current_wait_.has_value()) {
       current_wait_.emplace(parsed_head_, &ioevent_waiter);
     }
 
     if (pending_input_) {
-      // Drain available socket data into io_buf_.
-      io::MutableBytes buf = io_buf_.AppendBuffer();
-      // A recv call can return fewer bytes than requested even if the
-      // socket buffer actually contains enough data to satisfy the full request.
-      while (!buf.empty()) {
-        io::Result<size_t> res = socket_->TryRecv(buf);
-        if (!res || *res == 0) {
-          if (res) {
-            io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
-            pending_input_ = false;
-          } else {
-            auto ec = res.error();
-            // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
-            if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
-              pending_input_ = false;
-            else
-              io_ec_ = ec;
-          }
-          break;
-        }
-        io_buf_.CommitWrite(*res);
-        buf = io_buf_.AppendBuffer();
-      }
+      ReadPendingInput();
     }
 
     if (io_buf_.InputLen() == 0) {
       io_event_.await([this]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.
-        return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
+        return io_buf_.InputLen() > 0 || pending_input_ || HeadReadyToDispatch() ||
                (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_;
       });
     }
@@ -2758,7 +2764,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       parse_status = NEED_MORE;
 
       if (parsed_head_) {
-        if (HasCommandToExecute())
+        if (HeadReadyToDispatch())
           ExecuteBatch();
         ReplyBatch();
       }

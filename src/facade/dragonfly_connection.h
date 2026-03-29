@@ -277,7 +277,10 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
-  void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
+
+  // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
+  void ReadPendingInput();
 
   void CheckIoBufCapacity(bool is_iobuf_full);
 
@@ -445,13 +448,13 @@ class Connection : public util::Connection {
   size_t parsed_cmd_q_bytes_ = 0;
 
   // Returns true if there are dispatched commands that haven't been replied yet.
-  bool HasInFlightCommands() const {
+  bool HasDispatchedCommands() const {
     return parsed_head_ != parsed_to_execute_;
   }
 
-  // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
-  bool HasCommandToExecute() const {
-    return parsed_head_ && !HasInFlightCommands();
+  // Returns true if the head command is ready to dispatch (nothing in-flight ahead of it).
+  bool HeadReadyToDispatch() const {
+    return parsed_head_ && !HasDispatchedCommands();
   }
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
