@@ -27,6 +27,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
+#include "facade/op_status.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
@@ -694,7 +695,7 @@ void Connection::OnPostMigrateThread() {
   DCHECK(!async_fb_.IsJoinable());
 
   // If someone had sent Async during the migration, we must create async_fb_.
-  if (HasPendingMessages()) {
+  if (HasPendingMessages() && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
   }
 
@@ -1092,10 +1093,9 @@ void Connection::ConnectionFlow() {
   // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
-    if (redis_parser_) {
+    if (redis_parser_ && !ioloop_v2_) {
       parse_status = ParseRedis(10000);
     } else {
-      DCHECK(memcache_parser_);
       parse_status = ParseLoop();
     }
   }
@@ -1372,11 +1372,11 @@ void Connection::OnBreakCb(int32_t mask) {
 }
 
 void Connection::HandleMigrateRequest() {
-  if (cc_->conn_closing || !migration_request_) {
+  if (cc_->conn_closing || !migration_request_)
     return;
-  }
-  ProactorBase* dest = migration_request_;
 
+  DCHECK(!ioloop_v2_);
+  ProactorBase* dest = migration_request_;
   if (async_fb_.IsJoinable()) {
     SendAsync({MigrationRequestMessage{}});
     async_fb_.Join();
@@ -2007,6 +2007,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 }
 
 void Connection::LaunchAsyncFiberIfNeeded() {
+  DCHECK(!ioloop_v2_);
   if (!async_fb_.IsJoinable() && !migration_in_process_) {
     VLOG(1) << "[" << id_ << "] LaunchAsyncFiberIfNeeded ";
     async_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch", [this]() { AsyncFiber(); });
@@ -2030,7 +2031,7 @@ void Connection::SendAsync(MessageHandle msg) {
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
-  if (!cc_->conn_closing) {
+  if (!cc_->conn_closing && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
   }
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
@@ -2069,6 +2070,13 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   // Control Path Notification:
+
+  // TODO: Poissbily optimize wakeups
+  if (ioloop_v2_) {
+    io_event_.notify();
+    return;
+  }
+
   // We need to wake up the AsyncFiber only if it is currently sleeping.
   // 1. Memcache: Sleeps if dispatch_q_ is empty. Must notify on 0->1 transition.
   // 2. Redis: Sleeps if BOTH queues are empty. If pipeline has items, it's already awake.
@@ -2152,7 +2160,7 @@ facade::ConnectionContext* Connection::cntx() {
 }
 
 void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force) {
-  if ((!force && !migration_enabled_) || cc_ == nullptr) {
+  if ((!force && !migration_enabled_) || cc_ == nullptr || ioloop_v2_) {
     return;
   }
 
@@ -2267,6 +2275,7 @@ bool Connection::IsReplySizeOverLimit() const {
 }
 
 bool Connection::ParseRedisBatch() {
+  // TODO: Handle pipeline backpressure
   return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
 }
 
@@ -2678,8 +2687,6 @@ void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
 }
 
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
-  DCHECK(memcache_parser_) << "Not supported for redis yet";
-
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
@@ -2730,7 +2737,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // TODO: optimize CanReply with looking up waiter key
         bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
         bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
-        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || io_ec_;
+        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || !dispatch_q_.empty() ||
+               io_ec_;
       });
     }
 
@@ -2741,6 +2749,26 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
+
+    // Temporary: Handle dispatch queue items one by one blocking command execution
+    if (!dispatch_q_.empty()) {
+      while (!dispatch_q_.empty()) {
+        auto msg = std::move(dispatch_q_.front());
+        dispatch_q_.pop_front();
+        // Temporary; ProcessAdminMessage logic doesn't apply here (migrations for example)
+        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
+        UpdateDispatchStats(msg, false /* subtract */);
+      }
+
+      // TODO: Possibly don't flush unconditionally - optimize it
+      reply_builder_->Flush();
+      if (auto ec = reply_builder_->GetError(); ec)
+        return ec;
+
+      // TODO: Properly handle backpressure
+      GetQueueBackpressure().pubsub_ec.notifyAll();
+      continue;
+    }
 
     if (io_buf_.InputLen() > 0) {
       parse_status = ParseLoop();
