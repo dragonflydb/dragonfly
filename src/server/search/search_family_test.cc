@@ -17,6 +17,7 @@
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
+#include "server/search/doc_index.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -4920,6 +4921,51 @@ TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route_name", "cooking", "avg_dist", "0.2"),
                                          IsMap("route_name", "technology", "avg_dist", "0.6"),
                                          IsMap("route_name", "sports", "avg_dist", "0.6")));
+}
+
+// Verify that BuildRestoreCommand round-trips all HNSW parameters.
+// Regression test: M and EF_CONSTRUCTION were previously omitted, causing
+// replication to silently reconstruct the index with wrong defaults.
+TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+  using dfly::search::VectorSimilarity;
+
+  SchemaField field;
+  field.type = SchemaField::VECTOR;
+  field.flags = 0;
+  field.short_name = "embedding";
+
+  SchemaField::VectorParams vparams;
+  vparams.use_hnsw = true;
+  vparams.dim = 4;
+  vparams.sim = VectorSimilarity::COSINE;
+  vparams.capacity = 500;
+  vparams.hnsw_m = 32;
+  vparams.hnsw_ef_construction = 400;
+  field.special_params = vparams;
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["embedding"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  std::string cmd = info.BuildRestoreCommand();
+
+  // "HNSW 10" — the arg count must be 10 (5 key-value pairs), otherwise the
+  // parser stops early and silently drops M / EF_CONSTRUCTION on restore.
+  EXPECT_THAT(cmd, HasSubstr("HNSW 10"));
+  EXPECT_THAT(cmd, HasSubstr("DIM 4"));
+  EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
+  EXPECT_THAT(cmd, HasSubstr("INITIAL_CAP 500"));
+  EXPECT_THAT(cmd, HasSubstr("M 32"));
+  EXPECT_THAT(cmd, HasSubstr("EF_CONSTRUCTION 400"));
 }
 
 }  // namespace dfly
