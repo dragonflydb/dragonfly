@@ -1093,8 +1093,8 @@ void Connection::ConnectionFlow() {
   // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
-    if (redis_parser_ && !ioloop_v2_) {
-      parse_status = ParseRedis(10000);
+    if (redis_parser_) {
+      parse_status = ParseRedis(io_buf_, 10000);
     } else {
       parse_status = ParseLoop();
     }
@@ -1252,7 +1252,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool enqueue_only) {
+Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, unsigned max_busy_cycles,
+                                                bool enqueue_only) {
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
@@ -1330,13 +1331,19 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
   return ERROR;
 }
 
+void Connection::ParseFromBuffer(base::IoBuf& buf) {
+  auto parse_func =
+      protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
+  (this->*parse_func)(buf);
+}
+
 auto Connection::ParseLoop() -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
 
   bool commands_parsed = false;
   do {
-    commands_parsed = (this->*parse_func)();
+    commands_parsed = (this->*parse_func)(io_buf_);
 
     if (!ExecuteBatch())
       return ERROR;
@@ -1448,7 +1455,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
-      parse_status = ParseRedis(max_busy_read_cycles_cached);
+      parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseLoop();
@@ -2270,13 +2277,12 @@ bool Connection::IsReplySizeOverLimit() const {
   return over_limit;
 }
 
-bool Connection::ParseRedisBatch() {
-  // TODO: Handle pipeline backpressure
-  return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
+bool Connection::ParseRedisBatch(base::IoBuf& buf) {
+  return ParseRedis(buf, max_busy_read_cycles_cached, true) == ParserStatus::OK;
 }
 
-bool Connection::ParseMCBatch() {
-  CHECK(io_buf_.InputLen() > 0);
+bool Connection::ParseMCBatch(base::IoBuf& io_buf) {
+  CHECK(io_buf.InputLen() > 0);
 
   do {
     if (parsed_cmd_ == nullptr) {
@@ -2286,9 +2292,9 @@ bool Connection::ParseMCBatch() {
     }
     uint32_t consumed = 0;
     memcache_parser_->set_last_unix_time(time(nullptr));
-    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf_.InputBuffer()),
+    MemcacheParser::Result result = memcache_parser_->Parse(io::View(io_buf.InputBuffer()),
                                                             &consumed, parsed_cmd_->mc_command());
-    io_buf_.ConsumeInput(consumed);
+    io_buf.ConsumeInput(consumed);
 
     DVLOG(2) << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
@@ -2323,7 +2329,7 @@ bool Connection::ParseMCBatch() {
           break;
       }
     }
-  } while (parsed_cmd_q_len_ < 128 && io_buf_.InputLen() > 0);
+  } while (/* TODO: fix it later parsed_cmd_q_len_ < 128 && */ io_buf.InputLen() > 0);
   return true;
 }
 
@@ -2400,12 +2406,12 @@ bool Connection::ExecuteBatch() {
 
 bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
-  while (HasDispatchedCommands() && parsed_head_->CanReply()) {
+  while (HasInFlightCommands() && parsed_head_->CanReply()) {
     current_wait_.reset();  // we must free waiter before proceeding with other commands
     auto* cmd = parsed_head_;
     parsed_head_ = cmd->next;
     cmd->SendReply();
-    ReleaseParsedCommand(cmd, HasDispatchedCommands() /* is_pipelined */);
+    ReleaseParsedCommand(cmd, HasInFlightCommands() /* is_pipelined */);
     if (reply_builder_->GetError())
       return false;
   }
@@ -2606,44 +2612,17 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
     UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
                         [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
+    ParseFromBuffer(io_buf_);
   } else {
     LOG(FATAL) << "Should not reach here";
   }
 }
 
-void Connection::ReadPendingInput() {
-  // Drain available socket data into io_buf_.
-  io::MutableBytes buf = io_buf_.AppendBuffer();
-  // A recv call can return fewer bytes than requested even if the
-  // socket buffer actually contains enough data to satisfy the full request.
-  while (!buf.empty()) {
-    io::Result<size_t> res = socket_->TryRecv(buf);
-    if (!res) {
-      auto ec = res.error();
-      // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
-      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
-        pending_input_ = false;
-      else
-        io_ec_ = ec;
-      break;
-    }
-
-    if (*res == 0) {
-      io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
-      pending_input_ = false;
-      break;
-    }
-
-    io_buf_.CommitWrite(*res);
-    buf = io_buf_.AppendBuffer();
-  }
-}
-
-void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
+void Connection::CheckIoBufCapacity(base::IoBuf& io_buf, bool is_iobuf_full) {
   auto& conn_stats = tl_facade_stats->conn_stats;
   size_t max_io_buf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
-  size_t capacity = io_buf_.Capacity();
+  size_t capacity = io_buf.Capacity();
   if (capacity < max_io_buf_len) {
     size_t parser_hint = 0;
     if (redis_parser_)
@@ -2655,23 +2634,23 @@ void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
     // (Note: The buffer object is only working in power-of-2 sizes,
     // so there's no danger of accidental O(n^2) behavior.)
     if (parser_hint > capacity) {
-      UpdateIoBufCapacity(io_buf_, &conn_stats,
-                          [&]() { io_buf_.Reserve(std::min(max_io_buf_len, parser_hint)); });
+      UpdateIoBufCapacity(io_buf, &conn_stats,
+                          [&]() { io_buf.Reserve(std::min(max_io_buf_len, parser_hint)); });
     }
 
     // If we got a partial request because iobuf was full, grow it up to
     // a reasonable limit to save on Recv() calls.
     if (is_iobuf_full && capacity < max_io_buf_len / 2) {
       // Last io used most of the io_buf to the end.
-      UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() {
-        io_buf_.Reserve(capacity * 2);  // Valid growth range.
+      UpdateIoBufCapacity(io_buf, &conn_stats, [&]() {
+        io_buf.Reserve(capacity * 2);  // Valid growth range.
       });
     }
 
-    if (io_buf_.AppendLen() == 0U) {
+    if (io_buf.AppendLen() == 0U) {
       // it can happen with memcached but not for RedisParser, because RedisParser fully
       // consumes the passed buffer
-      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf_.Capacity()
+      LOG_EVERY_T(WARNING, 10) << "Maximum io_buf length reached " << io_buf.Capacity()
                                << ", consider to increase max_client_iobuf_len flag";
     }
   }
@@ -2718,75 +2697,76 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     HandleMigrateRequest();
 
     // Register completion for current head if its pending and we don't wait on current_wait_.
-    if (HasDispatchedCommands() && !current_wait_.has_value()) {
+    if (HasInFlightCommands() && !current_wait_.has_value()) {
       current_wait_.emplace(parsed_head_, &ioevent_waiter);
     }
 
     if (pending_input_) {
-      ReadPendingInput();
+      // Drain available socket data into a thread-local buffer shared by all
+      // connections on this thread. This is safe because ParseFromBuffer fully
+      // depletes the buffer before yielding (it's CPU-only), so no two fibers
+      // use it concurrently.
+      static thread_local base::IoBuf tl_buf(256);
+      DCHECK_EQ(tl_buf.InputLen(), 0u);
+      CHECK_EQ(io_buf_.InputLen(), 0u);
+
+      while (true) {
+        io::MutableBytes buf = tl_buf.AppendBuffer();
+        if (buf.empty())
+          break;
+        io::Result<size_t> res = socket_->TryRecv(buf);
+        if (!res || *res == 0) {
+          if (res) {
+            io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
+            pending_input_ = false;
+          } else {
+            auto ec = res.error();
+            // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
+            if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
+              pending_input_ = false;
+            else
+              io_ec_ = ec;
+          }
+          break;
+        }
+        tl_buf.CommitWrite(*res);
+        bool was_full = tl_buf.AppendLen() == 0;
+        ParseFromBuffer(tl_buf);
+        CHECK_EQ(tl_buf.InputLen(), 0u);
+        CheckIoBufCapacity(tl_buf, was_full);
+      }
     }
 
-    if (io_buf_.InputLen() == 0) {
-      io_event_.await([this]() {
-        // TODO: optimize CanReply with looking up waiter key
-        // io_buf_.InputLen() > 0 is still needed for multishot flow.
-        return io_buf_.InputLen() > 0 || pending_input_ || HeadReadyToDispatch() ||
-               (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_;
-      });
-    }
+    // Data is parsed eagerly above, so the await only needs to wait for
+    // commands to become executable/replyable, new data, or errors.
+    // io_buf_.InputLen() > 0 is still needed for the multishot recv path.
+    io_event_.await([this]() {
+      return io_buf_.InputLen() > 0 || pending_input_ || HasCommandToExecute() ||
+             (parsed_head_ && parsed_head_->CanReply()) || io_ec_;
+    });
 
     phase_ = PROCESS;
-    bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
-    // Temporary: Handle dispatch queue items one by one blocking command execution
-    if (!dispatch_q_.empty()) {
-      while (!dispatch_q_.empty()) {
-        auto msg = std::move(dispatch_q_.front());
-        dispatch_q_.pop_front();
-        // Temporary; ProcessAdminMessage logic doesn't apply here (migrations for example)
-        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-        UpdateDispatchStats(msg, false /* subtract */);
-      }
-
-      // TODO: Possibly don't flush unconditionally - optimize it
-      reply_builder_->Flush();
-      if (auto ec = reply_builder_->GetError(); ec)
-        return ec;
-
-      // TODO: Properly handle backpressure
-      GetQueueBackpressure().pubsub_ec.notifyAll();
-      continue;
+    if (HasCommandToExecute()) {
+      if (!ExecuteBatch())
+        parse_status = ERROR;
     }
-
-    if (io_buf_.InputLen() > 0) {
-      parse_status = ParseLoop();
-    } else {
-      parse_status = NEED_MORE;
-
-      if (parsed_head_) {
-        if (HeadReadyToDispatch())
-          ExecuteBatch();
-        ReplyBatch();
-      }
-    }
+    if (parse_status != ERROR && !ReplyBatch())
+      parse_status = ERROR;
 
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();
     }
 
-    // Check io_ec_ after parsing and flushing replies, so that half-closed
+    // Check io_ec_ after executing and flushing replies, so that half-closed
     // connections get their responses before we close.
     if (io_ec_) {
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
     }
 
-    if (parse_status == NEED_MORE) {
-      parse_status = OK;
-      CheckIoBufCapacity(is_iobuf_full);
-    } else if (parse_status != OK) {
+    if (parse_status != OK)
       break;
-    }
   } while (peer->IsOpen());
 
   return parse_status;
