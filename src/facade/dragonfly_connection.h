@@ -437,10 +437,23 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
+
   // Total number of commands in parsed command queue
   size_t parsed_cmd_q_len_ = 0;
+
   // Total bytes used by commands in parsed command queue
   size_t parsed_cmd_q_bytes_ = 0;
+
+  // Returns true if there are dispatched commands that haven't been replied yet.
+  bool HasInFlightCommands() const {
+    return parsed_head_ != parsed_to_execute_;
+  }
+
+  // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
+  bool HasCommandToExecute() const {
+    return parsed_head_ && !HasInFlightCommands();
+  }
+
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool HasPendingMessages() const {
     return parsed_head_ || !dispatch_q_.empty();
@@ -507,6 +520,7 @@ class Connection : public util::Connection {
 
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
+      bool pending_input_ : 1;
     };
   };
 
