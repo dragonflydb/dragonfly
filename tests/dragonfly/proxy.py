@@ -10,15 +10,23 @@ class Proxy:
         self.remote_port = remote_port
         self.stop_connections = []
         self.server = None
+        self._handler_tasks = set()
 
     async def handle(self, reader, writer):
+        task = asyncio.current_task()
+        self._handler_tasks.add(task)
+        try:
+            await self._handle_impl(reader, writer)
+        finally:
+            self._handler_tasks.discard(task)
+
+    async def _handle_impl(self, reader, writer):
         try:
             remote_reader, remote_writer = await asyncio.open_connection(
                 self.remote_host, self.remote_port
             )
-        except OSError:
+        except (OSError, asyncio.CancelledError):
             writer.close()
-            await writer.wait_closed()
             return
 
         async def forward(reader, writer):
@@ -79,7 +87,16 @@ class Proxy:
             cb()
         self.stop_connections = []
 
-        if not task == None:
+        # Cancel all handler tasks, including ones that haven't registered
+        # their cleanup callbacks yet (race between accept and close).
+        # Loop until no tasks remain so late-starting handlers are caught.
+        while self._handler_tasks:
+            tasks = list(self._handler_tasks)
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if task is not None:
             try:
                 await task
             except asyncio.exceptions.CancelledError:
