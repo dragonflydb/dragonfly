@@ -181,27 +181,33 @@ string DocIndexInfo::BuildRestoreCommand() const {
                     SearchFieldTypeToString(finfo.type));
 
     // Store specific params
-    Overloaded info{
-        [](monostate) {},
-        [out = &out](const search::SchemaField::VectorParams& params) {
-          auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
-                     : params.sim == search::VectorSimilarity::IP ? "IP"
-                                                                  : "COSINE";
-          absl::StrAppend(out, " ", params.use_hnsw ? "HNSW" : "FLAT", " 6 ", "DIM ", params.dim,
-                          " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
-        },
-        [out = &out](const search::SchemaField::TagParams& params) {
-          absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
-          if (params.case_sensitive)
-            absl::StrAppend(out, " ", "CASESENSITIVE");
-        },
-        [out = &out](const search::SchemaField::TextParams& params) {
-          if (params.with_suffixtrie)
-            absl::StrAppend(out, " ", "WITH_SUFFIXTRIE");
-        },
-        [out = &out](const search::SchemaField::NumericParams& params) {
-          absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));
-        }};
+    Overloaded info{[](monostate) {},
+                    [out = &out](const search::SchemaField::VectorParams& params) {
+                      auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
+                                 : params.sim == search::VectorSimilarity::IP ? "IP"
+                                                                              : "COSINE";
+                      if (params.use_hnsw) {
+                        absl::StrAppend(out, " HNSW 10 DIM ", params.dim, " DISTANCE_METRIC ", sim,
+                                        " INITIAL_CAP ", params.capacity, " M ", params.hnsw_m,
+                                        " EF_CONSTRUCTION ", params.hnsw_ef_construction);
+                      } else {
+                        absl::StrAppend(out, " FLAT 6 DIM ", params.dim, " DISTANCE_METRIC ", sim,
+                                        " INITIAL_CAP ", params.capacity);
+                      }
+                    },
+                    [out = &out](const search::SchemaField::TagParams& params) {
+                      absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
+                      if (params.case_sensitive)
+                        absl::StrAppend(out, " ", "CASESENSITIVE");
+                    },
+                    [out = &out](const search::SchemaField::TextParams& params) {
+                      if (params.with_suffixtrie)
+                        absl::StrAppend(out, " ", "WITH_SUFFIXTRIE");
+                    },
+                    [out = &out](const search::SchemaField::NumericParams& params) {
+                      absl::StrAppend(out, " ", "BLOCKSIZE", " ",
+                                      std::to_string(params.block_size));
+                    }};
     visit(info, finfo.special_params);
 
     // Store shared field flags
