@@ -865,7 +865,11 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
 
   PrimeValue* pv = &it->second;
   if (pv->ObjType() == OBJ_SET) {
-    return SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
+    auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
+    // Finalize memory accounting before potential deletion.
+    auto_updater.Run();
+    SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
+    return result;
   } else {
     return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
                                            values, pv);
@@ -887,6 +891,7 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   int32_t res = -1;
   if (it->second.ObjType() == OBJ_SET) {
     res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
+    SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
   } else {
     DCHECK_EQ(OBJ_HASH, it->second.ObjType());
     res = HSetFamily::FieldExpireTime(db_cntx, it->second, field);

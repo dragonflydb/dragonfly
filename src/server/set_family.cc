@@ -54,27 +54,6 @@ bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
 }
 
-// After iterating a StringSet with set_time(), lazy member expiry may have emptied it.
-// Per Redis semantics empty collections must not exist as keys, so delete the stale key.
-// Returns true if the key was deleted.
-bool DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view key,
-                      const PrimeValue& pv) {
-  if (!IsDenseEncoding(pv))
-    return false;
-
-  if (StringSet* ss = (StringSet*)pv.RObjPtr(); !ss->Empty())
-    return false;
-
-  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
-    db_slice.DelMutable(db_cntx, std::move(*res));
-    if (db_slice.shard_owner()->journal()) {
-      RecordDelete(db_cntx.db_index, key);
-    }
-    return true;
-  }
-  return false;
-}
-
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
   long long llval;
   *added = false;
@@ -685,9 +664,10 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
     auto res = db_slice.FindReadOnly(t->GetDbContext(), k, OBJ_SET);
     if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
-      const CompactObj& val = res.value()->second;
-      SetType st{val.RObjPtr(), val.Encoding()};
+      const PrimeValue& pv = res.value()->second;
+      SetType st{pv.RObjPtr(), pv.Encoding()};
       found_[0] = IsInSet(t->GetDbContext(), st, member_);
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), k, pv);
     } else {
       found_[index] = res.status();
     }
@@ -762,7 +742,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
         uniques.emplace(ce.ToString());
         return true;
       });
-      DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv);
+      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv);
       continue;
     }
 
@@ -800,7 +780,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
 
   // Lazy per-member TTL expiry during iteration may have emptied the set.
   // Delete the stale key and return KEY_NOTFOUND per Redis empty-key semantics.
-  if (DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv)) {
+  if (SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv)) {
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -827,7 +807,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
       }
     } else {
       DiffStrSet(op_args.db_cntx, st2, &uniques);
-      DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, diff_pv);
+      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, diff_pv);
     }
   }
 
@@ -862,7 +842,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
                                   result.push_back(ce.ToString());
                                   return true;
                                 });
-    DeleteSetIfEmpty(db_slice, t->GetDbContext(), *it, pv);
+    SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), *it, pv);
     return result;
   }
 
@@ -917,6 +897,17 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     InterStrSet(t->GetDbContext(), sets, &result);
   }
 
+  // Clean up sets emptied by lazy per-member TTL expiry.
+  auto cleanup_it = args.begin();
+  if (remove_first)
+    ++cleanup_it;
+  for (; cleanup_it != args.end(); ++cleanup_it) {
+    auto find_res = db_slice.FindReadOnly(t->GetDbContext(), *cleanup_it, OBJ_SET);
+    if (find_res)
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), *cleanup_it,
+                                  find_res.value()->second);
+  }
+
   return result;
 }
 
@@ -945,7 +936,7 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
 
   // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
   // we must not reference it afterwards.
-  DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
+  SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
 
   return result;
 }
@@ -1044,7 +1035,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto& db_slice = op_args.GetDbSlice();
+  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res) {
     *cursor = 0;
@@ -1067,6 +1059,8 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
     *cursor = 0;
   } else {
     *cursor = StringSetWrapper{it->second, op_args.db_cntx}.Scan(*cursor, scan_op, &res);
+    if (SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, it->second))
+      *cursor = 0;
   }
 
   return res;
@@ -1131,11 +1125,15 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   string_view val = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
+    auto find_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET);
 
     if (find_res) {
-      SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-      return IsInSet(t->GetDbContext(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
+      const PrimeValue& pv = find_res.value()->second;
+      SetType st{pv.RObjPtr(), pv.Encoding()};
+      auto result = IsInSet(t->GetDbContext(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, pv);
+      return result;
     }
 
     return find_res.status();
@@ -1153,12 +1151,14 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     DbContext db_cntx = t->GetDbContext();
-    auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(db_cntx, key, OBJ_SET);
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
+    auto find_res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET);
     if (find_res) {
-      SetType st{(*find_res)->second.RObjPtr(), find_res.value()->second.Encoding()};
+      const PrimeValue& pv = (*find_res)->second;
+      SetType st{pv.RObjPtr(), pv.Encoding()};
       for (size_t i = 0; i < members.size(); ++i)
         memberships[i] = IsInSet(db_cntx, st, ToSV(members[i]));
-      ;
+      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, pv);
       return OpStatus::OK;
     }
     return find_res.status();
@@ -1598,6 +1598,24 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 }  // namespace
+
+bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view key,
+                                 const PrimeValue& pv) {
+  if (!IsDenseEncoding(pv))
+    return false;
+
+  if (StringSet* ss = (StringSet*)pv.RObjPtr(); !ss->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
+    return true;
+  }
+  return false;
+}
 
 auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
   if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {

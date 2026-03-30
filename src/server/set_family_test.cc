@@ -696,4 +696,96 @@ TEST_F(SetFamilyTest, SRandMemberWithExpiredMembers) {
   EXPECT_THAT(Run({"exists", "key4"}), IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SIsMemberDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so the SISMEMBER lookup touches its bucket and empties the set.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sismember", "key", "a"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SMIsMemberDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"smismember", "key", "a", "b"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SScanDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key", "1", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sscan", "key", "0"});
+  // Cursor should be 0 and result set empty.
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], "0");
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, SInterMultiKeyDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  Run({"saddex", "key1", "1", "a", "b"});
+  Run({"sadd", "key2", "a", "b"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"sinter", "key1", "key2"});
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(Run({"exists", "key1"}), IntArg(0));
+  // key2 has no TTL, should still exist.
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(1));
+}
+
+TEST_F(SetFamilyTest, SMoveDeletesEmptySourceSet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so the SMOVE lookup touches its bucket and empties the set.
+  Run({"saddex", "src", "1", "a"});
+  Run({"sadd", "dst", "x"});
+  AdvanceTime(2000);
+
+  auto resp = Run({"smove", "src", "dst", "a"});
+  EXPECT_THAT(resp, IntArg(0));
+  EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, FieldExpireDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so FIELDEXPIRE touches its bucket and triggers lazy expiry.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  // FIELDEXPIRE on an already-expired member should clean up the empty set.
+  auto resp = Run({"fieldexpire", "key", "100", "a"});
+  // -2 means the field was not found (expired).
+  EXPECT_THAT(resp, IntArg(-2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, FieldTtlDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so FIELDTTL touches its bucket and triggers lazy expiry.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  // FIELDTTL on an already-expired member should clean up the empty set.
+  auto resp = Run({"fieldttl", "key", "a"});
+  // -3 means the field was not found (expired); -2 would mean key not found.
+  EXPECT_THAT(resp, IntArg(-3));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
 }  // namespace dfly

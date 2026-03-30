@@ -4290,8 +4290,10 @@ async def test_rm_replication(df_factory: DflyInstanceFactory):
         ["SMEMBERS", "myset"],
         ["SUNION", "myset", "other"],
         ["SDIFF", "myset", "other"],
+        ["SMISMEMBER", "myset", "a", "b", "c"],
+        ["SSCAN", "myset", "0"],
     ],
-    ids=["smembers", "sunion", "sdiff"],
+    ids=["smembers", "sunion", "sdiff", "smismember", "sscan"],
 )
 async def test_set_member_expiry_replication(df_factory: DflyInstanceFactory, trigger_cmd):
     """
@@ -4329,6 +4331,63 @@ async def test_set_member_expiry_replication(df_factory: DflyInstanceFactory, tr
     await c_master.execute_command(*trigger_cmd)
 
     # The key should be gone on master
+    assert await c_master.exists("myset") == 0
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.exists("myset") == 0, (
+        f"Replica still has 'myset' after lazy expiry triggered by {trigger_cmd[0]}. "
+        "DeleteSetIfEmpty must journal the deletion so the replica stays in sync."
+    )
+
+
+@pytest.mark.parametrize(
+    "trigger_cmd, members, extra_setup",
+    [
+        (["SISMEMBER", "myset", "a"], ["a"], []),
+        (["SMOVE", "myset", "dst", "a"], ["a"], [["SADD", "dst", "x"]]),
+        (["SINTER", "myset", "other"], ["a", "b", "c"], [["SADD", "other", "a", "b", "c"]]),
+        (["FIELDEXPIRE", "myset", "100", "a"], ["a"], []),
+        (["FIELDTTL", "myset", "a"], ["a"], []),
+    ],
+    ids=["sismember", "smove", "sinter", "fieldexpire", "fieldttl"],
+)
+async def test_set_member_expiry_replication_with_setup(
+    df_factory: DflyInstanceFactory, trigger_cmd, members, extra_setup
+):
+    """
+    Verify lazy set-member expiry replication for commands that need special setup.
+
+    SISMEMBER/SMOVE are point lookups that only expire entries in the accessed bucket,
+    so a single member is used to guarantee the set becomes empty.
+    SINTER needs a second set to exist for the intersection code path to iterate.
+    """
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    await c_master.execute_command("SADDEX", "myset", "1", *members)
+    for cmd in extra_setup:
+        await c_master.execute_command(*cmd)
+
+    num_members = len(members)
+    assert await c_master.scard("myset") == num_members
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    assert await c_replica.scard("myset") == num_members
+
+    await asyncio.sleep(1)
+
+    await c_master.execute_command(*trigger_cmd)
+
     assert await c_master.exists("myset") == 0
 
     await check_all_replicas_finished([c_replica], c_master)
