@@ -1482,7 +1482,6 @@ async def test_migration_with_key_ttl(df_factory):
 
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 5})
-@pytest.mark.skip("Fails on CI")
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(
