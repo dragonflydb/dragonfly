@@ -19,6 +19,7 @@
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
 #include "server/search/global_hnsw_index.h"
+#include "server/search/serialization_utils.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/stacktrace.h"
@@ -96,6 +97,10 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
       };
     }
   }
+  bool serialize_index = SaveMode() != dfly::SaveMode::RDB &&
+                         absl::GetFlag(FLAGS_serialize_hnsw_index) &&
+                         replica_dfly_version_ >= DflyVersion::VER6;
+
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
@@ -103,10 +108,12 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   fb2::Fiber::Opts opts{.priority = use_background_mode_ ? fb2::FiberPriority::BACKGROUND
                                                          : fb2::FiberPriority::NORMAL,
                         .name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex())};
-  snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal] {
-    // TODO add error processing for index serialization
-    SerializeIndexMappings();
-    SerializeGlobalHnswIndices();
+  snapshot_fb_ = fb2::Fiber(opts, [this, stream_journal, serialize_index] {
+    if (serialize_index) {
+      // TODO add error processing for index serialization
+      SearchSerializer::Serialize(serializer_.get(), db_slice_,
+                                  std::bind(&SliceSnapshot::PushSerialized, this, false));
+    }
     this->IterateBucketsFb(stream_journal);
     UnregisterChangeListener();
     consumer_->Finalize();
@@ -149,112 +156,6 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
 // it also guarantees 100% coverage of all items that exists when the traversal started
 // and survived until it finished.
-
-void SliceSnapshot::SerializeIndexMapping(
-    uint32_t shard_id, std::string_view index_name,
-    const std::vector<std::pair<std::string, search::DocId>>& mappings) {
-  // Format: [RDB_OPCODE_SHARD_DOC_INDEX, shard_id, index_name, mapping_count,
-  //          then for each mapping: key_string, doc_id]
-  if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_SHARD_DOC_INDEX); ec)
-    return;
-  if (auto ec = serializer_->SaveLen(shard_id); ec)
-    return;
-  if (auto ec = serializer_->SaveString(index_name); ec)
-    return;
-  if (auto ec = serializer_->SaveLen(mappings.size()); ec)
-    return;
-
-  for (const auto& [key, doc_id] : mappings) {
-    if (auto ec = serializer_->SaveString(key); ec)
-      return;
-    if (auto ec = serializer_->SaveLen(doc_id); ec)
-      return;
-  }
-  PushSerialized(false);
-}
-
-void SliceSnapshot::SerializeIndexMappings() {
-#ifdef WITH_SEARCH
-  if (SaveMode() == dfly::SaveMode::RDB || !absl::GetFlag(FLAGS_serialize_hnsw_index) ||
-      replica_dfly_version_ < DflyVersion::VER6) {
-    return;
-  }
-
-  // Get all HNSW index names from the global registry
-  absl::flat_hash_set<std::string> hnsw_index_names =
-      GlobalHnswIndexRegistry::Instance().GetIndexNames();
-
-  auto* indices = db_slice_->shard_owner()->search_indices();
-  uint32_t shard_id = db_slice_->shard_owner()->shard_id();
-
-  for (const auto& index_name : hnsw_index_names) {
-    auto* index = indices->GetIndex(index_name);
-    if (!index) {
-      continue;
-    }
-
-    auto mappings = index->SerializeKeyIndex();
-    if (mappings.empty()) {
-      continue;
-    }
-
-    SerializeIndexMapping(shard_id, index_name, mappings);
-  }
-#endif
-}
-
-void SliceSnapshot::SerializeGlobalHnswIndices() {
-#ifdef WITH_SEARCH
-  // Serialize HNSW global indices for shard 0 only
-  if (db_slice_->shard_owner()->shard_id() != 0 || SaveMode() == dfly::SaveMode::RDB ||
-      !absl::GetFlag(FLAGS_serialize_hnsw_index) || replica_dfly_version_ < DflyVersion::VER6) {
-    return;
-  }
-
-  auto all_indices = GlobalHnswIndexRegistry::Instance().GetAll();
-
-  // Preallocate buffer for HNSW entry serialization.
-  std::vector<uint8_t> tmp_buf;
-
-  for (const auto& [index_key, index] : all_indices) {
-    {
-      // Acquire a read lock to ensure a consistent snapshot of the graph.
-      // While held, Add/Remove calls will defer into the adapter's internal list
-      // and will be replayed automatically on the next write operation.
-      auto read_lock = index->GetReadLock();
-
-      // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
-      //          then for each node: binary encoded entry via SaveHNSWEntry]
-      if (auto ec = serializer_->WriteOpcode(RDB_OPCODE_VECTOR_INDEX); ec) {
-        continue;
-      }
-      if (auto ec = serializer_->SaveString(index_key); ec) {
-        continue;
-      }
-
-      size_t node_count = index->GetNodeCount();
-      if (auto ec = serializer_->SaveLen(node_count); ec) {
-        continue;
-      }
-
-      constexpr size_t kBatchSize = 1000;
-      for (size_t i = 0; i < node_count; i += kBatchSize) {
-        size_t batch_end = std::min(i + kBatchSize, node_count);
-        auto nodes = index->GetNodesRange(i, batch_end);
-        for (const auto& node : nodes) {
-          tmp_buf.resize(node.TotalSize());
-          if (auto ec = serializer_->SaveHNSWEntry(node, absl::MakeSpan(tmp_buf)); ec)
-            break;
-        }
-      }
-    }  // read_lock released here
-
-    // Flush after completing entire index to avoid splitting HNSW data across compressed blobs.
-    // The HNSW loader expects all nodes for an index to be readable in one pass.
-    PushSerialized(false);
-  }
-#endif
-}
 
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
@@ -457,19 +358,11 @@ void SliceSnapshot::ThrottleIfNeeded() {
 }
 
 size_t SliceSnapshot::GetBufferCapacity() const {
-  if (serializer_ == nullptr) {
-    return 0;
-  }
-
-  return serializer_->GetBufferCapacity();
+  return serializer_ ? serializer_->GetBufferCapacity() : 0;
 }
 
 size_t SliceSnapshot::GetTempBuffersSize() const {
-  if (serializer_ == nullptr) {
-    return 0;
-  }
-
-  return serializer_->GetTempBufferSize();
+  return serializer_ ? serializer_->GetTempBufferSize() : 0;
 }
 
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
