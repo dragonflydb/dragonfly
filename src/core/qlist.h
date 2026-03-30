@@ -12,6 +12,7 @@
 #include <string>
 
 #include "core/collection_entry.h"
+#include "server/common_types.h"
 
 #define QL_COMP_BITS 16
 #define QL_BM_BITS 4
@@ -85,6 +86,7 @@ class QList {
     size_t GetLZF(void** data) const;
 
     void SetExternal(size_t offset, uint32_t sz);
+    void Upload(QList* ql, std::string_view val);
     std::pair<size_t, size_t> GetExternalSlice() const {
       return std::make_pair(size_t(ext_offset), size_t(ext_size));
     }
@@ -122,9 +124,22 @@ class QList {
   }
 
   // Add to the number of offloaded nodes by one.
-  void IncrementNumOffloadedNodes(int delta) {
-    num_offloaded_nodes_ += delta;
+  void AdjustOffloadNodeCount(int delta) {
+    if (tiering_enabled_) {
+      tiering_params_->num_offloaded_nodes += delta;
+    }
   }
+
+  DbIndex GetDbIndex() const {
+    return db_id_;
+  }
+  struct TieringParams {
+    uint32_t num_offloaded_nodes = 0;
+    uint32_t node_depth_threshold = 0;
+    void (*offload)(QList* ql, Node* node) = nullptr;
+    void (*load)(QList* ql, Node* node) = nullptr;
+    void (*cleanup)(QList* ql, Node* node) = nullptr;
+  };
 
   /**
    * fill: The number of entries allowed per internal list node can be specified
@@ -260,11 +275,14 @@ class QList {
     zstd_threshold_ = threshold;
   }
 
-  // Enable tiered storage and set node depth threshold
-  void EnableTiering(uint32_t threshold) {
+  // Enable tiered storage.
+  void EnableTiering(const TieringParams& params) {
     tiering_enabled_ = 1;
-    tiering_node_depth_threshold_ = threshold;
+    tiering_params_ = std::make_unique<TieringParams>(params);
   }
+
+  // Updates the db index associated with this list.
+  void SetDbIndex(DbIndex db_id);
 
   struct Stats {
     uint64_t compression_attempts = 0;
@@ -340,13 +358,6 @@ class QList {
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
 
-  // Offload node to tiered storage
-  void OffloadNode(Node* node) const;
-  // Read offloaded node from tiered storage
-  void ReadOffloadedNode(Node* node) const;
-  // Delete offloaded node or cancel offloading of node
-  void CleanupOffloadedNode(Node* node) const;
-
   // Initializes iterator's zi_ to point to the element at offset_.
   // Decompresses the node if needed. Assumes current_ is not null.
   void InitIteratorEntry(Iterator* it) const;
@@ -364,9 +375,9 @@ class QList {
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
-  uint32_t num_offloaded_nodes_ = 0;
-  uint32_t zstd_threshold_ = 0;                // 0 = disabled
-  uint32_t tiering_node_depth_threshold_ = 0;  // 0 = disabled
+  uint16_t db_id_ = kInvalidDbId;
+  uint32_t zstd_threshold_ = 0;  // 0 = disabled
+  std::unique_ptr<TieringParams> tiering_params_;
 };
 
 }  // namespace dfly

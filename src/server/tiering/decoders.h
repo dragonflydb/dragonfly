@@ -97,7 +97,7 @@ struct ListNodeDecoder : public Decoder {
 
  private:
   QList* ql_;
-  std::string_view slice;
+  std::string_view slice_;
 };
 
 }  // namespace dfly::tiering

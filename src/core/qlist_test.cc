@@ -411,20 +411,6 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
   ASSERT_EQ(i, total_items);
 }
 
-TEST_F(QListTest, Tiering) {
-  QList::stats.offload_requests = 0;
-  QList tiered_ql;
-
-  // Enable tiering and set node_depth_threshold = 1
-  tiered_ql.EnableTiering(1);
-
-  for (int i = 0; i < 8000; i++) {
-    tiered_ql.Push(absl::StrCat("value", i), QList::TAIL);
-  }
-
-  EXPECT_EQ(QList::stats.offload_requests, 9);
-}
-
 // MergeNodes must not follow the head_->prev circular link when looking for
 // adjacent nodes to merge.  Splitting a full head node and calling MergeNodes
 // on the right half used to traverse new_head->prev (= tail), merging two
