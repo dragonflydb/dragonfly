@@ -241,7 +241,7 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
 
   // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
   // = true when we are sure that all shards ignore crc during migration process
-  std::string value_dump = RdbSerializerBase::DumpValue(serializer_.get(), pv, false);
+  std::string value_dump = RdbSerializer::DumpValue(serializer_.get(), pv, false);
   args.push_back(value_dump);
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
