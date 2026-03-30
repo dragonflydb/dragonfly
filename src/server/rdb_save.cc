@@ -213,13 +213,11 @@ uint8_t RdbObjectType(const CompactObj& pv) {
   return 0; /* avoid warning */
 }
 
-RdbSerializerBase::RdbSerializerBase(CompressionMode compression_mode)
-    : compression_mode_(compression_mode), mem_buf_{4_KB}, tmp_buf_(nullptr) {
-}
-
 RdbSerializer::RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun,
                              size_t flush_threshold)
-    : RdbSerializerBase(compression_mode),
+    : compression_mode_(compression_mode),
+      mem_buf_{4_KB},
+      tmp_buf_(nullptr),
       consume_fun_(std::move(consume_fun)),
       flush_threshold_(flush_threshold) {
 }
@@ -903,7 +901,7 @@ error_code RdbSerializer::SaveHNSWEntry(const search::HnswNodeData& node,
   return WriteRaw(Bytes{tmp_buf.data(), total_size});
 }
 
-error_code RdbSerializerBase::SendFullSyncCut() {
+error_code RdbSerializer::SendFullSyncCut() {
   VLOG(1) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
@@ -915,19 +913,19 @@ error_code RdbSerializerBase::SendFullSyncCut() {
   return WriteRaw(buf);
 }
 
-std::error_code RdbSerializerBase::WriteOpcode(uint8_t opcode) {
+std::error_code RdbSerializer::WriteOpcode(uint8_t opcode) {
   return WriteRaw(::io::Bytes{&opcode, 1});
 }
 
-size_t RdbSerializerBase::GetBufferCapacity() const {
+size_t RdbSerializer::GetBufferCapacity() const {
   return mem_buf_.Capacity();
 }
 
-size_t RdbSerializerBase::GetTempBufferSize() const {
-  return tmp_buf_.size();
+size_t RdbSerializer::GetTempBufferSize() const {
+  return tmp_buf_.size() + tmp_str_.size();
 }
 
-error_code RdbSerializerBase::WriteRaw(const io::Bytes& buf) {
+error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
   memcpy(dest.data(), buf.data(), buf.size());
@@ -935,7 +933,7 @@ error_code RdbSerializerBase::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-string RdbSerializerBase::Flush(RdbSerializerBase::FlushState flush_state) {
+string RdbSerializer::Flush(FlushState flush_state) {
   auto bytes = PrepareFlush(flush_state);
   if (bytes.empty())
     return {};
@@ -950,18 +948,12 @@ string RdbSerializerBase::Flush(RdbSerializerBase::FlushState flush_state) {
 
   mem_buf_.ConsumeInput(bytes.size());
 
-  return result;
-}
-
-string RdbSerializer::Flush(FlushState flush_state) {
-  string res = RdbSerializerBase::Flush(flush_state);
-
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
   // snapshot)
   last_entry_db_index_ = kInvalidDbId;
 
-  return res;
+  return result;
 }
 
 namespace {
@@ -999,8 +991,7 @@ void AppendFooter(bool ignore_crc, string* dest) {
 }
 }  // namespace
 
-string RdbSerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
-                                    bool ignore_crc) {
+string RdbSerializer::DumpValue(RdbSerializer* serializer, const PrimeValue& obj, bool ignore_crc) {
   CompressionMode serializer_used_compression_mode = serializer->compression_mode_;
   if (serializer_used_compression_mode != CompressionMode::NONE) {
     serializer->SetCompressionMode(CompressionMode::SINGLE_ENTRY);
@@ -1016,7 +1007,7 @@ string RdbSerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue&
   CHECK(!ec);
   ec = serializer->SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  string res = serializer->Flush(RdbSerializerBase::FlushState::kFlushMidEntry);
+  string res = serializer->Flush(FlushState::kFlushMidEntry);
   CHECK(!res.empty());             // make sure that fully was successful
   AppendFooter(ignore_crc, &res);  // version and crc
   CHECK_GT(res.size(), 10u);
@@ -1025,16 +1016,16 @@ string RdbSerializerBase::DumpValue(RdbSerializer* serializer, const PrimeValue&
   return res;
 }
 
-string RdbSerializerBase::DumpValue(const PrimeValue& obj, bool ignore_crc) {
+string RdbSerializer::DumpValue(const PrimeValue& obj, bool ignore_crc) {
   RdbSerializer serializer(GetDefaultCompressionMode());
   return DumpValue(&serializer, obj, ignore_crc);
 }
 
-size_t RdbSerializerBase::SerializedLen() const {
+size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-io::Bytes RdbSerializerBase::PrepareFlush(RdbSerializerBase::FlushState flush_state) {
+io::Bytes RdbSerializer::PrepareFlush(FlushState flush_state) {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
     return {};
@@ -1053,7 +1044,7 @@ io::Bytes RdbSerializerBase::PrepareFlush(RdbSerializerBase::FlushState flush_st
   return mem_buf_.InputBuffer();
 }
 
-error_code RdbSerializerBase::WriteJournalEntry(std::string_view serialized_entry) {
+error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
   VLOG(2) << "WriteJournalEntry";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
@@ -1061,7 +1052,7 @@ error_code RdbSerializerBase::WriteJournalEntry(std::string_view serialized_entr
   return error_code{};
 }
 
-error_code RdbSerializerBase::SaveString(string_view val) {
+error_code RdbSerializer::SaveString(string_view val) {
   /* Try integer encoding */
   if (val.size() <= 11) {
     uint8_t buf[16];
@@ -1101,13 +1092,13 @@ error_code RdbSerializerBase::SaveString(string_view val) {
   return error_code{};
 }
 
-error_code RdbSerializerBase::SaveLen(size_t len) {
+error_code RdbSerializer::SaveLen(size_t len) {
   uint8_t buf[16];
   unsigned enclen = WritePackedUInt(len, buf);
   return WriteRaw(Bytes{buf, enclen});
 }
 
-error_code RdbSerializerBase::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
+error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
   /* Data compressed! Let's save it on disk */
   uint8_t opcode = (RDB_ENCVAL << 6) | RDB_ENC_LZF;
   RETURN_ON_ERR(WriteOpcode(opcode));
@@ -1496,7 +1487,7 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
 
 error_code RdbSaver::Impl::FlushSerializer() {
   last_write_time_ns_ = absl::GetCurrentTimeNanos();
-  string blob = serializer()->Flush(RdbSerializerBase::FlushState::kFlushMidEntry);
+  string blob = serializer()->Flush(RdbSerializer::FlushState::kFlushMidEntry);
   error_code ec;
   if (!blob.empty()) {
     ec = sink_->Write(io::Buffer(blob));
@@ -1808,7 +1799,7 @@ int64_t RdbSaver::GetLastWriteTime() const {
   return impl_->last_write_ts();
 }
 
-void RdbSerializerBase::AllocateCompressorOnce() {
+void RdbSerializer::AllocateCompressorOnce() {
   if (compressor_impl_) {
     return;
   }
@@ -1821,7 +1812,7 @@ void RdbSerializerBase::AllocateCompressorOnce() {
   }
 }
 
-void RdbSerializerBase::CompressBlob() {
+void RdbSerializer::CompressBlob() {
   if (!compression_stats_) {
     compression_stats_.emplace(CompressionStats{});
   }
@@ -1880,11 +1871,7 @@ void RdbSerializerBase::CompressBlob() {
   ++stats.compressed_blobs;
 }
 
-size_t RdbSerializer::GetTempBufferSize() const {
-  return RdbSerializerBase::GetTempBufferSize() + tmp_str_.size();
-}
-
-void RdbSerializer::PushToConsumerIfNeeded(RdbSerializerBase::FlushState flush_state) {
+void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
   if (consume_fun_ && SerializedLen() > flush_threshold_) {
     string blob = Flush(flush_state);
     DCHECK(!blob.empty());  // SerializedLen() > 0.

@@ -17,8 +17,6 @@ extern "C" {
 #include "io/io_buf.h"
 #include "server/detail/compressor.h"
 #include "server/execution_state.h"
-#include "server/journal/serializer.h"
-#include "server/journal/types.h"
 #include "server/table.h"
 #include "server/version.h"
 
@@ -165,13 +163,18 @@ class RdbSaver {
   std::string snapshot_id_;
 };
 
-class RdbSerializer;
-class RdbSerializerBase {
+class RdbSerializer {
  public:
   enum class FlushState : uint8_t { kFlushMidEntry, kFlushEndEntry };
 
-  explicit RdbSerializerBase(CompressionMode compression_mode);
-  virtual ~RdbSerializerBase() = default;
+  // ConsumeFun is called when internal buffer exceeds flush_threshold.
+  // The callback receives the extracted data.
+  using ConsumeFun = std::function<void(std::string)>;
+
+  explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
+                         size_t flush_threshold = 0);
+
+  ~RdbSerializer();
 
   // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
   static std::string DumpValue(const PrimeValue& obj, bool ignore_crc = false);
@@ -182,10 +185,10 @@ class RdbSerializerBase {
   size_t SerializedLen() const;
 
   // Flush internal buffer and return serialized blob.
-  virtual std::string Flush(FlushState flush_state);
+  std::string Flush(FlushState flush_state);
 
   size_t GetBufferCapacity() const;
-  virtual size_t GetTempBufferSize() const;
+  size_t GetTempBufferSize() const;
 
   std::error_code WriteRaw(const ::io::Bytes& buf);
 
@@ -211,50 +214,6 @@ class RdbSerializerBase {
     compression_mode_ = mode;
   }
 
- protected:
-  // Prepare internal buffer for flush. Compress it.
-  io::Bytes PrepareFlush(FlushState flush_state);
-
-  // If membuf data is compressable use compression impl to compress the data and write it to membuf
-  void CompressBlob();
-  void AllocateCompressorOnce();
-
-  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
-
-  CompressionMode compression_mode_;
-  io::IoBuf mem_buf_;
-  std::unique_ptr<detail::CompressorImpl> compressor_impl_;
-
-  static constexpr size_t kFilterChunkSize = 1ULL << 26;
-  static constexpr size_t kMinStrSizeToCompress = 256;
-  static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
-  static constexpr double kMinCompressionReductionPrecentage = 0.95;
-  struct CompressionStats {
-    uint32_t compression_no_effective = 0;
-    uint32_t size_skip_count = 0;
-    uint32_t compression_failed = 0;
-    uint32_t compressed_blobs = 0;
-  };
-  std::optional<CompressionStats> compression_stats_;
-  base::PODArray<uint8_t> tmp_buf_;
-  std::unique_ptr<LZF_HSLOT[]> lzf_;
-  size_t number_of_chunks_ = 0;
-
-  uint64_t serialization_peak_bytes_ = 0;
-};
-
-class RdbSerializer : public RdbSerializerBase {
- public:
-  // ConsumeFun is called when internal buffer exceeds flush_threshold.
-  // The callback receives the extracted data.
-  using ConsumeFun = std::function<void(std::string)>;
-
-  explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
-                         size_t flush_threshold = 0);
-
-  ~RdbSerializer();
-
-  std::string Flush(FlushState flush_state) override;
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
@@ -276,10 +235,18 @@ class RdbSerializer : public RdbSerializerBase {
   // Save HNSW index entry using provided tmp_buf for serialization to avoid repeated allocations.
   std::error_code SaveHNSWEntry(const search::HnswNodeData& node, absl::Span<uint8_t> tmp_buf);
 
-  size_t GetTempBufferSize() const override;
   std::error_code SendEofAndChecksum();
 
  private:
+  // Prepare internal buffer for flush. Compress it.
+  io::Bytes PrepareFlush(FlushState flush_state);
+
+  // If membuf data is compressable use compression impl to compress the data and write it to membuf
+  void CompressBlob();
+  void AllocateCompressorOnce();
+
+  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
+
   // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const PrimeValue& pv);
@@ -299,6 +266,26 @@ class RdbSerializer : public RdbSerializerBase {
 
   // Might preempt
   void PushToConsumerIfNeeded(FlushState flush_state);
+
+  static constexpr size_t kFilterChunkSize = 1ULL << 26;
+  static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
+  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  struct CompressionStats {
+    uint32_t compression_no_effective = 0;
+    uint32_t size_skip_count = 0;
+    uint32_t compression_failed = 0;
+    uint32_t compressed_blobs = 0;
+  };
+
+  CompressionMode compression_mode_;
+  io::IoBuf mem_buf_;
+  std::unique_ptr<detail::CompressorImpl> compressor_impl_;
+  std::optional<CompressionStats> compression_stats_;
+  base::PODArray<uint8_t> tmp_buf_;
+  std::unique_ptr<LZF_HSLOT[]> lzf_;
+  size_t number_of_chunks_ = 0;
+  uint64_t serialization_peak_bytes_ = 0;
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
