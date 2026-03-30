@@ -1582,6 +1582,13 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
+  AppendMetricHeader("tls_handshakes_total", "Total TLS handshakes by status", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_started, {"status"}, {"started"},
+                    &resp->body());
+  AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_completed, {"status"},
+                    {"completed"}, &resp->body());
+
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.pipeline_queue_entries,
