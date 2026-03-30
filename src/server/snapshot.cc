@@ -27,6 +27,8 @@
 ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
+ABSL_FLAG(bool, serialization_tagged_chunks, false,
+          "Tag each chunk for replication with type of stream");
 
 namespace dfly {
 
@@ -97,6 +99,10 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
   }
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
+
+  if (allow_flush == SnapshotFlush::kAllow) {
+    serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
+  }
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
