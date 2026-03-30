@@ -88,6 +88,12 @@ class TestMemcached:
 
         assert False, "Pipelining not detected"
 
+    def test_get_many(self, memcached_client: MCClient):
+        keys = [f"k{i}" for i in range(100)]
+        for k in keys:
+            memcached_client.set(k, k)
+        assert memcached_client.get_many(keys) == {k: k.encode() for k in keys}
+
     def test_noreply_alternating(self, memcached_client: MCClient):
         """
         Assert alternating noreply works correctly, will cause many dispatch queue emptyings.
@@ -284,3 +290,29 @@ def test_memcached_tls_no_requirepass(df_factory, with_tls_server_args, with_tls
     # Test basic operations
     assert client.set("foo", "bar")
     assert client.get("foo") == b"bar"
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_memcached_half_close(df_server: DflyInstance):
+    """
+    Verify the server replies to buffered commands even when the client
+    half-closes the connection (sends data then shuts down the write side).
+    Requires a fresh server so the first recv sees data+FIN together.
+    """
+    port = int(df_server["memcached_port"])
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    sock.connect(("127.0.0.1", port))
+
+    sock.sendall(b"set hc 0 0 3\r\nfoo\r\nget hc\r\n")
+    sock.shutdown(socket.SHUT_WR)
+
+    response = b""
+    while True:
+        data = sock.recv(4096)
+        if not data:
+            break
+        response += data
+    sock.close()
+
+    assert response == b"STORED\r\nVALUE hc 0 3\r\nfoo\r\nEND\r\n"

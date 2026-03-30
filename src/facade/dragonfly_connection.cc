@@ -685,7 +685,7 @@ void Connection::OnPostMigrateThread() {
 
   if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
-      DoReadOnRecv(n);
+      NotifyOnRecv(n);
       io_event_.notify();
     });
   }
@@ -1107,10 +1107,6 @@ void Connection::ConnectionFlow() {
     UpdateIoBufCapacity(io_buf_, &conn_stats, [&]() { io_buf_.EnsureCapacity(64); });
     variant<error_code, Connection::ParserStatus> res;
     if (ioloop_v2_) {
-      // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
-      // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
-      // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
-      migration_allowed_to_register_ = true;
       res = IoLoopV2();
     } else {
       res = IoLoop();
@@ -2404,15 +2400,12 @@ bool Connection::ExecuteBatch() {
 
 bool Connection::ReplyBatch() {
   reply_builder_->SetBatchMode(true);
-  for (auto& cmd = parsed_head_; cmd != parsed_to_execute_;) {
-    if (!cmd->CanReply())
-      break;
-
+  while (HasDispatchedCommands() && parsed_head_->CanReply()) {
     current_wait_.reset();  // we must free waiter before proceeding with other commands
+    auto* cmd = parsed_head_;
+    parsed_head_ = cmd->next;
     cmd->SendReply();
-
-    auto* prev = exchange(cmd, cmd->next);
-    ReleaseParsedCommand(prev, cmd != parsed_to_execute_ /* is_pipelined */);
+    ReleaseParsedCommand(cmd, HasDispatchedCommands() /* is_pipelined */);
     if (reply_builder_->GetError())
       return false;
   }
@@ -2595,7 +2588,7 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
   return client_id_ == other.client_id_;
 }
 
-void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) {
+void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) {
   if (std::holds_alternative<std::error_code>(n.read_result)) {
     io_ec_ = std::get<std::error_code>(n.read_result);
     return;
@@ -2603,48 +2596,46 @@ void Connection::DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n) 
 
   using RecvNoti = util::FiberSocketBase::RecvNotification::RecvCompletion;
   if (std::holds_alternative<RecvNoti>(n.read_result)) {
-    if (!std::get<RecvNoti>(n.read_result)) {
+    if (!std::get<RecvNoti>(n.read_result)) {  // false - connection aborted
       io_ec_ = make_error_code(errc::connection_aborted);
       return;
     }
 
-    if (io_buf_.AppendLen() == 0) {
-      // We will regrow in IoLoopV2
-      return;
-    }
-
-    io::MutableBytes buf = io_buf_.AppendBuffer();
-    io::Result<size_t> res = socket_->TryRecv(buf);
-
-    if (res) {
-      if (*res > 0) {
-        // A recv call can return fewer bytes than requested even if the
-        // socket buffer actually contains enough data to satisfy the full request.
-        // TODO maybe worth looping here and try another recv call until it fails
-        // with EAGAIN or EWOULDBLOCK. The problem there is that we need to handle
-        // resizing if AppendBuffer is zero.
-        io_buf_.CommitWrite(*res);
-        return;
-      }
-      // *res == 0
-      io_ec_ = make_error_code(errc::connection_aborted);
-      return;
-    }
-
-    // error path (!res)
-    auto ec = res.error();
-    // EAGAIN and EWOULDBLOCK
-    if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block) {
-      return;
-    }
-
-    io_ec_ = ec;
+    pending_input_ = true;
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
     UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
                         [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
   } else {
     LOG(FATAL) << "Should not reach here";
+  }
+}
+
+void Connection::ReadPendingInput() {
+  // Drain available socket data into io_buf_.
+  io::MutableBytes buf = io_buf_.AppendBuffer();
+  // A recv call can return fewer bytes than requested even if the
+  // socket buffer actually contains enough data to satisfy the full request.
+  while (!buf.empty()) {
+    io::Result<size_t> res = socket_->TryRecv(buf);
+    if (!res) {
+      auto ec = res.error();
+      // TryRecv is non-blocking: it returns EAGAIN/EWOULDBLOCK when nothing is ready.
+      if (ec == errc::resource_unavailable_try_again || ec == errc::operation_would_block)
+        pending_input_ = false;
+      else
+        io_ec_ = ec;
+      break;
+    }
+
+    if (*res == 0) {
+      io_ec_ = make_error_code(errc::connection_aborted);  // *res == 0, clean EOF
+      pending_input_ = false;
+      break;
+    }
+
+    io_buf_.CommitWrite(*res);
+    buf = io_buf_.AppendBuffer();
   }
 }
 
@@ -2694,18 +2685,25 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   if (!peer->IsOpen())
     return ParserStatus::OK;
 
+  // Everything above the IoLoopV2 is fiber blocking. A connection can migrate before
+  // it reaches here and will cause a double RegisterOnRecv check fail. To avoid this,
+  // a migration shall only call RegisterOnRecv if it reached the main IoLoopV2 below.
+  migration_allowed_to_register_ = true;
+  pending_input_ = true;
+
   if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
 #ifdef __linux__
     fb2::UringProactor* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
     if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
       static_cast<fb2::UringSocket*>(peer)->EnableRecvMultishot();
+      pending_input_ = false;
     }
 #endif
   }
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
-    DoReadOnRecv(n);
+    NotifyOnRecv(n);
     io_event_.notify();
   });
 
@@ -2719,32 +2717,22 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   do {
     HandleMigrateRequest();
 
-    // Register completion for current head if its pending and we don't wait
-    if (auto* cmd = parsed_head_; cmd && cmd != parsed_to_execute_ && !current_wait_.has_value()) {
-      current_wait_.emplace(cmd, &ioevent_waiter);
+    // Register completion for current head if its pending and we don't wait on current_wait_.
+    if (HasDispatchedCommands() && !current_wait_.has_value()) {
+      current_wait_.emplace(parsed_head_, &ioevent_waiter);
+    }
+
+    if (pending_input_) {
+      ReadPendingInput();
     }
 
     if (io_buf_.InputLen() == 0) {
-      // Poll again for readiness. The event handler registered above is edge triggered
-      // We should read from the socket until EAGAIN or EWOULDBLOCK
-      // to make sure we consume all available data.
-      // See "Do I need to continuously read/write" question
-      // under https://man7.org/linux/man-pages/man7/epoll.7.html
-      // The exception is when we use io_uring with multishot recv enabled, in which case
-      // we rely on the kernel to keep feeding us data until we multishot is disabled.
-      DoReadOnRecv(FiberSocketBase::RecvNotification{true});
       io_event_.await([this]() {
         // TODO: optimize CanReply with looking up waiter key
-        bool cmd_executable = parsed_head_ && parsed_head_ == parsed_to_execute_;
-        bool cmd_ready = !cmd_executable && parsed_head_ && parsed_head_->CanReply();
-        return io_buf_.InputLen() > 0 || cmd_ready || cmd_executable || !dispatch_q_.empty() ||
-               io_ec_;
+        // io_buf_.InputLen() > 0 is still needed for multishot flow.
+        return io_buf_.InputLen() > 0 || pending_input_ || HeadReadyToDispatch() ||
+               (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_;
       });
-    }
-
-    if (io_ec_) {
-      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
-      return std::exchange(io_ec_, {});
     }
 
     phase_ = PROCESS;
@@ -2776,7 +2764,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       parse_status = NEED_MORE;
 
       if (parsed_head_) {
-        if (parsed_head_ == parsed_to_execute_)
+        if (HeadReadyToDispatch())
           ExecuteBatch();
         ReplyBatch();
       }
@@ -2784,6 +2772,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();
+    }
+
+    // Check io_ec_ after parsing and flushing replies, so that half-closed
+    // connections get their responses before we close.
+    if (io_ec_) {
+      LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
+      return std::exchange(io_ec_, {});
     }
 
     if (parse_status == NEED_MORE) {
