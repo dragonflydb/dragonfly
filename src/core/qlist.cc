@@ -1042,11 +1042,8 @@ void QList::CompressByDepth(Node* node) {
   int in_depth = 0;
 
   while (depth++ < compress_) {
-    // Offloaded nodes have no entry data yet; skip decompression here.
-    if (!forward->offloaded && !forward->io_pending)
-      malloc_size_ += TryDecompressInternal(false, forward);
-    if (!reverse->offloaded && !reverse->io_pending)
-      malloc_size_ += TryDecompressInternal(false, reverse);
+    malloc_size_ += TryDecompressInternal(false, forward);
+    malloc_size_ += TryDecompressInternal(false, reverse);
 
     if (forward == node || reverse == node)
       in_depth = 1;
@@ -1063,13 +1060,8 @@ void QList::CompressByDepth(Node* node) {
   if (!in_depth && node) {
     malloc_size_ += TryCompress(node);
   }
-  /* At this point, forward and reverse are one node beyond depth.
-   * Skip offloaded/io_pending nodes: their u_.entry is not a valid
-   * in-memory pointer and must not be passed to lzf_compress. */
-  if (!forward->offloaded && !forward->io_pending)
-    malloc_size_ += TryCompress(forward);
-  if (!reverse->offloaded && !reverse->io_pending)
-    malloc_size_ += TryCompress(reverse);
+  malloc_size_ += TryCompress(forward);
+  malloc_size_ += TryCompress(reverse);
 }
 
 void QList::Materialize(Node* node) {
@@ -1646,10 +1638,10 @@ void QList::CompressWithZstdDict() {
       continue;
     if (node->encoding == QUICKLIST_NODE_ENCODING_RAW && node->sz >= MIN_COMPRESS_BYTES)
       any_attempted = true;
-    size_t prev_size = zmalloc_usable_size(node->entry);
+    size_t prev_size = zmalloc_usable_size(node->u_.entry);
     if (CompressNodeWithDict(node)) {
       any_compressed = true;
-      malloc_size_ += zmalloc_usable_size(node->entry) - prev_size;
+      malloc_size_ += zmalloc_usable_size(node->u_.entry) - prev_size;
     }
   }
 
