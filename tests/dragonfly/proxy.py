@@ -87,6 +87,10 @@ class Proxy:
             cb()
         self.stop_connections = []
 
+        # Yield so that accepted-but-not-yet-started handler tasks begin
+        # executing and register themselves in _handler_tasks.
+        await asyncio.sleep(0)
+
         # Cancel all handler tasks, including ones that haven't registered
         # their cleanup callbacks yet (race between accept and close).
         # Loop until no tasks remain so late-starting handlers are caught.
