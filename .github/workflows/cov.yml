@@ -107,7 +107,7 @@ jobs:
           cd $GITHUB_WORKSPACE/build
           lcov -c -d . -o main_coverage.info --ignore-errors mismatch
           lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*'
-          genhtml main_coverage.info --ignore-errors source --output-directory covout -p $GITHUB_WORKSPACE
+          genhtml main_coverage.info --ignore-errors source,unmapped --output-directory covout -p $GITHUB_WORKSPACE
           ls ./
           echo ls covout
           ls covout/
