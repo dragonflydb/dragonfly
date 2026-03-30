@@ -518,6 +518,21 @@ TEST_F(GenericFamilyTest, RenameSameShard) {
   EXPECT_EQ(Run({"rename", "x", "y"}), "OK");
 }
 
+TEST_F(GenericFamilyTest, RenameCmsNanCrash) {
+  num_threads_ = 2;
+  ResetService();
+
+  // With 2 shards (XXH64 seed 120577240643): myset -> shard 0, dst -> shard 1.
+  // NaN must be rejected: !(NaN > 0 && NaN < 1) is true for both checks.
+  // Before the fix, NaN bypassed <= 0 / >= 1 guards (NaN comparisons are always
+  // false), creating a CMS with width=0 and depth=0.  The subsequent cross-shard
+  // RENAME triggered Renamer::FinalizeRename -> DeserializeDest -> ReadCMS,
+  // which rejected width==0 -> INVALID_VALUE -> DFATAL (SIGABRT in debug builds).
+  EXPECT_THAT(Run({"cms.initbyprob", "myset", "NaN", "NaN"}), ErrArg("between 0 and 1"));
+  EXPECT_THAT(Run({"exists", "myset"}), IntArg(0));
+  EXPECT_THAT(Run({"rename", "myset", "dst"}), ErrArg("no such key"));
+}
+
 TEST_F(GenericFamilyTest, Stick) {
   // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
