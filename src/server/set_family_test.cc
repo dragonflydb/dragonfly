@@ -760,4 +760,32 @@ TEST_F(SetFamilyTest, SMoveDeletesEmptySourceSet) {
   EXPECT_THAT(Run({"exists", "src"}), IntArg(0));
 }
 
+TEST_F(SetFamilyTest, FieldExpireDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so FIELDEXPIRE touches its bucket and triggers lazy expiry.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  // FIELDEXPIRE on an already-expired member should clean up the empty set.
+  auto resp = Run({"fieldexpire", "key", "100", "a"});
+  // -2 means the field was not found (expired).
+  EXPECT_THAT(resp, IntArg(-2));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
+TEST_F(SetFamilyTest, FieldTtlDeletesEmptySet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Single member so FIELDTTL touches its bucket and triggers lazy expiry.
+  Run({"saddex", "key", "1", "a"});
+  AdvanceTime(2000);
+
+  // FIELDTTL on an already-expired member should clean up the empty set.
+  auto resp = Run({"fieldttl", "key", "a"});
+  // -3 means the field was not found (expired); -2 would mean key not found.
+  EXPECT_THAT(resp, IntArg(-3));
+  EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
+}
+
 }  // namespace dfly
