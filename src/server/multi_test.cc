@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "core/interpreter.h"
 #include "facade/facade_test.h"
+#include "facade/resp_expr.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
@@ -1084,6 +1085,32 @@ TEST_F(MultiTest, ScriptBadCommand) {
 
   resp = Run({"eval", s4, "0"});
   EXPECT_EQ(resp, "OK");
+}
+
+// Test undeclared key errors with async calls
+TEST_F(MultiTest, ACallUndeclaredKeys) {
+  constexpr string_view SCRIPT = R"(
+for i = 1, #KEYS do
+  redis.acall('DEL', KEYS[i])
+end
+for i = 1, #ARGV do
+  redis.acall('DEL', ARGV[i])
+end
+  )";
+
+  std::vector<std::string> args = {"EVAL", string(SCRIPT), "0"};
+  for (size_t i = 0; i < 10; i++)
+    args.emplace_back(absl::StrCat("k", i));
+
+  for (size_t i = 0; i < 10; i++) {
+    args[2] = absl::StrCat(i);
+    auto res = Run(args);
+    EXPECT_THAT(res, ErrArg("undeclared key"));
+    EXPECT_THAT(res, ErrArg(args[i + 3]));
+  }
+
+  args[2] = "10";
+  EXPECT_THAT(Run(args), ArgType(RespExpr::NIL));
 }
 
 TEST_F(MultiTest, MultiSquash) {

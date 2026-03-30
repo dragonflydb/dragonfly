@@ -5,6 +5,7 @@
 #include "server/command_registry.h"
 
 #include <absl/container/inlined_vector.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -322,8 +323,10 @@ CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
   return std::move(family_of_commands_);
 }
 
-std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(string_view cmd,
-                                                                      ParsedArgs tail_args) const {
+std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(ParsedArgs args) const {
+  string cmd = absl::AsciiStrToUpper(args.Front());
+  auto tail_args = args.Tail();
+
   if (cmd == RenamedOrOriginal("ACL"sv)) {
     if (tail_args.empty()) {
       return {Find(cmd), {}};
