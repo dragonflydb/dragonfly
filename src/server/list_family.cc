@@ -104,8 +104,8 @@ auto NodeOnloadCb(TieredStorage* ts, DbIndex db_id, QList* ql) {
     // We are going to overwrite node external offset so first call delete.
     ts->Delete(db_id, node);
 
-    node->u_.entry = static_cast<unsigned char*>(zmalloc(res->size()));
-    memcpy(node->u_.entry, res->data(), res->size());
+    node->entry = static_cast<unsigned char*>(zmalloc(res->size()));
+    memcpy(node->entry, res->data(), res->size());
   };
 }
 

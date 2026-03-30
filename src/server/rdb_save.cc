@@ -421,7 +421,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
       size_t compress_len = node->GetLZF(&data);
       RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
-      RETURN_ON_ERR(SaveString(node->u_.entry, node->sz));
+      RETURN_ON_ERR(SaveString(node->entry, node->sz));
       FlushState flush_state = FlushState::kFlushMidEntry;
       if (node->next == nullptr)
         flush_state = FlushState::kFlushEndEntry;

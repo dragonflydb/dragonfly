@@ -55,10 +55,10 @@ class QList {
     Node* prev;
     Node* next;
 
-    union U {
+    union {
       unsigned char* entry;  // Pointer to the memory value of the node.
       size_t ext_offset;     // Offset in tiered storage
-    } u_;
+    };
 
     // For offloaded nodes, we store the offset of the value in colder storage
     // instead of a pointer to the data in memory.
@@ -90,7 +90,7 @@ class QList {
 
     void SetExternal(size_t offset, uint32_t sz);
     std::pair<size_t, size_t> GetExternalSlice() const {
-      return std::make_pair(size_t(u_.ext_offset), size_t(ext_size));
+      return std::make_pair(size_t(ext_offset), size_t(ext_size));
     }
   };
 
