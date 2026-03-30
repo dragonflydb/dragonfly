@@ -17,7 +17,7 @@ from redis.backoff import NoBackoff
 from redis.retry import Retry
 from redis.exceptions import ConnectionError, ResponseError
 
-from . import dfly_args
+from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory
 from .utility import tick_timer, assert_eventually
 
@@ -1325,27 +1325,149 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
     assert info["dispatch_queue_bytes"] == 0
 
 
-@dfly_args({"proactor_threads": 4, "pipeline_queue_limit": 10})
-async def test_pipeline_overlimit(df_server: DflyInstance):
-    client = df_server.client()
+@dfly_multi_test_args(
+    {"proactor_threads": 4, "pipeline_queue_limit": 10, "pipeline_buffer_limit": "1024"},
+    {
+        "proactor_threads": 4,
+        "pipeline_queue_limit": 10,
+        "pipeline_buffer_limit": "1024",
+        "experimental_io_loop_v2": "true",
+    },
+)
+async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
+    """
+    Verifies that the server correctly triggers backpressure when the number of
+    queued pipeline commands exceeds 'pipeline_queue_limit'.
+    The test ensures:
+    1. The 'pipeline_throttle_total' metric increments (proving the fiber parked).
+    2. Raising the limit via CONFIG SET dynamically resumes the parked fibers.
+    3. Data integrity is maintained (no bytes were skipped or corrupted during
+       the pause/resume cycle of the parser).
+    """
+    server = df_factory.create()
+    server.start()
+    client = server.client()
 
     await client.set("x", "a" * 1024 * 5)
 
     async def pipe_overlimit():
-        c = df_server.client()
+        c = server.client()
         pipe = c.pipeline()
         for i in range(1000):
             pipe.get("x")
         logging.debug("Executing...")
         res = await pipe.execute()
-        logging.debug(f"Executed.")
+        logging.debug("Executed.")
+        assert len(res) == 1000
+        assert all(
+            r == "a" * 1024 * 5 for r in res
+        ), "Pipeline returned corrupted data after backpressure"
 
     pipeline_tasks = [asyncio.create_task(pipe_overlimit()) for _ in range(20)]
 
     await asyncio.sleep(2)
+
+    # Verify backpressure was exercised
+    info = await client.info("stats")
+    assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
+
     await client.config_set("pipeline_queue_limit", 10000)
     for task in pipeline_tasks:
         await task
+
+
+@dfly_args(
+    {
+        "proactor_threads": 4,
+        "pipeline_queue_limit": 10,
+        "pipeline_buffer_limit": "1024",
+        "experimental_io_loop_v2": "true",
+    }
+)
+async def test_pipeline_backpressure_v2_correctness(df_server: DflyInstance):
+    """Verify that V2 backpressure throttles without corrupting responses."""
+    client = df_server.client()
+    value = "v" * 512
+    num_keys = 50
+    for i in range(num_keys):
+        await client.set(f"bp:{i}", value)
+
+    async def run_pipeline() -> list:
+        c = df_server.client()
+        pipe = c.pipeline()
+        for i in range(num_keys):
+            pipe.get(f"bp:{i}")
+        return await pipe.execute()
+
+    tasks = [asyncio.create_task(run_pipeline()) for _ in range(10)]
+    results = await asyncio.gather(*tasks)
+
+    # Every pipeline must return the correct values (client uses decode_responses=True)
+    expected = [value] * num_keys
+    for i, res in enumerate(results):
+        assert res == expected, f"Pipeline {i} returned unexpected results"
+
+    info = await client.info("stats")
+    assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
+
+
+@dfly_multi_test_args(
+    {"proactor_threads": 4, "pipeline_queue_limit": 10, "pipeline_buffer_limit": "1024"},
+    {
+        "proactor_threads": 4,
+        "pipeline_queue_limit": 10,
+        "pipeline_buffer_limit": "1024",
+        "experimental_io_loop_v2": "true",
+    },
+)
+async def test_pipeline_backpressure_disconnect(df_factory: DflyInstanceFactory):
+    """Verify a client stuck in backpressure can safely disconnect (io_ec_ trigger).
+
+    Uses 4 proactor threads with concurrent flood clients to reliably trigger
+    backpressure (with 1 thread, parsing and execution are fully sequential so
+    the queue never builds up). A separate raw TCP connection is then abruptly
+    closed while the server is under backpressure to verify clean shutdown.
+    """
+    server = df_factory.create()
+    server.start()
+    client = server.client()
+
+    await client.set("x", "a" * 1024 * 5)
+
+    # Open a raw TCP connection that we will abruptly disconnect.
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    writer.write(b"GET x\r\n" * 1000)
+    await writer.drain()
+
+    # Create concurrent pipeline floods to reliably trigger backpressure
+    # (same proven pattern as test_pipeline_overlimit).
+    async def pipe_flood():
+        c = server.client()
+        pipe = c.pipeline()
+        for i in range(1000):
+            pipe.get("x")
+        res = await pipe.execute()
+        assert len(res) == 1000
+
+    flood_tasks = [asyncio.create_task(pipe_flood()) for _ in range(20)]
+    await asyncio.sleep(2)
+
+    # Verify backpressure was exercised
+    info = await client.info("stats")
+    assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
+
+    # Abruptly close the raw TCP socket while backpressure is active.
+    writer.close()
+    await writer.wait_closed()
+    await asyncio.sleep(0.5)
+
+    # Unblock the flood tasks by raising the limit
+    await client.config_set("pipeline_queue_limit", 10000)
+    for task in flood_tasks:
+        await task
+
+    # Verify the server is still healthy after the abrupt disconnect
+    assert await client.ping() is True
 
 
 async def test_client_unpause(df_server: DflyInstance):
