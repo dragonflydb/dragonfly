@@ -39,13 +39,8 @@ string Entry::ToString() const {
 }
 
 string ParsedEntry::ToString() const {
-  string rv = absl::StrCat("{op=", opcode, ", dbid=", dbid, ", cmd='");
-  for (string_view arg : cmd) {
-    absl::StrAppend(&rv, arg, " ");
-  }
-  rv.pop_back();
-  rv += "'}";
-  return rv;
+  return absl::StrCat("{op=", opcode, ", dbid=", dbid, ", cmd='")  //
+         + absl::StrJoin(cmd.view(), " ") + "'}";
 }
 
 }  // namespace dfly::journal
