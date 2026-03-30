@@ -286,7 +286,7 @@ jobs:
         fetch-depth: 0
 
     - name: Install helm
-      uses: azure/setup-helm@v4
+      uses: azure/setup-helm@v5
 
     - name: Setup Go
       uses: actions/setup-go@v6

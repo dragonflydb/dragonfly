@@ -112,7 +112,7 @@ jobs:
           echo ls covout
           ls covout/
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: build/main_coverage.info
           fail_ci_if_error: true
