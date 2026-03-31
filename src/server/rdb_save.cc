@@ -1951,7 +1951,9 @@ void RdbSerializer::StashCurrentBuffer() {
   }
 }
 
-std::string RdbSerializer::TagChunk(Bytes bytes, uint32_t stream_id) {
+std::string RdbSerializer::TagChunk(std::string blob, uint32_t stream_id) {
+  const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
+
   uint8_t header[9];
   header[0] = RDB_OPCODE_TAGGED_CHUNK;
   absl::little_endian::Store32(header + 1, stream_id);
@@ -1990,23 +1992,19 @@ std::string RdbSerializer::FinalizeCurrentRecord(FlushState flush_state) {
   if (active_entry_.kind == ActiveEntry::Kind::Raw)
     return blob;
 
-  auto do_tag = [&] {
-    const Bytes bytes{reinterpret_cast<const unsigned char*>(blob.data()), blob.size()};
-    return TagChunk(bytes, *active_entry_.stream_id);
-  };
-
   if (flush_state == FlushState::kFlushMidEntry) {
-    // Mark the current entry as chunked. It will now always be tagged, any future chunks going out
-    // for this entry will be tagged too
+    // Mark the current entry as chunked. Any future chunks going out for this entry will be tagged
+    // too
     if (!active_entry_.chunked) {
       active_entry_.chunked = true;
       active_entry_.stream_id = AllocateStreamId();
     }
-    return do_tag();
+    return TagChunk(blob, *active_entry_.stream_id);
   }
 
+  // end of entry
   if (active_entry_.chunked) {
-    blob = do_tag();
+    blob = TagChunk(blob, *active_entry_.stream_id);
   }
 
   // Reset active entry, current baseline entry is finished

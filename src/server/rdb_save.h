@@ -327,7 +327,7 @@ class RdbSerializer : public RdbSerializerBase {
   void StashCurrentBuffer();
 
   // Tags a given byte series with opcode, stream ID and the size of bytes in 9 byte header.
-  static std::string TagChunk(io::Bytes bytes, uint32_t stream_id);
+  static std::string TagChunk(std::string blob, uint32_t stream_id);
 
   // Helper to switche state from tagged chunks to non tagged chunks, eg journal, full sync cut etc
   // Must be called for any non k-v records to stash the current buffer data first.
