@@ -470,7 +470,9 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 
   size_t table_before = db->prime.mem_usage();
   db->prime.Reserve(key_size);
-  table_memory_ += (db->prime.mem_usage() - table_before);
+  ssize_t table_increase = db->prime.mem_usage() - table_before;
+  table_memory_ += table_increase;
+  memory_budget_ -= table_increase;
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
