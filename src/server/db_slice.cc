@@ -468,7 +468,9 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   auto& db = db_arr_[db_ind];
   DCHECK(db);
 
+  size_t table_before = db->prime.mem_usage();
   db->prime.Reserve(key_size);
+  table_memory_ += (db->prime.mem_usage() - table_before);
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
