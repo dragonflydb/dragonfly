@@ -419,7 +419,7 @@ size_t QList::Node::GetLZF(void** data) const {
 }
 
 void QList::Node::SetExternal(size_t offset, uint32_t size) {
-  DCHECK(entry);
+  DCHECK(entry && !io_pending);
   zfree(entry);
   offloaded = 1;
   ext_offset = offset;
@@ -601,10 +601,8 @@ string QList::Pop(Where where) {
   DCHECK_EQ(node->encoding, QUICKLIST_NODE_ENCODING_RAW);
   DCHECK(head_->prev->next == nullptr);
 
-  // Try onloading entry if it's offloaded.
-  if (tiering_params_) {
-    AccessForReads(false, node);
-  }
+  // Onloading the node if needed
+  Materialize(node);
 
   string res;
   if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(node))) {
@@ -1072,21 +1070,7 @@ void QList::AccessForReads(bool recompress, Node* node) {
   DCHECK(node);
   stats.total_node_reads++;
 
-  if (tiering_params_ && (node->offloaded || node->io_pending)) {
-    // If the nodes is io_pending. Just call the delete callback to cancel stashing.
-    if (node->io_pending && tiering_params_->delete_cb) {
-      tiering_params_->delete_cb(node);
-    }
-    // If the nodes is offlodaded. Load the data back to node.
-    if (node->offloaded && tiering_params_->onload_cb) {
-      stats.onload_requests++;
-      tiering_params_->onload_cb(node);
-    }
-    // After onload_cb returns, the node entry must be restored and flags cleared.
-    DCHECK(!node->offloaded);
-    DCHECK(!node->io_pending);
-    DCHECK(node->entry != nullptr);
-  }
+  Materialize(node);
 
   if (len_ > 2 && node != head_ && node->next != nullptr) {
     stats.interior_node_reads++;

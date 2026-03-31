@@ -176,7 +176,7 @@ class ListWrapper {
   }
 
  public:
-  // TODO: passing current dbid of objecte. It could happen that object is moved to
+  // TODO: passing current dbid of object. It could happen that object is moved to
   // another db so this dbid will be incorrect. Refactor to support moving objects between dbs.
   template <typename T>
   explicit ListWrapper(DbIndex dbid, T t) : db_id_(dbid), impl_(std::forward<T>(t)) {
