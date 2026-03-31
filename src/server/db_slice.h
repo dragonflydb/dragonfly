@@ -224,9 +224,6 @@ class DbSlice {
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
-  // Activates `db_ind` database if it does not exist (see ActivateDb below).
-  void Reserve(DbIndex db_ind, size_t key_size);
-
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
