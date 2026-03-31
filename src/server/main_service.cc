@@ -1944,7 +1944,6 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 void Service::TryEnqueueEvalAsyncCmd(Interpreter::CallArgs& ca, CommandContext* cmd_cntx,
                                      facade::RedisReplyBuilder* replier) {
   using CT = Interpreter::CallArgs::Type;
-  auto* tx = cmd_cntx->tx();
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.script_info;
 
@@ -1960,12 +1959,8 @@ void Service::TryEnqueueEvalAsyncCmd(Interpreter::CallArgs& ca, CommandContext* 
       auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       auto tail_slice = ca.args.subspan(ca.args.size() - tail.size());
 
-      if (auto err = CheckKeysDeclared(*info, cid, tail_slice, tx->GetMultiMode()); err) {
-        early_async_error = std::move(*err);
-      } else {
-        info->async_cmds.emplace_back(cid, tail_slice, reply_mode);
-        info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
-      }
+      info->async_cmds.emplace_back(cid, tail_slice, reply_mode);
+      info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
       early_async_error = ReportUnknownCmd(ca.args[0]);
     }
@@ -1989,6 +1984,8 @@ void Service::TryEnqueueEvalAsyncCmd(Interpreter::CallArgs& ca, CommandContext* 
 void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
   using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
   auto* tx = cmd_cntx->tx();
+  DCHECK(tx);
+
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.script_info;
   info->stats.num_commands++;

@@ -140,6 +140,9 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
       return SquashResult::NOT_SQUASHED;  // at least two shards
   }
 
+  if (IsAtomic() && !cntx_->transaction->IsActive(last_sid))
+    return SquashResult::NOT_SQUASHED;
+
   auto& sinfo = PrepareShardInfo(last_sid);
 
   sinfo.dispatched.push_back({.cmd = cmd, .reply = {}});

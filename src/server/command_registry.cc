@@ -324,6 +324,8 @@ CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
 }
 
 std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(ParsedArgs args) const {
+  DCHECK(!args.empty());
+
   string cmd = absl::AsciiStrToUpper(args.Front());
   auto tail_args = args.Tail();
 

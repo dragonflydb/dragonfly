@@ -1087,6 +1087,21 @@ TEST_F(MultiTest, ScriptBadCommand) {
   EXPECT_EQ(resp, "OK");
 }
 
+TEST_F(MultiTest, GeneralACall) {
+  constexpr string_view SCRIPT = R"(
+redis.acall('PING')
+for i = 1, 10 do
+  redis.acall('RPUSH', KEYS[1], 'v' .. i)
+end
+return "OK";
+  )";
+
+  EXPECT_EQ(Run({"EVAL", SCRIPT, "1", "l"}), "OK");
+
+  EXPECT_THAT(Run({"lrange", "l", "0", "-1"}).GetVec(),
+              ElementsAre("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"));
+}
+
 // Test undeclared key errors with async calls
 TEST_F(MultiTest, ACallUndeclaredKeys) {
   constexpr string_view SCRIPT = R"(
