@@ -345,6 +345,10 @@ class RdbSerializer : public RdbSerializerBase {
   // applied to it, which includes a unique key id which will be used by the loader to reassemble.
   std::string FinalizeCurrentRecord(FlushState flush_state);
 
+  // Drains mem buf content, tags if required and adds to pending records. After this call finishes,
+  // mem buf is empty, and pending records are tagged if required, and ready to send to consumer.
+  void DrainMemBufIntoPendingRecords(FlushState flush_state);
+
   std::string FlushImpl(FlushState flush_state);
 
   std::string tmp_str_;

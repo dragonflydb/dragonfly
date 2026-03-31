@@ -957,10 +957,7 @@ string RdbSerializer::Flush(FlushState flush_state) {
 }
 
 string RdbSerializer::FlushImpl(FlushState flush_state) {
-  if (string res = FinalizeCurrentRecord(flush_state); !res.empty()) {
-    pending_record_bytes_ += res.size();
-    pending_records_.push_back(std::move(res));
-  }
+  DrainMemBufIntoPendingRecords(flush_state);
 
   std::string out = absl::StrJoin(pending_records_, "");
   pending_records_.clear();
@@ -1930,8 +1927,7 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
     DCHECK(!blob.empty());  // SerializedLen() > 0.
     const auto saved_entry = active_entry_;
     consume_fun_(std::move(blob));
-    if (mem_buf_.InputLen() > 0)
-      StashCurrentBuffer();
+    StashCurrentBuffer();
     // Restore saved entry if we yielded during consume_fun_, restores the tagging information
     // (ActiveEntry::chunked, ActiveEntry::stream_id)
     active_entry_ = saved_entry;
@@ -1945,10 +1941,7 @@ void RdbSerializer::StashCurrentBuffer() {
   if (mem_buf_.InputLen() == 0)
     return;
 
-  if (auto record = FinalizeCurrentRecord(FlushState::kFlushEndEntry); !record.empty()) {
-    pending_record_bytes_ += record.size();
-    pending_records_.push_back(std::move(record));
-  }
+  DrainMemBufIntoPendingRecords(FlushState::kFlushEndEntry);
 }
 
 std::string RdbSerializer::TagChunk(std::string blob, uint32_t stream_id) {
@@ -2010,6 +2003,13 @@ std::string RdbSerializer::FinalizeCurrentRecord(FlushState flush_state) {
   // Reset active entry, current baseline entry is finished
   active_entry_.Reset(ActiveEntry::Kind::Raw);
   return blob;
+}
+
+void RdbSerializer::DrainMemBufIntoPendingRecords(FlushState flush_state) {
+  if (auto record = FinalizeCurrentRecord(flush_state); !record.empty()) {
+    pending_record_bytes_ += record.size();
+    pending_records_.push_back(std::move(record));
+  }
 }
 
 }  // namespace dfly
