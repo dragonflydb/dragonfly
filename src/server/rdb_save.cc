@@ -665,10 +665,10 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
     string_view blob = sbf->data(i);
     if (absl::GetFlag(FLAGS_rdb_sbf_chunked)) {
       RETURN_ON_ERR(SaveLen(blob.size()));
-
       for (size_t offset = 0; offset < blob.size(); offset += kFilterChunkSize) {
         size_t chunk_len = std::min(kFilterChunkSize, blob.size() - offset);
         RETURN_ON_ERR(SaveString(blob.substr(offset, chunk_len)));
+        PushToConsumerIfNeeded(FlushState::kFlushMidEntry);
       }
     } else {
       RETURN_ON_ERR(SaveString(blob));
