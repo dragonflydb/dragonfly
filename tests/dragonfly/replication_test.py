@@ -1,5 +1,6 @@
 import os
 import platform
+import random
 import shutil
 import signal
 import struct
@@ -4167,6 +4168,68 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
     await check_all_replicas_finished([c_replica], c_master)
 
     assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
+
+
+# Verify that chunked replication of a large bloom filter works and doesn't exceed the max chunk size. Check that
+# replicated bloom filter contains all added items.
+@pytest.mark.large
+async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
+    master = df_factory.create(
+        proactor_threads=1,
+        maxmemory="4G",
+        rdb_sbf_chunked="true",
+    )
+    replica = df_factory.create(
+        proactor_threads=1,
+        maxmemory="4G",
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("BF.RESERVE", "bf", "0.011", "400000000")
+
+    bf_size = await c_master.execute_command("MEMORY USAGE", "bf")
+    assert bf_size > 2**30, f"Bloom filter should be >1GB, got {bf_size}"
+
+    # Fix set to have reproducible test results and log the seed for debugging
+    random_seeed = random.getrandbits(64)
+    logging.info(f"Using random seed {random_seeed} for test reproducibility")
+    test_rng = random.Random(random_seeed)
+
+    random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), 20_000)]
+    await c_master.execute_command("BF.MADD", "bf", *random_items)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(c_replica)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify all added items exist on the replica
+    replica_results = await c_replica.execute_command("BF.MEXISTS", "bf", *random_items)
+    assert all(
+        replica_results
+    ), f"{replica_results.count(0)} of {len(random_items)} items missing on replica"
+
+    # Verify some non-added item doesn't exist on the replica
+    assert await c_replica.execute_command("BF.EXISTS", "bf", "not-added") == 0
+
+    master.stop()
+    replica.stop()
+
+    # We have set MAX_SBF_CHUNK_SIZE to 1 << 26. Double peak bytes size to be safe because of
+    # potential overhead that could be added.
+    MAX_SBF_CHUNK_SIZE = 2**27
+
+    lines = master.find_in_logs("Serialization peak bytes: ")
+    assert len(lines) == 1
+    line = lines[0]
+    peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
+    assert peak_bytes < MAX_SBF_CHUNK_SIZE
 
 
 @pytest.mark.parametrize(
