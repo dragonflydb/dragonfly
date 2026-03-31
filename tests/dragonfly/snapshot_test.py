@@ -481,6 +481,77 @@ async def test_s3_save_local_dir(async_client, tmp_dir):
         )
 
 
+# Regression test for stack overflow in open_s3_write / write_file_close fibers.
+# If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be configured.
+@pytest.mark.skipif(
+    _missing_s3_test_env(),
+    reason="AWS S3 snapshots bucket or credentials are not configured",
+)
+@dfly_args({**BASIC_ARGS})
+async def test_s3_snapshot_no_stack_overflow(df_factory, tmp_dir):
+    """
+    Regression test for: SIGSEGV in WaitQueue::NotifyOne() caused by silent heap corruption
+    from a 40KB fixedsize_stack (no guard page) overflow in the open_s3_write / write_file_close
+    fibers during S3 TLS handshake on ARM64.
+
+    The test triggers SAVE DF to S3 while many connections are actively sending commands.
+    The active connections keep AsyncFiber instances alive and waiting on CondVarAny,
+    which is what gets hit by the corrupted WaitQueue in the crash scenario.
+
+    For reliable crash reproduction: build with protected_fixedsize_stack{40*1024} in
+    snapshot_storage.cc and save_stages_controller.cc -- this adds a guard page so the
+    process crashes deterministically at the overflow site instead of the corrupted heap.
+    Most likely to reproduce on ARM64 + HTTPS endpoint (real S3 or MinIO with TLS).
+    """
+    instance = df_factory.create(proactor_threads=4)
+    instance.start()
+    client = instance.client()
+
+    seeder = DebugPopulateSeeder(key_target=100_000)
+    await seeder.run(client)
+
+    # Open many connections that stay active with AsyncFiber waiting on CondVarAny.
+    # This replicates the production state: concurrent clients keep the notification
+    # path (EnqueueParsedCommand -> cnd_.notify_one -> WaitQueue::NotifyOne) hot
+    # while the S3 fiber's stack overflow silently corrupts the heap.
+    NUM_CONNECTIONS = 50
+    connections = [instance.client() for _ in range(NUM_CONNECTIONS)]
+    stop_event = asyncio.Event()
+
+    async def keep_busy(conn):
+        try:
+            while not stop_event.is_set():
+                pipe = conn.pipeline(transaction=False)
+                for i in range(50):
+                    pipe.set(f"busy:{i}", "x" * 256)
+                await pipe.execute()
+                await asyncio.sleep(0)
+        except Exception:
+            pass
+
+    tasks = [asyncio.create_task(keep_busy(c)) for c in connections]
+    bucket = os.environ["DRAGONFLY_S3_BUCKET"]
+
+    try:
+        async with timeout(120):
+            # SAVE DF to S3: triggers open_s3_write (CreateMultipartUpload + TLS)
+            # and later write_file_close (CompleteMultipartUpload + TLS) on ARM64.
+            await client.execute_command(
+                "SAVE", "DF", "s3://" + bucket + str(tmp_dir), "overflow_test"
+            )
+
+        # If we reach here the server survived; verify it is still functional.
+        assert await client.ping()
+        info = await client.execute_command("INFO", "persistence")
+        assert "rdb_bgsave_in_progress:0" in info
+    finally:
+        stop_event.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for conn in connections:
+            await conn.aclose()
+        delete_s3_objects(bucket, str(tmp_dir)[1:] + "/overflow_test")
+
+
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown"})
 class TestDflySnapshotOnShutdown:
     SEEDER_ARGS = dict(key_target=10_000)

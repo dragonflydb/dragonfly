@@ -12,6 +12,8 @@
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
+#include <boost/context/protected_fixedsize_stack.hpp>
+
 #include "util/aws/aws.h"
 #include "util/aws/credentials_provider_chain.h"
 #include "util/aws/s3_endpoint_provider.h"
@@ -558,9 +560,12 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
   fb2::ProactorBase* proactor = ProactorBase::me();
 
   // We run S3 operations via a temporary fiber to avoid agressive stack consumption.
+  // TODO(fix): 40KB is insufficient on ARM64 during TLS handshake; use protected stack to
+  // crash deterministically at the overflow site instead of corrupting the heap silently.
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> result;
   auto fb = proactor->LaunchFiber(
-      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "open_s3_write", [&] {
+      fb2::Launch::post, boost::context::protected_fixedsize_stack{40 * 1024}, "open_s3_write",
+      [&] {
         io::Result<aws::S3WriteFile> file = aws::S3WriteFile::Open(bucket, key, s3_);
         if (!file) {
           result = nonstd::make_unexpected(GenericError(file.error(), "Failed to open write file"));

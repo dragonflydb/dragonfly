@@ -7,6 +7,7 @@
 
 #include <absl/strings/match.h>
 
+#include <boost/context/protected_fixedsize_stack.hpp>
 #include <numeric>
 
 #include "base/flags.h"
@@ -155,8 +156,10 @@ error_code RdbSnapshot::Close() {
 
   // S3 implementation is stack hungry. We use a fiber to close the file to
   // avoid wasting stack space.
+  // TODO(fix): 40KB is insufficient on ARM64 during TLS handshake; use protected stack to
+  // crash deterministically at the overflow site instead of corrupting the heap silently.
   auto fb = ProactorBase::me()->LaunchFiber(
-      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "write_file_close",
+      fb2::Launch::post, boost::context::protected_fixedsize_stack{40 * 1024}, "write_file_close",
       [&] { ec = static_cast<io::WriteFile*>(io_sink_.get())->Close(); });
   fb.Join();
   return ec;
