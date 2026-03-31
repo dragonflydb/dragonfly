@@ -4200,8 +4200,7 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     test_rng = random.Random(random_seeed)
 
     random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), 20_000)]
-    for item in random_items:
-        await c_master.execute_command("BF.ADD", "bf", item)
+    await c_master.execute_command("BF.MADD", "bf", *random_items)
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
