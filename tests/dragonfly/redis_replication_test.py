@@ -27,8 +27,6 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
             await asyncio.sleep(1)
 
             timeout -= 1
-        await c_master.close()
-        await c_replica.close()
         assert timeout > 0, "Timeout while waiting for replica to sync"
 
 
@@ -134,7 +132,6 @@ replication_specs = [
 ]
 
 
-@pytest.mark.skip("Fails on CI")
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 async def test_redis_replication_all(
     df_factory: DflyInstanceFactory,
