@@ -663,21 +663,23 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(sbf->hashfunc_cnt(i)));
 
     string_view blob = sbf->data(i);
+
+    FlushState flush_state = FlushState::kFlushMidEntry;
+    if ((i + 1) == sbf->num_filters())
+      flush_state = FlushState::kFlushEndEntry;
+
     if (absl::GetFlag(FLAGS_rdb_sbf_chunked)) {
       RETURN_ON_ERR(SaveLen(blob.size()));
       for (size_t offset = 0; offset < blob.size(); offset += kFilterChunkSize) {
         size_t chunk_len = std::min(kFilterChunkSize, blob.size() - offset);
         RETURN_ON_ERR(SaveString(blob.substr(offset, chunk_len)));
-        PushToConsumerIfNeeded(FlushState::kFlushMidEntry);
+        const bool is_last_chunk = (offset + chunk_len >= blob.size());
+        PushToConsumerIfNeeded(is_last_chunk ? flush_state : FlushState::kFlushMidEntry);
       }
     } else {
       RETURN_ON_ERR(SaveString(blob));
+      PushToConsumerIfNeeded(flush_state);
     }
-
-    FlushState flush_state = FlushState::kFlushMidEntry;
-    if ((i + 1) == sbf->num_filters())
-      flush_state = FlushState::kFlushEndEntry;
-    PushToConsumerIfNeeded(flush_state);
   }
 
   return {};

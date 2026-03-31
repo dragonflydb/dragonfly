@@ -4172,7 +4172,7 @@ async def test_sbf_chunked_replication_over_4gb(df_factory: DflyInstanceFactory)
 
 # Verify that chunked replication of a large bloom filter works and doesn't exceed the max chunk size. Check that
 # replicated bloom filter contains all added items.
-# @pytest.mark.large
+@pytest.mark.large
 async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
@@ -4197,9 +4197,9 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     # Fix set to have reproducible test results and log the seed for debugging
     random_seeed = random.getrandbits(64)
     logging.info(f"Using random seed {random_seeed} for test reproducibility")
-    random.seed(random_seeed)
+    test_rng = random.Random(random_seeed)
 
-    random_items = [f"item:{i}" for i in random.sample(range(1_000_000), 20_000)]
+    random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), 20_000)]
     for item in random_items:
         await c_master.execute_command("BF.ADD", "bf", item)
 
@@ -4222,7 +4222,7 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     master.stop()
     replica.stop()
 
-    # We have set MAX_SBF_CHUNK_SIZE to 2 ** 26. Double peak bytes size to be safe because of
+    # We have set MAX_SBF_CHUNK_SIZE to 1 << 26. Double peak bytes size to be safe because of
     # potential overhead that could be added.
     MAX_SBF_CHUNK_SIZE = 2**27
 
