@@ -143,9 +143,9 @@ constexpr size_t kAsanFactor = 1;
 #endif
 
 #ifdef NDEBUG
-constexpr size_t kFiberStackBase = 32_KB;
+constexpr size_t kFiberStackBase = 40_KB;
 #else
-constexpr size_t kFiberStackBase = 48_KB;
+constexpr size_t kFiberStackBase = 56_KB;
 #endif
 
 // Default stack size for fibers. We decrease it by 16 bytes because some allocators
