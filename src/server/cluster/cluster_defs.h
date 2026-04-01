@@ -24,13 +24,7 @@ struct SlotRange {
   SlotId start = 0;
   SlotId end = 0;
 
-  bool operator==(const SlotRange& r) const noexcept {
-    return start == r.start && end == r.end;
-  }
-
-  bool operator<(const SlotRange& r) const noexcept {
-    return start < r.start || (start == r.start && end < r.end);
-  }
+  std::strong_ordering operator<=>(const SlotRange&) const noexcept = default;
 
   bool IsValid() const noexcept {
     return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;

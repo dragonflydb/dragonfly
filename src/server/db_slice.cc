@@ -1521,8 +1521,7 @@ void DbSlice::UnregisterConnectionWatches(absl::Span<const std::pair<DbIndex, st
   for (const auto& [db_indx, key] : keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
-      it->second.erase(std::remove(it->second.begin(), it->second.end(), dirty_ptr),
-                       it->second.end());
+      std::erase(it->second, dirty_ptr);
       if (it->second.empty())
         watched_keys.erase(it);
     }

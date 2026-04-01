@@ -12,6 +12,8 @@
 #include "server/search/filter_driver.h"
 #include "server/search/filter_eval.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::aggregate {
 
 namespace {
@@ -119,7 +121,7 @@ void Aggregator::DoSort(const SortParams& sort_params) {
 
   auto& values = result.values;
   if (sort_params.SortAll()) {
-    std::sort(values.begin(), values.end(), comparator);
+    rng::sort(values, comparator);
   } else {
     DCHECK_GE(sort_params.max, 0);
     const size_t limit = std::min(values.size(), size_t(sort_params.max));
@@ -240,10 +242,7 @@ AggregationStep MakeLimitStep(size_t offset, size_t num) {
 
 void Aggregator::DoFilter(const FilterExprNode& expr) {
   auto& values = result.values;
-  values.erase(
-      std::remove_if(values.begin(), values.end(),
-                     [&](const DocValues& doc) { return !IsTruthy(EvalFilterExpr(expr, doc)); }),
-      values.end());
+  std::erase_if(values, [&](const DocValues& doc) { return !IsTruthy(EvalFilterExpr(expr, doc)); });
 }
 
 std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_expr) {

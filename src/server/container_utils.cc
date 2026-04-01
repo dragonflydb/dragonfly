@@ -23,6 +23,8 @@ extern "C" {
 #include "redis/util.h"
 }
 
+namespace rng = std::ranges;
+
 namespace dfly::container_utils {
 using namespace std;
 namespace {
@@ -113,7 +115,8 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   trans->Execute(std::move(cb), false);
 
   // If any key is of the wrong type, report it immediately
-  if (std::find(find_res.begin(), find_res.end(), OpStatus::WRONG_TYPE) != find_res.end())
+  if (rng::find_if(find_res, [](const auto& r) { return r == OpStatus::WRONG_TYPE; }) !=
+      find_res.end())
     return OpStatus::WRONG_TYPE;
 
   // Order result by their keys position in the command arguments, push errors to back

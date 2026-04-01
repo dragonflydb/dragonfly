@@ -23,6 +23,8 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/test_utils.h"
 
+namespace rng = std::ranges;
+
 using namespace testing;
 using namespace std;
 using namespace util;
@@ -794,7 +796,7 @@ TEST_P(HnswRestoreTest, RestoreVectorSearchIndexHnsw) {
   auto is_indexing_done = [this](string_view idx_name) {
     auto resp = Run({"FT.INFO", idx_name});
     auto arr = resp.GetVec();
-    auto it = std::find_if(arr.begin(), arr.end(), [](const auto& e) { return e == "indexing"; });
+    auto it = rng::find_if(arr, [](const auto& e) { return e == "indexing"; });
     return it != arr.end() && (++it)->GetInt() == 0;
   };
 

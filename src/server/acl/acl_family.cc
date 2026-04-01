@@ -43,6 +43,8 @@
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
 
+namespace rng = std::ranges;
+
 using namespace std;
 
 ABSL_FLAG(string, aclfile, "", "Path and name to aclfile");
@@ -688,7 +690,7 @@ MergeResult MergeTables(const User::CategoryChanges& categories,
     result.push_back(CommandAndMetadata{cmd, meta});
   }
 
-  std::sort(result.begin(), result.end(), [](const auto& l, const auto& r) {
+  rng::sort(result, [](const auto& l, const auto& r) {
     auto fetch = [](const auto& l) { return l.metadata.seq_no; };
     return std::visit(fetch, l) < std::visit(fetch, r);
   });

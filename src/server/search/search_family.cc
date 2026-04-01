@@ -39,6 +39,8 @@
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
+namespace rng = std::ranges;
+
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
 ABSL_FLAG(bool, cluster_search, false,
           "Enable search commands for cross-shard search. turned off by default for safety.");
@@ -295,16 +297,14 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
                                      search::SchemaField::SORTABLE);
       if (!flag) {
         std::string_view option = parser->Peek();
-        if (std::find(kIgnoredOptions.begin(), kIgnoredOptions.end(), option) !=
-            kIgnoredOptions.end()) {
+        if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
           LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
               << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options
           parser->Skip(1);
           continue;
         }
-        if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(), option) !=
-            kIgnoredOptionsWithArg.end()) {
+        if (rng::find(kIgnoredOptionsWithArg, option) != kIgnoredOptionsWithArg.end()) {
           LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options with argument
           parser->Skip(2);
@@ -897,7 +897,7 @@ join::Vector<join::Vector<join::Key>> DoJoin(
     size_t limit = offset + total;
     if (!sort_params.empty()) {
       if (limit >= joined_entries->size()) {
-        std::sort(joined_entries->begin(), joined_entries->end(), std::move(comparator));
+        rng::sort(*joined_entries, std::move(comparator));
       } else {
         std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
                           joined_entries->end(), std::move(comparator));
@@ -2269,7 +2269,7 @@ void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Sort group_ids before sending
     std::vector<std::string> sorted_ids(group_ids.begin(), group_ids.end());
-    std::sort(sorted_ids.begin(), sorted_ids.end());
+    rng::sort(sorted_ids);
 
     for (const auto& id : sorted_ids) {
       rb->SendBulkString(id);

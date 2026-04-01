@@ -28,6 +28,8 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/transaction.h"
 
+namespace rng = std::ranges;
+
 /**
  * The number of entries allowed per internal list node can be specified
  * as a fixed maximum size or a maximum number of elements.
