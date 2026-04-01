@@ -63,14 +63,7 @@ jobs:
 
       - name: Install Python test requirements
         shell: bash
-        run: |
-          cd ${GITHUB_WORKSPACE}/tests
-          # https://peps.python.org/pep-0668/#keep-the-marker-file-in-container-images
-          if compgen -G '/usr/lib/python3.*/EXTERNALLY-MANAGED' > /dev/null; then
-            pip3 install --break-system-packages -r dragonfly/requirements.txt
-          else
-            pip3 install -r dragonfly/requirements.txt
-          fi
+        run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
 
       - name: Configure CMake
         run: |
