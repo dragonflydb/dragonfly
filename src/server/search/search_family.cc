@@ -215,10 +215,13 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   // Validate that the initial allocation (capacity * (dim+1) floats) cannot
   // overflow size_t or request an unreasonable amount of memory.  Without this
   // check FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc,
-  // leaving a half-initialised index registered in ShardDocIndices
+  // leaving a half-initialised index registered in ShardDocIndices.
   static constexpr size_t kMaxFlatBufEntries = size_t{1} << 30;  // ~4 GiB of floats
-  size_t dim_plus1 = vector_params.dim + 1;                      // can't overflow: dim > 0
-  if (dim_plus1 > kMaxFlatBufEntries || vector_params.capacity > kMaxFlatBufEntries / dim_plus1) {
+  if (vector_params.dim >= kMaxFlatBufEntries) {
+    return CreateSyntaxError("Vector index initial allocation is too large"sv);
+  }
+  size_t dim_plus1 = vector_params.dim + 1;
+  if (vector_params.capacity > kMaxFlatBufEntries / dim_plus1) {
     return CreateSyntaxError("Vector index initial allocation is too large"sv);
   }
 
