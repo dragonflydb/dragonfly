@@ -413,28 +413,13 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
 
 TEST_F(QListTest, Tiering) {
   QList::stats.offload_requests = 0;
+  QList tiered_ql;
 
-  // Simulate tiering setup where we mark offloaded nodes as pending so that
-  // throttling logic works correctly. We need to free memory manually in the
-  // delete callback.
-  QList::TieringParams params{.node_depth_threshold = 1,
-                              .offload_cb =
-                                  [](QList::Node* node) {
-                                    node->io_pending = 1;
-                                    return true;
-                                  },
-                              .onload_cb = nullptr,
-                              .delete_cb =
-                                  [](QList::Node* node) {
-                                    zfree(node->entry);
-                                    node->entry = nullptr;
-                                    node->io_pending = 0;
-                                  }};
-
-  ql_.SetTieringParams(params);
+  // Enable tiering and set node_depth_threshold = 1
+  tiered_ql.EnableTiering(1);
 
   for (int i = 0; i < 8000; i++) {
-    ql_.Push(absl::StrCat("value", i), QList::TAIL);
+    tiered_ql.Push(absl::StrCat("value", i), QList::TAIL);
   }
 
   EXPECT_EQ(QList::stats.offload_requests, 9);

@@ -26,7 +26,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
-#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 /**
@@ -101,17 +100,15 @@ class ListWrapper {
     if (ShouldStoreAsListPack(sz + additional_size)) {
       return nullptr;
     }
+
     QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                               GetFlag(FLAGS_list_compress_depth));
 
-    if (GetFlag(FLAGS_list_tiering_threshold) > 0 && EngineShard::tlocal()->tiered_storage()) {
-      QList::TieringParams params{.node_depth_threshold = GetFlag(FLAGS_list_tiering_threshold),
-                                  .offload_cb = nullptr,
-                                  .onload_cb = nullptr,
-                                  .delete_cb = nullptr};
-
-      ql->SetTieringParams(params);
+    const uint32_t tiering_node_depth_threshold = absl::GetFlag(FLAGS_list_tiering_threshold);
+    if (tiering_node_depth_threshold > 0 && EngineShard::tlocal()->tiered_storage()) {
+      ql->EnableTiering(tiering_node_depth_threshold);
     }
+
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_experimental_zstd_dict_threshold);
         zstd_thresh > 0) {
       ql->set_compr_threshold(zstd_thresh);
