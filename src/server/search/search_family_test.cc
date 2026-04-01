@@ -5059,13 +5059,13 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
 // Verify that FT.INFO returns TAG field parameters: SEPARATOR and CASESENSITIVE.
 TEST_F(SearchFamilyTest, InfoIndexTagParams) {
   EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG",
-                 "SEPARATOR", "|", "CASESENSITIVE"}),
+                 "SEPARATOR", "|", "CASESENSITIVE", "WITHSUFFIXTRIE"}),
             "OK");
 
   auto info = Run({"ft.info", "idx"});
 
   auto tag_field_matcher = IsArray("identifier", "tags", "attribute", "tags", "type", "TAG",
-                                   "SEPARATOR", "|", "CASESENSITIVE");
+                                   "SEPARATOR", "|", "CASESENSITIVE", "WITHSUFFIXTRIE");
 
   EXPECT_THAT(
       info, IsArray(_, _, _, _, _, _, "attributes", IsArray(tag_field_matcher), _, _, _, _, _, _));

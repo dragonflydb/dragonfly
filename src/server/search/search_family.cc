@@ -1670,6 +1670,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
       info.emplace_back(std::string(1, tparams.separator));
       if (tparams.case_sensitive)
         info.emplace_back("CASESENSITIVE");
+      if (tparams.with_suffixtrie)
+        info.emplace_back("WITHSUFFIXTRIE");
     } else if (field_info.type == search::SchemaField::TEXT) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
       if (tparams.with_suffixtrie)
