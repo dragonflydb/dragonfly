@@ -7,6 +7,7 @@
 #include <boost/intrusive/list_hook.hpp>
 
 #include "core/compact_object.h"
+#include "core/qlist.h"
 
 namespace dfly::tiering {
 
@@ -39,45 +40,36 @@ class FragmentRef {
   FragmentRef(CompactValue* pv) : val_(pv) {  // NOLINT
   }
 
-  bool IsOffloaded() const {
-    return std::visit([](auto* pv) { return pv->IsExternal(); }, val_);
+  FragmentRef(QList::Node& node) : val_(&node) {  // NOLINT
   }
+
+  FragmentRef(QList::Node* node) : val_(node) {  // NOLINT
+  }
+
+  bool IsOffloaded() const;
 
   // Resets offloaded state for this fragment.
-  void ClearOffloaded() {
-    std::visit([](auto* pv) { pv->RemoveExternal(); }, val_);
-  }
+  void ClearOffloaded();
 
-  bool HasStashPending() const {
-    return std::visit([](auto* pv) { return pv->HasStashPending(); }, val_);
-  }
+  bool HasStashPending() const;
+  void SetStashPending(bool b);
 
-  void ClearStashPending() {
-    std::visit([](auto* pv) { pv->SetStashPending(false); }, val_);
-  }
-
-  CompactObjType ObjType() const {
-    return std::visit([](auto* pv) { return pv->ObjType(); }, val_);
-  }
+  CompactObjType ObjType() const;
 
   // Determine required byte size and encoding type based on value.
-  SerializationDescr GetSerializationDescr() const {
-    return std::visit([](auto* pv) { return GetDescr(pv); }, val_);
-  }
+  SerializationDescr GetSerializationDescr() const;
 
   // Returns a pointer to TieredCoolRecord if this fragment is cool, and null otherwise.
   TieredCoolRecord* GetCoolRecord() const;
 
   // Returns the external slice of the offloaded value. Only valid if IsOffloaded() is true.
-  std::pair<size_t, size_t> GetExternalSlice() const {
-    return std::visit([](auto* pv) { return pv->GetExternalSlice(); }, val_);
-  }
+  std::pair<size_t, size_t> GetExternalSlice() const;
 
  private:
   static SerializationDescr GetDescr(const CompactValue* pv);
+  static SerializationDescr GetDescr(const QList::Node* node);
 
-  // TODO: to support more types, for example Node* from qlist.h.
-  std::variant<CompactValue*> val_;
+  std::variant<CompactValue*, QList::Node*> val_;
 };
 
 }  // namespace dfly::tiering
