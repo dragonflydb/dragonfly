@@ -169,10 +169,12 @@ string DocIndexInfo::BuildRestoreCommand() const {
     }
   }
 
-  // STOPWORDS
-  absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
-  for (const auto& sw : base_index.options.stopwords)
-    absl::StrAppend(&out, " ", sw);
+  // STOPWORDS — only emit when explicitly configured, so restore preserves the distinction
+  if (base_index.options.custom_stopwords) {
+    absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
+    for (const auto& sw : base_index.options.stopwords)
+      absl::StrAppend(&out, " ", sw);
+  }
 
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
@@ -181,33 +183,35 @@ string DocIndexInfo::BuildRestoreCommand() const {
                     SearchFieldTypeToString(finfo.type));
 
     // Store specific params
-    Overloaded info{[](monostate) {},
-                    [out = &out](const search::SchemaField::VectorParams& params) {
-                      auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
-                                 : params.sim == search::VectorSimilarity::IP ? "IP"
-                                                                              : "COSINE";
-                      if (params.use_hnsw) {
-                        absl::StrAppend(out, " HNSW 10 DIM ", params.dim, " DISTANCE_METRIC ", sim,
-                                        " INITIAL_CAP ", params.capacity, " M ", params.hnsw_m,
-                                        " EF_CONSTRUCTION ", params.hnsw_ef_construction);
-                      } else {
-                        absl::StrAppend(out, " FLAT 6 DIM ", params.dim, " DISTANCE_METRIC ", sim,
-                                        " INITIAL_CAP ", params.capacity);
-                      }
-                    },
-                    [out = &out](const search::SchemaField::TagParams& params) {
-                      absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
-                      if (params.case_sensitive)
-                        absl::StrAppend(out, " ", "CASESENSITIVE");
-                    },
-                    [out = &out](const search::SchemaField::TextParams& params) {
-                      if (params.with_suffixtrie)
-                        absl::StrAppend(out, " ", "WITH_SUFFIXTRIE");
-                    },
-                    [out = &out](const search::SchemaField::NumericParams& params) {
-                      absl::StrAppend(out, " ", "BLOCKSIZE", " ",
-                                      std::to_string(params.block_size));
-                    }};
+    Overloaded info{
+        [](monostate) {},
+        [out = &out](const search::SchemaField::VectorParams& params) {
+          auto sim = params.sim == search::VectorSimilarity::L2   ? "L2"
+                     : params.sim == search::VectorSimilarity::IP ? "IP"
+                                                                  : "COSINE";
+          if (params.use_hnsw) {
+            absl::StrAppend(out, " HNSW 12 TYPE ", params.data_type, " DIM ", params.dim,
+                            " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity, " M ",
+                            params.hnsw_m, " EF_CONSTRUCTION ", params.hnsw_ef_construction);
+          } else {
+            absl::StrAppend(out, " FLAT 8 TYPE ", params.data_type, " DIM ", params.dim,
+                            " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
+          }
+        },
+        [out = &out](const search::SchemaField::TagParams& params) {
+          absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
+          if (params.case_sensitive)
+            absl::StrAppend(out, " ", "CASESENSITIVE");
+          if (params.with_suffixtrie)
+            absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+        },
+        [out = &out](const search::SchemaField::TextParams& params) {
+          if (params.with_suffixtrie)
+            absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+        },
+        [out = &out](const search::SchemaField::NumericParams& params) {
+          absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));
+        }};
     visit(info, finfo.special_params);
 
     // Store shared field flags

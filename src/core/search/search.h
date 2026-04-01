@@ -66,6 +66,7 @@ struct SchemaField {
     size_t capacity = 1000;                       // initial capacity
     size_t hnsw_ef_construction = 200;
     size_t hnsw_m = 16;
+    std::string data_type = "FLOAT32";
   };
 
   struct TagParams {
@@ -120,6 +121,7 @@ struct IndicesOptions {
   }
 
   absl::flat_hash_set<std::string> stopwords;
+  bool custom_stopwords = false;  // true when STOPWORDS was explicitly set in FT.CREATE
 };
 
 // Collection of indices for all fields in schema

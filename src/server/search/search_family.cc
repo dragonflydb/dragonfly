@@ -111,6 +111,8 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
+    } else if (parser->Check("TYPE")) {
+      params.data_type = absl::AsciiStrToUpper(parser->Next<string_view>());
     } else if (parser->Check("EF_RUNTIME")) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
@@ -237,6 +239,7 @@ ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
 // STOPWORDS count [words...]
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
+  index->options.custom_stopwords = true;
   for (size_t num = parser->Next<size_t>(); num > 0; num--) {
     index->options.stopwords.emplace(parser->Next());
   }
@@ -1603,7 +1606,8 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  rb->StartCollection(7, CollectionType::MAP);
+  bool has_custom_stopwords = info.base_index.options.custom_stopwords;
+  rb->StartCollection(has_custom_stopwords ? 8 : 7, CollectionType::MAP);
 
   rb->SendSimpleString("index_name");
   rb->SendSimpleString(idx_name);
@@ -1641,7 +1645,36 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
     if (field_info.flags & search::SchemaField::SORTABLE)
       info.emplace_back("SORTABLE"sv);
 
-    if (field_info.type == search::SchemaField::NUMERIC) {
+    if (field_info.type == search::SchemaField::VECTOR) {
+      auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
+      info.emplace_back("algorithm");
+      info.emplace_back(vparams.use_hnsw ? "HNSW" : "FLAT");
+      info.emplace_back("data_type");
+      info.emplace_back(vparams.data_type);
+      info.emplace_back("dim");
+      info.emplace_back(std::to_string(vparams.dim));
+      info.emplace_back("distance_metric");
+      auto sim = vparams.sim == search::VectorSimilarity::L2   ? "L2"
+                 : vparams.sim == search::VectorSimilarity::IP ? "IP"
+                                                               : "COSINE";
+      info.emplace_back(sim);
+      if (vparams.use_hnsw) {
+        info.emplace_back("M");
+        info.emplace_back(std::to_string(vparams.hnsw_m));
+        info.emplace_back("ef_construction");
+        info.emplace_back(std::to_string(vparams.hnsw_ef_construction));
+      }
+    } else if (field_info.type == search::SchemaField::TAG) {
+      auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
+      info.emplace_back("SEPARATOR");
+      info.emplace_back(std::string(1, tparams.separator));
+      if (tparams.case_sensitive)
+        info.emplace_back("CASESENSITIVE");
+    } else if (field_info.type == search::SchemaField::TEXT) {
+      auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
+      if (tparams.with_suffixtrie)
+        info.emplace_back("WITHSUFFIXTRIE");
+    } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);
       info.emplace_back("blocksize"sv);
@@ -1653,6 +1686,15 @@ void CmdFtInfo(CmdArgList args, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("num_docs");
   rb->SendLong(total_num_docs);
+
+  if (has_custom_stopwords) {
+    const auto& stopwords = info.base_index.options.stopwords;
+    rb->SendSimpleString("stopwords_list");
+    rb->StartArray(stopwords.size());
+    for (const auto& sw : stopwords) {
+      rb->SendBulkString(sw);
+    }
+  }
 
   rb->SendSimpleString("indexing");
   rb->SendLong(indexing ? 1 : 0);
