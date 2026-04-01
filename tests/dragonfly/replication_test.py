@@ -126,7 +126,10 @@ async def test_replication_all(
     async def check():
         await check_all_replicas_finished(c_replicas, c_master)
         hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-        assert len(set(hashes)) == 1
+        if len(set(hashes)) != 1:
+            sizes = ((await c.dbsize()) for c in [c_master] + c_replicas)
+            print("DB SIZES", sizes)
+            assert False, sizes
 
     await check()
     # Stream more data in stable state
