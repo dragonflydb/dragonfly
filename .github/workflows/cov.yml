@@ -95,6 +95,20 @@ jobs:
           export DRAGONFLY_PATH=`pwd`/dragonfly
           pytest ../tests/dragonfly/ --durations=10 --timeout=300 --color=yes --log-cli-level=INFO
 
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
+
+      - name: Upload regression logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression_logs
+          path: /tmp/failed/*
+
       - name: Generate Coverage Report
         run: |
           cd $GITHUB_WORKSPACE/build
