@@ -815,6 +815,8 @@ CompactObjType CompactObj::ObjType() const {
         return OBJ_STRING;
       case ExternalRep::SERIALIZED_MAP:
         return OBJ_HASH;
+      case ExternalRep::LIST_NODE:
+        return OBJ_LIST;
     };
   }
 

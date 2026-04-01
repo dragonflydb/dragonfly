@@ -462,15 +462,6 @@ SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   return db_arr_[0]->slots_stats[sid];
 }
 
-void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
-  ActivateDb(db_ind);
-
-  auto& db = db_arr_[db_ind];
-  DCHECK(db);
-
-  db->prime.Reserve(key_size);
-}
-
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 

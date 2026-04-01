@@ -63,14 +63,7 @@ jobs:
 
       - name: Install Python test requirements
         shell: bash
-        run: |
-          cd ${GITHUB_WORKSPACE}/tests
-          # https://peps.python.org/pep-0668/#keep-the-marker-file-in-container-images
-          if compgen -G '/usr/lib/python3.*/EXTERNALLY-MANAGED' > /dev/null; then
-            pip3 install --break-system-packages -r dragonfly/requirements.txt
-          else
-            pip3 install -r dragonfly/requirements.txt
-          fi
+        run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
 
       - name: Configure CMake
         run: |
@@ -101,6 +94,20 @@ jobs:
           cd $GITHUB_WORKSPACE/build
           export DRAGONFLY_PATH=`pwd`/dragonfly
           pytest ../tests/dragonfly/ --durations=10 --timeout=300 --color=yes --log-cli-level=INFO
+
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
+
+      - name: Upload regression logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression_logs
+          path: /tmp/failed/*
 
       - name: Generate Coverage Report
         run: |

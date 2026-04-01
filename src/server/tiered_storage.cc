@@ -118,6 +118,9 @@ size_t TieredStorage::StashDescriptor::Serialize(io::MutableBytes buffer) const 
       return tiering::SerializedMap::Serialize(
           lw, {reinterpret_cast<char*>(buffer.data()), buffer.length()});
     }
+    case CompactObj::ExternalRep::LIST_NODE: {
+      // Make compiler happy. It will be implemented in following PR
+    }
   };
   return 0;
 }
@@ -186,14 +189,20 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     DCHECK(!value.empty());
 
     switch (pv->GetExternalRep()) {
-      case CompactObj::ExternalRep::STRING:
+      case CompactObj::ExternalRep::STRING: {
         pv->Materialize(value, true);
         break;
-      case CompactObj::ExternalRep::SERIALIZED_MAP:
+      }
+      case CompactObj::ExternalRep::SERIALIZED_MAP: {
         tiering::SerializedMapDecoder decoder{};
         decoder.Initialize(value);
         decoder.Upload(pv);
         break;
+      }
+      case CompactObj::ExternalRep::LIST_NODE: {
+        // Make compiler happy. It will be implemented in following PR.
+        break;
+      }
     };
 
     RecordDeleted(*pv, value.size(), GetDbTableStats(dbid));
@@ -467,7 +476,7 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key,
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->CancelPending(*bin);
   }
-  fragment_ref.ClearStashPending();
+  fragment_ref.SetStashPending(false);
 }
 
 TieredStats TieredStorage::GetStats() const {

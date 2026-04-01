@@ -10,14 +10,14 @@ from .proxy import Proxy
 
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
-async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1):
+async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1, timeout=30):
     rnd_str = "".join(random.choices(string.ascii_letters, k=10))
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
         await c_master.set(key, "dummy")
         logging.debug(f"set {key} MASTER db = {db}")
-        timeout = 30
-        while timeout > 0:
+        remaining = timeout
+        while remaining > 0:
             v = await c_replica.get(key)
             logging.debug(f"get {key} from REPLICA db = {db} got {v}")
             if v is not None:
@@ -26,15 +26,13 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
             logging.debug(f"replication info: {repl_state}")
             await asyncio.sleep(1)
 
-            timeout -= 1
-        await c_master.close()
-        await c_replica.close()
-        assert timeout > 0, "Timeout while waiting for replica to sync"
+            remaining -= 1
+        assert remaining > 0, "Timeout while waiting for replica to sync"
 
 
-async def await_synced_all(c_master, c_replicas):
+async def await_synced_all(c_master, c_replicas, timeout=30):
     for c_replica in c_replicas:
-        await await_synced(c_master, c_replica)
+        await await_synced(c_master, c_replica, timeout=timeout)
 
 
 async def check_data(seeder, replicas, c_replicas):
@@ -134,7 +132,6 @@ replication_specs = [
 ]
 
 
-@pytest.mark.skip("Fails on CI")
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 async def test_redis_replication_all(
     df_factory: DflyInstanceFactory,
@@ -176,14 +173,14 @@ async def test_redis_replication_all(
     await stream_task
 
     # Check data after full sync
-    await await_synced_all(c_master, c_replicas)
+    await await_synced_all(c_master, c_replicas, timeout=60)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await await_synced_all(c_master, c_replicas)
+    await await_synced_all(c_master, c_replicas, timeout=60)
     await check_data(seeder, replicas, c_replicas)
 
 
