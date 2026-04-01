@@ -394,9 +394,11 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
-    if (auto resp = ReadRespReply(ack_timeout_ms - passed_ms); !resp) {
+    auto read_timeout = ack_timeout_ms - passed_ms;
+    if (auto resp = ReadRespReply(read_timeout); !resp) {
       LOG(WARNING) << "Error reading response to ACK command from " << server().Description()
-                   << ": " << resp.error()
+                   << ": " << resp.error() << " (read_timeout=" << read_timeout
+                   << "ms, ack_timeout=" << ack_timeout_ms << "ms)"
                    << ", socket state: " + GetSocketInfo(Sock()->native_handle());
       return false;
     }

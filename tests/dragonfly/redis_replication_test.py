@@ -173,14 +173,14 @@ async def test_redis_replication_all(
     await stream_task
 
     # Check data after full sync
-    await await_synced_all(c_master, c_replicas, timeout=60)
+    await await_synced_all(c_master, c_replicas, timeout=30)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await await_synced_all(c_master, c_replicas, timeout=60)
+    await await_synced_all(c_master, c_replicas, timeout=30)
     await check_data(seeder, replicas, c_replicas)
 
 

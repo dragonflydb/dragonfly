@@ -733,10 +733,22 @@ error_code Replica::ConsumeRedisStream() {
 
   CommandContext cmnd_ctx;
   cmnd_ctx.Init(&null_builder, &conn_context);
+  // Instrumentation for tracking time spent in different phases.
+  using Clock = std::chrono::steady_clock;
+  auto last_log_time = Clock::now();
+  uint64_t num_commands = 0;
+  uint64_t total_bytes = 0;
+  uint64_t read_usec = 0;
+  uint64_t dispatch_usec = 0;
+  uint64_t yield_usec = 0;
+
   while (true) {
     // Yield if the fiber has been running for long.
     if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
+      auto t1 = Clock::now();
       ThisFiber::Yield();
+      yield_usec +=
+          std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t1).count();
     }
 
     // If the acks-fb or something else triggered a shutdown, then do not attempt to read from the
@@ -750,7 +762,10 @@ error_code Replica::ConsumeRedisStream() {
       return exec_st_.GetError();
     }
 
+    auto read_start = Clock::now();
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
+    read_usec +=
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - read_start).count();
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
                      << GetCurrentPhase() << " with " << server().Description()
@@ -778,14 +793,38 @@ error_code Replica::ConsumeRedisStream() {
         }
 
         FillBackedArgs(last_args, &cmnd_ctx);
+        auto dispatch_start = Clock::now();
         service_.DispatchCommand(facade::ParsedArgs{cmnd_ctx}, &cmnd_ctx,
                                  facade::AsyncPreference::ONLY_SYNC);
+        dispatch_usec +=
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - dispatch_start)
+                .count();
+        ++num_commands;
       }
     }
 
     io_buf.ConsumeInput(response->left_in_buffer);
+    total_bytes += response->total_read;
     repl_offs_ += response->total_read;
     replica_waker_.notify();  // Notify to trigger ACKs.
+
+    // Log progress every 10 seconds.
+    auto now = Clock::now();
+    if (now - last_log_time >= std::chrono::seconds(10)) {
+      auto elapsed_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count();
+      LOG(INFO) << "Replication progress: repl_offs=" << repl_offs_ << ", cmds=" << num_commands
+                << ", bytes=" << total_bytes << " in " << elapsed_ms
+                << "ms. Time breakdown: read=" << read_usec / 1000
+                << "ms, dispatch=" << dispatch_usec / 1000 << "ms, yield=" << yield_usec / 1000
+                << "ms";
+      num_commands = 0;
+      total_bytes = 0;
+      read_usec = 0;
+      dispatch_usec = 0;
+      yield_usec = 0;
+      last_log_time = now;
+    }
   }
 }
 

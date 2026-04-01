@@ -217,7 +217,17 @@ bool IncomingSlotMigration::Join(long attempt) {
     VLOG_EVERY_N(1, 10000) << "Checking whether to continue with join " << passed << " vs "
                            << timeout;
     if (passed >= timeout) {
-      LOG(WARNING) << "Can't join migration in time for " << source_id_;
+      auto per_flow_info = [&]() {
+        std::string info;
+        for (size_t i = 0; i < shard_flows_.size(); ++i) {
+          absl::StrAppend(&info, i > 0 ? ", " : "", "shard ", i,
+                          ": attempt=", shard_flows_[i]->GetLastAttempt());
+        }
+        return info;
+      };
+      LOG(WARNING) << "Can't join migration in time for " << source_id_ << " attempt " << attempt
+                   << " timeout_ms=" << absl::ToInt64Milliseconds(timeout) << " flows=["
+                   << per_flow_info() << "]";
       ReportError(GenericError("Can't join migration in time"));
       return false;
     }
@@ -244,7 +254,8 @@ bool IncomingSlotMigration::Join(long attempt) {
         state_ = MigrationState::C_FINISHED;
         keys_number_ = cluster::GetKeyCount(slots_);
       } else {
-        LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_;
+        LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_
+                     << " attempt " << attempt;
         ReportError(GenericError("Can't join migration in time"));
       }
       return wait_res;
