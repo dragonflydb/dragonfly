@@ -227,9 +227,15 @@ ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
 // PREFIX count prefix [prefix ...]
 ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
   size_t count = parser->Next<size_t>();
-  index->prefixes.reserve(count);
-  for (size_t i = 0; i < count; i++) {
+  size_t i = 0;
+  for (; i < count && parser->HasNext(); i++) {
     index->prefixes.push_back(parser->Next<std::string>());
+  }
+  // If fewer prefixes were consumed than promised, trigger an out-of-bounds error.
+  // This prevents unbounded loops for huge user-supplied counts while
+  // preserving the existing syntax-error behavior for mismatched counts.
+  if (i < count) {
+    parser->Next();  // triggers OUT_OF_BOUNDS
   }
   return true;
 }
@@ -237,8 +243,13 @@ ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
 // STOPWORDS count [words...]
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
-  for (size_t num = parser->Next<size_t>(); num > 0; num--) {
+  size_t count = parser->Next<size_t>();
+  size_t i = 0;
+  for (; i < count && parser->HasNext(); i++) {
     index->options.stopwords.emplace(parser->Next());
+  }
+  if (i < count) {
+    parser->Next();  // triggers OUT_OF_BOUNDS
   }
   return true;
 }
