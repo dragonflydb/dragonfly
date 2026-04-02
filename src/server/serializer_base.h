@@ -65,16 +65,10 @@ struct DelayedEntryHandler {
   std::multimap<BucketIdentity, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 };
 
-// SerializerBase owns the DbSlice change-listener registration and a per-bucket
-// state machine that tracks each bucket through:
-//
-//   NotVisited  ->  Serializing  ->  (DelayedPending  ->)  Covered
-//
-// NotVisited and Covered are implicit (bucket absent from the map).
-// Only transient states (Serializing, DelayedPending) are stored in the map.
-//
-// State tracking is purely observational in early PRs: it drives DCHECKs and
-// stats but does not alter the serialization control flow.
+// Base class for operations relying on snapshotting and implementing SerializeBucket.
+// Progress should be driven externally by calling ProcessBucket().
+// Additionally, db_slice change listeners can be registered that invoke SerializeBucket
+// before any modification are performed to ensure point-in-time isolation.
 class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
  public:
   struct Stats {
@@ -88,7 +82,7 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   explicit SerializerBase(DbSlice* slice, ExecutionState* cntx);
   virtual ~SerializerBase();
 
-  // Register db_slice change listener and save snapshot it
+  // Register db_slice change listener and save snapshot version.
   void RegisterChangeListener();
 
   // Unregisters the callback.  Safe to call if already unregistered.
@@ -99,12 +93,6 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   }
 
  protected:
-  // Phase of an in-flight bucket (only stored while transient).
-  enum class BucketPhase : uint8_t {
-    kSerializing,     // bucket is being iterated by the main loop / OnChangeBlocking
-    kDelayedPending,  // all entries serialized but tiered reads still in-flight
-  };
-
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
@@ -133,8 +121,6 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   Stats stats_;
 
  private:
-  friend class SerializerBaseTest;
-
   uint64_t change_cb_id_ = 0;
 };
 

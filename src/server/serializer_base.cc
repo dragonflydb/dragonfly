@@ -28,9 +28,9 @@ void BucketDependencies::Increment(BucketIdentity bucket) {
 
 void BucketDependencies::Decrement(BucketIdentity bucket) {
   auto it = deps_.find(bucket);
-  DCHECK(it != deps_.end());
-  it->second->unlock();
+  CHECK(it != deps_.end());
 
+  it->second->unlock();
   if (!it->second->IsBlocked())
     deps_.erase(it);
 }
@@ -75,6 +75,7 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
     auto value = entry->value.Get();
 
     if (!value.has_value()) {
+      deps_.Decrement(it->first);
       cntx->ReportError(make_error_code(std::errc::io_error),
                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
