@@ -710,6 +710,30 @@ TEST_F(VectorRangeTest, FlatRange1D) {
   }
 }
 
+TEST_F(VectorRangeTest, FlatRangeWithoutYieldDistanceAs) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // VECTOR_RANGE without =>{$YIELD_DISTANCE_AS: ...} — must parse and return correct results
+  params["vec"] = ToBytes({5.0f});
+  algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]", &params);
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
+
+  // score_alias should be empty when not specified
+  ASSERT_NE(nullptr, algo.GetVectorRangeNode());
+  EXPECT_TRUE(algo.GetVectorRangeNode()->score_alias.empty());
+}
+
 TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};

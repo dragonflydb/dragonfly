@@ -4373,6 +4373,26 @@ TEST_F(SearchFamilyTest, HnswVectorRange) {
   EXPECT_THAT(vals_desc, ElementsAre(60, 50, 40));
 }
 
+TEST_F(SearchFamilyTest, HnswVectorRangeWithoutYieldDistanceAs) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i))});
+  }
+
+  string query_vec = FloatToBytes(5.0f);
+
+  // VECTOR_RANGE without =>{$YIELD_DISTANCE_AS: ...} — must work like Redis Stack
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]", "PARAMS", "2", "vec",
+                   query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+}
+
 TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   auto FloatToBytes = [](float f) -> string {
     return string(reinterpret_cast<const char*>(&f), sizeof(float));
