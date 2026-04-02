@@ -4968,4 +4968,20 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   EXPECT_THAT(cmd, HasSubstr("EF_CONSTRUCTION 400"));
 }
 
+// FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
+// used to cause std::bad_alloc inside FlatVectorIndex, leaving a broken
+// ShardDocIndex registered.  A subsequent FT.SEARCH would dereference the empty
+// optional<FieldIndices> and crash (Abseil: "Use of destroyed hash table.").
+//
+// The fix rejects the index at parse time when dim * capacity overflows.
+TEST_F(SearchFamilyTest, SearchOnIndexWithHugeVectorDim) {
+  auto resp = Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "v", "VECTOR",
+                   "FLAT", "6", "TYPE", "FLOAT32", "DIM", "99999999999", "DISTANCE_METRIC", "L2"});
+  EXPECT_THAT(resp, ErrArg("Vector index initial allocation is too large"));
+
+  // Index must not be registered — FT.SEARCH must report "no such index".
+  resp = Run({"FT.SEARCH", "idx", "hello"});
+  EXPECT_THAT(resp, ErrArg("idx: no such index"));
+}
+
 }  // namespace dfly
