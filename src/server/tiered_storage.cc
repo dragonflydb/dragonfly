@@ -160,9 +160,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     stats_.total_cancels++;
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(id));
     node->io_pending = 0;
-    // If stashing failed we need to decrease offloaded nodes count.
-    QList* ql = reinterpret_cast<QList*>(std::get<1>(id));
-    ql->IncrementNumOffloadedNodes(-1);
   }
 
   void CancelStash(tiering::KeyRef id, size_t size) {
@@ -176,8 +173,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   void CancelStash(tiering::ListNodeId id) {
-    QList* ql = reinterpret_cast<QList*>(std::get<1>(id));
-    ql->IncrementNumOffloadedNodes(-1);
     CancelPending(id);
   }
 
@@ -281,15 +276,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     stats_.total_stashes++;
 
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(id));
-    QList* ql = reinterpret_cast<QList*>(std::get<1>(id));
-
     node->io_pending = 0;
-
-    // Adjust parent QList node malloc size / number of offloaded nodes.
-    ql->AdjustMallocSize(-segment.length);
-    node->SetExternal(segment.offset, segment.length);
-
-    stats->AddTypeMemoryUsage(OBJ_LIST, -segment.length);
   }
 
   // If any backpressure (throttling) is active, notify that the operation finished
