@@ -225,7 +225,8 @@ class RdbSerializerBase {
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
 
   CompressionMode compression_mode_;
-  io::IoBuf mem_buf_;
+  io::IoBuf default_buf_;
+  io::IoBuf* mem_buf_;
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
 
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
@@ -293,9 +294,7 @@ class RdbSerializer : public RdbSerializerBase {
 
   // stash baseline data before journal write
   std::error_code WriteJournalEntry(std::string_view serialized_entry) override;
-
-  // include stash size with mem buf size
-  size_t SerializedLen() const override;
+  std::string PrefixDefaultBufferAndTag(io::Bytes);
 
   // Set raw mode before full sync cut
   std::error_code SendFullSyncCut() override;
@@ -321,60 +320,26 @@ class RdbSerializer : public RdbSerializerBase {
   // Might preempt
   void PushToConsumerIfNeeded(FlushState flush_state);
 
-  // Consumes and stores current mem_buf_ content into a stash so that interleaved entries of
-  // different types (Baseline/journal etc) are sent to consumer with correct headers on each
-  // chunk.
-  void StashCurrentBuffer();
+  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
 
-  // Tags a given byte series with opcode, stream ID and the size of bytes in 9 byte header.
-  static std::string TagChunk(std::string blob, uint32_t stream_id);
-
-  // Helper to switche state from tagged chunks to non tagged chunks, eg journal, full sync cut etc
-  // Must be called for any non k-v records to stash the current buffer data first.
-  void SetRawMode();
-
-  uint32_t AllocateStreamId();
-
-  // Applies wire format on a single blob read from the memory buffer before it is sent to
-  // consumer or stashed. If the blob is any of the following:
-  // 1. A journal entry
-  // 2. A non data entry (journal offset, full sync cut etc)
-  // 3. A data entry which was never split
-  // That data is eventually sent to consumer as it is.
-  // If the blob is part of a data entry which might have been split, then a tagged header is
-  // applied to it, which includes a unique key id which will be used by the loader to reassemble.
-  std::string FinalizeCurrentRecord(FlushState flush_state);
-
-  // Drains mem buf content, tags if required and adds to pending records. After this call finishes,
-  // mem buf is empty, and pending records are tagged if required, and ready to send to consumer.
-  void DrainMemBufIntoPendingRecords(FlushState flush_state);
-
-  std::string FlushImpl(FlushState flush_state);
+  void AddEntry();
+  void FinishEntry();
+  void TagAndDrainToDefaultBuffer();
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
 
-  std::vector<std::string> pending_records_;
-  uint64_t pending_record_bytes_ = 0;
   bool send_tagged_entries_ = false;
 
   uint32_t next_stream_id_ = 1;
-
-  struct ActiveEntry {
-    enum class Kind : uint8_t { Baseline, Raw } kind = Kind::Raw;
-    bool chunked = false;
-    std::optional<uint32_t> stream_id = std::nullopt;
-
-    void Reset(Kind k) {
-      kind = k;
-      chunked = false;
-      stream_id = std::nullopt;
-    }
+  uint32_t active_entry_id_ = 0;
+  struct Entry {
+    std::unique_ptr<io::IoBuf> buffer;
+    bool was_split = false;
   };
-
-  ActiveEntry active_entry_;
+  absl::flat_hash_map<uint32_t, Entry> entries_;
 };
 
 }  // namespace dfly
