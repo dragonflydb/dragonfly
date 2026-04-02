@@ -467,6 +467,27 @@ TEST_F(SearchFamilyTest, Errors) {
               ErrArg("Tag separator must be a single character. Got ``"));
 }
 
+// Regression test: FT.CREATE with a huge PREFIX/STOPWORDS count must not OOM-crash the server.
+// Previously, ParsePrefix called index->prefixes.reserve(count) with a user-supplied count,
+// causing a 3.2 TB allocation for count=99999999999.
+// ParseStopwords had the same unbounded-loop issue.
+TEST_F(SearchFamilyTest, HugeCountNoOOM) {
+  // PREFIX: 99999999999 * sizeof(std::string) = ~3.2 TB — must return syntax error, not crash
+  EXPECT_THAT(Run({"ft.create", "idx1", "ON", "HASH", "PREFIX", "99999999999", "doc:", "SCHEMA",
+                   "content", "TEXT"}),
+              ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"ft.info", "idx1"}), ErrArg(""));  // index must not have been created
+
+  // STOPWORDS: same unbounded-loop protection
+  EXPECT_THAT(Run({"ft.create", "idx2", "ON", "HASH", "STOPWORDS", "99999999999", "the", "a", "an",
+                   "SCHEMA", "content", "TEXT"}),
+              ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"ft.info", "idx2"}), ErrArg(""));
+
+  // Verify the server is still alive
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
 TEST_F(SearchFamilyTest, NoPrefix) {
   Run({"hset", "d:1", "a", "one", "k", "v"});
   Run({"hset", "d:2", "a", "two", "k", "v"});
