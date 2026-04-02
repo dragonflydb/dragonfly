@@ -443,11 +443,13 @@ class Segment {
   }
 
   template <bool UV = kUseVersion>
-  std::enable_if_t<UV, uint64_t> GetVersion(PhysicalBid bid) const {
+  requires UV uint64_t GetVersion(PhysicalBid bid)
+  const {
     return GetBucket(bid).GetVersion();
   }
 
-  template <bool UV = kUseVersion> std::enable_if_t<UV> SetVersion(PhysicalBid bid, uint64_t v) {
+  template <bool UV = kUseVersion>
+  requires UV void SetVersion(PhysicalBid bid, uint64_t v) {
     return GetBucket(bid).SetVersion(v);
   }
 
@@ -535,14 +537,14 @@ class Segment {
   // if the insertion would happen. The ids are put into bid array that should have at least 2
   // spaces.
   template <bool UV = kUseVersion>
-  std::enable_if_t<UV, unsigned> CVCOnInsert(uint64_t ver_threshold, Hash_t key_hash,
-                                             PhysicalBid bid[2]) const;
+  requires UV unsigned CVCOnInsert(uint64_t ver_threshold, Hash_t key_hash,
+                                   PhysicalBid bid[2]) const;
 
   // Returns bucket ids whose versions will change as a result of bumping up the item
   // Can return upto 3 buckets.
   template <bool UV = kUseVersion>
-  std::enable_if_t<UV, unsigned> CVCOnBump(uint64_t ver_threshold, unsigned bid, unsigned slot,
-                                           Hash_t hash, PhysicalBid result_bid[3]) const;
+  requires UV unsigned CVCOnBump(uint64_t ver_threshold, unsigned bid, unsigned slot, Hash_t hash,
+                                 PhysicalBid result_bid[3]) const;
 
   // Finds a valid entry going from specified indices up.
   Iterator FindValidStartingFrom(PhysicalBid bid, unsigned slot) const;
@@ -1441,11 +1443,10 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   return Iterator{};
 }
 
-template <typename Key, typename Value, typename Policy>
-template <bool UV>
-std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_threshold,
-                                                                        Hash_t key_hash,
-                                                                        uint8_t bid_res[2]) const {
+template <typename Key, typename Value, typename Policy> template <bool UV>
+requires UV unsigned Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_threshold,
+                                                              Hash_t key_hash,
+                                                              uint8_t bid_res[2]) const {
   const LogicalBid bid = HomeIndex(key_hash);
   const LogicalBid nid = NextBid(bid);
 
@@ -1503,12 +1504,10 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
   return UINT16_MAX;
 }
 
-template <typename Key, typename Value, typename Policy>
-template <bool UV>
-std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t ver_threshold,
-                                                                      unsigned bid, unsigned slot,
-                                                                      Hash_t hash,
-                                                                      uint8_t result_bid[3]) const {
+template <typename Key, typename Value, typename Policy> template <bool UV>
+requires UV unsigned Segment<Key, Value, Policy>::CVCOnBump(uint64_t ver_threshold, unsigned bid,
+                                                            unsigned slot, Hash_t hash,
+                                                            uint8_t result_bid[3]) const {
   if (bid < kBucketNum) {
     // Right now we do not migrate entries from nid to bid, only from stash to normal buckets.
     // The reason for this is that CVCOnBump implementation swaps the slots of the same bucket

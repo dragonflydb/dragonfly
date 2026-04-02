@@ -20,6 +20,8 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
 
+namespace rng = std::ranges;
+
 using facade::operator""_KB;
 
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
@@ -114,8 +116,7 @@ void MonitorsRepo::Add(facade::Connection* connection) {
 }
 
 void MonitorsRepo::Remove(const facade::Connection* conn) {
-  auto it = std::find_if(monitors_.begin(), monitors_.end(),
-                         [&conn](const auto& val) { return val == conn; });
+  auto it = rng::find_if(monitors_, [&conn](const auto& val) { return val == conn; });
   if (it != monitors_.end()) {
     VLOG(1) << "removing connection 0x" << std::hex << conn << " releasing token";
     monitors_.erase(it);

@@ -15,6 +15,8 @@
 #include "base/logging.h"
 #include "util/fibers/fibers.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::search {
 
 class RangeTreeTest : public testing::Test {
@@ -79,7 +81,7 @@ std::vector<DocId> ExtractDocIdsFromRange(const std::vector<Entry>& entries, dou
     }
   }
 
-  std::sort(result.begin(), result.end());
+  rng::sort(result);
   result.erase(std::unique(result.begin(), result.end()), result.end());
   return result;
 }
@@ -448,8 +450,7 @@ TEST_F(RangeTreeTest, RangeResultTwoBlocks) {
 
   DCHECK(entries.size() == 100);
 
-  std::sort(entries.begin(), entries.end(),
-            [](const Entry& a, const Entry& b) { return a.second < b.second; });
+  rng::sort(entries, [](const Entry& a, const Entry& b) { return a.second < b.second; });
 
   auto add_entries = [&tree, &entries](size_t start, size_t end) {
     for (size_t i = start; i < end; i++) {
@@ -515,14 +516,14 @@ TEST_F(BuilderTest, Builder) {
   builder.Populate(&tree, RenewableQuota::Unlimited());
 
   // Sort for comparisons
-  std::ranges::sort(entries, {}, &RangeTree::Entry::first);
+  rng::sort(entries, {}, &RangeTree::Entry::first);
   auto entry_ids = entries | std::views::keys;
 
   // Check correctness of all ids
   {
     auto all_values = tree.Range(-1000, +1000);
     auto got_ids = all_values.Take();
-    EXPECT_TRUE(std::ranges::equal(got_ids, entry_ids));
+    EXPECT_TRUE(rng::equal(got_ids, entry_ids));
   }
 
   // Check correctness of all values including ids
@@ -590,7 +591,7 @@ TEST_F(BuilderTest, BuilderUpdates) {
   populate_fb.Join();
 
   // Sort for comparisons
-  std::sort(entries.begin(), entries.end());
+  rng::sort(entries);
   // auto entry_ids_view = entries | std::views::keys;
 
   // Check correctness of all ids

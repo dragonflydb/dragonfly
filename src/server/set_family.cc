@@ -28,6 +28,8 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 
 using namespace facade;
@@ -434,7 +436,7 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
 
   // Sort the per shard-sorted sets
   if (!sorted_vec.empty()) {
-    std::sort(sorted_vec.begin(), sorted_vec.end(),
+    rng::sort(sorted_vec,
               [](const auto* lhs, const auto* rhs) { return lhs->size() < rhs->size(); });
 
     for (const string& s : *sorted_vec[0]) {
@@ -872,7 +874,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     return SetTypeLen(db_contx, left) < SetTypeLen(db_contx, right);
   };
 
-  std::sort(sets.begin(), sets.end(), comp);
+  rng::sort(sets, comp);
 
   int encoding = sets.front().second;
   result.reserve(SetTypeLen(t->GetDbContext(), sets.front()));

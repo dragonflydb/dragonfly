@@ -33,6 +33,8 @@
 #include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
+namespace rng = std::ranges;
+
 ABSL_FLAG(std::string, cluster_announce_ip, "",
           "IP address that Dragonfly announces to cluster clients");
 
@@ -229,9 +231,7 @@ void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* 
     // we need to remove hiden replicas
     auto shards_info = config->Unwrap();
     for (auto& shard : shards_info) {
-      auto new_end = std::remove_if(shard.replicas.begin(), shard.replicas.end(),
-                                    [](const auto& r) { return r.health == NodeHealth::HIDDEN; });
-      shard.replicas.erase(new_end, shard.replicas.end());
+      std::erase_if(shard.replicas, [](const auto& r) { return r.health == NodeHealth::HIDDEN; });
     }
     return ClusterShardsImpl({shards_info}, builder);
   }
@@ -257,11 +257,10 @@ void ClusterSlotsImpl(ClusterShardInfos config, SinkReplyBuilder* builder) {
   auto shards_info = config.Unwrap();
   for (auto& shard : shards_info) {
     slot_ranges += shard.slot_ranges.Size();
-    auto new_end = std::remove_if(shard.replicas.begin(), shard.replicas.end(), [](const auto& r) {
+    std::erase_if(shard.replicas, [](const auto& r) {
       return r.health == NodeHealth::HIDDEN || r.health == NodeHealth::FAIL ||
              r.health == NodeHealth::LOADING;
     });
-    shard.replicas.erase(new_end, shard.replicas.end());
   }
 
   config = {shards_info};
@@ -898,7 +897,7 @@ namespace {
 // returns removed incoming migration
 bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
                                  string_view source_id) {
-  auto it = std::find_if(jobs.begin(), jobs.end(), [source_id](const auto& im) {
+  auto it = rng::find_if(jobs, [source_id](const auto& im) {
     // we can have only one migration per target-source pair
     return source_id == im->GetSourceID();
   });
@@ -1084,9 +1083,9 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, CommandContext* cmd_cntx) {
 
   VLOG(1) << "DFLYMIGRATE ACK" << args;
   auto in_migrations = ClusterConfig::Current()->GetIncomingMigrations();
-  auto m_it =
-      std::find_if(in_migrations.begin(), in_migrations.end(),
-                   [source_id = source_id](const auto& m) { return m.node_info.id == source_id; });
+  auto m_it = rng::find_if(in_migrations, [source_id = source_id](const auto& m) {
+    return m.node_info.id == source_id;
+  });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
     return cmd_cntx->SendSimpleString(kUnknownMigration);
@@ -1149,8 +1148,8 @@ void ClusterFamily::ReconcileMasterSlots(std::string_view repl_id) {
     // we are updating the old config
     if (info.master.id == id_) {
       if (!info.replicas.empty()) {
-        auto target = std::find_if(info.replicas.begin(), info.replicas.end(),
-                                   [repl_id](const auto& e) { return e.id == repl_id; });
+        auto target =
+            rng::find_if(info.replicas, [repl_id](const auto& e) { return e.id == repl_id; });
 
         if (target == info.replicas.end()) {
           auto topology =

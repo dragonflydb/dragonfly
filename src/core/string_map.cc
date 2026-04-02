@@ -12,6 +12,8 @@
 
 extern "C" {
 #include "redis/zmalloc.h"
+
+namespace rng = std::ranges;
 }
 
 using namespace std;
@@ -184,7 +186,7 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
     picks.push_back(pick);
   }
 
-  std::sort(picks.begin(), picks.end(), [](auto& x, auto& y) { return x.first < y.first; });
+  rng::sort(picks, [](auto& x, auto& y) { return x.first < y.first; });
 
   unsigned int index = picks[0].first, pick_index = 0;
   auto itr = begin();

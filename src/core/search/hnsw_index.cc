@@ -15,6 +15,8 @@
 #include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::search {
 
 using namespace std;
@@ -443,7 +445,7 @@ struct HnswlibAdapter {
         auto* ll0 = world_.get_linklist0(internal_id);
         world_.setListCount(ll0, node.levels_links[0].size());
         auto* links0 = reinterpret_cast<uint32_t*>(ll0 + 1);
-        std::copy(node.levels_links[0].begin(), node.levels_links[0].end(), links0);
+        rng::copy(node.levels_links[0], links0);
       }
 
       // Restore links for upper layers
@@ -452,7 +454,7 @@ struct HnswlibAdapter {
         auto* ll = world_.get_linklist(internal_id, lvl);
         world_.setListCount(ll, node.levels_links[lvl].size());
         auto* links = reinterpret_cast<uint32_t*>(ll + 1);
-        std::copy(node.levels_links[lvl].begin(), node.levels_links[lvl].end(), links);
+        rng::copy(node.levels_links[lvl], links);
       }
 
       // Track restored count so markDeletedInternal can validate internal_id bounds.

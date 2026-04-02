@@ -78,6 +78,8 @@ extern "C" {
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
 
+namespace rng = std::ranges;
+
 using namespace std;
 
 struct ReplicaOfFlag {
@@ -955,7 +957,7 @@ void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorP
     }
   }
 
-  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+  rng::sort(merged_slow_log, [](const auto& e1, const auto& e2) {
     return e1.first.unix_ts_usec > e2.first.unix_ts_usec;
   });
 
@@ -2195,8 +2197,7 @@ bool ServerFamily::AreAllReplicasInStableSync() const {
     return true;
   }
   auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
-  return std::all_of(roles.begin(), roles.end(),
-                     [&match](auto& elem) { return elem.state == match; });
+  return rng::all_of(roles, [&match](auto& elem) { return elem.state == match; });
 }
 
 optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {

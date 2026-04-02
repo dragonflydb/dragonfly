@@ -467,6 +467,27 @@ TEST_F(SearchFamilyTest, Errors) {
               ErrArg("Tag separator must be a single character. Got ``"));
 }
 
+// Regression test: FT.CREATE with a huge PREFIX/STOPWORDS count must not OOM-crash the server.
+// Previously, ParsePrefix called index->prefixes.reserve(count) with a user-supplied count,
+// causing a 3.2 TB allocation for count=99999999999.
+// ParseStopwords had the same unbounded-loop issue.
+TEST_F(SearchFamilyTest, HugeCountNoOOM) {
+  // PREFIX: 99999999999 * sizeof(std::string) = ~3.2 TB — must return syntax error, not crash
+  EXPECT_THAT(Run({"ft.create", "idx1", "ON", "HASH", "PREFIX", "99999999999", "doc:", "SCHEMA",
+                   "content", "TEXT"}),
+              ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"ft.info", "idx1"}), ErrArg(""));  // index must not have been created
+
+  // STOPWORDS: same unbounded-loop protection
+  EXPECT_THAT(Run({"ft.create", "idx2", "ON", "HASH", "STOPWORDS", "99999999999", "the", "a", "an",
+                   "SCHEMA", "content", "TEXT"}),
+              ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"ft.info", "idx2"}), ErrArg(""));
+
+  // Verify the server is still alive
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
 TEST_F(SearchFamilyTest, NoPrefix) {
   Run({"hset", "d:1", "a", "one", "k", "v"});
   Run({"hset", "d:2", "a", "two", "k", "v"});
@@ -4965,6 +4986,22 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   EXPECT_THAT(cmd, HasSubstr("INITIAL_CAP 500"));
   EXPECT_THAT(cmd, HasSubstr("M 32"));
   EXPECT_THAT(cmd, HasSubstr("EF_CONSTRUCTION 400"));
+}
+
+// FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
+// used to cause std::bad_alloc inside FlatVectorIndex, leaving a broken
+// ShardDocIndex registered.  A subsequent FT.SEARCH would dereference the empty
+// optional<FieldIndices> and crash (Abseil: "Use of destroyed hash table.").
+//
+// The fix rejects the index at parse time when dim * capacity overflows.
+TEST_F(SearchFamilyTest, SearchOnIndexWithHugeVectorDim) {
+  auto resp = Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "v", "VECTOR",
+                   "FLAT", "6", "TYPE", "FLOAT32", "DIM", "99999999999", "DISTANCE_METRIC", "L2"});
+  EXPECT_THAT(resp, ErrArg("Vector index initial allocation is too large"));
+
+  // Index must not be registered — FT.SEARCH must report "no such index".
+  resp = Run({"FT.SEARCH", "idx", "hello"});
+  EXPECT_THAT(resp, ErrArg("idx: no such index"));
 }
 
 // Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TEXT fields.

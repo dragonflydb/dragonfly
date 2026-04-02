@@ -39,6 +39,8 @@
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 
+namespace rng = std::ranges;
+
 ABSL_FLAG(bool, search_reject_legacy_field, true, "FT.AGGREGATE: Reject legacy field names.");
 ABSL_FLAG(bool, cluster_search, false,
           "Enable search commands for cross-shard search. turned off by default for safety.");
@@ -213,6 +215,20 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
   if (vector_params.dim == 0) {
     return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
   }
+
+  // Validate that the initial allocation (capacity * (dim+1) floats) cannot
+  // overflow size_t or request an unreasonable amount of memory.  Without this
+  // check FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc,
+  // leaving a half-initialised index registered in ShardDocIndices.
+  static constexpr size_t kMaxFlatBufEntries = size_t{1} << 30;  // ~4 GiB of floats
+  if (vector_params.dim >= kMaxFlatBufEntries) {
+    return CreateSyntaxError("Vector index initial allocation is too large"sv);
+  }
+  size_t dim_plus1 = vector_params.dim + 1;
+  if (vector_params.capacity > kMaxFlatBufEntries / dim_plus1) {
+    return CreateSyntaxError("Vector index initial allocation is too large"sv);
+  }
+
   return std::make_pair(search::SchemaField::VECTOR, vector_params);
 }
 
@@ -229,9 +245,15 @@ ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
 // PREFIX count prefix [prefix ...]
 ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
   size_t count = parser->Next<size_t>();
-  index->prefixes.reserve(count);
-  for (size_t i = 0; i < count; i++) {
+  size_t i = 0;
+  for (; i < count && parser->HasNext(); i++) {
     index->prefixes.push_back(parser->Next<std::string>());
+  }
+  // If fewer prefixes were consumed than promised, trigger an out-of-bounds error.
+  // This prevents unbounded loops for huge user-supplied counts while
+  // preserving the existing syntax-error behavior for mismatched counts.
+  if (i < count) {
+    parser->Next();  // triggers OUT_OF_BOUNDS
   }
   return true;
 }
@@ -240,8 +262,13 @@ ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
 ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   index->options.stopwords.clear();
   index->options.custom_stopwords = true;
-  for (size_t num = parser->Next<size_t>(); num > 0; num--) {
+  size_t count = parser->Next<size_t>();
+  size_t i = 0;
+  for (; i < count && parser->HasNext(); i++) {
     index->options.stopwords.emplace(parser->Next());
+  }
+  if (i < count) {
+    parser->Next();  // triggers OUT_OF_BOUNDS
   }
   return true;
 }
@@ -298,16 +325,14 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
                                      search::SchemaField::SORTABLE);
       if (!flag) {
         std::string_view option = parser->Peek();
-        if (std::find(kIgnoredOptions.begin(), kIgnoredOptions.end(), option) !=
-            kIgnoredOptions.end()) {
+        if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
           LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
               << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options
           parser->Skip(1);
           continue;
         }
-        if (std::find(kIgnoredOptionsWithArg.begin(), kIgnoredOptionsWithArg.end(), option) !=
-            kIgnoredOptionsWithArg.end()) {
+        if (rng::find(kIgnoredOptionsWithArg, option) != kIgnoredOptionsWithArg.end()) {
           LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
           // Ignore these options with argument
           parser->Skip(2);
@@ -900,7 +925,7 @@ join::Vector<join::Vector<join::Key>> DoJoin(
     size_t limit = offset + total;
     if (!sort_params.empty()) {
       if (limit >= joined_entries->size()) {
-        std::sort(joined_entries->begin(), joined_entries->end(), std::move(comparator));
+        rng::sort(*joined_entries, std::move(comparator));
       } else {
         std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
                           joined_entries->end(), std::move(comparator));
@@ -2313,7 +2338,7 @@ void CmdFtSynDump(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Sort group_ids before sending
     std::vector<std::string> sorted_ids(group_ids.begin(), group_ids.end());
-    std::sort(sorted_ids.begin(), sorted_ids.end());
+    rng::sort(sorted_ids);
 
     for (const auto& id : sorted_ids) {
       rb->SendBulkString(id);

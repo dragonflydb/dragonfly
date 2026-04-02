@@ -7,6 +7,7 @@
 #include <absl/numeric/bits.h>
 #include <absl/types/span.h>
 
+#include <concepts>
 #include <vector>
 
 #include "core/detail/stateless_allocator.h"
@@ -491,7 +492,7 @@ class OAHSet {  // Open Addressing Hash Set
     return false;
   }
 
-  template <class T, std::enable_if_t<std::is_invocable_v<T, std::string_view>>* = nullptr>
+  template <std::invocable<std::string_view> T>
   bool ScanBucket(OAHEntry& entry, const T& cb, uint32_t bucket_id) {
     if (!entry.IsVector()) {
       entry.ExpireIfNeeded(time_now_, &size_, &obj_alloc_used_);

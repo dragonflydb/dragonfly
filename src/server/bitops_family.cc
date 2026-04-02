@@ -23,6 +23,8 @@
 #include "src/core/overloaded.h"
 #include "util/varz.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 using namespace facade;
 using namespace std;
@@ -1154,8 +1156,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
                                                          NOT_OP_NAME};
   string op = absl::AsciiStrToUpper(ArgS(args, 0));
   string_view dest_key = ArgS(args, 1);
-  bool illegal = std::none_of(BITOP_OP_NAMES.begin(), BITOP_OP_NAMES.end(),
-                              [&op](auto val) { return op == val; });
+  bool illegal = rng::none_of(BITOP_OP_NAMES, [&op](auto val) { return op == val; });
 
   auto* builder = cmd_cntx->rb();
   if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {

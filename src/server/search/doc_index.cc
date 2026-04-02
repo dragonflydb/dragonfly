@@ -25,6 +25,8 @@
 #include "server/server_state.h"
 #include "util/fibers/fibers.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 
 using namespace std;
@@ -271,7 +273,7 @@ void ShardDocIndex::DocKeyIndex::Remove(DocId id) {
 string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
   // Check that this id was not removed
-  DCHECK(id < last_id_ && std::find(free_ids_.begin(), free_ids_.end(), id) == free_ids_.end());
+  DCHECK(id < last_id_ && rng::find(free_ids_, id) == free_ids_.end());
 
   return keys_[id];
 }
@@ -543,7 +545,7 @@ void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
 
 void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
   // Don't run loop if no vector fields are present
-  if (std::ranges::empty(GetIndexedHnswFields(base_->schema)))
+  if (rng::empty(GetIndexedHnswFields(base_->schema)))
     return;
 
   LOG(INFO) << "Restoring vector index '" << index_name << "' from serialized graph on shard "

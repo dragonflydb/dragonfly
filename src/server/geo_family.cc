@@ -27,6 +27,8 @@ extern "C" {
 #include "server/transaction.h"
 #include "server/zset_family.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 
 using namespace std;
@@ -440,7 +442,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
     std::partial_sort(ga->begin(), ga->begin() + count, ga->end(), comparator);
     ga->resize(count);
   } else {
-    std::sort(ga->begin(), ga->end(), comparator);
+    rng::sort(*ga, comparator);
   }
 }
 

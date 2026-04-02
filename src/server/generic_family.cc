@@ -46,6 +46,8 @@ extern "C" {
 #include "util/fibers/future.h"
 #include "util/varz.h"
 
+namespace rng = std::ranges;
+
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
 ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");
 ABSL_FLAG(bool, unlink_experimental_async, true, "If true, runs unlink command asynchronously.");
@@ -1858,7 +1860,7 @@ struct SortVisitor {
           std::min<uint32_t>(params.bounds->first + params.bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
-      std::sort(entries.begin(), entries.end(), cmp);
+      rng::sort(entries, cmp);
     }
 
     // Fetch GET pattern values if needed
