@@ -146,6 +146,20 @@ vector_range_query:
                                 std::move(alias));
       }
     }
+  | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET
+    {
+      double radius = $5;
+      auto field = std::move($1);
+      auto vec_result = BytesToFtVectorSafe($6);
+      if (!vec_result) {
+        auto empty_vec = std::make_unique<float[]>(0);
+        $$ = AstVectorRangeNode(std::move(field), radius,
+                                {std::move(empty_vec), size_t{0}}, std::string{});
+      } else {
+        $$ = AstVectorRangeNode(std::move(field), radius, std::move(*vec_result),
+                                std::string{});
+      }
+    }
 
 vec_range_radius:
   DOUBLE  { $$ = toDouble($1); }
