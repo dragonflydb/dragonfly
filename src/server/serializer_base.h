@@ -24,7 +24,9 @@ class ExecutionState;
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
 
-// Track dependencies for buckets
+// Track dependencies for buckets.
+// Asynchronous processes during bucket serialization like big value streaming and tiered value
+// loading must increase the dependency count for their bucket to hold off changes to it.
 struct BucketDependencies {
   // Increase number of dependencies for bucket
   void Increment(BucketIdentity bucket);

@@ -141,6 +141,8 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 
   // Check if this bucket is stale
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
+    stats_.buckets_skipped++;
+
     // Force flush all delayed entries in the touched bucket
     if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update && !it.is_done())
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
