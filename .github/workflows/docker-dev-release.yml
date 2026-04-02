@@ -97,7 +97,7 @@ jobs:
           image_tags=(${{ steps.metadata.outputs.tags }})
 
           # install redis-tools
-          sudo apt-get install redis-tools -y
+          sudo apt-get update && sudo apt-get install redis-tools -y
 
           for image_tag in "${image_tags[@]}"; do
             echo "Testing image: ${image_tag}"
