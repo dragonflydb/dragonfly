@@ -199,8 +199,8 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
-                                 std::move(read_cb));
+      es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 

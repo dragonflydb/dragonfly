@@ -42,6 +42,12 @@ CompactObjType FragmentRef::ObjType() const {
                     val_);
 }
 
+size_t FragmentRef::MallocUsed() const {
+  return std::visit(Overloaded{[](CompactObj* pv) { return pv->MallocUsed(); },
+                               [](QList::Node* node) { return node->sz; }},
+                    val_);
+}
+
 auto FragmentRef::GetDescr(const CompactValue* pv) -> SerializationDescr {
   switch (pv->ObjType()) {
     case OBJ_STRING: {
