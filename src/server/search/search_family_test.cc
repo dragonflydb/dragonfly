@@ -4944,9 +4944,8 @@ TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {
                                          IsMap("route_name", "sports", "avg_dist", "0.6")));
 }
 
-// Verify that BuildRestoreCommand round-trips all HNSW parameters.
-// Regression test: M and EF_CONSTRUCTION were previously omitted, causing
-// replication to silently reconstruct the index with wrong defaults.
+// Verify that BuildRestoreCommand round-trips all HNSW vector parameters
+// including TYPE, M, and EF_CONSTRUCTION.
 TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   using dfly::DocIndex;
   using dfly::DocIndexInfo;
@@ -4979,9 +4978,9 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
 
   std::string cmd = info.BuildRestoreCommand();
 
-  // "HNSW 10" — the arg count must be 10 (5 key-value pairs), otherwise the
-  // parser stops early and silently drops M / EF_CONSTRUCTION on restore.
-  EXPECT_THAT(cmd, HasSubstr("HNSW 10"));
+  // HNSW 12 = 6 key-value pairs: TYPE, DIM, DISTANCE_METRIC, INITIAL_CAP, M, EF_CONSTRUCTION
+  EXPECT_THAT(cmd, HasSubstr("HNSW 12"));
+  EXPECT_THAT(cmd, HasSubstr("TYPE FLOAT32"));
   EXPECT_THAT(cmd, HasSubstr("DIM 4"));
   EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
   EXPECT_THAT(cmd, HasSubstr("INITIAL_CAP 500"));
@@ -5003,6 +5002,149 @@ TEST_F(SearchFamilyTest, SearchOnIndexWithHugeVectorDim) {
   // Index must not be registered — FT.SEARCH must report "no such index".
   resp = Run({"FT.SEARCH", "idx", "hello"});
   EXPECT_THAT(resp, ErrArg("idx: no such index"));
+}
+
+// Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TEXT fields.
+TEST(BuildRestoreCommandTest, TextWithSuffixTriePreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TEXT;
+  field.flags = 0;
+  field.short_name = "title";
+  field.special_params = SchemaField::TextParams{.with_suffixtrie = true};
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["title"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("WITHSUFFIXTRIE"));
+}
+
+// Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TAG fields.
+TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TAG;
+  field.flags = 0;
+  field.short_name = "tags";
+  field.special_params = SchemaField::TagParams{.separator = ',', .with_suffixtrie = true};
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["tags"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  std::string cmd = info.BuildRestoreCommand();
+  EXPECT_THAT(cmd, HasSubstr("WITHSUFFIXTRIE"));
+  EXPECT_THAT(cmd, HasSubstr("SEPARATOR"));
+}
+
+// Verify that FT.INFO returns all VECTOR field parameters.
+TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
+  EXPECT_EQ(Run({"ft.create",
+                 "idx",
+                 "ON",
+                 "HASH",
+                 "PREFIX",
+                 "1",
+                 "doc:",
+                 "SCHEMA",
+                 "embedding",
+                 "VECTOR",
+                 "HNSW",
+                 "10",
+                 "TYPE",
+                 "FLOAT32",
+                 "DIM",
+                 "4",
+                 "DISTANCE_METRIC",
+                 "COSINE",
+                 "M",
+                 "16",
+                 "EF_CONSTRUCTION",
+                 "200"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  auto vector_field_matcher =
+      IsArray("identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm",
+              "HNSW", "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "M", "16",
+              "ef_construction", "200");
+
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
+                            _, _, _));
+}
+
+// Verify that FT.INFO returns TAG field parameters: SEPARATOR and CASESENSITIVE.
+TEST_F(SearchFamilyTest, InfoIndexTagParams) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG",
+                 "SEPARATOR", "|", "CASESENSITIVE", "WITHSUFFIXTRIE"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  auto tag_field_matcher = IsArray("identifier", "tags", "attribute", "tags", "type", "TAG",
+                                   "SEPARATOR", "|", "CASESENSITIVE", "WITHSUFFIXTRIE");
+
+  EXPECT_THAT(
+      info, IsArray(_, _, _, _, _, _, "attributes", IsArray(tag_field_matcher), _, _, _, _, _, _));
+}
+
+// Verify that FT.INFO returns TEXT field parameter: WITHSUFFIXTRIE.
+TEST_F(SearchFamilyTest, InfoIndexTextParams) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT",
+                 "WITHSUFFIXTRIE"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  auto text_field_matcher =
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WITHSUFFIXTRIE");
+
+  EXPECT_THAT(
+      info, IsArray(_, _, _, _, _, _, "attributes", IsArray(text_field_matcher), _, _, _, _, _, _));
+}
+
+// Verify that FT.INFO returns stopwords_list as top-level field when explicitly set.
+TEST_F(SearchFamilyTest, InfoIndexStopwords) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "STOPWORDS", "2", "the",
+                 "a", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "stopwords_list",
+                            IsUnordArray("the", "a"), _, _, _, _));
+}
+
+// Verify that stopwords_list is absent when STOPWORDS was not explicitly set.
+TEST_F(SearchFamilyTest, InfoIndexDefaultStopwordsOmitted) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  // Collection size is 7 (no stopwords_list field).
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "indexing", _, _, _));
 }
 
 }  // namespace dfly
