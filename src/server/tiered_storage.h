@@ -179,10 +179,6 @@ class TieredStorage : public TieredStorageBase {
 void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                 std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts);
 
-void ReadTieredListNode(DbIndex dbid, QList::Node* node, QList* ql,
-                        const tiering::DiskSegment& segment,
-                        std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts);
-
 // Read offloaded value and apply transformation cb on the read result. Returns future of the
 // transformed result.
 template <typename T>
@@ -214,11 +210,6 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 // nullptr, assign/set the backpressure future to `*backpressure`.
 void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                      BackPressureFuture* backpressure);
-
-// Stash list node if it meets criteria.
-// Returns true if stash was initiated, false otherwise.
-bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
-                   BackPressureFuture* backpressure);
 
 #else
 
@@ -326,12 +317,6 @@ inline void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& val
                        std::function<void(io::Result<std::string_view>)> readf, TieredStorage* ts) {
 }
 
-inline void ReadTieredListNode(DbIndex dbid, QList::Node* node, QList* ql,
-                               const tiering::DiskSegment& segment,
-                               std::function<void(io::Result<std::string_view>)> readf,
-                               TieredStorage* ts) {
-}
-
 inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::string_view key,
                                                             const PrimeValue& value,
                                                             TieredStorage* ts) {
@@ -346,10 +331,6 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 
 inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                             BackPressureFuture* backpressure) {
-}
-
-inline bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
-                          BackPressureFuture* backpressure) {
 }
 
 #endif  // WITH_TIERING

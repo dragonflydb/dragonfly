@@ -26,6 +26,7 @@
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
+#include "server/tiering/decoders.h"
 #include "server/tiering/op_manager.h"
 #include "server/tiering/serialized_map.h"
 #include "server/tiering/small_bins.h"
@@ -75,8 +76,8 @@ bool OccupiesWholePages(size_t size) {
 constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 
 // Called after setting new value in place of previous segment
-void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats) {
-  stats->AddTypeMemoryUsage(pv.ObjType(), pv.MallocUsed());
+void RecordDeleted(const FragmentRef& fragment_ref, size_t tiered_len, DbTableStats* stats) {
+  stats->AddTypeMemoryUsage(fragment_ref.ObjType(), fragment_ref.MallocUsed());
   stats->tiered_entries--;
   stats->tiered_used_bytes -= tiered_len;
 }
@@ -346,19 +347,12 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   ++stats_.total_fetches;
 
   if (const auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
+    DbIndex db_id = std::get<0>(*key);
+    QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
-
-    QList* ql = reinterpret_cast<QList*>(std::get<1>(*key));
-    // Adjust malloc size and number of offloded nodes before uploading.
-    ql->AdjustMallocSize(segment.length);
-    ql->IncrementNumOffloadedNodes(-1);
-
-    DbTableStats* stats = GetDbTableStats(std::get<0>(*key));
-    stats->AddTypeMemoryUsage(OBJ_LIST, segment.length);
-
-    // We return false here, because we don't want to delete the value from storage yet.
-    // It will be done in onload_cb callback.
-    return false;
+    decoder->Upload(node);
+    RecordDeleted(node, segment.length, GetDbTableStats(db_id));
+    return true;
   }
 
   if (const auto* i = std::get_if<uintptr_t>(&id); i) {
@@ -788,18 +782,6 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredS
   }
 }
 
-bool StashListNode(DbIndex dbid, QList::Node* node, QList* ql, TieredStorage* ts,
-                   BackPressureFuture* backpressure) {
-  if (auto blobs = ts->ShouldStash(*node); blobs) {
-    // Increment before stashing; decremented on failure in `ClearStashPending`
-    ql->IncrementNumOffloadedNodes(1);
-    node->io_pending = 1;
-    ts->StashPartialValue(tiering::ListNodeId{dbid, ql, node}, *blobs, backpressure);
-    return true;
-  }
-  return false;
-}
-
 void TieredStorage::StashPartialValue(tiering::PendingId id, const StashDescriptor& blobs,
                                       BackPressureFuture* backpressure) {
   size_t est_size = blobs.EstimatedSerializedSize();
@@ -823,16 +805,6 @@ void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::StringDecoder{value},
            std::move(cb));
-}
-
-void ReadTieredListNode(DbIndex dbid, QList::Node* node, QList* ql,
-                        const tiering::DiskSegment& segment,
-                        std::function<void(io::Result<std::string_view>)> readf,
-                        TieredStorage* ts) {
-  auto cb = [readf = std::move(readf)](io::Result<tiering::BareDecoder*> res) mutable {
-    readf(res.transform([](tiering::BareDecoder* d) { return d->slice; }));
-  };
-  ts->Read(tiering::ListNodeId{dbid, ql, node}, segment, tiering::BareDecoder{}, std::move(cb));
 }
 
 template <typename T>

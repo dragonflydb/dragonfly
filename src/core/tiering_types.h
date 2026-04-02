@@ -56,6 +56,8 @@ class FragmentRef {
 
   CompactObjType ObjType() const;
 
+  size_t MallocUsed() const;
+
   // Determine required byte size and encoding type based on value.
   SerializationDescr GetSerializationDescr() const;
 

@@ -31,8 +31,8 @@ string OpManager::ToString(const OwnedEntryId& id) {
   }
   if (const auto* key = std::get_if<ListNodeId>(&id); key) {
     // Format dbid::qlist::node
-    return absl::StrCat("(", std::get<0>(*key), ":", absl::StrFormat("%p", std::get<2>(*key)), ":",
-                        absl::StrFormat("%p", std::get<1>(*key)), ")");
+    return absl::StrCat("(", std::get<0>(*key), ":", absl::StrFormat("%p", std::get<1>(*key)), ":",
+                        absl::StrFormat("%p", std::get<2>(*key)), ")");
   }
   const auto& key = std::get<DbKeyId>(id);
   return absl::StrCat("(", key.first, ":", key.second, ")");
