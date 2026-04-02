@@ -31,6 +31,8 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/transaction.h"
 
+namespace rng = std::ranges;
+
 namespace dfly {
 
 using namespace std;
@@ -1647,7 +1649,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
     tx->Execute(store_cb, true);
     builder->SendLong(smvec.size());
   } else {
-    std::sort(std::begin(smvec), std::end(smvec));
+    rng::sort(smvec);
 
     // We can't use SendScoredArray because it expects strings, not string_views
     // TOOD: Not longer relevant with new io, use scoping
@@ -2273,7 +2275,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
       }
     }
     if (to_sort_fields) {
-      std::sort(members.begin(), members.end());
+      rng::sort(members);
     }
   }
 
@@ -2366,7 +2368,7 @@ vector<ScoredMemberView> ZDiffOp(ShardId key_sid, vector<OpResult<vector<ScoredM
   }
 
   // Total O(KlogK)
-  std::sort(std::begin(smvec), std::end(smvec));
+  rng::sort(smvec);
 
   return smvec;
 }

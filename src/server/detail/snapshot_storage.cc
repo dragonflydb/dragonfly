@@ -31,6 +31,8 @@
 #include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/azure/storage.h"
 #include "util/fibers/fiber_file.h"
+
+namespace rng = std::ranges;
 namespace dfly {
 namespace detail {
 
@@ -85,7 +87,7 @@ std::string EscapeRegex(string_view input) {
 
 string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilename,
                                          vector<SnapStat> keys) {
-  std::sort(std::begin(keys), std::end(keys),
+  rng::sort(keys,
             [](const SnapStat& l, const SnapStat& r) { return l.last_modified > r.last_modified; });
 
   // Create a regex to match the object keys, substituting the timestamp
@@ -219,10 +221,9 @@ io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_
   }
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
   if (short_vec) {
-    std::sort(short_vec->begin(), short_vec->end(),
-              [](const io::StatShort& l, const io::StatShort& r) {
-                return std::difftime(l.last_modified, r.last_modified) < 0;
-              });
+    rng::sort(*short_vec, [](const io::StatShort& l, const io::StatShort& r) {
+      return std::difftime(l.last_modified, r.last_modified) < 0;
+    });
     auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
       return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, kSummarySuffix);
     });

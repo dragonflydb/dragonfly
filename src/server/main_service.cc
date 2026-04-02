@@ -69,6 +69,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+namespace rng = std::ranges;
 using facade::ErrorReply;
 
 ABSL_FLAG(int32_t, port, 6379,
@@ -174,6 +175,8 @@ namespace dfly {
 #if defined(__linux__)
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #include <sys/syscall.h>
+
+namespace rng = std::ranges;
 #define gettid() syscall(SYS_gettid)
 #endif
 
@@ -491,8 +494,7 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
 }
 
 bool IsSHA(string_view str) {
-  return std::all_of(str.begin(), str.end(),
-                     [](unsigned char c) { return absl::ascii_isxdigit(c); });
+  return rng::all_of(str, [](unsigned char c) { return absl::ascii_isxdigit(c); });
 }
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
@@ -2344,7 +2346,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
 
 // Check if exec_info watches keys on dbs other than db_indx.
 bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_info) {
-  return std::any_of(exec_info.watched_keys.begin(), exec_info.watched_keys.end(),
+  return rng::any_of(exec_info.watched_keys,
                      [db_indx](const auto& pair) { return pair.first != db_indx; });
 }
 

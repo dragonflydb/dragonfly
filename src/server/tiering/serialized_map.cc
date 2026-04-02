@@ -5,6 +5,8 @@
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::tiering {
 
 constexpr size_t kLenBytes = 4;
@@ -36,7 +38,7 @@ SerializedMap::SerializedMap(std::string_view slice) {
 }
 
 SerializedMap::Iterator SerializedMap::Find(std::string_view key) const {
-  return std::find_if(begin(), end(), [key](auto p) { return p.first == key; });
+  return rng::find_if(begin(), end(), [key](auto p) { return p.first == key; });
 }
 
 SerializedMap::Iterator SerializedMap::begin() const {

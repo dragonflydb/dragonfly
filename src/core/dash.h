@@ -485,9 +485,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
                          detail::IteratorPair<Key_t, Value_t>>;
 
   // Copy constructor from iterator to const_iterator.
-  template <bool TIsConst = IsConst, bool TIsSingleB,
-            typename std::enable_if<TIsConst>::type* = nullptr>
-  Iterator(const Iterator<!TIsConst, TIsSingleB>& other) noexcept
+  template <bool TIsConst = IsConst, bool TIsSingleB>
+  requires TIsConst Iterator(const Iterator<!TIsConst, TIsSingleB>& other)
+  noexcept
       : owner_(other.owner_),
         seg_id_(other.seg_id_),
         bucket_id_(other.bucket_id_),
@@ -556,12 +556,15 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return *owner_;
   }
 
-  template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> GetVersion() const {
+  template <bool B = Policy::kUseVersion>
+  requires B uint64_t GetVersion()
+  const {
     assert(owner_ && seg_id_ < owner_->segment_.size());
     return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
   }
 
-  template <bool B = Policy::kUseVersion> std::enable_if_t<B> SetVersion(uint64_t v) {
+  template <bool B = Policy::kUseVersion>
+  requires B void SetVersion(uint64_t v) {
     return owner_->segment_[seg_id_]->SetVersion(bucket_id_, v);
   }
 

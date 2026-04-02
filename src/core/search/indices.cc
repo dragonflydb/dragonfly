@@ -24,6 +24,8 @@
 
 #include "base/flags.h"
 
+namespace rng = std::ranges;
+
 ABSL_FLAG(bool, use_numeric_range_tree, true,
           "Use range tree for numeric index. "
           "If false, use a simple implementation with btree_set. "
@@ -236,7 +238,7 @@ class BtreeSetImpl : public NumericIndex::RangeTreeBase {
       }
     }
 
-    std::sort(result.begin(), result.end());
+    rng::sort(result);
     return result;
   }
 
@@ -428,7 +430,7 @@ template <typename C> vector<DocId> BaseStringIndex<C>::GetAllDocsWithNonNullVal
       }
     }
   }
-  std::sort(result.begin(), result.end());
+  rng::sort(result);
   return result;
 }
 

@@ -13,13 +13,21 @@ namespace dfly::tiering {
 // Map built over single continuous byte slice to allow easy read operations.
 struct SerializedMap {
   struct Iterator {
+    using iterator_concept = std::forward_iterator_tag;
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
     using value_type = std::pair<std::string_view, std::string_view>;
     using reference = value_type;
     using pointer = value_type*;
 
+    Iterator() = default;
+
     Iterator& operator++();
+    Iterator operator++(int) {
+      Iterator copy = *this;
+      ++(*this);
+      return copy;
+    }
 
     bool operator==(const Iterator& other) const {
       return slice_.data() == other.slice_.data() && slice_.size() == other.slice_.size();
