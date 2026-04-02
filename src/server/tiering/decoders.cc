@@ -4,8 +4,9 @@
 
 #include "server/tiering/decoders.h"
 
-#include "base/logging.h"
+#include "core/compact_object.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/overloaded.h"
 #include "server/tiering/serialized_map.h"
 
 extern "C" {
@@ -65,6 +66,9 @@ std::string* StringDecoder::Write() {
   return value_.GetMutable();
 }
 
+SerializedMapDecoder::~SerializedMapDecoder() {
+}
+
 std::unique_ptr<Decoder> SerializedMapDecoder::Clone() const {
   return std::make_unique<SerializedMapDecoder>();
 }
@@ -74,19 +78,44 @@ void SerializedMapDecoder::Initialize(std::string_view slice) {
 }
 
 Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
-  return UploadMetrics{.modified = false,
-                       .estimated_mem_usage = map_->DataBytes() + map_->size() * 2 * 8};
+  Overloaded ov{
+      [](const SerializedMap& sm) { return sm.DataBytes() + sm.size() * 8; },
+      [](const detail::ListpackWrap& lw) { return lw.DataBytes(); },
+  };
+  size_t bytes = visit(Overloaded{ov, [&](const auto& ptr) { return ov(*ptr); }}, map_);
+  return UploadMetrics{.modified = modified_, .estimated_mem_usage = bytes};
 }
 
 void SerializedMapDecoder::Upload(CompactObj* obj) {
-  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
-  for (const auto& [key, value] : *map_)
-    lw.Insert(key, value, true);
-  obj->InitRobj(OBJ_HASH, kEncodingListPack, lw.GetPointer());
+  if (std::holds_alternative<std::unique_ptr<SerializedMap>>(map_))
+    MakeOwned();
+
+  obj->InitRobj(OBJ_HASH, kEncodingListPack, GetMutable()->GetPointer());
 }
 
-SerializedMap* SerializedMapDecoder::Get() const {
-  return map_.get();
+std::variant<SerializedMap*, detail::ListpackWrap*> SerializedMapDecoder::Get() const {
+  using RT = std::variant<SerializedMap*, detail::ListpackWrap*>;
+  return std::visit([](auto& ptr) -> RT { return ptr.get(); }, map_);
+}
+
+detail::ListpackWrap* SerializedMapDecoder::GetMutable() {
+  if (std::holds_alternative<std::unique_ptr<detail::ListpackWrap>>(map_))
+    return std::get<std::unique_ptr<detail::ListpackWrap>>(map_).get();
+
+  // Convert SerializedMap to listpack
+  MakeOwned();
+  modified_ = true;
+  return GetMutable();
+}
+
+void SerializedMapDecoder::MakeOwned() {
+  auto& map = std::get<std::unique_ptr<SerializedMap>>(map_);
+
+  auto lw = detail::ListpackWrap::WithCapacity(GetMetrics().estimated_mem_usage);
+  for (const auto& [key, value] : *map)
+    lw.Insert(key, value, true);
+
+  map_ = std::make_unique<detail::ListpackWrap>(lw);
 }
 
 }  // namespace dfly::tiering
