@@ -2373,6 +2373,7 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
     MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {"@numeric:[15 +inf]", "@numeric:[-inf 20]", "@numeric:[-inf +inf]",
                            "@numeric:[0 100000]"};
@@ -2422,6 +2423,7 @@ static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
     MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {"@numeric:[0 40000]", "@numeric:[-inf +inf]"};
 
@@ -2478,6 +2480,7 @@ static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
     }};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {absl::StrCat("@numeric1:[15 +inf] @numeric2:[-inf 20]"),
                            absl::StrCat("@numeric1:[-inf 20] @numeric2:[15 +inf]"),
@@ -2536,6 +2539,7 @@ static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
 
     tag_number = (tag_number + 1) % max_tag_number;
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {absl::StrCat("@tag:{tag230|tag3|tag942} @numeric:[15 +inf]"),
                            absl::StrCat("@tag:{tag1|tag829|tag236} @numeric:[-inf 20]"),
@@ -2600,6 +2604,7 @@ static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
 
     tag_number = (tag_number + 1) % max_tag_number;
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {
       absl::StrCat(
@@ -2664,6 +2669,7 @@ static void BM_SearchMergeEqualSets(benchmark::State& state) {
     }};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string query = absl::StrCat("@numeric1:[-inf +inf] @numeric2:[-inf +inf]");
 
