@@ -322,6 +322,51 @@ class RdbSerializer {
     bool was_split = false;
   };
   absl::flat_hash_map<uint32_t, Entry> entries_;
+
+  struct EntryState {
+    std::unique_ptr<io::IoBuf> buffer;
+    bool was_split = false;
+  };
+
+  class MemBuf {
+   public:
+    using EntryId = uint32_t;
+
+    void StartEntry();
+    void FinishEntry();
+    void TagAndDrainToDefaultBuffer();
+    io::IoBuf* CurrentBuffer() const {
+      return current_buffer_;
+    }
+
+    std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
+
+    void MarkMidFlush() {
+      entries_.at(active_id_).was_split = true;
+    }
+
+    size_t FlushableSize() const;
+
+    struct SaveEntryState {
+      uint32_t id;
+      io::IoBuf* ptr;
+    };
+
+    SaveEntryState SuspendBeforeConsume();
+    void RestoreAfterConsume(SaveEntryState state);
+
+    std::string BuildBlob(io::Bytes current_bytes);
+
+   private:
+    bool send_tagged_entries_ = false;
+
+    EntryId next_id_ = 1;
+    EntryId active_id_ = 0;
+
+    io::IoBuf default_buffer_{4096};
+    io::IoBuf* current_buffer_ = &default_buffer_;
+    absl::flat_hash_map<EntryId, EntryState> entries_;
+  };
 };
 
 }  // namespace dfly

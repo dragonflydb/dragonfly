@@ -1987,4 +1987,103 @@ void RdbSerializer::TagAndDrainToDefaultBuffer() {
   mem_buf_->ConsumeInput(bytes.size());
 }
 
+void RdbSerializer::MemBuf::StartEntry() {
+  active_id_ = next_id_++;
+  entries_.emplace(active_id_, EntryState{std::make_unique<IoBuf>(4_KB), false});
+  current_buffer_ = entries_[active_id_].buffer.get();
+}
+
+void RdbSerializer::MemBuf::FinishEntry() {
+  if (const auto it = entries_.find(active_id_);
+      it != entries_.end() && current_buffer_ == it->second.buffer.get())
+    TagAndDrainToDefaultBuffer();
+
+  entries_.erase(active_id_);
+  current_buffer_ = &default_buffer_;
+  active_id_ = 0;
+}
+
+void RdbSerializer::MemBuf::TagAndDrainToDefaultBuffer() {
+  if (current_buffer_->InputLen() == 0)
+    return;
+
+  const auto bytes = current_buffer_->InputBuffer();
+  const auto& entry = entries_.at(active_id_);
+  if (entry.was_split && send_tagged_entries_) {
+    const auto header = MakeTagHeader(current_buffer_->InputLen());
+    default_buffer_.WriteAndCommit(header.data(), header.size());
+  }
+
+  default_buffer_.WriteAndCommit(bytes.data(), bytes.size());
+  current_buffer_->ConsumeInput(bytes.size());
+}
+
+std::array<uint8_t, 9> RdbSerializer::MemBuf::MakeTagHeader(size_t size) const {
+  DCHECK_NE(active_id_, 0u) << "tagging when active entry is invalid";
+  std::array<uint8_t, 9> header;
+  header[0] = RDB_OPCODE_TAGGED_CHUNK;
+  absl::little_endian::Store32(header.data() + 1, active_id_);
+  absl::little_endian::Store32(header.data() + 5, size);
+  return header;
+}
+
+size_t RdbSerializer::MemBuf::FlushableSize() const {
+  auto size = current_buffer_->InputLen();
+  if (current_buffer_ != &default_buffer_)
+    size += default_buffer_.InputLen();
+  return size;
+}
+
+RdbSerializer::MemBuf::SaveEntryState RdbSerializer::MemBuf::SuspendBeforeConsume() {
+  const SaveEntryState state{active_id_, current_buffer_};
+  current_buffer_ = &default_buffer_;
+  active_id_ = 0;
+  return state;
+}
+
+void RdbSerializer::MemBuf::RestoreAfterConsume(const SaveEntryState state) {
+  active_id_ = state.id;
+  current_buffer_ = state.ptr;
+}
+
+std::string RdbSerializer::MemBuf::BuildBlob(Bytes current_bytes) {
+  const bool should_tag =
+      send_tagged_entries_ && active_id_ != 0 && entries_.at(active_id_).was_split;
+
+  const auto current = io::View(current_bytes);
+
+  if (current_buffer_ == &default_buffer_ || default_buffer_.InputLen() == 0) {
+    if (!should_tag) {
+      std::string out{current};
+      current_buffer_->ConsumeInput(current_bytes.size());
+      return out;
+    }
+
+    const auto header = MakeTagHeader(current_bytes.size());
+    std::string out;
+    out.reserve(header.size() + current.size());
+
+    out.append(reinterpret_cast<const char*>(header.data()), header.size());
+    out.append(current);
+
+    current_buffer_->ConsumeInput(current_bytes.size());
+    return out;
+  }
+
+  const auto prefix = default_buffer_.InputBuffer();
+
+  std::string out;
+  out.reserve(prefix.size() + (should_tag ? 9 : 0) + current.size());
+  out.append(io::View(prefix));
+  if (should_tag) {
+    const auto header = MakeTagHeader(current_bytes.size());
+    out.append(reinterpret_cast<const char*>(header.data()), header.size());
+  }
+  out.append(current);
+
+  default_buffer_.ConsumeInput(prefix.size());
+  current_buffer_->ConsumeInput(current_bytes.size());
+  return out;
+}
+
 }  // namespace dfly
