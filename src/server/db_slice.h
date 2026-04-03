@@ -75,6 +75,9 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  // how many journal omit optimizations were performed
+  size_t journal_omit = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -223,6 +226,24 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
+  // Hints for the current operation.
+  struct MutationHints {
+    // Inputs
+    struct {
+      // Operation contains only a single key
+      bool single_key = false;
+
+      // Support omitting journal writes
+      bool support_omit = false;
+    } const hint;
+
+    // Outputs
+    struct {
+      // The journal write is safe to be omitted
+      bool omit_journal = false;
+    } result = {};
+  };
+
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
@@ -250,6 +271,8 @@ class DbSlice {
     AutoUpdater post_updater;
     bool is_new = false;
   };
+
+  void ProvideHints(MutationHints* hints);
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
@@ -630,6 +653,9 @@ class DbSlice {
 
   // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
   bool expired_keys_events_recording_ = true;
+
+  // Provided for the next FindMutableInternal operation
+  MutationHints* mutation_hints_ = nullptr;
 
   struct Hash {
     size_t operator()(const facade::ConnectionRef& c) const {

@@ -112,6 +112,7 @@ class SetCmd {
 
   const OpArgs op_args_;
   bool explicit_journal_;  // call RecordJournal (auto journaling disabled)
+  bool skip_journal_ = false;
 };
 
 size_t SetRangeInternal(std::string* value, size_t start, std::string_view range) {
@@ -836,9 +837,14 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     }
   }
 
+  DbSlice::MutationHints hints{.hint{.single_key = true, .support_omit = explicit_journal_}};
+  db_slice.ProvideHints(&hints);
+
   // We can use std::nullopt here because SET command can change the key type to string
   auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
+
+  skip_journal_ = hints.result.omit_journal;
 
   if (!op_res->is_new) {
     if (auto status = CachePrevIfNeeded(params, op_res->it); status != OpStatus::OK)
@@ -940,6 +946,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
 }
 
 void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
+  if (skip_journal_)
+    return;
+
   absl::InlinedVector<string_view, 5> cmds({key, value});  // 5 is theoretical maximum;
 
   std::string exp_str;
