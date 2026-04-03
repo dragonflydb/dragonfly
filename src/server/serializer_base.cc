@@ -165,8 +165,9 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
   auto* active = util::fb2::detail::FiberActive();
   if (!absl::StartsWith(active->name(), "shard_queue") &&
-      !absl::StartsWith(active->name(), "l2_queue")) {
-    LOG(DFATAL) << "Unexpected fiber: " << util::fb2::GetStacktrace();
+      !absl::StartsWith(active->name(), "l2_queue") &&
+      !absl::StartsWith(active->name(), "SliceSnapshot")) {
+    LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
   }
   if (ProcessBucket(db_index, it, true))
     ++stats_.buckets_on_change;
