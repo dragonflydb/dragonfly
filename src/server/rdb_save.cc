@@ -216,8 +216,6 @@ uint8_t RdbObjectType(const CompactObj& pv) {
 RdbSerializer::RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun,
                              size_t flush_threshold)
     : compression_mode_(compression_mode),
-      default_buf_{4_KB},
-      mem_buf_{&default_buf_},
       tmp_buf_(nullptr),
       consume_fun_(std::move(consume_fun)),
       flush_threshold_(flush_threshold) {
@@ -276,8 +274,8 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return 0;
   }
 
-  AddEntry();
-  absl::Cleanup finish_entry = [&] { FinishEntry(); };
+  mem_buf_controller_.StartEntry();
+  absl::Cleanup cleanup = [&] { mem_buf_controller_.FinishEntry(); };
 
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   auto ec = SelectDb(dbid);
@@ -927,7 +925,7 @@ std::error_code RdbSerializer::WriteOpcode(uint8_t opcode) {
 }
 
 size_t RdbSerializer::GetBufferCapacity() const {
-  return mem_buf_->Capacity();
+  return mem_buf_controller_.CurrentBuffer()->Capacity();
 }
 
 size_t RdbSerializer::GetTempBufferSize() const {
@@ -935,21 +933,22 @@ size_t RdbSerializer::GetTempBufferSize() const {
 }
 
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
-  mem_buf_->Reserve(mem_buf_->InputLen() + buf.size());
-  IoBuf::Bytes dest = mem_buf_->AppendBuffer();
+  auto mem_buf = mem_buf_controller_.CurrentBuffer();
+  mem_buf->Reserve(mem_buf->InputLen() + buf.size());
+  IoBuf::Bytes dest = mem_buf_controller_.CurrentBuffer()->AppendBuffer();
   memcpy(dest.data(), buf.data(), buf.size());
-  mem_buf_->CommitWrite(buf.size());
+  mem_buf->CommitWrite(buf.size());
   return error_code{};
 }
 
 string RdbSerializer::Flush(FlushState flush_state) {
   const auto bytes = PrepareFlush(flush_state);
-  auto result = PrefixDefaultBufferAndTag(bytes);
-  mem_buf_->ConsumeInput(bytes.size());
+  auto result = mem_buf_controller_.BuildBlob(bytes);
   if (result.empty())
     return {};
 
-  if (send_tagged_entries_) {
+  // did not compress during PrepareFlush, try now
+  if (!allow_prepare_flush_compression_) {
     if (auto res = CompressBlob(result); res)
       result = std::move(*res);
   }
@@ -1033,15 +1032,9 @@ string RdbSerializer::DumpValue(const PrimeValue& obj, bool ignore_crc) {
   return DumpValue(&serializer, obj, ignore_crc);
 }
 
-size_t RdbSerializer::SerializedLen() const {
-  auto len = mem_buf_->InputLen();
-  if (mem_buf_ != &default_buf_)
-    len += default_buf_.InputLen();
-  return len;
-}
-
-io::Bytes RdbSerializer::PrepareFlush(FlushState flush_state) {
-  size_t sz = mem_buf_->InputLen();
+Bytes RdbSerializer::PrepareFlush(FlushState flush_state) {
+  auto mem_buf = mem_buf_controller_.CurrentBuffer();
+  size_t sz = mem_buf->InputLen();
   if (sz == 0)
     return {};
 
@@ -1060,7 +1053,7 @@ io::Bytes RdbSerializer::PrepareFlush(FlushState flush_state) {
     number_of_chunks_ = is_last_chunk ? 0 : number_of_chunks_ + 1;
   }
 
-  return mem_buf_->InputBuffer();
+  return mem_buf->InputBuffer();
 }
 
 error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
@@ -1882,118 +1875,43 @@ std::optional<std::string> RdbSerializer::CompressBlob(std::string_view input) {
 }
 
 void RdbSerializer::CompressBlob() {
-  Bytes blob_to_compress = mem_buf_->InputBuffer();
+  auto mem_buf = mem_buf_controller_.CurrentBuffer();
+  Bytes blob_to_compress = mem_buf->InputBuffer();
   std::string_view input{reinterpret_cast<const char*>(blob_to_compress.data()),
                          blob_to_compress.size()};
   auto compressed = CompressBlob(input);
   if (!compressed)
     return;
 
-  mem_buf_->ConsumeInput(blob_to_compress.size());
-  mem_buf_->Reserve(compressed->size());
-  auto destination = mem_buf_->AppendBuffer();
+  mem_buf->ConsumeInput(blob_to_compress.size());
+  mem_buf->Reserve(compressed->size());
+  auto destination = mem_buf->AppendBuffer();
   memcpy(destination.data(), compressed->data(), compressed->size());
-  mem_buf_->CommitWrite(compressed->size());
-}
-
-std::string RdbSerializer::PrefixDefaultBufferAndTag(Bytes bytes) {
-  const bool should_tag =
-      send_tagged_entries_ && active_entry_id_ != 0 && entries_.at(active_entry_id_).was_split;
-
-  const auto current_bytes = io::View(bytes);
-  if (mem_buf_ == &default_buf_ || default_buf_.InputLen() == 0) {
-    if (!should_tag)
-      return std::string{current_bytes};
-
-    auto header = MakeTagHeader(current_bytes.size());
-    std::string out;
-    out.reserve(header.size() + current_bytes.size());
-    out.append(std::string_view(reinterpret_cast<const char*>(header.data()), header.size()));
-    out.append(current_bytes);
-    return out;
-  }
-
-  std::string out;
-  const auto prefix = default_buf_.InputBuffer();
-
-  out.reserve(prefix.size() + 9 + current_bytes.size());
-  out.append(io::View(prefix));
-  default_buf_.ConsumeInput(prefix.size());
-
-  if (should_tag)
-    out.append(io::View(MakeTagHeader(current_bytes.size())));
-  out.append(current_bytes);
-  return out;
+  mem_buf->CommitWrite(compressed->size());
 }
 
 void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
-  if (!consume_fun_ || SerializedLen() <= flush_threshold_)
+  if (!consume_fun_ || mem_buf_controller_.FlushableSize() <= flush_threshold_)
     return;
 
   if (flush_state == FlushState::kFlushMidEntry)
-    entries_.at(active_entry_id_).was_split = true;
+    mem_buf_controller_.MarkMidFlush();
 
   string blob = Flush(flush_state);
   DCHECK(!blob.empty());  // SerializedLen() > 0.
 
-  const auto id = active_entry_id_;
-  mem_buf_ = &default_buf_;
-  active_entry_id_ = 0;
-
+  const auto state = mem_buf_controller_.SaveStateBeforeConsume();
   consume_fun_(std::move(blob));
-
-  active_entry_id_ = id;
-  mem_buf_ = entries_[id].buffer.get();
+  mem_buf_controller_.RestoreStateAfterConsume(state);
 }
 
-std::array<uint8_t, 9> RdbSerializer::MakeTagHeader(size_t size) const {
-  DCHECK_NE(active_entry_id_, 0u) << "tagging when active entry is invalid";
-  std::array<uint8_t, 9> header;
-  header[0] = RDB_OPCODE_TAGGED_CHUNK;
-  absl::little_endian::Store32(header.data() + 1, active_entry_id_);
-  absl::little_endian::Store32(header.data() + 5, size);
-  return header;
-}
-
-void RdbSerializer::AddEntry() {
-  active_entry_id_ = next_stream_id_++;
-  entries_.emplace(active_entry_id_,
-                   Entry{.buffer = std::make_unique<IoBuf>(4_KB), .was_split = false});
-  mem_buf_ = entries_[active_entry_id_].buffer.get();
-}
-
-void RdbSerializer::FinishEntry() {
-  if (const auto it = entries_.find(active_entry_id_);
-      it != entries_.end() && mem_buf_ == it->second.buffer.get())
-    TagAndDrainToDefaultBuffer();
-
-  entries_.erase(active_entry_id_);
-  mem_buf_ = &default_buf_;
-  active_entry_id_ = 0;
-}
-
-void RdbSerializer::TagAndDrainToDefaultBuffer() {
-  if (mem_buf_->InputLen() == 0)
-    return;
-
-  const auto bytes = mem_buf_->InputBuffer();
-  const auto& entry = entries_.at(active_entry_id_);
-  if (entry.was_split && send_tagged_entries_) {
-    const auto header = MakeTagHeader(mem_buf_->InputLen());
-    default_buf_.WriteAndCommit(header.data(), header.size());
-  }
-
-  default_buf_.WriteAndCommit(bytes.data(), bytes.size());
-  mem_buf_->ConsumeInput(bytes.size());
-}
-
-void RdbSerializer::MemBuf::StartEntry() {
+void MemBufController::StartEntry() {
   active_id_ = next_id_++;
-  entries_.emplace(active_id_, EntryState{std::make_unique<IoBuf>(4_KB), false});
+  entries_.emplace(active_id_, EntryState{std::make_unique<io::IoBuf>(4096), false});
   current_buffer_ = entries_[active_id_].buffer.get();
 }
 
-void RdbSerializer::MemBuf::FinishEntry() {
+void MemBufController::FinishEntry() {
   if (const auto it = entries_.find(active_id_);
       it != entries_.end() && current_buffer_ == it->second.buffer.get())
     TagAndDrainToDefaultBuffer();
@@ -2003,7 +1921,7 @@ void RdbSerializer::MemBuf::FinishEntry() {
   active_id_ = 0;
 }
 
-void RdbSerializer::MemBuf::TagAndDrainToDefaultBuffer() {
+void MemBufController::TagAndDrainToDefaultBuffer() {
   if (current_buffer_->InputLen() == 0)
     return;
 
@@ -2018,7 +1936,7 @@ void RdbSerializer::MemBuf::TagAndDrainToDefaultBuffer() {
   current_buffer_->ConsumeInput(bytes.size());
 }
 
-std::array<uint8_t, 9> RdbSerializer::MemBuf::MakeTagHeader(size_t size) const {
+std::array<uint8_t, 9> MemBufController::MakeTagHeader(size_t size) const {
   DCHECK_NE(active_id_, 0u) << "tagging when active entry is invalid";
   std::array<uint8_t, 9> header;
   header[0] = RDB_OPCODE_TAGGED_CHUNK;
@@ -2027,61 +1945,45 @@ std::array<uint8_t, 9> RdbSerializer::MemBuf::MakeTagHeader(size_t size) const {
   return header;
 }
 
-size_t RdbSerializer::MemBuf::FlushableSize() const {
+size_t MemBufController::FlushableSize() const {
   auto size = current_buffer_->InputLen();
   if (current_buffer_ != &default_buffer_)
     size += default_buffer_.InputLen();
   return size;
 }
 
-RdbSerializer::MemBuf::SaveEntryState RdbSerializer::MemBuf::SuspendBeforeConsume() {
+MemBufController::SaveEntryState MemBufController::SaveStateBeforeConsume() {
   const SaveEntryState state{active_id_, current_buffer_};
   current_buffer_ = &default_buffer_;
   active_id_ = 0;
   return state;
 }
 
-void RdbSerializer::MemBuf::RestoreAfterConsume(const SaveEntryState state) {
+void MemBufController::RestoreStateAfterConsume(const SaveEntryState state) {
   active_id_ = state.id;
   current_buffer_ = state.ptr;
 }
 
-std::string RdbSerializer::MemBuf::BuildBlob(Bytes current_bytes) {
-  const bool should_tag =
-      send_tagged_entries_ && active_id_ != 0 && entries_.at(active_id_).was_split;
-
-  const auto current = io::View(current_bytes);
-
-  if (current_buffer_ == &default_buffer_ || default_buffer_.InputLen() == 0) {
-    if (!should_tag) {
-      std::string out{current};
-      current_buffer_->ConsumeInput(current_bytes.size());
-      return out;
-    }
-
-    const auto header = MakeTagHeader(current_bytes.size());
-    std::string out;
-    out.reserve(header.size() + current.size());
-
-    out.append(reinterpret_cast<const char*>(header.data()), header.size());
-    out.append(current);
-
-    current_buffer_->ConsumeInput(current_bytes.size());
-    return out;
-  }
-
-  const auto prefix = default_buffer_.InputBuffer();
+std::string MemBufController::BuildBlob(Bytes current_bytes) {
+  const bool has_prefix = current_buffer_ != &default_buffer_ && default_buffer_.InputLen() > 0;
+  const auto prefix = has_prefix ? default_buffer_.InputBuffer() : Bytes{};
+  const bool should_tag = send_tagged_entries_ && active_id_ != 0 &&
+                          entries_.at(active_id_).was_split && !current_bytes.empty();
 
   std::string out;
-  out.reserve(prefix.size() + (should_tag ? 9 : 0) + current.size());
-  out.append(io::View(prefix));
+  out.reserve(prefix.size() + (should_tag ? kHeaderSize : 0) + current_bytes.size());
+
+  if (has_prefix) {
+    out.append(io::View(prefix));
+    default_buffer_.ConsumeInput(prefix.size());
+  }
+
   if (should_tag) {
     const auto header = MakeTagHeader(current_bytes.size());
     out.append(reinterpret_cast<const char*>(header.data()), header.size());
   }
-  out.append(current);
 
-  default_buffer_.ConsumeInput(prefix.size());
+  out.append(io::View(current_bytes));
   current_buffer_->ConsumeInput(current_bytes.size());
   return out;
 }

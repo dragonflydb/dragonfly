@@ -6,8 +6,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
 
-#include "server/rdb_extensions.h"
-
 extern "C" {
 #include "redis/lzfP.h"
 }
@@ -80,6 +78,59 @@ enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MUL
 CompressionMode GetDefaultCompressionMode();
 
 using StringVec = std::vector<std::string>;
+
+class MemBufController {
+  friend class MemBufControllerTest;
+  struct EntryState {
+    std::unique_ptr<io::IoBuf> buffer;
+    bool was_split = false;
+  };
+  using EntryId = uint32_t;
+
+ public:
+  static constexpr auto kHeaderSize = 9;
+
+  void StartEntry();
+  void FinishEntry();
+
+  void TagAndDrainToDefaultBuffer();
+  io::IoBuf* CurrentBuffer() const {
+    return current_buffer_;
+  }
+
+  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
+
+  void MarkMidFlush() {
+    entries_.at(active_id_).was_split = true;
+  }
+
+  size_t FlushableSize() const;
+
+  struct SaveEntryState {
+    uint32_t id;
+    io::IoBuf* ptr;
+    bool operator<=>(const SaveEntryState&) const = default;
+  };
+
+  SaveEntryState SaveStateBeforeConsume();
+  void RestoreStateAfterConsume(SaveEntryState state);
+
+  std::string BuildBlob(io::Bytes current_bytes);
+
+  void SetTagEntries(bool tag_entries) {
+    send_tagged_entries_ = tag_entries;
+  }
+
+ private:
+  bool send_tagged_entries_ = false;
+
+  EntryId next_id_ = 1;
+  EntryId active_id_ = 0;
+
+  io::IoBuf default_buffer_{4096};
+  io::IoBuf* current_buffer_ = &default_buffer_;
+  absl::flat_hash_map<EntryId, EntryState> entries_;
+};
 
 class RdbSaver {
  public:
@@ -184,7 +235,9 @@ class RdbSerializer {
                                bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
-  size_t SerializedLen() const;
+  size_t SerializedLen() const {
+    return mem_buf_controller_.FlushableSize();
+  }
 
   // Flush internal buffer and return serialized blob.
   std::string Flush(FlushState flush_state);
@@ -240,7 +293,7 @@ class RdbSerializer {
   std::error_code SendEofAndChecksum();
 
   void SetTagEntries(bool tag_entries) {
-    send_tagged_entries_ = tag_entries;
+    mem_buf_controller_.SetTagEntries(tag_entries);
     allow_prepare_flush_compression_ = !tag_entries;
   }
 
@@ -275,13 +328,6 @@ class RdbSerializer {
   // Might preempt
   void PushToConsumerIfNeeded(FlushState flush_state);
 
-  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
-
-  void AddEntry();
-  void FinishEntry();
-  void TagAndDrainToDefaultBuffer();
-  std::string PrefixDefaultBufferAndTag(io::Bytes);
-
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
@@ -294,8 +340,6 @@ class RdbSerializer {
   };
 
   CompressionMode compression_mode_;
-  io::IoBuf default_buf_;
-  io::IoBuf* mem_buf_;
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
   std::optional<CompressionStats> compression_stats_;
   base::PODArray<uint8_t> tmp_buf_;
@@ -313,60 +357,7 @@ class RdbSerializer {
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
 
-  bool send_tagged_entries_ = false;
-
-  uint32_t next_stream_id_ = 1;
-  uint32_t active_entry_id_ = 0;
-  struct Entry {
-    std::unique_ptr<io::IoBuf> buffer;
-    bool was_split = false;
-  };
-  absl::flat_hash_map<uint32_t, Entry> entries_;
-
-  struct EntryState {
-    std::unique_ptr<io::IoBuf> buffer;
-    bool was_split = false;
-  };
-
-  class MemBuf {
-   public:
-    using EntryId = uint32_t;
-
-    void StartEntry();
-    void FinishEntry();
-    void TagAndDrainToDefaultBuffer();
-    io::IoBuf* CurrentBuffer() const {
-      return current_buffer_;
-    }
-
-    std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
-
-    void MarkMidFlush() {
-      entries_.at(active_id_).was_split = true;
-    }
-
-    size_t FlushableSize() const;
-
-    struct SaveEntryState {
-      uint32_t id;
-      io::IoBuf* ptr;
-    };
-
-    SaveEntryState SuspendBeforeConsume();
-    void RestoreAfterConsume(SaveEntryState state);
-
-    std::string BuildBlob(io::Bytes current_bytes);
-
-   private:
-    bool send_tagged_entries_ = false;
-
-    EntryId next_id_ = 1;
-    EntryId active_id_ = 0;
-
-    io::IoBuf default_buffer_{4096};
-    io::IoBuf* current_buffer_ = &default_buffer_;
-    absl::flat_hash_map<EntryId, EntryState> entries_;
-  };
+  MemBufController mem_buf_controller_;
 };
 
 }  // namespace dfly
