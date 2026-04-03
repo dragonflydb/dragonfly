@@ -41,8 +41,8 @@ class JournalSlice {
   uint32_t RegisterOnChange(JournalConsumerInterface* consumer);
   void UnregisterOnChange(uint32_t);
 
-  bool HasRegisteredCallbacks() const {
-    return !journal_consumers_arr_.empty();
+  unsigned OnChangeCbCount() const {
+    return journal_consumers_arr_.size();
   }
 
   /// Returns whether the journal entry with this LSN is available

@@ -365,7 +365,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 136, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 144, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -384,6 +384,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_misses);
   ADD(huff_encode_total);
   ADD(huff_encode_success);
+  ADD(journal_omit);
   return *this;
 }
 
@@ -520,6 +521,11 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
   DCHECK(IsValid(it));
 }
 
+void DbSlice::ProvideHints(MutationHints* hints) {
+  DCHECK(!mutation_hints_);
+  mutation_hints_ = hints;
+}
+
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
   return std::move(FindMutableInternal(cntx, key, std::nullopt).value());
 }
@@ -532,12 +538,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
                                                              std::optional<unsigned> req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
-  if (!res.ok()) {
-    return res.status();
-  }
+  RETURN_ON_BAD_STATUS(res);
 
   auto it = Iterator(*res, StringOrView::FromView(key));
   PreUpdateBlocking(cntx.db_index, it);
+
   // PreUpdate() might have caused a deletion of `it`
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
@@ -660,7 +665,24 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
-    PreUpdateBlocking(cntx.db_index, it);
+
+    bool omit_update = false;
+    if (auto* mutation = std::exchange(mutation_hints_, nullptr); mutation) {
+      // We can omit the journal write if:
+      // 0. it support mutation hints and uses only a single key
+      // 1. there is a single eventually-consistent snapshot (i.e. replica full sync)
+      // 2. there are no other journal consumers
+      // 3. the snapshot did not reach the bucket yet
+      omit_update = mutation->hint.single_key && mutation->hint.support_omit &&
+                    change_cb_.size() == 1 && it.GetVersion() < change_cb_.front().first &&
+                    journal::CallbackNumber() == 1;
+
+      events_.journal_omit += unsigned(omit_update);
+      mutation->result.omit_journal = omit_update;
+    }
+
+    if (!omit_update)
+      PreUpdateBlocking(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->IsOccupied()) {
@@ -671,6 +693,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   } else if (res == OpStatus::WRONG_TYPE) {
     return OpStatus::WRONG_TYPE;
   }
+
+  mutation_hints_ = nullptr;  // for now: just take them
 
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
@@ -734,7 +758,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
-  CallMovedCallbacks(cntx.db_index, evp.moved_items());
+  // CallMovedCallbacks(cntx.db_index, evp.moved_items());
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
@@ -1294,12 +1318,6 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
-uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
-  ++next_moved_id_;
-  moved_cb_.emplace_back(next_moved_id_, cb);
-  return next_moved_id_;
-}
-
 // Ordering invariant (PIT mode):
 //   When the traversal fiber visits a bucket in BucketSaveCb, earlier-registered snapshots
 //   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
@@ -1337,14 +1355,6 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
   change_cb_.erase(it);
-}
-
-void DbSlice::UnregisterOnMoved(uint64_t id) {
-  serialization_latch_.Wait();
-  auto it =
-      find_if(moved_cb_.begin(), moved_cb_.end(), [id](const auto& cb) { return cb.first == id; });
-  CHECK(it != moved_cb_.end());
-  moved_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
@@ -1852,7 +1862,7 @@ void DbSlice::OnCbFinishBlocking() {
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
-      CallMovedCallbacks(db_index, policy.moved_items());
+      // CallMovedCallbacks(db_index, policy.moved_items());
     }
   }
 
@@ -1872,23 +1882,6 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   for (size_t i = 0; i < limit; ++i) {
     CHECK(ccb->second);
     ccb->second(id, cr);
-    ++ccb;
-  }
-}
-
-void DbSlice::CallMovedCallbacks(
-    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_items) {
-  if (moved_cb_.empty())
-    return;
-
-  // does not preempt, just increments the counter.
-  unique_lock<LocalLatch> lk(serialization_latch_);
-
-  const size_t limit = moved_cb_.size();
-  auto ccb = moved_cb_.begin();
-  for (size_t i = 0; i < limit; ++i) {
-    CHECK(ccb->second);
-    ccb->second(id, moved_items);
     ++ccb;
   }
 }
