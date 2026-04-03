@@ -71,12 +71,12 @@ void RecordTxScheduleStats(const Transaction* tx) {
   ++ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1];
 }
 
-std::ostream& operator<<(std::ostream& os, Transaction::time_point tp) {
+std::string FormatTp(Transaction::time_point tp) {
   using namespace chrono;
   if (tp == Transaction::time_point::max())
-    return os << "inf";
+    return "inf";
   size_t ms = duration_cast<milliseconds>(tp - Transaction::time_point::clock::now()).count();
-  return os << ms << "ms";
+  return absl::StrCat(ms, "ms");
 }
 
 uint16_t trans_id(const Transaction* ptr) {
@@ -1377,7 +1377,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
-  DVLOG(1) << "WaitOnWatch wait for " << tp << " " << DebugId();
+  DVLOG(1) << "WaitOnWatch wait for " << FormatTp(tp) << " " << DebugId();
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.

@@ -4,13 +4,13 @@
 
 #include "server/search/search_family.h"
 
-#include <absl/flags/flag.h>
 #include <absl/strings/str_format.h>
 
 #include <algorithm>
 #include <atomic>
 #include <string_view>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
