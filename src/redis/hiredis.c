@@ -174,6 +174,7 @@ static void *createArrayObject(const redisReadTask *task, size_t elements) {
     }
 
     r->elements = elements;
+        if (SIZE_MAX / sizeof(redisReply*) < elements) return NULL;  /* Don't overflow */
 
     if (task->parent) {
         parent = task->parent->obj;
