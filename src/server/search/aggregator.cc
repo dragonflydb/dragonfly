@@ -255,6 +255,21 @@ std::variant<AggregationStep, std::string> MakeFilterStep(std::string_view raw_e
   return AggregationStep{[shared](Aggregator* agg) { agg->DoFilter(*shared); }};
 }
 
+std::variant<AggregationStep, std::string> MakeApplyStep(std::string_view raw_expr,
+                                                         std::string alias) {
+  FilterParseResult parsed = ParseFilterExpr(raw_expr);
+  if (!std::holds_alternative<FilterExpr>(parsed))
+    return std::get<std::string>(std::move(parsed));
+
+  auto shared = std::shared_ptr<FilterExprNode>(std::get<FilterExpr>(std::move(parsed)).release());
+  return AggregationStep{[shared, alias = std::move(alias)](Aggregator* agg) {
+    for (auto& doc : agg->result.values) {
+      doc[alias] = EvalFilterExpr(*shared, doc);
+    }
+    agg->result.fields_to_print.insert(alias);
+  }};
+}
+
 AggregationResult Process(std::vector<DocValues> values,
                           absl::Span<const std::string_view> fields_to_print,
                           absl::Span<const AggregationStep> steps) {

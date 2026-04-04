@@ -711,6 +711,26 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
       continue;
     }
 
+    // DIALECT (accepted and ignored — DF always behaves as dialect 2)
+    if (parser->Check("DIALECT")) {
+      parser->Skip(1);
+      continue;
+    }
+
+    // APPLY "expr" AS alias
+    if (parser->Check("APPLY")) {
+      string expr{parser->Next<string_view>()};
+      parser->ExpectTag("AS");
+      string alias = parser->Next<string>();
+      auto step_or_err = aggregate::MakeApplyStep(expr, std::move(alias));
+      if (std::holds_alternative<std::string>(step_or_err)) {
+        return CreateSyntaxError(
+            absl::StrCat("APPLY expression error: ", std::get<std::string>(step_or_err)));
+      }
+      params.steps.push_back(std::move(std::get<aggregate::AggregationStep>(step_or_err)));
+      continue;
+    }
+
     if (parser->Check("LOAD")) {
       return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
     }
@@ -2104,15 +2124,89 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     vector<ResultContainer> query_results(shard_set->size());
 
-    // Check for HNSW VECTOR_RANGE — must be handled via GlobalHnswIndexRegistry,
-    // not per-shard FieldIndices (HNSW fields are not stored there).
-    const search::AstVectorRangeNode* hnsw_range = nullptr;
-    if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
-      if (GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field))
-        hnsw_range = vr;
+    // Handle HNSW KNN query — pop KNN node and run global HNSW search
+    std::unique_ptr<search::AstNode> knn_node;
+    search::AstKnnNode* knn = nullptr;
+    if (search_algo.IsKnnQuery()) {
+      if (GlobalHnswIndexRegistry::Instance().Exist(params->index,
+                                                    search_algo.GetKnnNode()->field)) {
+        knn_node = search_algo.PopKnnNode();
+        knn = std::get_if<search::AstKnnNode>(knn_node.get());
+      }
     }
 
-    if (hnsw_range) {
+    if (knn) {
+      auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(params->index, knn->field);
+      if (!hnsw_index) {
+        return builder->SendError(string{params->index} + ": no such global hnsw index");
+      }
+
+      // Run per-shard prefilter if KNN has a filter expression
+      const bool knn_has_prefilter = knn->HasPreFilter();
+      vector<SearchResult> prefilter_docs(shard_set->size());
+
+      if (knn_has_prefilter) {
+        cmd_cntx->tx()->Execute(
+            [&](Transaction* t, EngineShard* es) {
+              if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+                SearchParams sp;
+                sp.limit_total = std::numeric_limits<size_t>::max();
+                sp.return_fields.emplace();  // ids-only, skip field serialization
+                prefilter_docs[es->shard_id()] =
+                    index->Search(t->GetOpArgs(es), sp, &search_algo, true);
+              }
+              return OpStatus::OK;
+            },
+            false);
+      }
+
+      // Collect prefilter GlobalDocIds for HNSW search
+      std::optional<std::vector<search::GlobalDocId>> prefilter_global_ids;
+      if (knn_has_prefilter) {
+        std::vector<search::GlobalDocId> ids;
+        for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++) {
+          for (const auto& doc : prefilter_docs[shard_id].docs) {
+            auto doc_id = doc.id;
+            ids.push_back(search::CreateGlobalDocId(shard_id, doc_id));
+          }
+        }
+        prefilter_global_ids = std::move(ids);
+      }
+
+      // Run global HNSW KNN search
+      std::vector<std::pair<float, search::GlobalDocId>> knn_results;
+      if (prefilter_global_ids) {
+        knn_results = hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime,
+                                      *prefilter_global_ids);
+      } else {
+        knn_results = hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+      }
+
+      // Group results by shard and load doc data
+      const ShardId shard_size = shard_set->size();
+      std::vector<std::vector<std::pair<search::DocId, float>>> shard_docs(shard_size);
+      for (const auto& [score, global_doc_id] : knn_results) {
+        auto [shard_id, local_doc_id] = search::DecomposeGlobalDocId(global_doc_id);
+        shard_docs[shard_id].emplace_back(local_doc_id, score);
+      }
+
+      auto load_cb = [&](Transaction* t, EngineShard* es) {
+        auto* index = es->search_indices()->GetIndex(params->index);
+        if (!index || shard_docs[es->shard_id()].empty())
+          return OpStatus::OK;
+        query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
+            t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], knn->score_alias);
+        return OpStatus::OK;
+      };
+
+      if (knn_has_prefilter) {
+        cmd_cntx->tx()->Execute(load_cb, true);  // finalize multi-hop transaction
+      } else {
+        cmd_cntx->tx()->ScheduleSingleHop(load_cb);
+      }
+    } else if (auto* vr = search_algo.GetVectorRangeNode();
+               vr && GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
+      const search::AstVectorRangeNode* hnsw_range = vr;
       auto hnsw_index = GetValidatedHnswRangeIndex(params->index, hnsw_range, builder);
       if (!hnsw_index)
         return;
