@@ -133,8 +133,8 @@ bool SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
   return true;
 }
 
-bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                   bool on_update) {
+bool SerializerBase::ProcessIfNeeded(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                     bool on_update) {
   std::lock_guard guard(big_value_mu_);
 
   // Check if this bucket should be serialized
@@ -144,6 +144,14 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
     return false;
   }
+
+  return ProcessBucketInternal(db_index, it, on_update);
+}
+
+bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                           bool on_update) {
+  DCHECK(big_value_mu_.is_locked());
+  DCHECK(ShouldProcessBucket(it));
 
   // For non updates, flush change to earlier snapshots and acquire serialization latch
   std::optional<std::lock_guard<LocalLatch>> db_guard;
@@ -171,7 +179,7 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
       !absl::StartsWith(active->name(), "SliceSnapshot")) {
     LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
   }
-  if (ProcessBucket(db_index, it, true))
+  if (ProcessIfNeeded(db_index, it, true))
     ++stats_.buckets_on_change;
 }
 
@@ -179,11 +187,9 @@ void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
   // We must hold the lock across checking all buckets
   std::unique_lock lk{big_value_mu_};
 
-  auto cb = [this, db_index, &lk](PrimeTable::bucket_iterator bit) {
-    DCHECK_LT(bit.GetVersion(), snapshot_version_);
-    lk.unlock();  // give up lock because OnChange acquires it
-    OnChange(db_index, bit);
-    CHECK(lk.try_lock());
+  auto cb = [this, db_index, &lk](PrimeTable::bucket_iterator it) {
+    ProcessBucketInternal(db_index, it, true);
+    ++stats_.buckets_on_change;
   };
   db_slice_->GetTables(db_index)->CVCUponInsert(snapshot_version_, key, cb);
 }
