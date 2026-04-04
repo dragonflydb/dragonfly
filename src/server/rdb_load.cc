@@ -287,13 +287,17 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
-  SBF* sbf =
-      CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+  SBF* sbf = config_.append ? pv_->GetSBF()
+                            : CompactObj::AllocateMR<SBF>(
+                                  src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
                                   src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
-  pv_->SetSBF(sbf);
+
+  // new obj
+  if (!config_.append)
+    pv_->SetSBF(sbf);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
@@ -1000,7 +1004,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   DVLOG(3) << "Copying " << to_copy << " bytes";
 
   ::memcpy(next, mem_buf_->InputBuffer().data(), to_copy);
-  mem_buf_->ConsumeInput(to_copy);
+  RETURN_ON_ERR(ConsumeInput(to_copy));
   size -= to_copy;
   if (size == 0)
     return kOk;
@@ -1016,6 +1020,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   if (size > 512) {  // Worth reading directly into next.
     io::MutableBytes mb{next, size};
 
+    RETURN_ON_ERR(ConsumeChunkBudget(size));
     SET_OR_RETURN(src_->Read(mb), bytes_read);
     if (bytes_read < size)
       return RdbError(errc::rdb_file_corrupted);
@@ -1045,7 +1050,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
 
   mem_buf_->CommitWrite(bytes_read);
   ::memcpy(next, mem_buf_->InputBuffer().data(), size);
-  mem_buf_->ConsumeInput(size);
+  RETURN_ON_ERR(ConsumeInput(size));
 
   return kOk;
 }
@@ -1141,8 +1146,11 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
 
   // FetchBuf consumes the input but if we have not went through that path
   // we need to consume now.
-  if (zerocopy_decompress)
-    mem_buf_->ConsumeInput(clen);
+  if (zerocopy_decompress) {
+    if (auto ec = ConsumeInput(clen); ec) {
+      return make_unexpected(ec);
+    }
+  }
 
   return res;
 }
@@ -1167,11 +1175,12 @@ io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
   } u;
 
   static_assert(sizeof(u) == sizeof(uint64_t));
-  auto ec = EnsureRead(8);
-  if (ec)
+  if (auto ec = EnsureRead(8); ec)
     return make_unexpected(ec);
 
   uint8_t buf[8];
+  if (auto ec = ConsumeChunkBudget(8); ec)
+    return make_unexpected(ec);
   mem_buf_->ReadAndConsume(8, buf);
   u.val = base::LE::LoadT<uint64_t>(buf);
   return u.d;
@@ -1385,17 +1394,20 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min(len, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; i++) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); i++) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec) {
       return make_unexpected(ec);
     }
   }
+  // cut off extra elements we allocated but stopped short due to budget
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1466,16 +1478,18 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1501,7 +1515,8 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
@@ -1516,11 +1531,12 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     }
     load_trace->arr[i].score = score;
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (zsetlen > n) {
-    pending_read_.remaining = zsetlen - n;
+  if (zsetlen > i) {
+    pending_read_.remaining = zsetlen - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1545,7 +1561,8 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   // therefore using a smaller segment length than kMaxBlobLen.
   size_t n = std::min<size_t>(len, 512);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
     if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
       SET_OR_UNEXPECT(LoadLen(nullptr), container);
@@ -1568,11 +1585,12 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->arr[i].rdb_var = std::move(var);
     load_trace->arr[i].encoding = container;
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1595,7 +1613,10 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   load_trace->arr.resize(n * 2);
 
   error_code ec;
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  // The sender always sends stream id and blob together, there is no flush between. So the budget
+  // check is not midway between the two entries.
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     /* Get the master ID, the one we'll use as key of the radix tree
      * node: the entries inside the listpack itself are delta-encoded
      * relatively to this ID. */
@@ -1620,14 +1641,15 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->arr[2 * i].rdb_var = std::move(stream_id);
     load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
   }
+  load_trace->arr.resize(2 * i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
   //
   // We only load the stream metadata and consumer groups in the final read,
   // so if there are still unread elements return the partial stream.
-  if (listpacks > n) {
-    pending_read_.remaining = listpacks - n;
+  if (listpacks > i) {
+    pending_read_.remaining = listpacks - i;
     return OpaqueObj{std::move(load_trace), rdbtype};
   }
 
@@ -1805,24 +1827,75 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
   RdbSBF res;
-  uint64_t options;
-  SET_OR_UNEXPECT(LoadLen(nullptr), options);
-  if (options != 0)
-    return Unexpected(errc::rdb_file_corrupted);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-  if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
-
-  unsigned num_filters = 0;
-  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
   auto is_power2 = [](size_t n) { return (n & (n - 1)) == 0; };
 
-  for (unsigned i = 0; i < num_filters; ++i) {
+  unsigned num_filters = 0;
+
+  // Only read SBF metadata if not continuing.
+  if (!pending_read_.sbf_filter.has_value() && pending_read_.remaining == 0) {
+    uint64_t options;
+    SET_OR_UNEXPECT(LoadLen(nullptr), options);
+    if (options != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
+    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+  } else {
+    num_filters = pending_read_.remaining;
+    pending_read_.remaining = 0;
+  }
+
+  // Read single filter as chunks into data starting at start_offset, will stop early if chunk
+  // budget exhausted
+  auto read_filter_chunks = [&](string& data, size_t start_offset) -> io::Result<size_t> {
+    const size_t total = data.size();
+    size_t curr_offset = start_offset;
+    while (curr_offset < total && !ChunkBudgetExhausted()) {
+      auto chunk_res = LoadLen(nullptr);
+      if (!chunk_res)
+        return make_unexpected(chunk_res.error());
+      const size_t chunk_size = *chunk_res;
+      if (chunk_size == 0 || chunk_size > total - curr_offset)
+        return Unexpected(errc::rdb_file_corrupted);
+      if (auto ec = FetchBuf(chunk_size, data.data() + curr_offset))
+        return make_unexpected(ec);
+      curr_offset += chunk_size;
+    }
+    return curr_offset;
+  };
+
+  auto append_filter = [&](unsigned hash_cnt, string filter_data) -> error_code {
+    if (const size_t bit_len = filter_data.size() * 8; !is_power2(bit_len))
+      return RdbError(errc::rdb_file_corrupted);
+    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    return {};
+  };
+
+  // First, complete a partially read filter from the previous state if there is one
+  if (pending_read_.sbf_filter) {
+    auto& sf = *pending_read_.sbf_filter;
+
+    SET_OR_UNEXPECT(read_filter_chunks(sf.filter_data, sf.offset), sf.offset);
+
+    if (sf.offset < sf.filter_data.size()) {
+      return OpaqueObj{std::move(res), RDB_TYPE_SBF};
+    }
+
+    if (auto ec = append_filter(sf.hash_cnt, std::move(sf.filter_data)))
+      return make_unexpected(ec);
+    pending_read_.sbf_filter.reset();
+    num_filters--;
+  }
+
+  unsigned i = 0;
+  for (; i < num_filters && !ChunkBudgetExhausted(); ++i) {
     unsigned hash_cnt;
     string filter_data;
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
@@ -1830,35 +1903,27 @@ auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
     if (chunking) {
       size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
-      if (total_size == 0) {
+      if (total_size == 0)
         return Unexpected(errc::rdb_file_corrupted);
-      }
 
       filter_data.resize(total_size);
       size_t offset = 0;
-      while (offset < total_size) {
-        size_t chunk_size = 0;
-        SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
-        if (chunk_size == 0 || chunk_size > total_size - offset) {
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-        error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
-        if (ec) {
-          return make_unexpected(ec);
-        }
+      SET_OR_UNEXPECT(read_filter_chunks(filter_data, 0), offset);
 
-        offset += chunk_size;
+      if (offset < total_size) {
+        pending_read_.sbf_filter = {std::move(filter_data), offset, hash_cnt};
+        pending_read_.remaining = num_filters - i;
+        return OpaqueObj{std::move(res), RDB_TYPE_SBF};
       }
     } else {
       SET_OR_UNEXPECT(FetchGenericString(), filter_data);
     }
 
-    size_t bit_len = filter_data.size() * 8;
-    if (!is_power2(bit_len)) {  // must be power of two
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    if (auto ec = append_filter(hash_cnt, std::move(filter_data)))
+      return make_unexpected(ec);
   }
+
+  pending_read_.remaining = num_filters > i ? num_filters - i : 0;
   return OpaqueObj{std::move(res), RDB_TYPE_SBF};
 }
 
@@ -1974,11 +2039,12 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
-  auto ec = EnsureRead(sizeof(T));
-  if (ec)
+  if (auto ec = EnsureRead(sizeof(T)); ec)
     return make_unexpected(ec);
 
   char buf[16];
+  if (auto ec = ConsumeChunkBudget(sizeof(T)); ec)
+    return make_unexpected(ec);
   mem_buf_->ReadAndConsume(sizeof(T), buf);
 
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
@@ -2018,6 +2084,18 @@ struct RdbLoader::ObjSettings {
   }
 
   ObjSettings() = default;
+};
+
+// A key and value can be sent in chunks, which overlap with other keys and values or other journal
+// entries. To maintain the state between calls we store enough information so that when a partial
+// value is seen it can be mapped to a prime value which is partially built, append to the value,
+// and finally save it.
+struct RdbLoader::StreamState {
+  DbIndex db_index;
+  int type;
+  PendingRead pending_read;
+  ObjSettings settings;
+  std::string key;
 };
 
 RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string snapshot_id)
@@ -2162,7 +2240,7 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_FULLSYNC_END) {
       VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
       RETURN_ON_ERR(EnsureRead(8));
-      mem_buf_->ConsumeInput(8);  // ignore 8 bytes
+      RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
 
       if (full_sync_cut_cb) {
         FlushAllShards();  // Flush as the handler awakes post load handlers
@@ -2341,6 +2419,24 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_TAGGED_CHUNK) {
+      ActiveTaggedChunk state;
+      SET_OR_RETURN(FetchInt<uint32_t>(), state.stream_id);
+      SET_OR_RETURN(FetchInt<uint32_t>(), state.remaining_payload_bytes);
+      current_chunk_state_ = state;
+
+      if (stream_states_.contains(current_chunk_state_->stream_id)) {
+        RETURN_ON_ERR(LoadValueChunk());
+        // TODO return error instead of CHECK_EQ
+        CHECK_EQ(current_chunk_state_->remaining_payload_bytes, 0u)
+            << "chunk fully consumed but payload bytes remain "
+            << current_chunk_state_->remaining_payload_bytes;
+        // This chunk is finished. So reset the state, next chunk encountered will read from map
+        current_chunk_state_.reset();
+      }
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       LOG(ERROR) << "Unrecognized rdb object type: " << type;
       LOG(ERROR) << "Last iteration: ";
@@ -2354,6 +2450,16 @@ error_code RdbLoader::Load(io::Source* src) {
     ++keys_loaded;
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
     settings.Reset();
+
+    // TODO return error instead of CHECK_EQ
+    if (current_chunk_state_)
+      CHECK_EQ(current_chunk_state_->remaining_payload_bytes, 0u)
+          << "chunk fully consumed but payload bytes remain "
+          << current_chunk_state_->remaining_payload_bytes;
+
+    // If we just read the first chunk of a key, then reset state here because LoadKeyValPair will
+    // only return when the chunk finishes
+    current_chunk_state_.reset();
   }  // main load loop
 
   DVLOG(1) << "RdbLoad loop finished";
@@ -2433,14 +2539,30 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
   return kOk;
 }
 
+std::error_code RdbLoaderBase::ConsumeInput(size_t n) {
+  RETURN_ON_ERR(ConsumeChunkBudget(n));
+  mem_buf_->ConsumeInput(n);
+  return kOk;
+}
+
+std::error_code RdbLoaderBase::ConsumeChunkBudget(size_t n) {
+  if (!current_chunk_state_)
+    return kOk;
+
+  if (n > current_chunk_state_->remaining_payload_bytes)
+    return RdbError(errc::rdb_file_corrupted);
+
+  current_chunk_state_->remaining_payload_bytes -= n;
+  return kOk;
+}
+
 io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (is_encoded)
     *is_encoded = false;
 
   // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
   // so we can ensure we have 9 bytes to read up until that point.
-  error_code ec = EnsureRead(9);
-  if (ec)
+  if (error_code ec = EnsureRead(9))
     return make_unexpected(ec);
 
   // Read integer meta info.
@@ -2455,7 +2577,9 @@ io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (meta.Type() == RDB_ENCVAL && is_encoded)
     *is_encoded = true;
 
-  mem_buf_->ConsumeInput(1 + meta.ByteSize());
+  if (auto ec = ConsumeInput(1 + meta.ByteSize()); ec) {
+    return make_unexpected(ec);
+  }
 
   return res;
 }
@@ -2526,6 +2650,14 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
   // Fetch uncompress blob
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
+
+  // Stop counting payload bytes on decompressed data. At this point the entire payload size must be
+  // consumed as it was the compressed blob. We switch to another buffer and must be able to read
+  // everything from it without any checks
+  if (current_chunk_state_ && current_chunk_state_->remaining_payload_bytes > 0) {
+    return RdbError(errc::rdb_file_corrupted);
+  }
+  current_chunk_state_.reset();
 
   // Decompress blob and switch membuf pointer
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
@@ -2750,9 +2882,10 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   };
 
   LoadConfig config_copy = item->load_config;
+  ChunkedKey chunked_key{db_ind, item->key};
   if (item->load_config.chunked && item->load_config.append) {
     std::unique_lock lk{now_chunked_mu_};
-    if (auto it = now_chunked_.find(item->key); it != now_chunked_.end()) {
+    if (auto it = now_chunked_.find(chunked_key); it != now_chunked_.end()) {
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2793,13 +2926,13 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
 
   if (item->load_config.chunked) {
     std::unique_lock lk{now_chunked_mu_};
-    if (!now_chunked_.contains(item->key))
-      now_chunked_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+    if (!now_chunked_.contains(chunked_key))
+      now_chunked_.emplace(chunked_key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
       return;
 
-    pv = std::move(*now_chunked_.extract(item->key).mapped());
+    pv = std::move(*now_chunked_.extract(chunked_key).mapped());
   }
 
   // We need this extra check because we don't return empty_key
@@ -2879,79 +3012,134 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   SET_OR_RETURN(ReadKey(), key);
   last_key_loaded_ = key;
 
-  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
-  bool streamed = false;
+  bool finalized = false;
+  auto remaining_payload_bytes = [&] {
+    return current_chunk_state_ ? current_chunk_state_->remaining_payload_bytes : UINT32_MAX;
+  };
+
   do {
-    // If there is a cached Item in the free pool, take it, otherwise allocate
-    // a new Item (LoadItemsBuffer returns free items).
-    Item* item = item_queue_.Pop();
-    if (item == nullptr) {
-      item = new Item;
-    }
-    // Delete the item if we fail to load the key/val pair.
-    auto cleanup = absl::Cleanup([item] { delete item; });
+    RETURN_ON_ERR(ReadAndDispatchObject(type, key, *settings, cur_db_index_, &finalized));
+  } while (!finalized && remaining_payload_bytes() > 0 && !stop_early_.load(memory_order_relaxed));
 
-    item->load_config.append = pending_read_.remaining > 0;
-
-    error_code ec = ReadObj(type, &item->val);
-    if (ec) {
-      VLOG(2) << "ReadObj error " << ec << " for key " << key;
-      return ec;
-    }
-
-    // If the key can be discarded, we must still continue to read the
-    // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, *settings)) {
-      pending_read_.reserve = 0;
-      continue;
-    }
-
-    if (dry_run)
-      continue;
-
-    item->load_config.finalize = pending_read_.remaining == 0;
-    if (!item->load_config.finalize) {
-      item->key = key;
-      streamed = true;
-    } else {
-      // Avoid copying the key if this is the last read of the object.
-      item->key = std::move(key);
-    }
-
-    item->load_config.chunked = streamed;
-    item->load_config.reserve = pending_read_.reserve;
-    // Clear 'reserve' as we must only set when the object is first
-    // initialized.
-    pending_read_.reserve = 0;
-
-    item->is_sticky = settings->is_sticky;
-    item->has_mc_flags = settings->has_mc_flags;
-    item->mc_flags = settings->mc_flags;
-    item->expire_ms = settings->expiretime;
-
-    std::move(cleanup).Cancel();
-    ShardId sid = Shard(item->key, shard_set->size());
-    EngineShard* es = EngineShard::tlocal();
-
-    if (es && es->shard_id() == sid) {
-      DbContext db_cntx{&namespaces->GetDefaultNamespace(), cur_db_index_, GetCurrentTimeMs()};
-      CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
-      item_queue_.Push(item);
-    } else {
-      auto& out_buf = shard_buf_[sid];
-
-      out_buf.emplace_back(item);
-
-      constexpr size_t kBufSize = 64;
-      if (out_buf.size() >= kBufSize) {
-        // Despite being async, this function can block if the shard queue is full.
-        FlushShardAsync(sid);
-      }
-    }
-  } while (pending_read_.remaining > 0 && !stop_early_.load(memory_order_relaxed));
+  // If the object is not complete and we're in tagged chunk mode, save state for continuation.
+  // This is only done on the first chunk. Any next chunks will go through the LoadValueChunk method
+  if (!finalized && current_chunk_state_ && current_chunk_state_->stream_id != 0) {
+    stream_states_[current_chunk_state_->stream_id] = {
+        .db_index = cur_db_index_,
+        .type = type,
+        .pending_read = pending_read_,
+        .settings = *settings,
+        .key = std::move(key),
+    };
+  }
 
   int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
   LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
+
+  pending_read_ = {};
+  return kOk;
+}
+
+std::error_code RdbLoader::LoadValueChunk() {
+  // At this point we must have a filled in chunk state and the same stream id we loaded
+  CHECK(current_chunk_state_.has_value()) << "chunk load attempt without expected state";
+  const auto it = stream_states_.find(current_chunk_state_->stream_id);
+  CHECK(it != stream_states_.end()) << "missing stream id " << current_chunk_state_->stream_id;
+
+  StreamState& state = it->second;
+
+  // Restore before reading one chunk
+  pending_read_ = state.pending_read;
+
+  bool finalized = false;
+  do {
+    RETURN_ON_ERR(
+        ReadAndDispatchObject(state.type, state.key, state.settings, state.db_index, &finalized));
+  } while (!finalized && current_chunk_state_->remaining_payload_bytes > 0 &&
+           !stop_early_.load(memory_order_relaxed));
+
+  if (finalized) {
+    // done reading this object
+    stream_states_.erase(current_chunk_state_->stream_id);
+  } else {
+    // only pending read changes from chunk -> chunk
+    state.pending_read = pending_read_;
+  }
+
+  pending_read_ = {};
+  return kOk;
+}
+
+std::error_code RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
+                                                 const ObjSettings& obj_settings, DbIndex db_index,
+                                                 bool* finalized) {
+  Item* item = item_queue_.Pop();
+  if (item == nullptr) {
+    item = new Item;
+  }
+
+  auto cleanup = absl::Cleanup([item] { delete item; });
+
+  // Pending read is restored before loading a value chunk.
+  auto is_done = [&] { return pending_read_.remaining == 0; };
+
+  // For first chunk, remaining is 0. append is False. This causes CreateObjectOnShard->FromOpaque
+  // to build a new data structure. For all next chunks, append is always True. This causes
+  // FromOpaque to append.
+  item->load_config.append = !is_done();
+
+  // Read a part of the object. Updates remaining items
+  RETURN_ON_ERR(ReadObj(object_type, &item->val));
+
+  if (ShouldDiscardKey(key, obj_settings)) {
+    pending_read_.reserve = 0;
+    *finalized = is_done();
+    return kOk;
+  }
+
+  if (GetFlag(FLAGS_rdb_load_dry_run)) {
+    *finalized = is_done();
+    return kOk;
+  }
+
+  item->load_config.finalize = is_done();
+
+  // Append will be false on first chunk. This field should still be true if elements are remaining.
+  // It is used to place items in the now_chunked_ map and support incremental parsing
+  item->load_config.chunked = item->load_config.append || !is_done();
+
+  item->load_config.reserve = pending_read_.reserve;
+  pending_read_.reserve = 0;
+
+  if (item->load_config.finalize) {
+    item->key = std::move(key);
+  } else {
+    item->key = key;
+  }
+
+  item->is_sticky = obj_settings.is_sticky;
+  item->has_mc_flags = obj_settings.has_mc_flags;
+  item->mc_flags = obj_settings.mc_flags;
+  item->expire_ms = obj_settings.expiretime;
+
+  *finalized = item->load_config.finalize;
+
+  std::move(cleanup).Cancel();
+
+  const ShardId sid = Shard(item->key, shard_set->size());
+
+  if (const EngineShard* es = EngineShard::tlocal(); es && es->shard_id() == sid) {
+    const DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_index, GetCurrentTimeMs()};
+    CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
+    item_queue_.Push(item);
+  } else {
+    auto& out_buf = shard_buf_[sid];
+    out_buf.emplace_back(item);
+    constexpr size_t kBufSize = 64;
+    if (out_buf.size() >= kBufSize) {
+      FlushShardAsync(sid);
+    }
+  }
 
   return kOk;
 }
