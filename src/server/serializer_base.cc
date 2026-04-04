@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <mutex>
+
 #include "base/logging.h"
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
@@ -174,11 +176,16 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
 }
 
 void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
-  PrimeTable* table = db_slice_->GetTables(db_index);
-  table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator bit) {
+  // We must hold the lock across checking all buckets
+  std::unique_lock lk{big_value_mu_};
+
+  auto cb = [this, db_index, &lk](PrimeTable::bucket_iterator bit) {
     DCHECK_LT(bit.GetVersion(), snapshot_version_);
+    lk.unlock();  // give up lock because OnChange acquires it
     OnChange(db_index, bit);
-  });
+    CHECK(lk.try_lock());
+  };
+  db_slice_->GetTables(db_index)->CVCUponInsert(snapshot_version_, key, cb);
 }
 
 }  // namespace dfly

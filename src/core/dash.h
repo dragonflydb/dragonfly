@@ -389,7 +389,7 @@ class DashTable : public detail::DashTableBase {
   // These are not const functions because they send non-const iterators that allow
   // updating contents/versions of the passed iterators.
   template <typename U, typename Cb>
-  void CVCUponInsert(uint64_t ver_threshold, const U& key, Cb&& cb);
+  void CVCUponInsert(uint64_t ver_threshold, const U& key, const Cb& cb);
 
   template <typename Cb> void CVCUponBump(uint64_t ver_threshold, const_iterator it, Cb&& cb);
 
@@ -680,7 +680,8 @@ DashTable<_Key, _Value, Policy>::~DashTable() {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename U, typename Cb>
-void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, const U& key, Cb&& cb) {
+void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, const U& key,
+                                                    const Cb& cb) {
   uint64_t key_hash = DoHash(key);
   uint32_t seg_id = SegmentId(key_hash);
   assert(seg_id < segment_.size());
