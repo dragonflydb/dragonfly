@@ -525,8 +525,8 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
                                            bool ec2_metadata, bool sign_payload) {
-  shard_set->pool()->GetNextProactor()->Await([&] {
 #ifdef WITH_AWS
+  shard_set->pool()->GetNextProactor()->Await([&] {
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
     }
@@ -547,8 +547,8 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
     std::shared_ptr<Aws::S3::S3EndpointProviderBase> endpoint_provider =
         std::make_shared<aws::S3EndpointProvider>(endpoint, https);
     s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
-#endif
   });
+#endif
 }
 
 AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
@@ -603,10 +603,10 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
 #endif
 }
 
-io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
-  VLOG(1) << "Opening S3 read file: " << path;
-
+io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(
+    [[maybe_unused]] const std::string& path) {
 #ifdef WITH_AWS
+  VLOG(1) << "Opening S3 read file: " << path;
   std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
   if (!bucket_path) {
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
@@ -758,11 +758,7 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
 #elif defined(WITH_AWS_CLOUD)
   string adjusted_prefix;
   if (!prefix.empty()) {
-    if (prefix.back() == '/') {
-      adjusted_prefix = prefix;
-    } else {
-      adjusted_prefix = absl::StrCat(prefix, "/");
-    }
+    adjusted_prefix = prefix.back() == '/' ? prefix : absl::StrCat(prefix, "/");
   }
 
   error_code ec = proactor->Await([&]() -> error_code {
