@@ -180,6 +180,16 @@ DbSlice& GetCurrentDbSlice() {
   return namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 }
 
+// FNV-1a 32-bit hash for variable-length field names (used with HLL).
+uint32_t HashFieldName(std::string_view sv) {
+  uint32_t h = 2166136261u;
+  for (unsigned char c : sv) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
 }  // namespace
 
 class RdbLoaderBase::OpaqueObjLoader {
@@ -2027,7 +2037,11 @@ RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       deserialize_hnsw_index_{GetFlag(FLAGS_deserialize_hnsw_index)},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
-      shard_buf_{shard_set->size()} {
+      shard_buf_{shard_set->size()},
+      per_shard_hll_(shard_set->size()) {
+  for (auto& hll_state : per_shard_hll_) {
+    hll_state.hll = std::make_unique<HllEstimator>();
+  }
 }
 
 RdbLoader::~RdbLoader() {
@@ -2811,6 +2825,29 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
     VLOG(2) << "Expire key on load: " << item->key;
     return;
+  }
+
+  // Track hash field names via HLL for duplication detection across all hash objects.
+  // Only process non-appended items to avoid double-counting chunked hashes.
+  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingStrMap2) {
+    ShardHllState& hll_state = per_shard_hll_[db_slice->shard_id()];
+
+    StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
+    for (auto it = sm->begin(); it != sm->end(); ++it) {
+      std::string_view sv{it->first, sdslen(it->first)};
+      hll_state.hll->Add(HashFieldName(sv));
+      ++hll_state.total_fields;
+    }
+
+    if (hll_state.total_fields > hll_state.last_estimate + 1000) {
+      hll_state.last_estimate = hll_state.total_fields;
+
+      uint64_t unique_est = static_cast<uint64_t>(hll_state.hll->EstimateCardinality());
+      if (unique_est < hll_state.total_fields / 3) {
+        LOG_FIRST_N(INFO, 1) << "Hash field duplication stats: " << unique_est
+                             << " unique fields out of " << hll_state.total_fields << " total";
+      }
+    }
   }
 
   auto op_res = db_slice->AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
