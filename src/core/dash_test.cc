@@ -1472,22 +1472,20 @@ TEST_F(DashTest, CVCUponInsert) {
   // freed slot 0 but the bucket still has i at slot 1.
   dt.Erase(10);
 
-  auto cb = [](VersionDT::bucket_iterator bit) {
+  auto bucket_set = dt.CVCUponInsert(1, i);
+  for (auto bit : bucket_set.buckets()) {
     LOG(INFO) << "sid: " << bit.segment_id() << " " << bit.bucket_id();
     while (!bit.is_done()) {
       LOG(INFO) << "key: " << bit->first;
       ++bit;
     }
-  };
-  dt.CVCUponInsert(1, i, cb);
+  }
 }
 
 TEST_F(DashTest, CVCUponInsertStress) {
   VersionDT dt;
   for (int i = 0; i < 5000; ++i) {
-    dt.CVCUponInsert(1, i, [](VersionDT::bucket_iterator) {
-      // empty callback
-    });
+    dt.CVCUponInsert(1, i);
     dt.Insert(i, 0);
   }
 }

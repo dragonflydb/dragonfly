@@ -1456,27 +1456,17 @@ requires UV unsigned Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_thres
 
   const Bucket& bfirst = bucket_[first];
   if (!bfirst.IsFull()) {
-    unsigned cnt = 0;
-    if (!bfirst.IsEmpty() && bfirst.GetVersion() < ver_threshold) {
-      bid_res[cnt++] = first;
-    }
-    return cnt;
+    bid_res[0] = first;
+    return 1;
   }
 
   // both nid and bid are full.
   const LogicalBid after_next = NextBid(nid);
 
   auto do_fun = [this, ver_threshold, &bid_res](auto bid, auto nid) {
-    unsigned cnt = 0;
-    // We could tighten the checks here and below because
-    // if nid is less than ver_threshold, than nid won't be affected and won't cross
-    // ver_threshold as well.
-    if (GetBucket(bid).GetVersion() < ver_threshold)
-      bid_res[cnt++] = bid;
-
-    if (!GetBucket(nid).IsEmpty() && GetBucket(nid).GetVersion() < ver_threshold)
-      bid_res[cnt++] = nid;
-    return cnt;
+    bid_res[0] = bid;
+    bid_res[1] = nid;
+    return 2;
   };
 
   if (CheckIfMovesToOther(true, nid, after_next)) {
@@ -1493,11 +1483,8 @@ requires UV unsigned Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_thres
     PhysicalBid stash_bid = kBucketNum + ((bid + i) % kStashBucketNum);
     const Bucket& stash = GetBucket(stash_bid);
     if (!stash.IsFull()) {
-      unsigned cnt = 0;
-      if (!stash.IsEmpty() && stash.GetVersion() < ver_threshold)
-        bid_res[cnt++] = stash_bid;
-
-      return cnt;
+      bid_res[0] = stash_bid;
+      return 1;
     }
   }
 

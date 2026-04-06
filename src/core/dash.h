@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <optional>
 #include <vector>
 
 #include "absl/random/random.h"
@@ -41,6 +42,7 @@ class DashTable : public detail::DashTableBase {
 
   // if IsSingleBucket is true - iterates only over a single bucket.
   template <bool IsConst, bool IsSingleBucket = false> class Iterator;
+  struct BucketSet;
 
   using const_iterator = Iterator<true>;
   using iterator = Iterator<false>;
@@ -388,8 +390,7 @@ class DashTable : public detail::DashTableBase {
   //
   // These are not const functions because they send non-const iterators that allow
   // updating contents/versions of the passed iterators.
-  template <typename U, typename Cb>
-  void CVCUponInsert(uint64_t ver_threshold, const U& key, const Cb& cb);
+  template <typename U> BucketSet CVCUponInsert(uint64_t ver_threshold, const U& key);
 
   template <typename Cb> void CVCUponBump(uint64_t ver_threshold, const_iterator it, Cb&& cb);
 
@@ -610,6 +611,24 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   void Seek2Occupied();
 };  // Iterator
 
+template <typename _Key, typename _Value, typename Policy>
+struct DashTable<_Key, _Value, Policy>::BucketSet {
+  auto buckets() const {
+    bool is_all = limit > 2;
+    return std::views::iota(0u, limit) |
+           std::views::transform([o = owner, s = seg_id, a = is_all, arr = ids](uint8_t i) {
+             uint8_t index = a ? i : arr[i];
+             return bucket_iterator{o, s, index};
+           });
+  }
+
+  DashTable* owner;
+  uint32_t seg_id;
+
+  uint8_t limit = 0;
+  uint8_t ids[2];
+};
+
 /**
   _____                 _                           _        _   _
  |_   _|               | |                         | |      | | (_)
@@ -679,9 +698,9 @@ DashTable<_Key, _Value, Policy>::~DashTable() {
 }
 
 template <typename _Key, typename _Value, typename Policy>
-template <typename U, typename Cb>
-void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, const U& key,
-                                                    const Cb& cb) {
+template <typename U>
+auto DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, const U& key)
+    -> BucketSet {
   uint64_t key_hash = DoHash(key);
   uint32_t seg_id = SegmentId(key_hash);
   assert(seg_id < segment_.size());
@@ -690,19 +709,13 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
   uint8_t bids[2];
   unsigned num_touched = target->CVCOnInsert(ver_threshold, key_hash, bids);
   if (num_touched < UINT16_MAX) {
-    for (unsigned i = 0; i < num_touched; ++i) {
-      cb(bucket_iterator{this, seg_id, bids[i]});
-    }
-    return;
+    return BucketSet{
+        .owner = this, .seg_id = seg_id, .limit = num_touched, .ids = {bids[0], bids[1]}};
   }
 
   // Segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.
-  for (uint8_t i = 0; i < target->num_buckets(); ++i) {
-    if (target->GetVersion(i) < ver_threshold && !target->GetBucket(i).IsEmpty()) {
-      cb(bucket_iterator{this, seg_id, i});
-    }
-  }
+  return BucketSet{.owner = this, .seg_id = seg_id, .limit = target->num_buckets(), .ids = {0, 0}};
 }
 
 template <typename _Key, typename _Value, typename Policy>
