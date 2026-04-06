@@ -342,10 +342,13 @@ class ShardDocIndex {
 
   void AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                  PrimeValue* pv);
-  // Returns true when all HNSW removes executed synchronously (write lock acquired,
-  // deferred queue drained). False means at least one was deferred.
-  bool RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
-                                      const PrimeValue& pv);
+
+  // Remove doc from all HNSW indices. When a Remove is deferred (read lock held),
+  // preserves the old sds entries internally so deferred ops remain safe.
+  // modified_fields: when non-empty, only preserve fields being mutated.
+  void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
+                                      PrimeValue& pv,
+                                      absl::Span<const std::string_view> modified_fields = {});
 
   // Rebuild global vector indices from restored key index, updating vector data
   // for nodes whose graph structure was already restored from RDB.
@@ -402,13 +405,6 @@ class ShardDocIndex {
 
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
-
-  // Preserve old field data for HNSW indices with external vector storage.
-  // Extracts and keeps alive the old sds entries so deferred HNSW removal
-  // can still dereference pointers into them. Only called when
-  // RemoveDocFromGlobalVectorIndex was deferred (couldn't acquire write lock).
-  // When modified_fields is empty, preserves all HNSW-indexed fields.
-  void PreserveFieldData(PrimeValue& pv, absl::Span<const std::string_view> modified_fields);
 
   void ClearPreservedData() {
     preserved_field_data_.clear();

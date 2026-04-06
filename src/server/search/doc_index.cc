@@ -43,20 +43,19 @@ static void NoopDeleter(void*) {
 
 // Swap an sds entry in StringMap with a copy, returning the original.
 // The returned RAII handle keeps the old data alive for deferred HNSW operations.
-// For synchronous removes: the old sds stays valid until the PreservedEntry is destroyed
-// (end of RemoveDoc), covering the brief window between markDelete and StringMap swap
-// where concurrent searches may still dereference the pointer.
 PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
-  // External vectors (copy_vector=false) only exist when dim*4 >= max_listpack_map_bytes,
-  // which forces StringMap encoding. Listpack hashes are always below that threshold.
+  // External vectors (copy_vector=false) normally imply StringMap encoding, but at the
+  // exact threshold boundary (dim*4 == max_listpack_map_bytes) the hash may still be listpack.
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
+  if (pv.Encoding() != kEncodingStrMap2)
+    return {nullptr, NoopDeleter};
 
   auto* sm = static_cast<StringMap*>(pv.RObjPtr());
   auto it = sm->Find(field);
   if (it == sm->end())
     return {nullptr, NoopDeleter};
   string_view val(it->second, sdslen(it->second));
-  return sm->AddOrExchange(field, val);
+  return sm->AddOrExchange(field, val, /*ttl_sec=*/UINT32_MAX, /*keepttl=*/true);
 }
 
 template <typename F>
@@ -510,25 +509,6 @@ void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeVal
   indices_->Remove(id, *accessor);
 }
 
-void ShardDocIndex::PreserveFieldData(PrimeValue& pv,
-                                      absl::Span<const std::string_view> modified_fields) {
-  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
-    if (!index || index->IsVectorCopied())
-      continue;
-
-    // When modified_fields is non-empty, only preserve fields that are being modified.
-    if (!modified_fields.empty() &&
-        rng::find(modified_fields, field_info.short_name) == modified_fields.end()) {
-      continue;
-    }
-
-    if (auto data = ExtractField(pv, field_info.short_name); data) {
-      preserved_field_data_.push_back(std::move(data));
-    }
-  }
-}
-
 void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
   if (is_restoring_vectors_) {
@@ -552,28 +532,47 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
   }
 }
 
-bool ShardDocIndex::RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id,
-                                                   const DbContext& db_cntx, const PrimeValue& pv) {
+void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
+    ShardDocIndex::DocId doc_id, const DbContext& db_cntx, PrimeValue& pv,
+    absl::Span<const std::string_view> modified_fields) {
   if (is_restoring_vectors_) {
     // Buffer the key — will be re-applied after RestoreGlobalVectorIndices completes.
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
-    return true;  // No deferred ops from our side.
+    return;
   }
 
-  bool all_synchronous = true;
   auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
+  bool any_deferred = false;
   for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
-        index) {
-      if (!index->Remove(global_id, *accessor, field_ident)) {
-        all_synchronous = false;
-      }
+    auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
+    if (!index)
+      continue;
+
+    bool sync = index->Remove(global_id, *accessor, field_ident);
+    if (sync || index->IsVectorCopied())
+      continue;
+
+    // Remove was deferred and index uses external vectors — preserve the old sds
+    // so the deferred Remove can still dereference hnswlib's stored pointer.
+    // Use field_ident (the actual hash key), not short_name (the index alias).
+    if (!modified_fields.empty() &&
+        rng::find(modified_fields, field_ident) == modified_fields.end()) {
+      continue;
     }
+    if (auto data = ExtractField(pv, field_ident); data) {
+      preserved_field_data_.push_back(std::move(data));
+    }
+    any_deferred = true;
   }
-  return all_synchronous;
+
+  if (!any_deferred) {
+    // All removes were synchronous (write lock acquired, deferred queue drained).
+    // Safe to release any previously preserved data.
+    ClearPreservedData();
+  }
 }
 
 void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
@@ -1187,16 +1186,7 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, Prime
     if (index->Matches(key, pv.ObjType())) {
       std::optional<search::DocId> doc_id = index->GetDocId(key, db_cntx);
       if (doc_id) {
-        bool all_sync = index->RemoveDocFromGlobalVectorIndex(*doc_id, db_cntx, pv);
-        if (all_sync) {
-          // Write lock acquired, ProcessDeferred drained all pending ops.
-          // Safe to release previously preserved data.
-          index->ClearPreservedData();
-        } else {
-          // Remove was deferred (e.g., serialization holds the read lock).
-          // Preserve field data so deferred HNSW ops can still access vector pointers.
-          index->PreserveFieldData(pv, modified_fields);
-        }
+        index->RemoveDocFromGlobalVectorIndex(*doc_id, db_cntx, pv, modified_fields);
         index->RemoveDoc(*doc_id, db_cntx, pv);
       }
     }

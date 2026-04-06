@@ -4269,15 +4269,6 @@ async def test_hnsw_search_replication_with_network_disruptions(
     await seeder.create_index(c_master)
     await seeder.seed_initial_docs(c_master)
 
-    # For external vector mode, verify the hash encoding is hashtable (StringMap).
-    # This confirms copy_vector=false, i.e. HNSW stores raw pointers into sds entries.
-    if num_dims >= 256:
-        encoding = await c_master.object("encoding", f"{seeder.prefix}0")
-        assert encoding == "hashtable", (
-            f"Expected hashtable encoding for {num_dims * 4}-byte vectors, got {encoding}. "
-            f"External mode requires dim*4 >= max_listpack_map_bytes (default 1024)."
-        )
-
     proxy = Proxy("127.0.0.1", 0, "127.0.0.1", master.port)
     await proxy.start()
     proxy_task = asyncio.create_task(proxy.serve())
