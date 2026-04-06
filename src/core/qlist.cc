@@ -1087,10 +1087,12 @@ auto QList::MergeNodes(Node* center) -> Node* {
   Node *prev = NULL, *prev_prev = NULL, *next = NULL;
   Node *next_next = NULL, *target = NULL;
 
-  if (center->prev) {
+  // head_->prev is a circular shortcut to the tail, not a real predecessor.
+  // Only follow ->prev chains when we are not at the head node.
+  if (center != head_) {
     prev = center->prev;
-    if (center->prev->prev)
-      prev_prev = center->prev->prev;
+    if (prev != head_)
+      prev_prev = prev->prev;
   }
 
   if (center->next) {
@@ -1112,7 +1114,7 @@ auto QList::MergeNodes(Node* center) -> Node* {
   }
 
   /* Try to merge center node and previous node */
-  if (NodeAllowMerge(center, center->prev, fill_)) {
+  if (center != head_ && NodeAllowMerge(center, center->prev, fill_)) {
     target = ListpackMerge(center->prev, center);
     center = NULL; /* center could have been deleted, invalidate it. */
   } else {
