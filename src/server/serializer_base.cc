@@ -142,6 +142,8 @@ bool SerializerBase::ProcessIfNeeded(DbIndex db_index, PrimeTable::bucket_iterat
 
 bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it,
                                            bool on_update) {
+  DCHECK(big_value_mu_.is_locked());
+
   // Check if this bucket should be serialized
   if (!ShouldProcessBucket(it)) {
     // Force flush all delayed entries in the touched bucket
@@ -160,9 +162,12 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
 
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(it.bucket_address());
+
   stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
+  stats_.buckets_on_change += unsigned(on_update);
+
   FinishBucketIteration(it.bucket_address());
-  DCHECK_EQ(it.GetVersion(), snapshot_version_);  // No parallel access while serializing
+  DCHECK_EQ(it.GetVersion(), snapshot_version_);  // No parallel version changes while serializing
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
@@ -179,19 +184,18 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
   }
 
   std::lock_guard guard(big_value_mu_);
-  if (ProcessBucketInternal(db_index, it, true))
-    ++stats_.buckets_on_change;
+  ProcessBucketInternal(db_index, it, true);
 }
 
 void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
-  // We must hold the lock across checking all buckets
+  // We must acquire the mutex ahead and process all buckets under the same lock.
+  // This ensures that CVCUponInsert and the table insertion that invoked this callback
+  // will be operating on the same state as all writes are linarly ordered by this mutex.
   std::unique_lock lk{big_value_mu_};
 
-  auto bucket_set = db_slice_->GetTables(db_index)->CVCUponInsert(snapshot_version_, key);
-  for (PrimeTable::bucket_iterator it : bucket_set.buckets()) {
+  // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
+  for (auto it : db_slice_->GetTables(db_index)->CVCUponInsert(key).buckets())
     ProcessBucketInternal(db_index, it, true);
-    ++stats_.buckets_on_change;
-  }
 }
 
 }  // namespace dfly
