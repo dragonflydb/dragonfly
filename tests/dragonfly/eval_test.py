@@ -414,3 +414,38 @@ async def test_StackOverflowByHincrbyfloat(df_server: DflyInstance):
     await client.execute_command("HSET myhash field 1.0")
     await client.eval("return redis.pcall('HINCRBYFLOAT', KEYS[1], 'field', '1.5')", 1, "myhash")
     assert "2.5" == await client.execute_command("HGET myhash field")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_eval_commandstats_nested_call(async_client: aioredis.Redis):
+    def calls(stats, name: str) -> int:
+        return stats.get(f"cmdstat_{name}", {}).get("calls", 0)
+
+    probe_key = "__missing_eval_stats_probe__"
+
+    await async_client.config_resetstat()
+
+    stats = await async_client.info("commandstats")
+    assert calls(stats, "eval") == 0
+    assert calls(stats, "exists") == 0
+
+    assert await async_client.execute_command("EVAL", "return 1", 0) == 1
+
+    stats = await async_client.info("commandstats")
+    assert calls(stats, "eval") == 1
+    assert calls(stats, "exists") == 0
+
+    for _ in range(3):
+        assert (
+            await async_client.execute_command(
+                "EVAL",
+                "return redis.call('EXISTS', KEYS[1])",
+                1,
+                probe_key,
+            )
+            == 0
+        )
+
+    stats = await async_client.info("commandstats")
+    assert calls(stats, "eval") == 4
+    assert calls(stats, "exists") == 3
