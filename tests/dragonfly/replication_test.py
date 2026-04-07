@@ -863,6 +863,71 @@ async def test_expiry(df_factory: DflyInstanceFactory, n_keys=1000):
     assert all(v is None for v in res)
 
 
+@dfly_args({"proactor_threads": 4, "replica_delete_expired": "true"})
+async def test_expiry_on_replica(df_factory: DflyInstanceFactory):
+    """
+    Test that expired keys on a replica are proactively deleted (not just hidden) on the read
+    path when replica_delete_expired=true. Without the fix, replicas kept stale data in memory
+    and ExpireIfNeeded returned valid iterators, causing GET to return stale values and TTL to
+    return huge unsigned values (~UINT64_MAX).
+    """
+    master = df_factory.create(hz=0)
+    replica = df_factory.create(hz=0)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # Set keys with short TTL on master
+    n_keys = 50
+    for i in range(n_keys):
+        await c_master.execute_command("SET", f"exptest-{i}", f"value-{i}", "PX", 2000)
+
+    # Set some keys without TTL to verify they are unaffected
+    for i in range(n_keys):
+        await c_master.execute_command("SET", f"persist-{i}", f"pvalue-{i}")
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Verify keys exist on replica before expiry
+    for i in range(n_keys):
+        val = await c_replica.get(f"exptest-{i}")
+        assert val is not None, f"exptest-{i} should exist before expiry"
+
+    # Wait for keys to expire (hz=0 disables background sweep)
+    await asyncio.sleep(3.0)
+
+    # Check expired keys on replica WITHOUT touching them on master first.
+    # Before the fix, GET returned stale values and TTL returned ~UINT64_MAX.
+    for i in range(n_keys):
+        val = await c_replica.get(f"exptest-{i}")
+        assert val is None, f"exptest-{i} should be nil on replica after expiry"
+        ttl = await c_replica.execute_command("TTL", f"exptest-{i}")
+        assert ttl == -2, f"exptest-{i} TTL should be -2 on replica, got {ttl}"
+
+    # Verify non-expiry keys are unaffected
+    for i in range(n_keys):
+        val = await c_replica.get(f"persist-{i}")
+        assert val == f"pvalue-{i}", f"persist-{i} should still have its value"
+        ttl = await c_replica.execute_command("TTL", f"persist-{i}")
+        assert ttl == -1
+
+    # Verify replication still works after reading expired keys
+    await c_master.execute_command("SET", "after-expiry", "works")
+    await check_all_replicas_finished([c_replica], c_master)
+    val = await c_replica.get("after-expiry")
+    assert val == "works", "Replication should still be healthy"
+
+    # Verify SET via replication can overwrite an expired key on replica
+    await c_master.execute_command("SET", "exptest-0", "new-value")
+    await check_all_replicas_finished([c_replica], c_master)
+    val = await c_replica.get("exptest-0")
+    assert val == "new-value", "Replication SET should overwrite expired key on replica"
+
+
 @dfly_args({"proactor_threads": 4})
 async def test_simple_scripts(df_factory: DflyInstanceFactory):
     master = df_factory.create()

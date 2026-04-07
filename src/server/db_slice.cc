@@ -46,6 +46,9 @@ ABSL_FLAG(std::string, notify_keyspace_events, "",
 
 ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flushing slots");
 
+ABSL_FLAG(bool, replica_delete_expired, true,
+          "If true, replicas proactively delete expired keys on the read path.");
+
 namespace dfly {
 
 using namespace std;
@@ -1234,8 +1237,10 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 
   int64_t expire_time = it->first.GetExpireTime();
 
-  // Never do expiration on replica or if expiration is disabled.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
+  // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
+  // is enabled (which allows replicas to proactively delete expired keys on the read path).
+  if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
+      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
     return it;
   }
 
