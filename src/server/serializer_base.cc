@@ -167,7 +167,11 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   stats_.buckets_on_change += unsigned(on_update);
 
   FinishBucketIteration(it.bucket_address());
-  DCHECK_EQ(it.GetVersion(), snapshot_version_);  // No parallel version changes while serializing
+
+  // Assert the version is equal to a snapshot version so no other modifications have happened
+  DCHECK_GE(it.GetVersion(), snapshot_version_);
+  auto current_snapshots = db_slice_->SnapshotVersions();
+  DCHECK(std::ranges::find(current_snapshots, snapshot_version_) != current_snapshots.end());
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
