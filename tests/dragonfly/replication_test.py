@@ -1772,10 +1772,10 @@ async def test_network_disconnect(
 
             fill_task = None
             if stream_during:
-                seeder_kwargs = {}
                 if stream_target_ops is not None:
-                    seeder_kwargs["target_ops"] = stream_target_ops
-                fill_task = asyncio.create_task(seeder.run(**seeder_kwargs))
+                    fill_task = asyncio.create_task(seeder.run(target_ops=stream_target_ops))
+                else:
+                    fill_task = asyncio.create_task(seeder.run())
 
             for _ in range(num_drops):
                 await asyncio.sleep(random.randint(*sleep_range) / 10)
@@ -3948,7 +3948,8 @@ async def test_replication_mismatched_dbnum(
 ):
     """
     Test replication with mismatched dbnum between master and replica.
-    Shared DBs (0..min-1) are always verified. Extra replica DBs remain empty.
+    When the replica has fewer DBs than the master, replication should still succeed for
+    the shared DBs (0..min-1). When the replica has more DBs, the extra DBs remain empty.
     """
     shared_dbs = min(master_dbnum, replica_dbnum)
     master = df_factory.create(dbnum=master_dbnum)
@@ -3994,27 +3995,18 @@ async def test_replication_mismatched_dbnum(
 # BF.RESERVE with error_rate=0.00001 and capacity=1e9 creates a single bloom filter
 # of exactly 2^32 bytes (4 GiB). The chunked RDB loader used `unsigned` for the total
 # filter size, which silently overflowed to 0 and broke the RDB stream.
-# Verify that chunked replication of a large bloom filter works and doesn't exceed the max chunk
-# size. Check that replicated bloom filter contains all added items.
+# Verify that chunked replication of a large bloom filter works and the replicated filter
+# contains the expected items.
 @pytest.mark.large
-@pytest.mark.parametrize(
-    "maxmemory, error_rate, capacity, num_items, check_peak_bytes",
-    [
-        ("6G", "0.00001", "1000000000", 1, False),
-        ("4G", "0.011", "400000000", 20000, True),
-    ],
-)
-async def test_sbf_chunked_replication(
-    df_factory: DflyInstanceFactory, maxmemory, error_rate, capacity, num_items, check_peak_bytes
-):
+async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
     master = df_factory.create(
         proactor_threads=1,
-        maxmemory=maxmemory,
+        maxmemory="6G",
         rdb_sbf_chunked="true",
     )
     replica = df_factory.create(
         proactor_threads=1,
-        maxmemory=maxmemory,
+        maxmemory="6G",
     )
 
     df_factory.start_all([master, replica])
@@ -4022,21 +4014,50 @@ async def test_sbf_chunked_replication(
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("BF.RESERVE", "bf", error_rate, capacity)
+    await c_master.execute_command("BF.RESERVE", "bf", "0.00001", "1000000000")
+    await c_master.execute_command("BF.ADD", "bf", "hello")
 
-    if check_peak_bytes:
-        bf_size = await c_master.execute_command("MEMORY USAGE", "bf")
-        assert bf_size > 2**30, f"Bloom filter should be >1GB, got {bf_size}"
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
-        # Fix set to have reproducible test results and log the seed for debugging
-        random_seed = random.getrandbits(64)
-        logging.info(f"Using random seed {random_seed} for test reproducibility")
-        test_rng = random.Random(random_seed)
+    async with async_timeout.timeout(240):
+        await wait_for_replicas_state(c_replica)
 
-        random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), num_items)]
-        await c_master.execute_command("BF.MADD", "bf", *random_items)
-    else:
-        await c_master.execute_command("BF.ADD", "bf", "hello")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
+
+
+# Verify chunked replication of a moderately-sized bloom filter (~1 GB) doesn't exceed
+# the max chunk size and correctly replicates all added items.
+@pytest.mark.large
+async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactory):
+    master = df_factory.create(
+        proactor_threads=1,
+        maxmemory="4G",
+        rdb_sbf_chunked="true",
+    )
+    replica = df_factory.create(
+        proactor_threads=1,
+        maxmemory="4G",
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("BF.RESERVE", "bf", "0.011", "400000000")
+
+    bf_size = await c_master.execute_command("MEMORY USAGE", "bf")
+    assert bf_size > 2**30, f"Bloom filter should be >1GB, got {bf_size}"
+
+    # Fix seed to have reproducible test results and log the seed for debugging
+    random_seed = random.getrandbits(64)
+    logging.info(f"Using random seed {random_seed} for test reproducibility")
+    test_rng = random.Random(random_seed)
+
+    num_items = 20000
+    random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), num_items)]
+    await c_master.execute_command("BF.MADD", "bf", *random_items)
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
@@ -4045,30 +4066,27 @@ async def test_sbf_chunked_replication(
 
     await check_all_replicas_finished([c_replica], c_master)
 
-    if check_peak_bytes:
-        # Verify all added items exist on the replica
-        replica_results = await c_replica.execute_command("BF.MEXISTS", "bf", *random_items)
-        assert all(
-            replica_results
-        ), f"{replica_results.count(0)} of {len(random_items)} items missing on replica"
+    # Verify all added items exist on the replica
+    replica_results = await c_replica.execute_command("BF.MEXISTS", "bf", *random_items)
+    assert all(
+        replica_results
+    ), f"{replica_results.count(0)} of {len(random_items)} items missing on replica"
 
-        # Verify some non-added item doesn't exist on the replica
-        assert await c_replica.execute_command("BF.EXISTS", "bf", "not-added") == 0
+    # Verify some non-added item doesn't exist on the replica
+    assert await c_replica.execute_command("BF.EXISTS", "bf", "not-added") == 0
 
-        master.stop()
-        replica.stop()
+    master.stop()
+    replica.stop()
 
-        # We have set MAX_SBF_CHUNK_SIZE to 1 << 26. Double peak bytes size to be safe because of
-        # potential overhead that could be added.
-        MAX_SBF_CHUNK_SIZE = 2**27
+    # We have set MAX_SBF_CHUNK_SIZE to 1 << 26. Double peak bytes size to be safe because of
+    # potential overhead that could be added.
+    MAX_SBF_CHUNK_SIZE = 2**27
 
-        lines = master.find_in_logs("Serialization peak bytes: ")
-        assert len(lines) == 1
-        line = lines[0]
-        peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
-        assert peak_bytes < MAX_SBF_CHUNK_SIZE
-    else:
-        assert await c_replica.execute_command("BF.EXISTS", "bf", "hello") == 1
+    lines = master.find_in_logs("Serialization peak bytes: ")
+    assert len(lines) == 1
+    line = lines[0]
+    peak_bytes = extract_int_after_prefix("Serialization peak bytes: ", line)
+    assert peak_bytes < MAX_SBF_CHUNK_SIZE
 
 
 @pytest.mark.parametrize(
@@ -4202,7 +4220,18 @@ async def test_rm_replication(df_factory: DflyInstanceFactory):
         (["FIELDEXPIRE", "myset", "100", "a"], ["a"], []),
         (["FIELDTTL", "myset", "a"], ["a"], []),
     ],
-    ids=["smembers", "sunion", "sdiff", "smismember", "sscan", "sismember", "smove", "sinter", "fieldexpire", "fieldttl"],
+    ids=[
+        "smembers",
+        "sunion",
+        "sdiff",
+        "smismember",
+        "sscan",
+        "sismember",
+        "smove",
+        "sinter",
+        "fieldexpire",
+        "fieldttl",
+    ],
 )
 async def test_set_member_expiry_replication(
     df_factory: DflyInstanceFactory, trigger_cmd, members, extra_setup
