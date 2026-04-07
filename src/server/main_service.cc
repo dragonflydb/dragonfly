@@ -2296,9 +2296,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
 
-  absl::Cleanup clean = [interpreter, &sinfo]() {
+  const CommandId* original = cmd_cntx->cid;
+  absl::Cleanup clean = [interpreter, &sinfo, original, &cmd_cntx] {
     interpreter->ResetStack();
     sinfo.reset();
+    cmd_cntx->cid = original;
   };
 
   if (CanRunSingleShardMulti(sid, script_mode, *tx)) {
