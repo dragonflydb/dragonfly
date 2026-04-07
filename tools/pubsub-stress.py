@@ -1,7 +1,8 @@
 """
 Pub/sub stress test.
 
-Phase 1 (--subscribe): ramp up to --sub-max-channels subscriptions at --sub-rate/sec.
+Phase 1 (--subscribe): ramp up --sub-max-channels additional subscriptions at --sub-rate/sec
+                       (on top of any --pre-subscribe baseline).
                        Subscriptions remain open as background load during the publish phase.
 Phase 2 (--publish):  create --pub-sub-connections dedicated subscriber connections,
                       publish at --pub-rate msgs/sec across --pub-workers publisher connections,
@@ -389,6 +390,18 @@ if __name__ == "__main__":
         help="Number of subscriber connections in publish phase",
     )
     args = parser.parse_args()
+
+    errors = []
+    if args.sub_rate < 1:
+        errors.append("--sub-rate must be >= 1")
+    if args.sub_channels < 1:
+        errors.append("--sub-channels must be >= 1")
+    if args.pub_workers < 1:
+        errors.append("--pub-workers must be >= 1")
+    if args.pub_sub_connections < 1:
+        errors.append("--pub-sub-connections must be >= 1")
+    if errors:
+        parser.error("\n  ".join(errors))
 
     if args.uri:
         host, port, password, ssl = parse_uri(args.uri)
