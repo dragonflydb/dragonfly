@@ -829,21 +829,22 @@ async def test_snapshot_inline_dispatch_crash(df_factory):
     instance.start()
     client = instance.client()
 
-    await client.execute_command("DEBUG POPULATE 100 key 100")
+    # More data = longer snapshot duration = wider race window
+    await client.execute_command("DEBUG POPULATE 10000 key 500 RAND")
 
-    async def save_load_loop(inst, n):
+    async def bgsave_loop(inst, n):
+        """Repeatedly trigger BGSAVE so a snapshot is frequently in progress."""
+        c = inst.client()
         for _ in range(n):
-            c = inst.client()
-            pipe = c.pipeline(transaction=False)
-            pipe.execute_command("SAVE", "DF")
-            pipe.execute_command("DFLY", "LOAD", "test-snap-inline-summary.dfs")
             try:
-                await pipe.execute()
+                await c.execute_command("BGSAVE")
             except Exception:
                 pass
-            await c.aclose()
+            await asyncio.sleep(0)
+        await c.aclose()
 
     async def set_pipeline_loop(inst, n):
+        """Pipeline SETs on short-lived connections to exercise AsyncFiber dispatch."""
         for i in range(n):
             c = inst.client()
             pipe = c.pipeline(transaction=False)
@@ -856,8 +857,10 @@ async def test_snapshot_inline_dispatch_crash(df_factory):
             await c.aclose()
 
     await asyncio.gather(
-        save_load_loop(instance, 500),
-        set_pipeline_loop(instance, 500),
+        bgsave_loop(instance, 2000),
+        set_pipeline_loop(instance, 2000),
+        set_pipeline_loop(instance, 2000),
+        set_pipeline_loop(instance, 2000),
     )
 
     # Verify server survived - if the DFATAL assertion fired, this will fail.
