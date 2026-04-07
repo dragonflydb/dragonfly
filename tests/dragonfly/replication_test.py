@@ -2765,6 +2765,7 @@ async def test_replica_of_replica(df_factory):
 
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
 
+
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
 async def test_memory_on_big_string_loading(df_factory):
@@ -4190,7 +4191,6 @@ async def test_rm_replication(df_factory: DflyInstanceFactory):
         (["FIELDEXPIRE", "myset", "100", "a"], ["a"], []),
         (["FIELDTTL", "myset", "a"], ["a"], []),
     ],
-    ids=["smembers", "sunion", "sdiff", "smismember", "sscan", "sismember", "smove", "sinter", "fieldexpire", "fieldttl"],
 )
 async def test_set_member_expiry_replication(
     df_factory: DflyInstanceFactory, trigger_cmd, members, extra_setup
