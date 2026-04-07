@@ -25,7 +25,6 @@
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 

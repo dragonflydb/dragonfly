@@ -58,8 +58,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 @pytest.mark.parametrize("background_snapshotting", [False, True])
-# Disabled cache_mode until #5371 is fixed
-# @pytest.mark.parametrize("point_in_time_replication", [True, False])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
@@ -68,7 +66,6 @@ async def test_replication_all(
     stream_target,
     mode,
     background_snapshotting,
-    # point_in_time_replication,
 ):
     args = {}
     if mode:
@@ -82,7 +79,6 @@ async def test_replication_all(
     master = df_factory.create(
         admin_port=ADMIN_PORT,
         proactor_threads=t_master,
-        # point_in_time_snapshot=point_in_time_replication,
         **args,
     )
     replicas = [
