@@ -816,6 +816,7 @@ async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredi
     await check_flag("key2", 123456)
 
 
+@pytest.mark.debug_only
 @dfly_args({"proactor_threads": 1, "dbfilename": "test-snap-inline"})
 async def test_snapshot_inline_dispatch_crash(df_factory):
     """Regression: DFATAL in SerializerBase::OnChange when AsyncFiber runs SET
