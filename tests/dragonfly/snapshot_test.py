@@ -832,19 +832,19 @@ async def test_snapshot_inline_dispatch_crash(df_factory):
     # More data = longer snapshot duration = wider race window
     await client.execute_command("DEBUG POPULATE 10000 key 500 RAND")
 
-    async def bgsave_loop(inst, n):
-        """Repeatedly trigger BGSAVE so a snapshot is frequently in progress."""
-        c = inst.client()
+    async def save_load_loop(inst, n):
         for _ in range(n):
+            c = inst.client()
+            pipe = c.pipeline(transaction=False)
+            pipe.execute_command("SAVE", "DF")
+            pipe.execute_command("DFLY", "LOAD", "test-snap-inline-summary.dfs")
             try:
-                await c.execute_command("BGSAVE")
+                await pipe.execute()
             except Exception:
                 pass
-            await asyncio.sleep(0)
-        await c.aclose()
+            await c.aclose()
 
     async def set_pipeline_loop(inst, n):
-        """Pipeline SETs on short-lived connections to exercise AsyncFiber dispatch."""
         for i in range(n):
             c = inst.client()
             pipe = c.pipeline(transaction=False)
@@ -857,7 +857,7 @@ async def test_snapshot_inline_dispatch_crash(df_factory):
             await c.aclose()
 
     await asyncio.gather(
-        bgsave_loop(instance, 2000),
+        save_load_loop(instance, 2000),
         set_pipeline_loop(instance, 2000),
         set_pipeline_loop(instance, 2000),
         set_pipeline_loop(instance, 2000),
