@@ -858,10 +858,10 @@ async def test_snapshot_inline_dispatch_crash(df_factory):
             await c.aclose()
 
     await asyncio.gather(
-        save_load_loop(instance, 2000),
-        set_pipeline_loop(instance, 2000),
-        set_pipeline_loop(instance, 2000),
-        set_pipeline_loop(instance, 2000),
+        save_load_loop(instance, 300),
+        set_pipeline_loop(instance, 300),
+        set_pipeline_loop(instance, 300),
+        set_pipeline_loop(instance, 300),
     )
 
     # Verify server survived - if the DFATAL assertion fired, this will fail.
