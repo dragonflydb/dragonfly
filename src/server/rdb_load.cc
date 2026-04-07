@@ -2353,6 +2353,9 @@ error_code RdbLoader::Load(io::Source* src) {
 
     ++keys_loaded;
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+
+    VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
+            << " db= " << cur_db_index_;
     settings.Reset();
   }  // main load loop
 

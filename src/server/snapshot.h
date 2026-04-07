@@ -108,8 +108,8 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   // Serialize single bucket.
   // Returns number of serialized entries.
-  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
-                           bool on_update) override;
+  unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
+                                 bool on_update) override;
 
   void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
 

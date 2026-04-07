@@ -454,7 +454,8 @@ void RestoreStreamer::Run() {
     // Apparently, continue goes through the loop by checking the condition below, so we check
     // cursor here as well.
     // In addition if bucket writing was too intensive on CPU and we are overloaded.
-    // Note that we account for CPU time from OnDbChange and here as well (inside WriteBucket).
+    // Note that we account for CPU time from OnChangeBlocking and here as well
+    // (inside WriteBucket).
     // But we only throttle here, so if we migrated lots of slots during mutations, we
     // won't progress here but if we have not, then this fiber will progress withing the
     // CPU budget we defined for it.
@@ -573,8 +574,8 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 }
 
 // TODO(vlad): 80% similar with Snapshot::SerializeBucket. Move common parts
-unsigned RestoreStreamer::SerializeBucket(DbIndex /* unused */, PrimeTable::bucket_iterator it,
-                                          bool on_update) {
+unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
+                                                PrimeTable::bucket_iterator it, bool on_update) {
   auto& shard_stats = EngineShard::tlocal()->stats();
 
   unsigned written = 0;

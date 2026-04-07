@@ -1302,12 +1302,12 @@ uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
 }
 
 // Ordering invariant (PIT mode):
-//   When the traversal fiber visits a bucket in BucketSaveCb, earlier-registered snapshots
+//   When the traversal fiber visits a bucket in OnChangeBlocking, earlier-registered snapshots
 //   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
-//   yet. FlushChangeToEarlierCallbacks invokes their OnDbChange callbacks so they serialize the
-//   bucket before the current snapshot stamps it with its own version. Without this, an earlier
+//   yet. FlushChangeToEarlierCallbacks invokes their OnChangeBlocking callbacks so they serialize
+//   the bucket before the current snapshot stamps it with its own version. Without this, an earlier
 //   snapshot could miss the bucket entirely — its traversal already passed it, and the version
-//   stamp from the current snapshot would cause the earlier snapshot's OnDbChange to skip it.
+//   stamp from the current snapshot would cause the earlier snapshot's OnChangeBlocking to skip it.
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 

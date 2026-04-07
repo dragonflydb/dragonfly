@@ -19,6 +19,8 @@
 
 namespace dfly {
 
+using namespace std;
+
 void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk,
                                            const PrimeValue& pv, time_t expire_time,
                                            uint32_t mc_flags) {
@@ -91,7 +93,7 @@ SerializerBase::~SerializerBase() {
 void SerializerBase::RegisterChangeListener() {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
   auto cb = [this](DbIndex dbid, const ChangeReq& req) {
-    std::visit([&](auto it) { OnChange(dbid, it); }, req.change);
+    std::visit([&](auto it) { OnChangeBlocking(dbid, it); }, req.change);
   };
   snapshot_version_ = db_slice_->RegisterOnChange(cb);
 }
@@ -151,9 +153,12 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
     db_guard.emplace(*db_slice_->GetLatch());
   }
 
+  // We call it before SerializeBucketLocked because it dchecks on bucket version.
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(it.bucket_address());
-  stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
+
+  // SerializeBucketLocked might preempt on big value serialization.
+  stats_.keys_serialized += SerializeBucketLocked(db_index, it, on_update);
   FinishBucketIteration(it.bucket_address());
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
@@ -162,23 +167,34 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   return true;
 }
 
-void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
+void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it) {
   auto* active = util::fb2::detail::FiberActive();
-  if (!absl::StartsWith(active->name(), "shard_queue") &&
-      !absl::StartsWith(active->name(), "l2_queue") &&
-      !absl::StartsWith(active->name(), "SliceSnapshot")) {
+  string_view active_name = active->name();
+  if (!absl::StartsWith(active_name, "shard_queue") &&  //
+      !absl::StartsWith(active_name, "l2_queue") &&     // pipelining
+      !absl::StartsWith(active_name, "SliceSnapshot") &&
+      active_name != "Dispatched"  // Comes from OnAllShards(... { migration->RunSync(); });
+  ) {
     LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
   }
   if (ProcessBucket(db_index, it, true))
     ++stats_.buckets_on_change;
 }
 
-void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
+void SerializerBase::OnChangeBlocking(DbIndex db_index, std::string_view key) {
   PrimeTable* table = db_slice_->GetTables(db_index);
   table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator bit) {
     DCHECK_LT(bit.GetVersion(), snapshot_version_);
-    OnChange(db_index, bit);
+    OnChangeBlocking(db_index, bit);
   });
+
+  // Sanity check: the above CVCUponInsert runs preemptible callbacks, and segment state
+  // could change during the call. Validate that CVCUponInsert is consistent.
+#ifndef NDEBUG
+  unsigned check = 0;
+  table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator bit) { ++check; });
+  DCHECK_EQ(check, 0u);
+#endif
 }
 
 }  // namespace dfly
