@@ -1619,9 +1619,8 @@ async def wait_for_replica_status(
     ],
 )
 async def test_replicaof_flag(df_factory, start_replica_first, disconnect_at_end):
-    BASE_PORT = 1111
-
     if start_replica_first:
+        BASE_PORT = 1111
         # Replica starts before master, uses a fixed port so it knows where to connect
         replica = df_factory.create(
             proactor_threads=2,
@@ -1731,11 +1730,11 @@ async def test_df_crash_on_replicaof_flag(df_factory):
 
 
 @pytest.mark.parametrize(
-    "master_threads, backlog_len, stream_during, num_drops, sleep_range, check_stale_log",
+    "master_threads, backlog_len, stream_during, stream_target_ops, num_drops, sleep_range, check_stale_log",
     [
-        (6, None, False, 10, (0, 10), False),
-        (4, 4000, True, 3, (10, 20), False),
-        (4, 1, True, 3, (5, 10), True),
+        (6, None, False, None, 10, (0, 10), False),
+        (4, 4000, True, 4000, 3, (10, 20), False),
+        (4, 1, True, None, 3, (5, 10), True),
     ],
 )
 async def test_network_disconnect(
@@ -1744,6 +1743,7 @@ async def test_network_disconnect(
     master_threads,
     backlog_len,
     stream_during,
+    stream_target_ops,
     num_drops,
     sleep_range,
     check_stale_log,
@@ -1772,7 +1772,10 @@ async def test_network_disconnect(
 
             fill_task = None
             if stream_during:
-                fill_task = asyncio.create_task(seeder.run())
+                seeder_kwargs = {}
+                if stream_target_ops is not None:
+                    seeder_kwargs["target_ops"] = stream_target_ops
+                fill_task = asyncio.create_task(seeder.run(**seeder_kwargs))
 
             for _ in range(num_drops):
                 await asyncio.sleep(random.randint(*sleep_range) / 10)
@@ -1785,6 +1788,9 @@ async def test_network_disconnect(
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
             await wait_available_async(c_replica)
+
+            logging.debug(await c_replica.execute_command("INFO REPLICATION"))
+            logging.debug(await c_master.execute_command("INFO REPLICATION"))
 
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
@@ -2139,8 +2145,13 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     assert set(keys_master) == set(keys_replica)
 
 
-@pytest.mark.large
-@pytest.mark.parametrize("action_during_save", ["disconnect", "start_replicating"])
+@pytest.mark.parametrize(
+    "action_during_save",
+    [
+        pytest.param("disconnect", marks=pytest.mark.large),
+        "start_replicating",
+    ],
+)
 async def test_save_with_replication(df_factory, action_during_save):
     if action_during_save == "disconnect":
         master = df_factory.create(proactor_threads=1)
@@ -4191,6 +4202,7 @@ async def test_rm_replication(df_factory: DflyInstanceFactory):
         (["FIELDEXPIRE", "myset", "100", "a"], ["a"], []),
         (["FIELDTTL", "myset", "a"], ["a"], []),
     ],
+    ids=["smembers", "sunion", "sdiff", "smismember", "sscan", "sismember", "smove", "sinter", "fieldexpire", "fieldttl"],
 )
 async def test_set_member_expiry_replication(
     df_factory: DflyInstanceFactory, trigger_cmd, members, extra_setup
