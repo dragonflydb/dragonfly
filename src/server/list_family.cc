@@ -26,6 +26,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 namespace rng = std::ranges;
@@ -83,6 +84,37 @@ using time_point = Transaction::time_point;
 
 namespace {
 
+void OffloadListNode(QList* ql, QList::Node* node) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  DCHECK(ts);
+  QList::stats.offload_requests++;
+  StashListNode(ql->GetDbIndex(), ql, node, ts, nullptr);
+}
+
+void LoadListNode(QList* ql, QList::Node* node) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  DCHECK(ts);
+  QList::stats.onload_requests++;
+  auto res = ReadTieredListNode(ql->GetDbIndex(), ql, node, node->GetExternalSlice(), ts).Get();
+  if (!res) {
+    LOG(WARNING) << "Failed to load list node from tiered storage: " << res.error().message();
+  }
+}
+
+void CleanupListNode(QList* ql, QList::Node* node) {
+  TieredStorage* ts = EngineShard::tlocal()->tiered_storage();
+  DCHECK(ts);
+  if (!ts->IsClosed()) {
+    if (node->io_pending) {
+      ts->CancelStash(tiering::ListNodeId{ql->GetDbIndex(), ql, node}, node);
+    } else {
+      // We don't pass QList pointer so we need to decrease num_offloaded_nodes_ now.
+      ql->AdjustOffloadNodeCount(-1);
+      ts->Delete(ql->GetDbIndex(), node);
+    }
+  }
+}
+
 class ListWrapper {
   using LP = detail::ListPack;
 
@@ -106,9 +138,18 @@ class ListWrapper {
     QList* ql = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                               GetFlag(FLAGS_list_compress_depth));
 
+    // Set db index for new QList
+    ql->SetDbIndex(db_id_);
+
     const uint32_t tiering_node_depth_threshold = absl::GetFlag(FLAGS_list_tiering_threshold);
     if (tiering_node_depth_threshold > 0 && EngineShard::tlocal()->tiered_storage()) {
-      ql->EnableTiering(tiering_node_depth_threshold);
+      QList::TieringParams params{
+          .node_depth_threshold = tiering_node_depth_threshold,
+          .offload = OffloadListNode,
+          .load = LoadListNode,
+          .cleanup = CleanupListNode,
+      };
+      ql->EnableTiering(params);
     }
 
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_experimental_zstd_dict_threshold);

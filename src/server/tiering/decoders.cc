@@ -101,16 +101,16 @@ std::unique_ptr<Decoder> ListNodeDecoder::Clone() const {
 }
 
 void ListNodeDecoder::Initialize(std::string_view slice) {
-  this->slice = slice;
+  slice_ = slice;
 }
 
 void ListNodeDecoder::Upload(void* obj) {
-  ABSL_UNREACHABLE();
+  QList::Node* node_obj = reinterpret_cast<QList::Node*>(obj);
+  node_obj->Upload(ql_, slice_);
 }
 
 Decoder::UploadMetrics ListNodeDecoder::GetMetrics() const {
-  ABSL_UNREACHABLE();
-  return UploadMetrics{};
+  return UploadMetrics{.modified = false, .estimated_mem_usage = slice_.size()};
 }
 
 }  // namespace dfly::tiering

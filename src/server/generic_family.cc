@@ -974,6 +974,14 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   auto& add_res = *op_result;
   add_res.it->first.SetSticky(sticky);
 
+  // When tiering is enabled, update tiered-storage metadata for partial moved values.
+  if (EngineShard::tlocal()->tiered_storage()) {
+    if (add_res.it->second.ObjType() == OBJ_LIST && add_res.it->second.Encoding() == kEncodingQL2) {
+      auto* ql = static_cast<QList*>(add_res.it->second.RObjPtr());
+      ql->SetDbIndex(target_db);
+    }
+  }
+
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.it->second.ObjType() == OBJ_LIST && bc) {
     bc->Awaken(target_db, key);
