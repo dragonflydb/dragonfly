@@ -5,6 +5,7 @@
 #include "server/serializer_base.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_join.h>
 
 #include <mutex>
 
@@ -171,7 +172,8 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   // Assert the version is equal to a snapshot version so no other modifications have happened
   DCHECK_GE(it.GetVersion(), snapshot_version_);
   auto current_snapshots = db_slice_->SnapshotVersions();
-  DCHECK(std::ranges::find(current_snapshots, snapshot_version_) != current_snapshots.end());
+  DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())
+      << absl::StrJoin(current_snapshots, " ") << " does not contain " << it.GetVersion();
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
