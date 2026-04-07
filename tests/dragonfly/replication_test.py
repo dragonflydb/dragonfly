@@ -4017,9 +4017,9 @@ async def test_sbf_chunked_replication(
         assert bf_size > 2**30, f"Bloom filter should be >1GB, got {bf_size}"
 
         # Fix set to have reproducible test results and log the seed for debugging
-        random_seeed = random.getrandbits(64)
-        logging.info(f"Using random seed {random_seeed} for test reproducibility")
-        test_rng = random.Random(random_seeed)
+        random_seed = random.getrandbits(64)
+        logging.info(f"Using random seed {random_seed} for test reproducibility")
+        test_rng = random.Random(random_seed)
 
         random_items = [f"item:{i}" for i in test_rng.sample(range(1_000_000), num_items)]
         await c_master.execute_command("BF.MADD", "bf", *random_items)
