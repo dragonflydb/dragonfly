@@ -854,11 +854,11 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       }
     } else {
       string_view key = get<string_view>(req.change);
-      // table->CVCUponInsert(next_version, key,
-      //                      [next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
-      //                        DCHECK_LT(it.GetVersion(), next_version);
-      //                        iterate_bucket(it);
-      //                      });
+      auto bucket_set = table->CVCUponInsert(next_version, key);
+      for (auto it : bucket_set.buckets()) {
+        if (!it.is_done() && it.GetVersion() < next_version)
+          iterate_bucket(it);
+      }
     }
   };
   next_version = RegisterOnChange(std::move(on_change));

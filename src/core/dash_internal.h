@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <type_traits>
 
 #include "base/pmr/memory_resource.h"
@@ -537,8 +538,9 @@ class Segment {
   // if the insertion would happen. The ids are put into bid array that should have at least 2
   // spaces.
   template <bool UV = kUseVersion>
-  requires UV unsigned CVCOnInsert(uint64_t ver_threshold, Hash_t key_hash,
-                                   PhysicalBid bid[2]) const;
+  requires UV std::optional<uint8_t> CVCOnInsert(uint64_t ver_threshold, Hash_t key_hash,
+                                                 PhysicalBid bid[2])
+  const;
 
   // Returns bucket ids whose versions will change as a result of bumping up the item
   // Can return upto 3 buckets.
@@ -1444,9 +1446,10 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
 }
 
 template <typename Key, typename Value, typename Policy> template <bool UV>
-requires UV unsigned Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_threshold,
-                                                              Hash_t key_hash,
-                                                              uint8_t bid_res[2]) const {
+requires UV std::optional<uint8_t> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_threshold,
+                                                                            Hash_t key_hash,
+                                                                            uint8_t bid_res[2])
+const {
   const LogicalBid bid = HomeIndex(key_hash);
   const LogicalBid nid = NextBid(bid);
 
@@ -1488,7 +1491,7 @@ requires UV unsigned Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_thres
     }
   }
 
-  return UINT16_MAX;
+  return std::nullopt;
 }
 
 template <typename Key, typename Value, typename Policy> template <bool UV>

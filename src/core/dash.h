@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -626,7 +627,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
   uint32_t seg_id;
 
   uint8_t limit = 0;
-  uint8_t ids[2];
+  std::array<uint8_t, 2> ids;
 };
 
 /**
@@ -706,16 +707,14 @@ auto DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
   assert(seg_id < segment_.size());
   const SegmentType* target = segment_[seg_id];
 
-  uint8_t bids[2];
-  unsigned num_touched = target->CVCOnInsert(ver_threshold, key_hash, bids);
-  if (num_touched < UINT16_MAX) {
-    return BucketSet{
-        .owner = this, .seg_id = seg_id, .limit = num_touched, .ids = {bids[0], bids[1]}};
-  }
+  uint8_t bids[2] = {0, 0};
+  auto num_touched = target->CVCOnInsert(ver_threshold, key_hash, bids);
 
-  // Segment is full, we need to return the whole segment, because it can be split
+  // If the segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.
-  return BucketSet{.owner = this, .seg_id = seg_id, .limit = target->num_buckets(), .ids = {0, 0}};
+  uint8_t bucket_limit = num_touched.value_or(target->num_buckets());
+  return BucketSet{
+      .owner = this, .seg_id = seg_id, .limit = bucket_limit, .ids = {bids[0], bids[1]}};
 }
 
 template <typename _Key, typename _Value, typename Policy>
