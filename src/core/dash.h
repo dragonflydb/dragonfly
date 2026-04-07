@@ -610,19 +610,24 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 template <typename _Key, typename _Value, typename Policy>
 struct DashTable<_Key, _Value, Policy>::BucketSet {
   auto buckets() const {
-    bool is_all = limit > 2;
-    return std::views::iota(0u, limit) |
-           std::views::transform([=, ids = ids, owner = owner, seg_id = seg_id](uint8_t i) {
-             uint8_t index = is_all ? i : ids[i];
-             return bucket_iterator{owner, seg_id, index};
+    bool is_all = limit_ > ids_.size();
+    return std::views::iota(0u, limit_) | std::views::transform([this, is_all](uint8_t i) {
+             uint8_t index = is_all ? i : ids_[i];
+             return bucket_iterator{owner_, seg_id_, index};
            });
   }
 
-  DashTable* owner;
-  uint32_t seg_id;
+ private:
+  friend class DashTable;
 
-  uint8_t limit = 0;
-  std::array<uint8_t, 2> ids;
+  BucketSet(DashTable* owner, uint32_t seg_id, uint8_t limit, uint8_t ids[2])
+      : owner_{owner}, seg_id_{seg_id}, limit_{limit}, ids_{ids[0], ids[1]} {
+  }
+
+  DashTable* owner_;
+  uint32_t seg_id_;
+  uint8_t limit_;
+  std::array<uint8_t, 2> ids_;
 };
 
 /**
@@ -702,13 +707,8 @@ auto DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key) -> BucketSet {
   const SegmentType* target = segment_[seg_id];
 
   uint8_t bids[2] = {0, 0};
-  auto num_touched = target->CVCOnInsert(key_hash, bids);
-
-  // If the segment is full, we need to return the whole segment, because it can be split
-  // and its entries can be reshuffled into different buckets.
-  uint8_t bucket_limit = num_touched.value_or(target->num_buckets());
-  return BucketSet{
-      .owner = this, .seg_id = seg_id, .limit = bucket_limit, .ids = {bids[0], bids[1]}};
+  uint8_t num_touched = target->CVCOnInsert(key_hash, bids);
+  return BucketSet{this, seg_id, num_touched, bids};
 }
 
 template <typename _Key, typename _Value, typename Policy>

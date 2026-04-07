@@ -536,7 +536,7 @@ class Segment {
   // Returns nullopt if segment is full.
   // Otherwise, writes buckets to `bid` and returns the count (1 or 2).
   template <bool UV = kUseVersion>
-  requires UV std::optional<uint8_t> CVCOnInsert(Hash_t key_hash, PhysicalBid bid[2])
+  requires UV uint8_t CVCOnInsert(Hash_t key_hash, PhysicalBid bid[2])
   const;
 
   // Returns bucket ids whose versions will change as a result of bumping up the item
@@ -1443,8 +1443,7 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
 }
 
 template <typename Key, typename Value, typename Policy> template <bool UV>
-requires UV std::optional<uint8_t> Segment<Key, Value, Policy>::CVCOnInsert(Hash_t key_hash,
-                                                                            uint8_t bid_res[2])
+requires UV uint8_t Segment<Key, Value, Policy>::CVCOnInsert(Hash_t key_hash, uint8_t bid_res[2])
 const {
   const LogicalBid bid = HomeIndex(key_hash);
   const LogicalBid nid = NextBid(bid);
@@ -1487,7 +1486,7 @@ const {
     }
   }
 
-  return std::nullopt;
+  return num_buckets();
 }
 
 template <typename Key, typename Value, typename Policy> template <bool UV>

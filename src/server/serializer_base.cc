@@ -169,11 +169,14 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
 
   FinishBucketIteration(it.bucket_address());
 
-  // Assert the version is equal to a snapshot version so no other modifications have happened
+  // Assert the version is equal to a snapshot version (might be a different concurrent one),
+  // to prove no concurrent modifications are possible (they would've assigned a different version)
+#if DCHECK_IS_ON()
   DCHECK_GE(it.GetVersion(), snapshot_version_);
   auto current_snapshots = db_slice_->SnapshotVersions();
   DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())
       << absl::StrJoin(current_snapshots, " ") << " does not contain " << it.GetVersion();
+#endif
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
