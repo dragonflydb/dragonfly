@@ -814,3 +814,51 @@ async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredi
 
     await check_flag("key1", 2)
     await check_flag("key2", 123456)
+
+
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-snap-inline"})
+async def test_snapshot_inline_dispatch_crash(df_factory):
+    """Regression: DFATAL in SerializerBase::OnChange when AsyncFiber runs SET
+    inline while a snapshot is in progress from another connection.
+
+    Reproduces a fuzz crash where rapid pipelined SAVE/LOAD cycles from multiple
+    connections cause SET to execute via CanRunInlined() on AsyncFiber, triggering
+    snapshot change callbacks from an unexpected fiber.
+    """
+    instance = df_factory.create()
+    instance.start()
+    client = instance.client()
+
+    await client.execute_command("DEBUG POPULATE 100 key 100")
+
+    async def save_load_loop(inst, n):
+        for _ in range(n):
+            c = inst.client()
+            pipe = c.pipeline(transaction=False)
+            pipe.execute_command("SAVE", "DF")
+            pipe.execute_command("DFLY", "LOAD", "test-snap-inline-summary.dfs")
+            try:
+                await pipe.execute()
+            except Exception:
+                pass
+            await c.aclose()
+
+    async def set_pipeline_loop(inst, n):
+        for i in range(n):
+            c = inst.client()
+            pipe = c.pipeline(transaction=False)
+            for j in range(20):
+                pipe.set(f"key:{i}:{j}", f"val:{i}:{j}")
+            try:
+                await pipe.execute()
+            except Exception:
+                pass
+            await c.aclose()
+
+    await asyncio.gather(
+        save_load_loop(instance, 500),
+        set_pipeline_loop(instance, 500),
+    )
+
+    # Verify server survived - if the DFATAL assertion fired, this will fail.
+    assert await client.ping()
