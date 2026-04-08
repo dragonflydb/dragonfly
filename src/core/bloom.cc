@@ -234,4 +234,102 @@ size_t SBF::MallocUsed() const {
   return res;
 }
 
+SBFDumpIterator::SBFDumpIterator(const SBF& sbf, int64_t cursor) : sbf_{sbf}, cursor_{cursor} {
+  ResolveCursorToPos();
+}
+
+SBFChunk SBFDumpIterator::Next() {
+  if (!header_sent_) {
+    header_sent_ = true;
+    cursor_ = 1;
+    return {cursor_, SerializeHeader()};
+  }
+
+  if (filter_index_ >= sbf_.num_filters()) {
+    return {0, {}};
+  }
+
+  const string_view data = sbf_.data(filter_index_);
+  const size_t remaining = data.size() - byte_offset_;
+  const size_t chunk_len = std::min(kMaxChunkSize, remaining);
+  const string_view chunk = data.substr(byte_offset_, chunk_len);
+
+  byte_offset_ += chunk_len;
+  cursor_ += chunk_len;
+
+  if (byte_offset_ >= data.size()) {
+    filter_index_++;
+    byte_offset_ = 0;
+  }
+
+  return {cursor_, string{chunk}};
+}
+
+bool SBFDumpIterator::Done() const {
+  return filter_index_ >= sbf_.num_filters() && header_sent_;
+}
+
+std::string SBFDumpIterator::SerializeHeader() const {
+  constexpr uint32_t kSbfDumpVersion = 1;
+
+  constexpr size_t kDumpHeaderFixedSize = 48;  // version + 5x u64 + num_filters
+  constexpr size_t kDumpFilterMetaSize = 12;   // hash_cnt + data_length
+
+  const uint32_t num_filters = sbf_.num_filters();
+
+  std::string out;
+  out.reserve(kDumpHeaderFixedSize + num_filters * kDumpFilterMetaSize);
+
+  auto append_u32 = [&out](uint32_t v) {
+    char buf[sizeof(v)];
+    absl::little_endian::Store32(buf, v);
+    out.append(buf, sizeof(buf));
+  };
+
+  auto append_u64 = [&out](uint64_t v) {
+    char buf[sizeof(v)];
+    absl::little_endian::Store64(buf, v);
+    out.append(buf, sizeof(buf));
+  };
+
+  append_u32(kSbfDumpVersion);
+  append_u64(std::bit_cast<uint64_t>(sbf_.grow_factor()));
+  append_u64(std::bit_cast<uint64_t>(sbf_.fp_probability()));
+  append_u64(sbf_.prev_size());
+  append_u64(sbf_.current_size());
+  append_u64(sbf_.max_capacity());
+  append_u32(num_filters);
+
+  for (uint32_t i = 0; i < num_filters; ++i) {
+    append_u32(sbf_.hashfunc_cnt(i));
+    append_u64(sbf_.data(i).size());
+  }
+
+  return out;
+}
+
+void SBFDumpIterator::ResolveCursorToPos() {
+  header_sent_ = cursor_ > 0;
+  if (cursor_ == 0) {
+    filter_index_ = 0;
+    byte_offset_ = 0;
+    return;
+  }
+
+  size_t global_offset = cursor_ - 1;
+  for (uint32_t i = 0; i < sbf_.num_filters(); ++i) {
+    const size_t curr_filter_size = sbf_.data(i).size();
+    if (global_offset < curr_filter_size) {
+      filter_index_ = i;
+      byte_offset_ = global_offset;
+      return;
+    }
+    global_offset -= curr_filter_size;
+  }
+
+  // cursor is beyond data boundary
+  filter_index_ = sbf_.num_filters();
+  byte_offset_ = 0;
+}
+
 }  // namespace dfly

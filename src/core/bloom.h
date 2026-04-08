@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -144,6 +145,37 @@ class SBF {
   size_t prev_size_ = 0;
   size_t current_size_ = 0;
   size_t max_capacity_;
+};
+
+struct SBFChunk {
+  int64_t cursor;
+  std::string data;
+};
+
+class SBFDumpIterator {
+ public:
+  static constexpr uint64_t kMaxChunkSize = 16 * 1024 * 1024;
+
+  SBFDumpIterator(const SBF& sbf, int64_t cursor);
+
+  // Returns (next cursor, data between current and next cursor)
+  // Once the filter is fully read returns 0,""
+  SBFChunk Next();
+  bool Done() const;
+
+ private:
+  // On first call to Next(), serializes metadata. The SBF wide data is written first, then the per
+  // filter data in sequence (hash count and size per filter)
+  std::string SerializeHeader() const;
+  // Converts a cursor to the specific filter and the offset inside it
+  // O(n) in number of filters
+  void ResolveCursorToPos();
+
+  const SBF& sbf_;
+  int64_t cursor_;
+  bool header_sent_ = false;
+  uint32_t filter_index_ = 0;
+  size_t byte_offset_ = 0;
 };
 
 }  // namespace dfly
