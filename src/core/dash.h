@@ -611,7 +611,7 @@ template <typename _Key, typename _Value, typename Policy>
 struct DashTable<_Key, _Value, Policy>::BucketSet {
   auto buckets() const {
     bool is_all = limit_ > ids_.size();
-    return std::views::iota(0u, limit_) | std::views::transform([this, is_all](uint8_t i) {
+    return std::views::iota(0u, limit_) | std::views::transform([*this, is_all](uint8_t i) {
              uint8_t index = is_all ? i : ids_[i];
              return bucket_iterator{owner_, seg_id_, index};
            });
