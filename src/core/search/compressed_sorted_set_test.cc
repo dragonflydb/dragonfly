@@ -104,7 +104,7 @@ TEST_F(CompressedSortedSetTest, BasicInsert) {
   add(0);
   EXPECT_EQ(current(), list_copy);
 
-  // Make sure all test integers fit into a single byte
+  // Without store_freq, each entry is a single varint (1 byte for small diff values)
   EXPECT_EQ(list.ByteSize(), list.Size());
 }
 
@@ -135,7 +135,7 @@ TEST_F(CompressedSortedSetTest, BasicInsertLargeValues) {
 
   EXPECT_EQ(IdVec(list.begin(), list.end()), list_copy);
 
-  // Make sure we use at least twice less memory
+  // Without store_freq, verify compressed representation is still compact
   EXPECT_LE(list.ByteSize() * 2, list.Size() * sizeof(uint32_t));
 }
 
@@ -228,6 +228,168 @@ TEST_F(CompressedSortedSetTest, InsertRemoveLargeValues) {
 
     EXPECT_EQ(IdVec(list.begin(), list.end()), IdVec({}));
   }
+}
+
+TEST_F(CompressedSortedSetTest, FreqBasic) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  // Insert with explicit frequencies
+  list.Insert(10, 3);
+  list.Insert(20, 5);
+  list.Insert(30, 1);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_EQ(it.Freq(), 3u);
+  ++it;
+  EXPECT_EQ(*it, 20u);
+  EXPECT_EQ(it.Freq(), 5u);
+  ++it;
+  EXPECT_EQ(*it, 30u);
+  EXPECT_EQ(it.Freq(), 1u);
+  ++it;
+  EXPECT_EQ(it, list.end());
+}
+
+TEST_F(CompressedSortedSetTest, FreqDefaultIsOne) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  // Insert without explicit freq (default = 1)
+  list.Insert(5);
+  list.Insert(15);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 5u);
+  EXPECT_EQ(it.Freq(), 1u);
+  ++it;
+  EXPECT_EQ(*it, 15u);
+  EXPECT_EQ(it.Freq(), 1u);
+}
+
+TEST_F(CompressedSortedSetTest, FreqInsertMiddle) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  // Insert out of order to test mid-list insertion preserves freq
+  list.Insert(10, 2);
+  list.Insert(30, 4);
+  list.Insert(20, 3);  // Inserted between 10 and 30
+
+  vector<pair<uint32_t, uint32_t>> result;
+  for (auto it = list.begin(); it != list.end(); ++it)
+    result.emplace_back(*it, it.Freq());
+
+  EXPECT_EQ(result, (vector<pair<uint32_t, uint32_t>>{{10, 2}, {20, 3}, {30, 4}}));
+}
+
+TEST_F(CompressedSortedSetTest, FreqRemove) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  list.Insert(10, 2);
+  list.Insert(20, 3);
+  list.Insert(30, 4);
+
+  // Remove middle — freq of neighbors should be preserved
+  list.Remove(20);
+
+  vector<pair<uint32_t, uint32_t>> result;
+  for (auto it = list.begin(); it != list.end(); ++it)
+    result.emplace_back(*it, it.Freq());
+
+  EXPECT_EQ(result, (vector<pair<uint32_t, uint32_t>>{{10, 2}, {30, 4}}));
+
+  // Remove front
+  list.Remove(10);
+  result.clear();
+  for (auto it = list.begin(); it != list.end(); ++it)
+    result.emplace_back(*it, it.Freq());
+
+  EXPECT_EQ(result, (vector<pair<uint32_t, uint32_t>>{{30, 4}}));
+}
+
+TEST_F(CompressedSortedSetTest, FreqMerge) {
+  CompressedSortedSet list1{PMR_NS::get_default_resource(), /*store_freq=*/true};
+  CompressedSortedSet list2{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  list1.Insert(10, 2);
+  list1.Insert(30, 4);
+
+  list2.Insert(20, 3);
+  list2.Insert(40, 5);
+
+  list1.Merge(std::move(list2));
+
+  vector<pair<uint32_t, uint32_t>> result;
+  for (auto it = list1.begin(); it != list1.end(); ++it)
+    result.emplace_back(*it, it.Freq());
+
+  EXPECT_EQ(result, (vector<pair<uint32_t, uint32_t>>{{10, 2}, {20, 3}, {30, 4}, {40, 5}}));
+}
+
+TEST_F(CompressedSortedSetTest, FreqSplit) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  for (uint32_t i = 0; i < 20; i++)
+    list.Insert(i * 10, i + 1);
+
+  auto [first, second] = std::move(list).Split();
+
+  // Verify freqs are preserved in both halves
+  uint32_t expected_id = 0;
+  for (auto it = first.begin(); it != first.end(); ++it) {
+    EXPECT_EQ(*it, expected_id * 10);
+    EXPECT_EQ(it.Freq(), expected_id + 1);
+    expected_id++;
+  }
+  for (auto it = second.begin(); it != second.end(); ++it) {
+    EXPECT_EQ(*it, expected_id * 10);
+    EXPECT_EQ(it.Freq(), expected_id + 1);
+    expected_id++;
+  }
+  EXPECT_EQ(expected_id, 20u);
+}
+
+TEST_F(CompressedSortedSetTest, FreqLargeValues) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  // Test large frequency values that stress varint encoding
+  vector<pair<uint32_t, uint32_t>> entries = {
+      {10, 1},       // minimal
+      {20, 127},     // max 1-byte varint
+      {30, 128},     // min 2-byte varint
+      {40, 16383},   // max 2-byte varint
+      {50, 16384},   // min 3-byte varint
+      {60, 100000},  // large value
+  };
+
+  for (auto [id, freq] : entries)
+    list.Insert(id, freq);
+
+  EXPECT_EQ(list.Size(), entries.size());
+
+  auto it = list.begin();
+  for (size_t i = 0; i < entries.size(); i++, ++it) {
+    EXPECT_EQ(*it, entries[i].first) << "DocId mismatch at index " << i;
+    EXPECT_EQ(it.Freq(), entries[i].second) << "Freq mismatch at index " << i;
+  }
+}
+
+TEST_F(CompressedSortedSetTest, FreqZeroHandling) {
+  CompressedSortedSet list{PMR_NS::get_default_resource(), /*store_freq=*/true};
+
+  // freq=0 is used for synonym entries
+  list.Insert(10, 0);
+  list.Insert(20, 3);
+  list.Insert(30, 0);
+
+  auto it = list.begin();
+  EXPECT_EQ(*it, 10u);
+  EXPECT_EQ(it.Freq(), 0u);
+  ++it;
+  EXPECT_EQ(*it, 20u);
+  EXPECT_EQ(it.Freq(), 3u);
+  ++it;
+  EXPECT_EQ(*it, 30u);
+  EXPECT_EQ(it.Freq(), 0u);
 }
 
 }  // namespace dfly::search

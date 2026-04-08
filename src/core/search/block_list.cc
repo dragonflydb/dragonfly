@@ -1,5 +1,7 @@
 #include "core/search/block_list.h"
 
+#include <type_traits>
+
 #include "core/page_usage/page_usage_stats.h"
 
 namespace {
@@ -99,12 +101,38 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
   return {std::move(left), std::move(right), median_value, lmin, lmax, rmax};
 }
 
-template <typename C> bool BlockList<C>::Insert(ElementType t) {
+namespace {
+
+// Helper to forward freq to containers that support it (CompressedSortedSet).
+// For other containers (SortedVector), freq is ignored.
+template <typename Container, typename T>
+bool ContainerInsert(Container& c, T&& val, uint32_t freq) {
+  if constexpr (std::is_same_v<Container, CompressedSortedSet>) {
+    return c.Insert(std::forward<T>(val), freq);
+  } else {
+    return c.Insert(std::forward<T>(val));
+  }
+}
+
+// Helper to create a new block with the right constructor args.
+// CompressedSortedSet takes (mr, store_freq); other containers take (mr).
+template <typename Container> Container MakeBlock(PMR_NS::memory_resource* mr, bool store_freq) {
+  if constexpr (std::is_same_v<Container, CompressedSortedSet>) {
+    return Container{mr, store_freq};
+  } else {
+    return Container{mr};
+  }
+}
+
+}  // namespace
+
+template <typename C> bool BlockList<C>::Insert(ElementType t, uint32_t freq) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
-    block = blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
+    block = blocks_.insert(blocks_.end(),
+                           MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_));
 
-  if (!block->Insert(std::move(t)))
+  if (!ContainerInsert(*block, std::move(t), freq))
     return false;
 
   size_++;
@@ -112,14 +140,14 @@ template <typename C> bool BlockList<C>::Insert(ElementType t) {
   return true;
 }
 
-template <typename C> bool BlockList<C>::PushBack(ElementType t) {
+template <typename C> bool BlockList<C>::PushBack(ElementType t, uint32_t freq) {
   // If the last block is full, after insert we will need to split it
   // So we can prevent split by creating a new block and inserting there
   if (blocks_.empty() || ShouldSplit(blocks_.back().Size() + 1)) {
-    blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
+    blocks_.insert(blocks_.end(), MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_));
   }
 
-  if (!blocks_.back().Insert(std::move(t)))
+  if (!ContainerInsert(blocks_.back(), std::move(t), freq))
     return false;
 
   size_++;
