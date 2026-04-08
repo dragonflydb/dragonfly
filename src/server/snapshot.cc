@@ -225,17 +225,21 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 }
 
-unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                        bool on_update) {
-  // Version is already stamped by the caller (BucketSaveCb or SerializerBase::OnChange).
-  DCHECK_EQ(it.GetVersion(), snapshot_version_);
-
+unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                              bool on_update) {
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
 
   unsigned serialized = 0;
+
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+    // Version is already stamped by SerializerBase::OnChangeBlocking.
+    // TODO: this dcheck should be established as we assume nothing can mutate this bucket
+    // until SerializeBucketLocked finishes.
+    // DCHECK_EQ(it.GetVersion(), snapshot_version_);
+
     ++serialized;
+
     // might preempt due to big value serialization.
     SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
   }

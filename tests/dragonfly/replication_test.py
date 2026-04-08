@@ -36,11 +36,111 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 """
 
 
+async def compare_datasets(c_master, c_replica):
+    r_port = c_replica.connection_pool.connection_kwargs.get("port", "unknown")
+    hash_script = """
+    local type = ARGV[1]
+    local res = {}
+    for i, key in ipairs(KEYS) do
+        local hash = 0
+        if type == 'STRING' then
+            hash = dragonfly.ihash(0, false, 'GET', key)
+        elseif type == 'LIST' then
+            hash = dragonfly.ihash(0, false, 'LRANGE', key, 0, -1)
+        elseif type == 'SET' then
+            hash = dragonfly.ihash(0, true, 'SMEMBERS', key)
+        elseif type == 'ZSET' then
+            hash = dragonfly.ihash(0, false, 'ZRANGE', key, 0, -1, 'WITHSCORES')
+        elseif type == 'HASH' then
+            hash = dragonfly.ihash(0, true, 'HGETALL', key)
+        elseif type == 'JSON' then
+            hash = dragonfly.ihash(0, false, 'JSON.GET', key)
+        elseif type == 'STREAM' then
+            hash = dragonfly.ihash(0, false, 'XRANGE', key, '-', '+')
+        end
+        table.insert(res, hash)
+    end
+    return res
+    """
+    sha = await c_master.script_load(hash_script)
+    await c_replica.script_load(hash_script)
+
+    for t in SeederV2.DEFAULT_TYPES:
+        m_keys, r_keys = set(), set()
+
+        scan_type = "ReJSON-RL" if t == "JSON" else t
+        logging.info(f"Scanning keys for type {t}")
+        cursor = "0"
+        while True:
+            res = await c_master.execute_command("SCAN", cursor, "TYPE", scan_type, "COUNT", 5000)
+            cursor, keys = res[0], res[1]
+            m_keys.update(keys)
+            if int(cursor) == 0:
+                break
+
+        cursor = "0"
+        while True:
+            res = await c_replica.execute_command("SCAN", cursor, "TYPE", scan_type, "COUNT", 5000)
+            cursor, keys = res[0], res[1]
+            r_keys.update(keys)
+            if int(cursor) == 0:
+                break
+
+        if m_keys != r_keys:
+            logging.error(f"[{t}] P{r_port}: Key mismatch!")
+            logging.error(f"[{t}] P{r_port}: Master only: {m_keys - r_keys}")
+            logging.error(f"[{t}] P{r_port}: Replica only: {r_keys - m_keys}")
+
+        common = sorted(list(m_keys & r_keys))
+        if not common:
+            continue
+
+        logging.info(f"Comparing hashes for {len(common)} keys of type {t}")
+        m_hashes = []
+        for i in range(0, len(common), 500):
+            batch = common[i : i + 500]
+            res = await c_master.evalsha(sha, len(batch), *batch, t)
+            m_hashes.extend(res)
+
+        r_hashes = []
+        for i in range(0, len(common), 500):
+            batch = common[i : i + 500]
+            res = await c_replica.evalsha(sha, len(batch), *batch, t)
+            r_hashes.extend(res)
+
+        for k, mh, rh in zip(common, m_hashes, r_hashes):
+            if mh != rh:
+                logging.error(
+                    f"[{t}] P{r_port}: hash mismatch for key {k}: master_hash={mh}, replica_hash={rh}"
+                )
+                if t == "STRING":
+                    m_v, r_v = await c_master.get(k), await c_replica.get(k)
+                elif t == "LIST":
+                    m_v, r_v = await c_master.lrange(k, 0, -1), await c_replica.lrange(k, 0, -1)
+                elif t == "SET":
+                    m_v, r_v = await c_master.smembers(k), await c_replica.smembers(k)
+                elif t == "HASH":
+                    m_v, r_v = await c_master.hgetall(k), await c_replica.hgetall(k)
+                elif t == "ZSET":
+                    m_v, r_v = await c_master.zrange(
+                        k, 0, -1, withscores=True
+                    ), await c_replica.zrange(k, 0, -1, withscores=True)
+                elif t == "JSON":
+                    m_v, r_v = await c_master.execute_command(
+                        "JSON.GET", k
+                    ), await c_replica.execute_command("JSON.GET", k)
+                else:
+                    m_v, r_v = None, None
+                logging.error(f"[{t}] P{r_port}: Mismatch for key {k}: master={m_v}, replica={r_v}")
+
+
 @pytest.mark.parametrize(
     "t_master, t_replicas, seeder_config, stream_target",
     [
         # Quick general test that replication is working
         (1, 3 * [1], dict(key_target=1_000), 500),
+        (1, 2 * [1], dict(key_target=2_000, types=["LIST"]), 500),
+        (1, 2 * [1], dict(key_target=2_000, types=["LIST"]), 2000),
         # A lot of huge values
         (2, 2 * [1], dict(key_target=5_000, huge_value_target=30), 500),
         (4, [4, 4], dict(key_target=10_000), 1_000),
@@ -126,7 +226,10 @@ async def test_replication_all(
     async def check():
         await check_all_replicas_finished(c_replicas, c_master)
         hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-        assert len(set(hashes)) == 1
+        if len(set(hashes)) > 1:
+            for i, replica_client in enumerate(c_replicas):
+                await compare_datasets(c_master, replica_client)
+                assert False, "Replica data does not match master"
 
     await check()
     # Stream more data in stable state
@@ -154,6 +257,66 @@ async def test_replication_all(
         # the size of the hug value and the serialization max chunk size. For the test cases here,
         # it's usually close to 1% but there are some that are close to 3.
         assert preemptions <= (key_capacity * 0.03)
+
+
+"""
+Regression test for the double-apply bug during full sync.
+
+When a bucket is mutated during snapshot traversal *before* the snapshot loop visits it,
+SliceSnapshot serializes the mutation twice into the full sync stream:
+  1. OnChange fires -> bucket (post-mutation state) serialized into RDB
+  2. ConsumeJournalChange fires -> the same command also written as a journal blob
+
+The replica applies both: loads the bucket state, then re-executes the journal command
+on top. For additive operations (LPUSH/RPUSH) this doubles the list contents; for
+removals (LPOP/RPOP) it removes one extra element.
+
+The race is most pronounced with background_snapshotting=False (normal priority snapshot
+fiber): the snapshot holds the CPU for a full time-slice, causing queued mutations to
+burst against a large batch of not-yet-visited buckets the moment it yields.
+serialization_max_chunk_size=500 forces frequent yields within that burst.
+"""
+
+
+async def test_replication_list_double_apply(df_factory: DflyInstanceFactory):
+    """Regression test for double-apply of LIST mutations during full sync."""
+    master = df_factory.create(
+        proactor_threads=2,
+        num_shards=1,
+        serialization_max_chunk_size=500,
+    )
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Pre-fill master with LIST keys so the snapshot has real data to traverse.
+    seeder = SeederV2(
+        key_target=2000, types=["LIST"], data_size=100, huge_value_size=70000, huge_value_target=6
+    )
+    await seeder.run(c_master, target_deviation=0.01)
+
+    # Stream LIST mutations concurrently with full sync. add_list (LPUSH) and mod_list
+    # (LPUSH/RPUSH/LPOP/RPOP) both hit the race: additive ops produce doubles, removals
+    # produce under-counts.
+    stream_task = asyncio.create_task(seeder.run(c_master))
+    await asyncio.sleep(0.0)
+
+    # Trigger full sync while mutations are in flight.
+    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+
+    async with async_timeout.timeout(120):
+        await wait_for_replicas_state(c_replica)
+
+    await seeder.stop(c_master)
+    await stream_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    hashes = await asyncio.gather(SeederV2.capture(c_master), SeederV2.capture(c_replica))
+    if hashes[0] != hashes[1]:
+        await compare_datasets(c_master, c_replica)
+        assert False, "Replica data does not match master after full sync"
 
 
 """
