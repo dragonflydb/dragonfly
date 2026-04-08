@@ -134,7 +134,9 @@ bool CompressedSortedSet::Insert(IntType value, uint32_t freq) {
 
   auto bound = LowerBound(value);
 
-  // At least one element was read and it's equal to value: return to avoid duplicate
+  // At least one element was read and it's equal to value: return to avoid duplicate.
+  // Note: freq of the existing entry is preserved (not updated). This is safe because
+  // DocIds are unique per posting list — a document is indexed only once per term.
   if (bound.value == value && !bound.entry_span.empty())
     return false;
 

@@ -103,17 +103,6 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
 
 namespace {
 
-// Helper to forward freq to containers that support it (CompressedSortedSet).
-// For other containers (SortedVector), freq is ignored.
-template <typename Container, typename T>
-bool ContainerInsert(Container& c, T&& val, uint32_t freq) {
-  if constexpr (std::is_same_v<Container, CompressedSortedSet>) {
-    return c.Insert(std::forward<T>(val), freq);
-  } else {
-    return c.Insert(std::forward<T>(val));
-  }
-}
-
 // Helper to create a new block with the right constructor args.
 // CompressedSortedSet takes (mr, store_freq); other containers take (mr).
 template <typename Container> Container MakeBlock(PMR_NS::memory_resource* mr, bool store_freq) {
@@ -132,7 +121,7 @@ template <typename C> bool BlockList<C>::Insert(ElementType t, uint32_t freq) {
     block = blocks_.insert(blocks_.end(),
                            MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_));
 
-  if (!ContainerInsert(*block, std::move(t), freq))
+  if (!block->Insert(std::move(t), freq))
     return false;
 
   size_++;
@@ -147,7 +136,7 @@ template <typename C> bool BlockList<C>::PushBack(ElementType t, uint32_t freq) 
     blocks_.insert(blocks_.end(), MakeBlock<C>(blocks_.get_allocator().resource(), store_freq_));
   }
 
-  if (!ContainerInsert(blocks_.back(), std::move(t), freq))
+  if (!blocks_.back().Insert(std::move(t), freq))
     return false;
 
   size_++;
@@ -224,7 +213,8 @@ template <typename C> void BlockList<C>::TryMerge(BlockIt block) {
 }
 
 template <typename C> void BlockList<C>::TrySplit(BlockIt block) {
-  if (!ShouldSplit(block->Size() + 1))
+  // Need at least 2 elements to produce two non-empty halves after split
+  if (block->Size() < 2 || !ShouldSplit(block->Size() + 1))
     return;
 
   auto [left, right] = std::move(*block).Split();

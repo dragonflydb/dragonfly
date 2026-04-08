@@ -171,6 +171,10 @@ template <typename T> class SortedVector {
   }
 
   bool Insert(T t);
+  // TODO: store freq when SortedVector-based indices need TF scoring.
+  bool Insert(T t, uint32_t /*freq*/) {
+    return Insert(std::move(t));
+  }
   bool Remove(T t);
   void Merge(SortedVector<T>&& other);
   std::pair<SortedVector<T>, SortedVector<T>> Split() &&;
