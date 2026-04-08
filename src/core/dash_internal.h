@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <optional>
 #include <type_traits>
 
 #include "base/pmr/memory_resource.h"
@@ -533,8 +532,8 @@ class Segment {
 
   // capture version change in case of insert.
   // Determines ids of buckets that would possibly change on insertion
-  // Returns nullopt if segment is full.
-  // Otherwise, writes buckets to `bid` and returns the count (1 or 2).
+  // Writes buckets to `bid` and returns the count (1 or 2) or
+  // num_buckets() if the whole segment needs to be split (bid is not used).
   template <bool UV = kUseVersion>
   requires UV uint8_t CVCOnInsert(Hash_t key_hash, PhysicalBid bid[2])
   const;

@@ -4,7 +4,6 @@
 #pragma once
 
 #include <array>
-#include <optional>
 #include <ranges>
 #include <vector>
 
