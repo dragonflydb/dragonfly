@@ -183,11 +183,12 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
 }
 
 void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  auto* active = util::fb2::detail::FiberActive();
-  if (!absl::StartsWith(active->name(), "shard_queue") &&
-      !absl::StartsWith(active->name(), "l2_queue") &&
-      !absl::StartsWith(active->name(), "SliceSnapshot")) {
-    LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
+  std::string_view active_name = util::fb2::detail::FiberActive()->name();
+  if (!absl::StartsWith(active_name, "shard_queue") && !absl::StartsWith(active_name, "l2_queue") &&
+      !absl::StartsWith(active_name, "SliceSnapshot") &&
+      active_name != "Dispatched"  // Comes from OnAllShards(... { migration->RunSync(); });
+  ) {
+    LOG(DFATAL) << "Unexpected fiber: " << active_name << " on " << util::fb2::GetStacktrace();
   }
 
   ProcessBucket(db_index, it, true);
