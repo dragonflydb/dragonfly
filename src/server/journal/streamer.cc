@@ -480,7 +480,7 @@ void RestoreStreamer::Run() {
       // Do not progress if we are stalled.
       ThrottleIfNeeded();
 
-      stats_.buckets_loop += ProcessIfNeeded(0, it, false);
+      stats_.buckets_loop += ProcessBucket(0, it, false);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable

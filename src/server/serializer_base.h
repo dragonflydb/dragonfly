@@ -81,7 +81,7 @@ class SerializerBase : public DelayedEntryHandler {
   };
 
   // Process bucket if needed
-  bool ProcessIfNeeded(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
+  bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.

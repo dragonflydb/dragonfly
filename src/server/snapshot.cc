@@ -180,7 +180,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
 
       snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
-        return ProcessIfNeeded(snapshot_db_indx, it, false);
+        return ProcessBucket(snapshot_db_indx, it, false);
       });
 
       if (use_background_mode_) {

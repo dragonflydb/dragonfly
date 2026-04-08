@@ -7,8 +7,6 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
-#include <mutex>
-
 #include "base/logging.h"
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
@@ -135,8 +133,8 @@ bool SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
   return true;
 }
 
-bool SerializerBase::ProcessIfNeeded(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                     bool on_update) {
+bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                   bool on_update) {
   std::lock_guard guard(big_value_mu_);
   return ProcessBucketInternal(db_index, it, on_update);
 }
@@ -192,8 +190,7 @@ void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) 
     LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
   }
 
-  std::lock_guard guard(big_value_mu_);
-  ProcessBucketInternal(db_index, it, true);
+  ProcessBucket(db_index, it, true);
 }
 
 void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
