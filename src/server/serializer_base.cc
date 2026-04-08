@@ -202,7 +202,7 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   ProcessBucket(db_index, it, true);
 }
 
-void SerializerBase::OnChange(DbIndex db_index, std::string_view key) {
+void SerializerBase::OnChangeBlocking(DbIndex db_index, std::string_view key) {
   // We must acquire the mutex ahead and process all buckets under the same lock.
   // This ensures that CVCUponInsert and the table insertion that invoked this callback
   // will be operating on the same state as all writes are linarly ordered by this mutex.
