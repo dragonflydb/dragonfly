@@ -80,7 +80,7 @@ class SerializerBase : public DelayedEntryHandler {
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
-  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  // Process bucket if needed
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.
@@ -115,6 +115,9 @@ class SerializerBase : public DelayedEntryHandler {
   // Return identity if bucket should be processed.
   // Checks bucket validity, version and state
   bool ShouldProcessBucket(PrimeTable::bucket_iterator);
+
+  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  bool ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Transition bucket from NotVisited -> Serializing.
   void MarkBucketSerializing(BucketIdentity bid);

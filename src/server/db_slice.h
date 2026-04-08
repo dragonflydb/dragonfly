@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <atomic>
+#include <ranges>
 
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
@@ -397,13 +398,12 @@ class DbSlice {
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
 
-  //! Registers the callback to be called after items are moved in table.
-  //! Returns the registration id which is also the unique version of the dbslice
-  //! at a time of the call.
-  uint64_t RegisterOnMove(MovedCallback cb);
-
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
+  }
+
+  auto SnapshotVersions() const {
+    return change_cb_ | std::views::keys;
   }
 
   // Call registered callbacks with version less than upper_bound.
@@ -411,8 +411,6 @@ class DbSlice {
 
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
-
-  void UnregisterOnMoved(uint64_t id);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;        // number of deleted items due to expiry.
@@ -573,7 +571,6 @@ class DbSlice {
   }
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
-  void CallMovedCallbacks(DbIndex id, const MovedItemsVec& moved_items);
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
@@ -620,8 +617,6 @@ class DbSlice {
 
   // ordered from the smallest to largest version.
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
-
-  std::list<std::pair<uint32_t, MovedCallback>> moved_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of

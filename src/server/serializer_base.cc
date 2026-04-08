@@ -5,6 +5,7 @@
 #include "server/serializer_base.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_join.h>
 
 #include "base/logging.h"
 #include "redis/redis_aux.h"
@@ -13,6 +14,7 @@
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/synchronization.h"
+#include "server/table.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
@@ -139,6 +141,12 @@ bool SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) {
   std::lock_guard guard(big_value_mu_);
+  return ProcessBucketInternal(db_index, it, on_update);
+}
+
+bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                           bool on_update) {
+  DCHECK(big_value_mu_.is_locked());
 
   // Check if this bucket should be serialized
   if (!ShouldProcessBucket(it)) {
@@ -160,9 +168,19 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(it.bucket_address());
 
-  // SerializeBucketLocked might preempt on big value serialization.
   stats_.keys_serialized += SerializeBucketLocked(db_index, it, on_update);
+  stats_.buckets_on_change += unsigned(on_update);
+
   FinishBucketIteration(it.bucket_address());
+
+  // Assert the version is equal to a snapshot version (might be a different concurrent one),
+  // to prove no concurrent modifications are possible (they would've assigned a different version)
+#if DCHECK_IS_ON()
+  DCHECK_GE(it.GetVersion(), snapshot_version_);
+  auto current_snapshots = db_slice_->SnapshotVersions();
+  DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())
+      << absl::StrJoin(current_snapshots, " ") << " does not contain " << it.GetVersion();
+#endif
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
@@ -180,24 +198,19 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   ) {
     LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
   }
-  if (ProcessBucket(db_index, it, true))
-    ++stats_.buckets_on_change;
+
+  ProcessBucket(db_index, it, true);
 }
 
 void SerializerBase::OnChangeBlocking(DbIndex db_index, std::string_view key) {
-  PrimeTable* table = db_slice_->GetTables(db_index);
-  table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator bit) {
-    DCHECK_LT(bit.GetVersion(), snapshot_version_);
-    OnChangeBlocking(db_index, bit);
-  });
+  // We must acquire the mutex ahead and process all buckets under the same lock.
+  // This ensures that CVCUponInsert and the table insertion that invoked this callback
+  // will be operating on the same state as all writes are linarly ordered by this mutex.
+  std::unique_lock lk{big_value_mu_};
 
-  // Sanity check: the above CVCUponInsert runs preemptible callbacks, and segment state
-  // could change during the call. Validate that CVCUponInsert is consistent.
-#ifndef NDEBUG
-  unsigned check = 0;
-  table->CVCUponInsert(snapshot_version_, key, [&](PrimeTable::bucket_iterator bit) { ++check; });
-  DCHECK_EQ(check, 0u);
-#endif
+  // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
+  for (auto it : db_slice_->GetTables(db_index)->CVCUponInsert(key).buckets())
+    ProcessBucketInternal(db_index, it, true);
 }
 
 }  // namespace dfly

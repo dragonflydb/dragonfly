@@ -737,7 +737,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
-  CallMovedCallbacks(cntx.db_index, evp.moved_items());
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
@@ -857,11 +856,11 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       }
     } else {
       string_view key = get<string_view>(req.change);
-      table->CVCUponInsert(next_version, key,
-                           [next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
-                             DCHECK_LT(it.GetVersion(), next_version);
-                             iterate_bucket(it);
-                           });
+      auto bucket_set = table->CVCUponInsert(key);
+      for (auto it : bucket_set.buckets()) {
+        if (!it.is_done() && it.GetVersion() < next_version)
+          iterate_bucket(it);
+      }
     }
   };
   next_version = RegisterOnChange(std::move(on_change));
@@ -1300,12 +1299,6 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
-uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
-  ++next_moved_id_;
-  moved_cb_.emplace_back(next_moved_id_, cb);
-  return next_moved_id_;
-}
-
 // Ordering invariant (PIT mode):
 //   When the traversal fiber visits a bucket in OnChangeBlocking, earlier-registered snapshots
 //   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
@@ -1343,14 +1336,6 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
   change_cb_.erase(it);
-}
-
-void DbSlice::UnregisterOnMoved(uint64_t id) {
-  serialization_latch_.Wait();
-  auto it =
-      find_if(moved_cb_.begin(), moved_cb_.end(), [id](const auto& cb) { return cb.first == id; });
-  CHECK(it != moved_cb_.end());
-  moved_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
@@ -1854,7 +1839,7 @@ void DbSlice::OnCbFinishBlocking() {
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, ChangeReq{bit});
         };
-        db.prime.CVCUponBump(change_cb_.back().first, it, bump_cb);
+        db.prime.CVCUponBump(it, bump_cb);
       }
 
       // We must not change the bucket's internal order during serialization
@@ -1864,7 +1849,6 @@ void DbSlice::OnCbFinishBlocking() {
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
-      CallMovedCallbacks(db_index, policy.moved_items());
     }
   }
 
@@ -1884,23 +1868,6 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   for (size_t i = 0; i < limit; ++i) {
     CHECK(ccb->second);
     ccb->second(id, cr);
-    ++ccb;
-  }
-}
-
-void DbSlice::CallMovedCallbacks(
-    DbIndex id, const std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>& moved_items) {
-  if (moved_cb_.empty())
-    return;
-
-  // does not preempt, just increments the counter.
-  unique_lock<LocalLatch> lk(serialization_latch_);
-
-  const size_t limit = moved_cb_.size();
-  auto ccb = moved_cb_.begin();
-  for (size_t i = 0; i < limit; ++i) {
-    CHECK(ccb->second);
-    ccb->second(id, moved_items);
     ++ccb;
   }
 }
