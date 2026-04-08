@@ -98,7 +98,7 @@ SerializerBase::~SerializerBase() {
 void SerializerBase::RegisterChangeListener() {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
   auto cb = [this](DbIndex dbid, const ChangeReq& req) {
-    std::visit([&](auto it) { OnChangeBlocking(dbid, it); }, req.change);
+    std::visit([&](auto it) { OnChangeBlocking(dbid, it); }, req);
   };
   snapshot_version_ = db_slice_->RegisterOnChange(cb);
 }
@@ -202,14 +202,14 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   ProcessBucket(db_index, it, true);
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, std::string_view key) {
+void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& buckets) {
   // We must acquire the mutex ahead and process all buckets under the same lock.
   // This ensures that CVCUponInsert and the table insertion that invoked this callback
   // will be operating on the same state as all writes are linarly ordered by this mutex.
   std::unique_lock lk{big_value_mu_};
 
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : db_slice_->GetTables(db_index)->CVCUponInsert(key).buckets())
+  for (auto it : buckets.buckets())
     ProcessBucketInternal(db_index, it, true);
 }
 

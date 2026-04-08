@@ -94,7 +94,7 @@ class SerializerBase : public DelayedEntryHandler {
 
   // Called when a new key is about to be inserted,
   // calls CVCUponInsert -> OnChangeBlocking(bucket_iterator) for every touched bucket.
-  void OnChangeBlocking(DbIndex db_index, std::string_view key);
+  void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& buckets);
 
   // --- Shared members (to be moved from subclasses in later PRs) ---
 
