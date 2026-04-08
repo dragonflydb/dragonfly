@@ -46,6 +46,9 @@ ABSL_FLAG(std::string, notify_keyspace_events, "",
 
 ABSL_FLAG(bool, cluster_flush_decommit_memory, false, "Decommit memory after flushing slots");
 
+ABSL_FLAG(bool, replica_delete_expired, true,
+          "If true, replicas proactively delete expired keys on the read path.");
+
 namespace dfly {
 
 using namespace std;
@@ -1234,8 +1237,10 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) con
 
   int64_t expire_time = it->first.GetExpireTime();
 
-  // Never do expiration on replica or if expiration is disabled.
-  if (int64_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_) {
+  // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
+  // is enabled (which allows replicas to proactively delete expired keys on the read path).
+  if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
+      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
     return it;
   }
 
@@ -1302,12 +1307,12 @@ uint64_t DbSlice::RegisterOnMove(MovedCallback cb) {
 }
 
 // Ordering invariant (PIT mode):
-//   When the traversal fiber visits a bucket in BucketSaveCb, earlier-registered snapshots
+//   When the traversal fiber visits a bucket in OnChangeBlocking, earlier-registered snapshots
 //   (those with snapshot_version_ < this snapshot's version) may not have serialized this bucket
-//   yet. FlushChangeToEarlierCallbacks invokes their OnDbChange callbacks so they serialize the
-//   bucket before the current snapshot stamps it with its own version. Without this, an earlier
+//   yet. FlushChangeToEarlierCallbacks invokes their OnChangeBlocking callbacks so they serialize
+//   the bucket before the current snapshot stamps it with its own version. Without this, an earlier
 //   snapshot could miss the bucket entirely — its traversal already passed it, and the version
-//   stamp from the current snapshot would cause the earlier snapshot's OnDbChange to skip it.
+//   stamp from the current snapshot would cause the earlier snapshot's OnChangeBlocking to skip it.
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   unique_lock<LocalLatch> lk(serialization_latch_);
 

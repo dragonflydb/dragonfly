@@ -123,8 +123,8 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   void SendFinalize(long attempt);
 
  private:
-  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                           bool on_update) override;
+  unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                 bool on_update) override;
 
   void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override;
 

@@ -24,8 +24,8 @@ class SerializerBaseTest : public BaseFamilyTest, public SerializerBase {
     return bucket_states_.size();
   }
 
-  unsigned SerializeBucket(DbIndex /*db_index*/, PrimeTable::bucket_iterator /*it*/,
-                           bool /* on_update */) override {
+  unsigned SerializeBucketLocked(DbIndex /*db_index*/, PrimeTable::bucket_iterator /*it*/,
+                                 bool /* on_update */) override {
     return 0;
   }
 
