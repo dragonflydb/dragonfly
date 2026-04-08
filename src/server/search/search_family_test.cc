@@ -2319,11 +2319,11 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
 }
 
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
-  Run({"JSON.SET", "json1", "$", R"({"text":"2"})"});
-  Run({"JSON.SET", "json2", "$", R"({"text":"1"})"});
-
   auto resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.text", "AS", "text", "TEXT"});
   EXPECT_EQ(resp, "OK");
+
+  Run({"JSON.SET", "json1", "$", R"({"text":"2"})"});
+  Run({"JSON.SET", "json2", "$", R"({"text":"1"})"});
 
   auto expect_expr = [](std::string_view text_field) {
     return IsArray(2, "json2", IsMap(text_field, "1", "$", R"({"text":"1"})"), "json1",
