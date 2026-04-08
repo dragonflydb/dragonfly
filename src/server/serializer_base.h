@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <memory>
 #include <vector>
 
 #include "server/db_slice.h"
@@ -13,6 +14,7 @@
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -21,6 +23,21 @@ class ExecutionState;
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
+
+// Track dependencies for buckets
+struct BucketDependencies {
+  // Increase number of dependencies for bucket
+  void Increment(BucketIdentity bucket);
+  void Decrement(BucketIdentity bucket);
+
+  // Wait for all bucket dependencies to resolve
+  void Wait(BucketIdentity bucket) const;
+  bool DEBUG_IsBusy(BucketIdentity) const;
+
+ private:
+  using SharedLatch = std::shared_ptr<LocalLatch>;
+  absl::flat_hash_map<BucketIdentity, SharedLatch> deps_;
+};
 
 // Tracks serialization progress of offloaded (delayed) entries.
 struct DelayedEntryHandler {
@@ -35,7 +52,13 @@ struct DelayedEntryHandler {
   // Serialize delayed entry that was fetched with serializer specific implementation
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
+ protected:
+  explicit DelayedEntryHandler(BucketDependencies& deps) : deps_{deps} {
+  }
+
  private:
+  BucketDependencies& deps_;
+
   // Entries that are waiting for tiered storage reads to complete before they can be serialized.
   std::multimap<BucketIdentity, std::unique_ptr<TieredDelayedEntry>> delayed_entries_;
 };
@@ -50,7 +73,7 @@ struct DelayedEntryHandler {
 //
 // State tracking is purely observational in early PRs: it drives DCHECKs and
 // stats but does not alter the serialization control flow.
-class SerializerBase : public DelayedEntryHandler {
+class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
  public:
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
@@ -109,21 +132,7 @@ class SerializerBase : public DelayedEntryHandler {
 
  private:
   friend class SerializerBaseTest;
-  SerializerBase() : db_slice_(nullptr), base_cntx_(nullptr) {
-  }
 
-  // Return identity if bucket should be processed.
-  // Checks bucket validity, version and state
-  bool ShouldProcessBucket(PrimeTable::bucket_iterator);
-
-  // Transition bucket from NotVisited -> Serializing.
-  void MarkBucketSerializing(BucketIdentity bid);
-
-  // Transition bucket from Serializing -> Covered (empty delayed) or
-  // Serializing -> DelayedPending (non-empty delayed).
-  void FinishBucketIteration(BucketIdentity bid);
-
-  absl::flat_hash_map<BucketIdentity, BucketPhase> bucket_states_;
   uint64_t change_cb_id_ = 0;
 };
 
