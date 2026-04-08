@@ -4964,6 +4964,190 @@ TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {
                                          IsMap("route_name", "sports", "avg_dist", "0.6")));
 }
 
+TEST_F(SearchFamilyTest, AggregateDialect) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "price", "NUMERIC"});
+  Run({"HSET", "d1", "title", "hello world", "price", "10"});
+  Run({"HSET", "d2", "title", "goodbye world", "price", "20"});
+
+  // DIALECT 2 should be accepted and ignored (DF always behaves as dialect 2)
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@price", "LIMIT", "0", "10", "DIALECT", "2"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("price", "10"), IsMap("price", "20")));
+}
+
+TEST_F(SearchFamilyTest, AggregateDialectWithParams) {
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "price", "NUMERIC", "vec",
+       "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "title", "machine learning", "price", "10", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "title", "deep learning", "price", "20", "vec", MakeVec(2.0f, 2.0f)});
+
+  // DIALECT 2 enables parameterized queries with PARAMS
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @vec $vector AS dist]", "LOAD", "1", "@title",
+                   "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f), "SORTBY", "2", "@dist", "ASC",
+                   "DIALECT", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplySimple) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "price", "NUMERIC"});
+  Run({"HSET", "d1", "price", "100"});
+  Run({"HSET", "d2", "price", "200"});
+
+  // APPLY creates a new computed field
+  auto resp = Run(
+      {"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@price", "APPLY", "@price * 1.2", "AS", "taxed"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("price", "100", "taxed", "120"),
+                                         IsMap("price", "200", "taxed", "240")));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyFieldRename) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "rating", "NUMERIC"});
+  Run({"HSET", "d1", "rating", "4.5"});
+
+  // APPLY can rename a field
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@rating", "APPLY", "@rating", "AS", "score"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("rating", "4.5", "score", "4.5")));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyArithmetic) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC", "b", "NUMERIC"});
+  Run({"HSET", "d1", "a", "10", "b", "3"});
+
+  // APPLY with multi-field arithmetic
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@a", "@b", "APPLY", "(@a - @b) / 2",
+                   "AS", "result"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "10", "b", "3", "result", "3.5")));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyChained) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "distance", "NUMERIC"});
+  Run({"HSET", "d1", "distance", "0.4"});
+  Run({"HSET", "d2", "distance", "1.2"});
+
+  // Multiple APPLY steps chained (redisvl HybridQuery pattern)
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@distance", "APPLY",
+                   "(2 - @distance) / 2", "AS", "similarity", "APPLY", "@similarity * 0.7", "AS",
+                   "weighted", "SORTBY", "2", "@weighted", "DESC"});
+  // d1: similarity = (2-0.4)/2 = 0.8, weighted = 0.56
+  // d2: similarity = (2-1.2)/2 = 0.4, weighted = 0.28
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyWithSortBy) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "price", "NUMERIC"});
+  Run({"HSET", "d1", "price", "100"});
+  Run({"HSET", "d2", "price", "200"});
+  Run({"HSET", "d3", "price", "50"});
+
+  // APPLY + SORTBY on computed field
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@price", "APPLY", "@price * 2", "AS",
+                   "doubled", "SORTBY", "2", "@doubled", "DESC", "LIMIT", "0", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyMissingSyntax) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC"});
+  Run({"HSET", "d1", "a", "1"});
+
+  // APPLY without AS
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "APPLY", "@a * 2"}), ErrArg("syntax"));
+
+  // APPLY without expression
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "APPLY"}), ErrArg(""));
+}
+
+TEST_F(SearchFamilyTest, AggregateKnn) {
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "vec", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "title", "first", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "title", "second", "vec", MakeVec(2.0f, 2.0f)});
+  Run({"HSET", "d3", "title", "third", "vec", MakeVec(3.0f, 3.0f)});
+
+  // KNN in FT.AGGREGATE should return results with distance
+  // LOAD must come before pipeline steps (SORTBY)
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @vec $vector AS dist]", "LOAD", "1", "@title",
+                   "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f), "SORTBY", "2", "@dist", "ASC",
+                   "DIALECT", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  // Should return 2 closest docs (d1 is exact match = distance 0)
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateKnnWithFilter) {
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "category", "TAG", "vec", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "category", "science", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "category", "science", "vec", MakeVec(2.0f, 2.0f)});
+  Run({"HSET", "d3", "category", "cooking", "vec", MakeVec(3.0f, 3.0f)});
+
+  // KNN with tag filter in FT.AGGREGATE
+  auto resp = Run({"FT.AGGREGATE", "idx", "(@category:{science})=>[KNN 2 @vec $vector AS dist]",
+                   "LOAD", "1", "@category", "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f), "SORTBY",
+                   "2", "@dist", "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(1u));
+}
+
+TEST_F(SearchFamilyTest, AggregateKnnWithApply) {
+  // KNN in FT.AGGREGATE combined with APPLY — core use case for redisvl
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "vec", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "title", "first", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "title", "second", "vec", MakeVec(2.0f, 2.0f)});
+  Run({"HSET", "d3", "title", "third", "vec", MakeVec(3.0f, 3.0f)});
+
+  // KNN + APPLY to compute normalized similarity from distance
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx",
+                    "*=>[KNN 3 @vec $vector AS vector_distance]",
+                    "LOAD", "1", "@title",
+                    "APPLY", "(2 - @vector_distance) / 2", "AS", "similarity",
+                    "SORTBY", "2", "@similarity", "DESC", "MAX", "3",
+                    "DIALECT", "2",
+                    "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f)});
+  // clang-format on
+
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  // d1 is exact match (distance=0, similarity=1.0), should be first
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(3u));
+}
+
 // Verify that BuildRestoreCommand round-trips all HNSW vector parameters
 // including TYPE, M, and EF_CONSTRUCTION.
 TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {

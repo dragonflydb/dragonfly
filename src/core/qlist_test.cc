@@ -411,18 +411,32 @@ TEST_F(QListTest, DefragmentListpackCompressed) {
   ASSERT_EQ(i, total_items);
 }
 
-TEST_F(QListTest, Tiering) {
-  QList::stats.offload_requests = 0;
-  QList tiered_ql;
+// MergeNodes must not follow the head_->prev circular link when looking for
+// adjacent nodes to merge.  Splitting a full head node and calling MergeNodes
+// on the right half used to traverse new_head->prev (= tail), merging two
+// non-adjacent nodes and corrupting element order.
+TEST_F(QListTest, InsertSplitHeadMergeOrder) {
+  QList ql(5, 0);
 
-  // Enable tiering and set node_depth_threshold = 1
-  tiered_ql.EnableTiering(1);
-
-  for (int i = 0; i < 8000; i++) {
-    tiered_ql.Push(absl::StrCat("value", i), QList::TAIL);
+  // 3 nodes: [v0..v4](head,full) -> [v5..v9] -> [v10](tail,1 elem)
+  for (int i = 0; i < 11; i++) {
+    ql.Push(StrCat("v", i), QList::TAIL);
   }
+  ASSERT_EQ(3u, ql.node_count());
 
-  EXPECT_EQ(QList::stats.offload_requests, 9);
+  // Insert in the middle of the full head triggers split + MergeNodes.
+  ql.Insert("v2", "x", QList::BEFORE);
+
+  vector<string> items;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        items.push_back(e.to_string());
+        return true;
+      },
+      0, ql.Size());
+
+  EXPECT_THAT(items,
+              ElementsAre("v0", "v1", "x", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10"));
 }
 
 TEST_F(QListTest, InsertPivotSplitMergeMallocSize) {

@@ -160,6 +160,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     stats_.total_cancels++;
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(id));
     node->io_pending = 0;
+    // If stashing failed we need to decrease offloaded nodes count.
+    QList* ql = reinterpret_cast<QList*>(std::get<1>(id));
+    ql->AdjustOffloadNodeCount(-1);
   }
 
   void CancelStash(tiering::KeyRef id, size_t size) {
@@ -173,6 +176,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   void CancelStash(tiering::ListNodeId id) {
+    QList* ql = reinterpret_cast<QList*>(std::get<1>(id));
+    ql->AdjustOffloadNodeCount(-1);
     CancelPending(id);
   }
 
@@ -276,7 +281,15 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     stats_.total_stashes++;
 
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(id));
+    QList* ql = reinterpret_cast<QList*>(std::get<1>(id));
+
     node->io_pending = 0;
+
+    // Adjust parent QList node malloc size / number of offloaded nodes.
+    ql->AdjustMallocSize(-segment.length);
+    node->SetExternal(segment.offset, segment.length);
+
+    stats->AddTypeMemoryUsage(OBJ_LIST, -segment.length);
   }
 
   // If any backpressure (throttling) is active, notify that the operation finished
@@ -333,15 +346,6 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
                                                   tiering::Decoder* decoder) {
   ++stats_.total_fetches;
 
-  if (const auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
-    DbIndex db_id = std::get<0>(*key);
-    QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
-    ++stats_.total_uploads;
-    decoder->Upload(node);
-    RecordDeleted(node, segment.length, GetDbTableStats(db_id));
-    return true;
-  }
-
   if (const auto* i = std::get_if<uintptr_t>(&id); i) {
     if (*i == kFragmentedBin) {  // Generally we read whole bins only for defrag
       auto* bdecoder = static_cast<tiering::BareDecoder*>(decoder);
@@ -353,28 +357,41 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   tiering::Decoder::UploadMetrics metrics = decoder->GetMetrics();
 
   // 1. When modified is true we MUST upload the value back to memory.
-  // 2. On the other hand, if read is caused by snapshotting we do not want to fetch it.
+  // 2. On the other hand, if read is caused by snapshotting we:
+  //    a. Don't fetch it if it is PrimeValue
+  //    b. We allow fetching for ListNodes because they need to be materialized.
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
   bool should_upload = metrics.modified;
-  should_upload |= (ts_->UploadBudget() > int64_t(metrics.estimated_mem_usage)) &&
-                   !SliceSnapshot::IsSnaphotInProgress();
+  should_upload |=
+      (ts_->UploadBudget() > int64_t(metrics.estimated_mem_usage)) &&
+      (!SliceSnapshot::IsSnaphotInProgress() || std::holds_alternative<tiering::ListNodeId>(id));
 
   if (!should_upload)
     return false;
 
-  const auto& key = get<tiering::DbKeyId>(id);
-  auto* pv = Find(key.first, key.second);
-  if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-    if (metrics.modified || pv->WasTouched()) {
-      ++stats_.total_uploads;
-      decoder->Upload(pv);
-      RecordDeleted(*pv, segment.length, GetDbTableStats(key.first));
-      return true;
+  if (const auto* key = std::get_if<tiering::ListNodeId>(&id); key) {
+    DbIndex db_id = std::get<0>(*key);
+    QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
+    ++stats_.total_uploads;
+    decoder->Upload(node);
+    RecordDeleted(node, segment.length, GetDbTableStats(db_id));
+    return true;
+  }
+
+  if (const auto* key = std::get_if<tiering::DbKeyId>(&id); key) {
+    auto* pv = Find(key->first, key->second);
+    if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
+      if (metrics.modified || pv->WasTouched()) {
+        ++stats_.total_uploads;
+        decoder->Upload(pv);
+        RecordDeleted(*pv, segment.length, GetDbTableStats(key->first));
+        return true;
+      }
+      pv->SetTouched(true);
+      return false;
     }
-    pv->SetTouched(true);
-    return false;
   }
 
   LOG(DFATAL) << "Internal error, should not reach this";
@@ -769,6 +786,18 @@ void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredS
   }
 }
 
+bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
+                   BackPressureFuture* backpressure) {
+  if (auto blobs = ts->ShouldStash(*node); blobs) {
+    // Increment before stashing; decremented on failure in `ClearStashPending`
+    ql->AdjustOffloadNodeCount(1);
+    node->io_pending = 1;
+    ts->StashPartialValue(tiering::ListNodeId{dbid, ql, node}, *blobs, backpressure);
+    return true;
+  }
+  return false;
+}
+
 void TieredStorage::StashPartialValue(tiering::PendingId id, const StashDescriptor& blobs,
                                       BackPressureFuture* backpressure) {
   size_t est_size = blobs.EstimatedSerializedSize();
@@ -792,6 +821,18 @@ void ReadTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
   };
   ts->Read(KeyRef{dbid, key}, value.GetExternalSlice(), tiering::StringDecoder{value},
            std::move(cb));
+}
+
+TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
+                                                const tiering::DiskSegment& segment,
+                                                TieredStorage* ts) {
+  TieredStorage::TResult<bool> fut;
+  auto read_cb = [fut](const io::Result<tiering::ListNodeDecoder*>& res) mutable {
+    fut.Resolve(res.transform([](tiering::ListNodeDecoder* d) { return true; }));
+  };
+  ts->Read(tiering::ListNodeId{dbid, ql, node}, segment, tiering::ListNodeDecoder{ql},
+           std::move(read_cb));
+  return fut;
 }
 
 template <typename T>

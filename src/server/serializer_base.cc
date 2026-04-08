@@ -21,6 +21,8 @@
 
 namespace dfly {
 
+using namespace std;
+
 void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk,
                                            const PrimeValue& pv, time_t expire_time,
                                            uint32_t mc_flags) {
@@ -41,8 +43,28 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
-  auto serialize_entry = [&](auto it) {
-    auto& entry = it->second;
+  // Extract ahead because of possible iterator invalidation during suspension (Get/Serialize)
+  // if multiple fibers progress on delayed entries
+  std::vector<decltype(delayed_entries_)::node_type> targets;
+
+  // Flush all entries of bucket if provided
+  if (flush_bucket) {
+    auto [it, end] = delayed_entries_.equal_range(flush_bucket);
+    while (it != end)
+      targets.push_back(delayed_entries_.extract(it++));
+  }
+
+  // Serialize the delayed entries that are resolved, or all if force it true
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved())
+      it++;
+    else
+      targets.push_back(delayed_entries_.extract(it++));
+  }
+
+  // Serialize all targets
+  for (auto& target : targets) {
+    auto& entry = target.mapped();
     auto value = entry->value.Get();
 
     if (!value.has_value()) {
@@ -53,23 +75,6 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
 
     PrimeValue pv{*value};
     SerializeFetchedEntry(*entry, pv);
-    delayed_entries_.erase(it++);
-  };
-
-  // Flush all entries of bucket
-  if (flush_bucket) {
-    auto range = delayed_entries_.equal_range(flush_bucket);
-    for (auto it = range.first; it != range.second;) {
-      serialize_entry(it++);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved())
-      it++;
-    else
-      serialize_entry(it++);
   }
 }
 
@@ -93,7 +98,7 @@ SerializerBase::~SerializerBase() {
 void SerializerBase::RegisterChangeListener() {
   db_array_ = db_slice_->databases();  // copy pointers to survive flush
   auto cb = [this](DbIndex dbid, const ChangeReq& req) {
-    std::visit([&](auto it) { OnChange(dbid, it); }, req.change);
+    std::visit([&](auto it) { OnChangeBlocking(dbid, it); }, req.change);
   };
   snapshot_version_ = db_slice_->RegisterOnChange(cb);
 }
@@ -159,10 +164,11 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
     db_guard.emplace(*db_slice_->GetLatch());
   }
 
+  // We call it before SerializeBucketLocked because it dchecks on bucket version.
   it.SetVersion(snapshot_version_);
   MarkBucketSerializing(it.bucket_address());
 
-  stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
+  stats_.keys_serialized += SerializeBucketLocked(db_index, it, on_update);
   stats_.buckets_on_change += unsigned(on_update);
 
   FinishBucketIteration(it.bucket_address());
@@ -182,13 +188,15 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   return true;
 }
 
-void SerializerBase::OnChange(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::string_view active_name = util::fb2::detail::FiberActive()->name();
-  if (!absl::StartsWith(active_name, "shard_queue") && !absl::StartsWith(active_name, "l2_queue") &&
+void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it) {
+  auto* active = util::fb2::detail::FiberActive();
+  string_view active_name = active->name();
+  if (!absl::StartsWith(active_name, "shard_queue") &&  //
+      !absl::StartsWith(active_name, "l2_queue") &&     // pipelining
       !absl::StartsWith(active_name, "SliceSnapshot") &&
       active_name != "Dispatched"  // Comes from OnAllShards(... { migration->RunSync(); });
   ) {
-    LOG(DFATAL) << "Unexpected fiber: " << active_name << " on " << util::fb2::GetStacktrace();
+    LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
   }
 
   ProcessBucket(db_index, it, true);

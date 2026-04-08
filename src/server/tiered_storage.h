@@ -199,6 +199,10 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
       dbid, key, value, [](std::string_view val) { return std::string(val); }, ts);
 }
 
+TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
+                                                const tiering::DiskSegment& segment,
+                                                TieredStorage* ts);
+
 // Reads offloaded value, and applies modifications on it and return generic result from callback.
 // Unlike with immutable Reads - the modified value will be uploaded back to memory.
 // This is handled by OpManager when modf completes.
@@ -210,6 +214,11 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 // nullptr, assign/set the backpressure future to `*backpressure`.
 void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                      BackPressureFuture* backpressure);
+
+// Stash list node if it meets criteria.
+// Returns true if stash was initiated, false otherwise.
+bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
+                   BackPressureFuture* backpressure);
 
 #else
 
@@ -254,7 +263,7 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure) {
   }
 
-  void Delete(DbIndex dbid, PrimeValue* value) {
+  void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
   }
 
   bool HasModificationPending(tiering::DiskSegment segment) const {
@@ -323,6 +332,12 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
   return {};
 }
 
+inline TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
+                                                       const tiering::DiskSegment& segment,
+                                                       TieredStorage* ts) {
+  return {};
+}
+
 template <typename T>
 TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                                        std::function<T(std::string*)> modf, TieredStorage* ts) {
@@ -331,6 +346,11 @@ TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const
 
 inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
                             BackPressureFuture* backpressure) {
+}
+
+inline bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
+                          BackPressureFuture* backpressure) {
+  return false;
 }
 
 #endif  // WITH_TIERING

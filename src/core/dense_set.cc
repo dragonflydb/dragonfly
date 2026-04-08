@@ -942,7 +942,8 @@ void DenseSet::CollectExpired() {
 }
 
 size_t DenseSet::SizeSlow() {
-  CollectExpired();
+  if (expiration_used_)
+    CollectExpired();
   return size_;
 }
 

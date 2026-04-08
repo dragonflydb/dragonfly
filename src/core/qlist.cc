@@ -426,6 +426,14 @@ void QList::Node::SetExternal(size_t offset, uint32_t size) {
   ext_size = size;
 }
 
+void QList::Node::Upload(QList* ql, std::string_view val) {
+  entry = static_cast<unsigned char*>(zmalloc(val.size()));
+  memcpy(entry, val.data(), val.size());
+  ql->AdjustMallocSize(val.size());
+  ql->AdjustOffloadNodeCount(-1);
+  offloaded = 0;
+}
+
 void QList::SetPackedThreshold(unsigned threshold) {
   packed_threshold = threshold;
 }
@@ -480,10 +488,9 @@ QList::QList(QList&& other) noexcept
       tiering_enabled_(other.tiering_enabled_),
       compress_(other.compress_),
       bookmark_count_(other.bookmark_count_),
-      num_offloaded_nodes_(other.num_offloaded_nodes_) {
+      tiering_params_(std::move(other.tiering_params_)) {
   other.head_ = nullptr;
   other.len_ = other.count_ = 0;
-  other.num_offloaded_nodes_ = 0;
 }
 
 QList::~QList() {
@@ -503,9 +510,9 @@ QList& QList::operator=(QList&& other) noexcept {
     tiering_enabled_ = other.tiering_enabled_;
     compress_ = other.compress_;
     bookmark_count_ = other.bookmark_count_;
-    num_offloaded_nodes_ = other.num_offloaded_nodes_;
     other.head_ = nullptr;
-    other.len_ = other.count_ = other.num_offloaded_nodes_ = 0;
+    other.len_ = other.count_ = 0;
+    tiering_params_ = std::move(other.tiering_params_);
   }
   return *this;
 }
@@ -519,7 +526,7 @@ void QList::Clear() noexcept {
     // If entry is offloaded we should skip freeing its memory.
     bool free_entry = current->offloaded == 0;
     if (tiering_enabled_ && (current->offloaded || current->io_pending)) {
-      CleanupOffloadedNode(current);
+      tiering_params_->cleanup(this, current);
     } else {
       if (current->encoding != QUICKLIST_NODE_ENCODING_RAW) {
         quicklistLZF* lzf = (quicklistLZF*)current->entry;
@@ -540,7 +547,6 @@ void QList::Clear() noexcept {
   head_ = nullptr;
   count_ = 0;
   malloc_size_ = 0;
-  num_offloaded_nodes_ = 0;
 }
 
 void QList::Push(string_view value, Where where) {
@@ -915,6 +921,9 @@ void QList::Replace(Iterator it, std::string_view elem) {
 
 void QList::CoolOff(Node* node, uint32_t node_id) {
   if (tiering_enabled_) {
+    uint32_t threshold = tiering_params_->node_depth_threshold;
+    uint32_t num_offloaded_nodes = tiering_params_->num_offloaded_nodes;
+
     // Dry run for offloading decision.
     // a. Node id is withing the offloadable depth - offload it if not already offloaded.
     // b. Node id is outside the offloadable depth - but we have too many nodes that are not
@@ -925,12 +934,11 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     //    we won't need to traverse them again for "trivial" access patterns unless they
     //    get accessed again. Another reason for missing offloaded nodes is that node_id can be
     //    off due to merges (can be improved in future).
-    if (node_id >= tiering_node_depth_threshold_ &&
-        node_id + tiering_node_depth_threshold_ < len_) {
+    if (node_id >= threshold && node_id + threshold < len_) {
       if (!node->offloaded && !node->io_pending) {
-        OffloadNode(node);
+        tiering_params_->offload(this, node);
       }
-    } else if (num_offloaded_nodes_ * 2 + tiering_node_depth_threshold_ * 2 < len_) {
+    } else if (num_offloaded_nodes * 2 + threshold * 2 < len_) {
       // We check `num_offloaded_nodes_ * 2` above to avoid frequent traversals.
       // So only when the gap between offloaded and non-offloaded nodes is large enough,
       // we do a traversal to offload more nodes.
@@ -940,16 +948,15 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
 
       // Traverse from both ends towards the middle as we expect more offloads towards the ends
       // due to usual access patterns of adding items via lpush/rpush.
-      while (traverse_node_id <= len_ / 2 &&
-             (num_offloaded_nodes_ + 2 * tiering_node_depth_threshold_) < len_) {
-        if (traverse_node_id >= tiering_node_depth_threshold_) {
+      while (traverse_node_id <= len_ / 2 && (num_offloaded_nodes + 2 * threshold) < len_) {
+        if (traverse_node_id >= threshold) {
           if (fw->offloaded == 0 && fw->io_pending == 0) {
-            OffloadNode(fw);
+            tiering_params_->offload(this, fw);
           }
 
           // Avoid offloading the same node twice when fw and rev meet in the middle.
           if (rev != fw && rev->offloaded == 0 && rev->io_pending == 0) {
-            OffloadNode(rev);
+            tiering_params_->offload(this, rev);
           }
         }
         fw = fw->next;
@@ -1047,12 +1054,12 @@ void QList::Materialize(Node* node) {
 
   // Cancel stash in progress before loading.
   if (node->io_pending) {
-    CleanupOffloadedNode(node);
+    tiering_params_->cleanup(this, node);
   }
 
   // Load the offloaded node data back into memory.
   if (node->offloaded) {
-    ReadOffloadedNode(node);
+    tiering_params_->load(this, node);
   }
 
   DCHECK(!node->offloaded);
@@ -1087,10 +1094,12 @@ auto QList::MergeNodes(Node* center) -> Node* {
   Node *prev = NULL, *prev_prev = NULL, *next = NULL;
   Node *next_next = NULL, *target = NULL;
 
-  if (center->prev) {
+  // head_->prev is a circular shortcut to the tail, not a real predecessor.
+  // Only follow ->prev chains when we are not at the head node.
+  if (center != head_) {
     prev = center->prev;
-    if (center->prev->prev)
-      prev_prev = center->prev->prev;
+    if (prev != head_)
+      prev_prev = prev->prev;
   }
 
   if (center->next) {
@@ -1112,7 +1121,7 @@ auto QList::MergeNodes(Node* center) -> Node* {
   }
 
   /* Try to merge center node and previous node */
-  if (NodeAllowMerge(center, center->prev, fill_)) {
+  if (center != head_ && NodeAllowMerge(center, center->prev, fill_)) {
     target = ListpackMerge(center->prev, center);
     center = NULL; /* center could have been deleted, invalidate it. */
   } else {
@@ -1193,7 +1202,7 @@ void QList::DelNode(Node* node) {
   }
 
   if (tiering_enabled_ && (node->offloaded || node->io_pending)) {
-    CleanupOffloadedNode(node);
+    tiering_params_->cleanup(this, node);
   }
 
   /* If we deleted a node within our compress depth, we
@@ -1241,18 +1250,22 @@ bool QList::DelPackedIndex(Node* node, uint8_t* p) {
   return false;
 }
 
-void QList::OffloadNode(Node* node) const {
-  DCHECK(tiering_enabled_ && node->offloaded == 0 && node->io_pending == 0);
-  stats.offload_requests++;
-  node->io_pending = 1;
-}
-
-void QList::ReadOffloadedNode(QList::Node* node) const {
-  stats.onload_requests++;
-}
-
-void QList::CleanupOffloadedNode(QList::Node* node) const {
-  node->io_pending = 0;
+void QList::SetDbIndex(DbIndex db_id) {
+  if (db_id_ == db_id) {
+    return;
+  }
+  // With tiering enabled, we materialize all offloaded nodes before reassigning the db_id.
+  // This is suboptimal: pending nodes could be canceled, and fully offloaded nodes only need
+  // a statistics update — they don't depend on db_id, only on their storage offset.
+  if (tiering_enabled_ && tiering_params_->num_offloaded_nodes > 0) {
+    Node* node = head_;
+    while (node) {
+      Node* next = node->next;
+      Materialize(node);
+      node = (next == head_) ? nullptr : next;
+    }
+  }
+  db_id_ = db_id;
 }
 
 void QList::InitIteratorEntry(Iterator* it) const {

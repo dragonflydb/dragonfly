@@ -55,7 +55,7 @@ class SerializerBase : public DelayedEntryHandler {
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
     uint64_t buckets_serialized = 0;           // total number of buckets serialized
-    uint64_t buckets_on_change = 0;            // buckets serialized by OnChange flow
+    uint64_t buckets_on_change = 0;            // buckets serialized by OnChangeBlocking flow
     uint64_t buckets_skipped = 0;              // already Covered when seen
     uint64_t change_during_serialization = 0;  // change hit an in-flight bucket
   };
@@ -76,7 +76,7 @@ class SerializerBase : public DelayedEntryHandler {
  protected:
   // Phase of an in-flight bucket (only stored while transient).
   enum class BucketPhase : uint8_t {
-    kSerializing,     // bucket is being iterated by the main loop / OnChange
+    kSerializing,     // bucket is being iterated by the main loop / OnChangeBlocking
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
@@ -85,15 +85,16 @@ class SerializerBase : public DelayedEntryHandler {
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
-  virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                   bool on_update) = 0;
+  // Currently runs with big_value_mu_ held.
+  virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                         bool on_update) = 0;
 
   // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
-  void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
+  void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
 
   // Called when a new key is about to be inserted,
-  // calls CVCUponInsert -> OnChange(bucket_iterator) for every touched bucket.
-  void OnChange(DbIndex db_index, std::string_view key);
+  // calls CVCUponInsert -> OnChangeBlocking(bucket_iterator) for every touched bucket.
+  void OnChangeBlocking(DbIndex db_index, std::string_view key);
 
   // --- Shared members (to be moved from subclasses in later PRs) ---
 

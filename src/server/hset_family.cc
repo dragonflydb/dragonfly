@@ -1009,15 +1009,18 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
           str_vec.emplace_back(key, sdslen(key));
         }
       } else {
+        size_t real_size = string_map->SizeSlow();
         size_t actual_count =
-            (count >= 0) ? std::min(size_t(count), string_map->UpperBoundSize()) : abs(count);
+            (count >= 0) ? std::min(size_t(count), real_size) : size_t(-int64_t(count));
         std::vector<sds> keys, vals;
-        if (count >= 0) {
-          string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
-        } else {
-          string_map->RandomPairs(actual_count, keys, vals, with_values);
+        if (real_size > 0 && actual_count > 0) {
+          if (count >= 0) {
+            string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
+          } else {
+            string_map->RandomPairs(actual_count, keys, vals, with_values);
+          }
         }
-        for (size_t i = 0; i < actual_count; ++i) {
+        for (size_t i = 0; i < keys.size(); ++i) {
           str_vec.emplace_back(keys[i], sdslen(keys[i]));
           if (with_values) {
             str_vec.emplace_back(vals[i], sdslen(vals[i]));

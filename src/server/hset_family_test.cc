@@ -712,6 +712,28 @@ TEST_F(HSetFamilyTest, RandomField1NotExpired) {
   EXPECT_THAT(Run({"HRANDFIELD", "key"}), "keep");
 }
 
+// Regression test for SIGSEGV in CmdHRandField when expired fields
+// cause UpperBoundSize() > SizeSlow(). CmdHRandField uses UpperBoundSize()
+// for actual_count but RandomPairsUnique uses SizeSlow(), returning fewer
+// elements than the loop expects -> out-of-bounds access.
+TEST_F(HSetFamilyTest, HRandFieldCountWithExpiredFields) {
+  // Add fields with short TTL so they expire.
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_EQ(CheckedInt({"HSETEX", "key", "1", absl::StrCat("k", i), "v"}), 1);
+  }
+  // Add one permanent field.
+  EXPECT_EQ(CheckedInt({"HSET", "key", "keep", "v"}), 1);
+
+  AdvanceTime(2000);
+
+  // Request count=42 (positive) with expired fields.
+  // UpperBoundSize()=11 but SizeSlow()=1. Must not crash.
+  Run({"HRANDFIELD", "key", "42"});
+
+  // With WITHVALUES.
+  Run({"HRANDFIELD", "key", "42", "WITHVALUES"});
+}
+
 TEST_F(HSetFamilyTest, EmptyHashBug) {
   EXPECT_THAT(Run({"HSET", "foo", "a_field", "a_value"}), IntArg(1));
   EXPECT_THAT(Run({"HSETEX", "foo", "1", "b_field", "b_value"}), IntArg(1));
