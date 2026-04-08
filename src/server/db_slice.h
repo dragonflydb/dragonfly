@@ -74,6 +74,9 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  // how many journal omit optimizations were performed
+  size_t journal_omit = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -221,6 +224,24 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
+  // Hints for the current operation.
+  struct MutationHints {
+    // Inputs
+    struct {
+      // Operation contains only a single key
+      bool single_key = false;
+
+      // Support omitting journal writes
+      bool support_omit = false;
+    } const hint;
+
+    // Outputs
+    struct {
+      // The journal write is safe to be omitted
+      bool omit_journal = false;
+    } result = {};
+  };
+
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
@@ -248,6 +269,8 @@ class DbSlice {
     AutoUpdater post_updater;
     bool is_new = false;
   };
+
+  void ProvideHints(MutationHints* hints);
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
@@ -397,11 +420,6 @@ class DbSlice {
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
 
-  //! Registers the callback to be called after items are moved in table.
-  //! Returns the registration id which is also the unique version of the dbslice
-  //! at a time of the call.
-  uint64_t RegisterOnMove(MovedCallback cb);
-
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
   }
@@ -411,8 +429,6 @@ class DbSlice {
 
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
-
-  void UnregisterOnMoved(uint64_t id);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;        // number of deleted items due to expiry.
@@ -573,7 +589,6 @@ class DbSlice {
   }
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
-  void CallMovedCallbacks(DbIndex id, const MovedItemsVec& moved_items);
 
   // We need this because registered callbacks might yield and when they do so we want
   // to avoid Heartbeat or Flushing the db.
@@ -621,8 +636,6 @@ class DbSlice {
   // ordered from the smallest to largest version.
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
-  std::list<std::pair<uint32_t, MovedCallback>> moved_cb_;
-
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of
   // a transaction callback (not the whole transaction).
@@ -638,6 +651,9 @@ class DbSlice {
 
   // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
   bool expired_keys_events_recording_ = true;
+
+  // Provided for the next FindMutableInternal operation
+  MutationHints* mutation_hints_ = nullptr;
 
   struct Hash {
     size_t operator()(const facade::ConnectionRef& c) const {

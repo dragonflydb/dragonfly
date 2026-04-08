@@ -3290,6 +3290,8 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
     append("lua_force_gc_calls", m.lua_stats.force_gc_calls);
     append("lua_gc_freed_memory_total", m.lua_stats.gc_freed_memory);
     append("lua_gc_duration_total_sec", m.lua_stats.gc_duration_ns * 1e-9);
+
+    append("total_journal_omits", m.events.journal_omit);
   };
 
   auto add_tiered_info = [&] {
