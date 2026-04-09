@@ -595,7 +595,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
   CmdArgList fields = parser.Tail();
 
-  if (fields.size() % 2 != 0) {
+  if (fields.empty() || fields.size() % 2 != 0) {
     return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   }
 
