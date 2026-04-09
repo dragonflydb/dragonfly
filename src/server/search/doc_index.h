@@ -226,6 +226,60 @@ struct DocIndexInfo {
 
 class ShardDocIndices;
 
+// Per-shard wrapper around a global HnswVectorIndex. Encapsulates shard-local state
+// (preserved field data for deferred removes) and delegates to the global index.
+// One instance per HNSW field per shard.
+class HnswShardIndex {
+ public:
+  // field_ident: the actual hash key name (not the AS alias).
+  HnswShardIndex(std::shared_ptr<search::HnswVectorIndex> global_index, std::string field_ident);
+
+  // Add a document's vector to the global HNSW index. Returns true if added.
+  bool Add(search::GlobalDocId id, const BaseAccessor& doc);
+
+  // Extraction cache shared across indices for the same document.
+  // Ensures each sds field is extracted at most once and shared via shared_ptr.
+  using ExtractionCache = absl::flat_hash_map<std::string_view, std::shared_ptr<void>>;
+
+  // Remove a document's vector. If the write lock can't be acquired (e.g. serialization
+  // holds a read lock), the operation is deferred. When deferred and using external vectors,
+  // preserves the old sds entry from pv so the deferred op can still dereference it.
+  // modified_fields: when non-empty, only preserve if this field is being modified.
+  // cache: shared across indices so each field is extracted at most once per document.
+  void Remove(search::GlobalDocId id, const BaseAccessor& doc, PrimeValue& pv,
+              absl::Span<const std::string_view> modified_fields, ExtractionCache* cache);
+
+  // Unconditional remove by id (no preservation). Used during restoration.
+  void RemoveById(search::GlobalDocId id);
+
+  // Update vector data for an existing HNSW node (used during restoration).
+  bool UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc);
+
+  bool IsVectorCopied() const;
+
+  void ClearPreservedData();
+
+  const std::string& field_ident() const {
+    return field_ident_;
+  }
+
+  search::HnswVectorIndex* global_index() {
+    return global_index_.get();
+  }
+
+  const search::HnswVectorIndex* global_index() const {
+    return global_index_.get();
+  }
+
+ private:
+  std::shared_ptr<search::HnswVectorIndex> global_index_;
+  std::string field_ident_;  // actual hash key, not AS alias
+
+  // Old sds entries kept alive until deferred HNSW removes complete.
+  // shared_ptr because multiple search indices may reference the same sds.
+  std::vector<std::shared_ptr<void>> preserved_field_data_;
+};
+
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
   friend class ShardDocIndices;
@@ -346,9 +400,15 @@ class ShardDocIndex {
   // Remove doc from all HNSW indices. When a Remove is deferred (read lock held),
   // preserves the old sds entries internally so deferred ops remain safe.
   // modified_fields: when non-empty, only preserve fields being mutated.
+  // cache: shared across search indices so each sds field is extracted at most once.
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       PrimeValue& pv,
-                                      absl::Span<const std::string_view> modified_fields = {});
+                                      absl::Span<const std::string_view> modified_fields,
+                                      HnswShardIndex::ExtractionCache* cache);
+
+  // Clear preserved field data on all per-shard HNSW indices.
+  // Called after serialization drains deferred ops under held write locks.
+  void ClearAllHnswPreservedData();
 
   // Rebuild global vector indices from restored key index, updating vector data
   // for nodes whose graph structure was already restored from RDB.
@@ -406,9 +466,8 @@ class ShardDocIndex {
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
 
-  void ClearPreservedData() {
-    preserved_field_data_.clear();
-  }
+  // Initialize per-shard HNSW wrappers from schema + global registry.
+  void InitHnswShardIndices();
 
  private:
   std::shared_ptr<const DocIndex> base_;
@@ -418,17 +477,14 @@ class ShardDocIndex {
 
   std::unique_ptr<search::IndexBuilder> builder_;
 
+  // Per-shard HNSW wrappers, one per indexed vector field.
+  std::vector<HnswShardIndex> hnsw_shard_indices_;
+
   // Buffered state for journal events arriving while HNSW vector indices
   // are being restored from serialized graph data (is_restoring_vectors_ == true).
   // Drained by RestoreGlobalVectorIndices after the graph is fully restored.
   absl::flat_hash_set<std::string> pending_vector_updates_;
   bool is_restoring_vectors_ = false;
-
-  // Old field data kept alive until deferred HNSW removal completes.
-  // Populated by PreserveFieldData, cleared when the write lock is acquired.
-  // Note: grows unboundedly during long serialization windows (one entry per deferred remove).
-  using PreservedEntry = std::unique_ptr<void, void (*)(void*)>;
-  std::vector<PreservedEntry> preserved_field_data_;
 };
 
 // Stores shard doc indices by name on a specific shard.
@@ -467,10 +523,6 @@ class ShardDocIndices {
   // pv is non-const because preservation swaps sds entries in StringMap.
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, PrimeValue& pv,
                  absl::Span<const std::string_view> modified_fields = {});
-
-  // Clear preserved field data on all indices. Called after HNSW serialization
-  // finishes and read locks are released, so deferred ops can drain normally.
-  void ClearAllPreservedData();
 
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices

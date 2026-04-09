@@ -99,11 +99,11 @@ class HnswVectorIndex {
 
   // Acquire a read lock on the internal MRMW mutex.
   // Use this during serialization to block concurrent Add/Remove (write) operations.
-  std::unique_ptr<MRMWMutexLock> GetReadLock() const;
+  MRMWMutexLock GetReadLock() const;
 
   // Block until the write lock is acquired and all deferred ops are executed.
   // Returns the held write lock so the caller can keep it alive until safe.
-  std::unique_ptr<MRMWMutexLock> DrainPendingOps();
+  MRMWMutexLock DrainPendingOps();
 
  private:
   bool copy_vector_;

@@ -379,8 +379,8 @@ struct HnswlibAdapter {
  public:
   // Block until the write lock is acquired and all deferred ops are drained.
   // Returns the held write lock so the caller can keep it alive.
-  std::unique_ptr<MRMWMutexLock> DrainPendingOps() {
-    auto lock = std::make_unique<MRMWMutexLock>(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+  MRMWMutexLock DrainPendingOps() {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
     ProcessDeferred();
     return lock;
   }
@@ -520,8 +520,8 @@ struct HnswlibAdapter {
     return true;
   }
 
-  std::unique_ptr<MRMWMutexLock> GetReadLock() const {
-    return std::make_unique<MRMWMutexLock>(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+  MRMWMutexLock GetReadLock() const {
+    return MRMWMutexLock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
   }
 
  private:
@@ -643,11 +643,11 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
   return adapter_->UpdateVectorData(id, data);
 }
 
-std::unique_ptr<MRMWMutexLock> HnswVectorIndex::GetReadLock() const {
+MRMWMutexLock HnswVectorIndex::GetReadLock() const {
   return adapter_->GetReadLock();
 }
 
-std::unique_ptr<MRMWMutexLock> HnswVectorIndex::DrainPendingOps() {
+MRMWMutexLock HnswVectorIndex::DrainPendingOps() {
   return adapter_->DrainPendingOps();
 }
 

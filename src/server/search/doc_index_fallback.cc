@@ -21,8 +21,6 @@ void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt, P
                                 absl::Span<const std::string_view>) {
 }
 
-void ShardDocIndices::ClearAllPreservedData() {
-}
 void ShardDocIndices::DropAllIndices() {
 }
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {

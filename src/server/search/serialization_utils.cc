@@ -112,13 +112,18 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
   // write locks. Holding write locks ensures no new Remove can be deferred
   // (MRMW allows concurrent writers, so Removes execute synchronously).
   if (!all_indices.empty()) {
-    std::vector<std::unique_ptr<search::MRMWMutexLock>> write_locks;
+    std::vector<search::MRMWMutexLock> write_locks;
     write_locks.reserve(all_indices.size());
     for (const auto& [index_key, index] : all_indices) {
       write_locks.push_back(index->DrainPendingOps());
     }
-    shard_set->RunBriefInParallel(
-        [](EngineShard* es) { es->search_indices()->ClearAllPreservedData(); });
+    shard_set->RunBriefInParallel([](EngineShard* es) {
+      for (const auto& index_name : es->search_indices()->GetIndexNames()) {
+        if (auto* shard_index = es->search_indices()->GetIndex(index_name)) {
+          shard_index->ClearAllHnswPreservedData();
+        }
+      }
+    });
   }
 }
 #endif

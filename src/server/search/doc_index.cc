@@ -36,26 +36,29 @@ using nonstd::make_unexpected;
 
 namespace {
 
-using PreservedEntry = std::unique_ptr<void, void (*)(void*)>;
+using PreservedEntry = std::shared_ptr<void>;
 
-static void NoopDeleter(void*) {
-}
-
-// Swap an sds entry in StringMap with a copy, returning the original.
-// The returned RAII handle keeps the old data alive for deferred HNSW operations.
+// Swap an sds entry in StringMap with a copy, returning the original as a shared_ptr.
+// The returned handle keeps the old data alive for deferred HNSW operations.
+// When a document is indexed by multiple search indices, they share the same PreservedEntry
+// so the original sds stays alive until all indices release it.
 PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
   // External vectors (copy_vector=false) normally imply StringMap encoding, but at the
   // exact threshold boundary (dim*4 == max_listpack_map_bytes) the hash may still be listpack.
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   if (pv.Encoding() != kEncodingStrMap2)
-    return {nullptr, NoopDeleter};
+    return nullptr;
 
   auto* sm = static_cast<StringMap*>(pv.RObjPtr());
   auto it = sm->Find(field);
   if (it == sm->end())
-    return {nullptr, NoopDeleter};
+    return nullptr;
   string_view val(it->second, sdslen(it->second));
-  return sm->AddOrExchange(field, val, /*ttl_sec=*/UINT32_MAX, /*keepttl=*/true);
+  auto old = sm->AddOrExchange(field, val, /*ttl_sec=*/UINT32_MAX, /*keepttl=*/true);
+  if (!old)
+    return nullptr;
+  auto deleter = old.get_deleter();
+  return PreservedEntry(old.release(), deleter);
 }
 
 template <typename F>
@@ -509,10 +512,87 @@ void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeVal
   indices_->Remove(id, *accessor);
 }
 
+// --- HnswShardIndex implementation ---
+
+HnswShardIndex::HnswShardIndex(std::shared_ptr<search::HnswVectorIndex> global_index,
+                               std::string field_ident)
+    : global_index_(std::move(global_index)), field_ident_(std::move(field_ident)) {
+}
+
+bool HnswShardIndex::Add(search::GlobalDocId id, const BaseAccessor& doc) {
+  return global_index_->Add(id, doc, field_ident_);
+}
+
+void HnswShardIndex::Remove(search::GlobalDocId id, const BaseAccessor& doc, PrimeValue& pv,
+                            absl::Span<const std::string_view> modified_fields,
+                            ExtractionCache* cache) {
+  bool sync = global_index_->Remove(id, doc, field_ident_);
+  if (sync) {
+    // Write lock acquired, ProcessDeferred drained all pending ops for this field.
+    ClearPreservedData();
+    return;
+  }
+
+  if (global_index_->IsVectorCopied())
+    return;
+
+  // Remove was deferred and this index uses external vectors — preserve the old sds
+  // so the deferred Remove can still dereference hnswlib's stored pointer.
+  if (!modified_fields.empty() &&
+      rng::find(modified_fields, field_ident_) == modified_fields.end()) {
+    return;
+  }
+
+  // Use the cache to extract each field at most once per document.
+  // When multiple search indices reference the same hash field, they share
+  // ownership of the original sds via shared_ptr.
+  auto [it, inserted] = cache->emplace(field_ident_, nullptr);
+  if (inserted) {
+    it->second = ExtractField(pv, field_ident_);
+  }
+  if (it->second) {
+    preserved_field_data_.push_back(it->second);
+  }
+}
+
+void HnswShardIndex::RemoveById(search::GlobalDocId id) {
+  [[maybe_unused]] bool sync = global_index_->Remove(id);
+  DCHECK(sync) << "RemoveById should only be called when no read lock is held";
+}
+
+bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc) {
+  return global_index_->UpdateVectorData(id, doc, field_ident_);
+}
+
+bool HnswShardIndex::IsVectorCopied() const {
+  return global_index_->IsVectorCopied();
+}
+
+void HnswShardIndex::ClearPreservedData() {
+  preserved_field_data_.clear();
+}
+
+// --- ShardDocIndex HNSW methods ---
+
+void ShardDocIndex::ClearAllHnswPreservedData() {
+  for (auto& hnsw : hnsw_shard_indices_) {
+    hnsw.ClearPreservedData();
+  }
+}
+
+void ShardDocIndex::InitHnswShardIndices() {
+  hnsw_shard_indices_.clear();
+  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
+    auto global = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
+    if (global) {
+      hnsw_shard_indices_.emplace_back(std::move(global), std::string(field_ident));
+    }
+  }
+}
+
 void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
   if (is_restoring_vectors_) {
-    // Buffer the key — will be re-applied after RestoreGlobalVectorIndices completes.
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
     return;
@@ -521,22 +601,17 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
   auto accessor = GetAccessor(db_cntx, *pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
-        index) {
-      bool added = index->Add(global_id, *accessor, field_ident);
-      if (added && !index->IsVectorCopied()) {
-        pv->SetOmitDefrag(true);
-      }
+  for (auto& hnsw : hnsw_shard_indices_) {
+    if (hnsw.Add(global_id, *accessor) && !hnsw.IsVectorCopied()) {
+      pv->SetOmitDefrag(true);
     }
   }
 }
 
 void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
     ShardDocIndex::DocId doc_id, const DbContext& db_cntx, PrimeValue& pv,
-    absl::Span<const std::string_view> modified_fields) {
+    absl::Span<const std::string_view> modified_fields, HnswShardIndex::ExtractionCache* cache) {
   if (is_restoring_vectors_) {
-    // Buffer the key — will be re-applied after RestoreGlobalVectorIndices completes.
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
     return;
@@ -545,52 +620,20 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
   auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
-  bool any_deferred = false;
-  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
-    if (!index)
-      continue;
-
-    bool sync = index->Remove(global_id, *accessor, field_ident);
-    if (sync || index->IsVectorCopied())
-      continue;
-
-    // Remove was deferred and index uses external vectors — preserve the old sds
-    // so the deferred Remove can still dereference hnswlib's stored pointer.
-    // Use field_ident (the actual hash key), not short_name (the index alias).
-    if (!modified_fields.empty() &&
-        rng::find(modified_fields, field_ident) == modified_fields.end()) {
-      continue;
-    }
-    if (auto data = ExtractField(pv, field_ident); data) {
-      preserved_field_data_.push_back(std::move(data));
-    }
-    any_deferred = true;
-  }
-
-  if (!any_deferred) {
-    // All removes were synchronous (write lock acquired, deferred queue drained).
-    // Safe to release any previously preserved data.
-    ClearPreservedData();
+  for (auto& hnsw : hnsw_shard_indices_) {
+    hnsw.Remove(global_id, *accessor, pv, modified_fields, cache);
   }
 }
 
 void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
-  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    if (auto index = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
-        index) {
-      // Restoration runs after serialization completes (no read lock held),
-      // so Remove should always execute synchronously.
-      [[maybe_unused]] bool sync = index->Remove(global_id);
-      DCHECK(sync) << "Remove during restoration should always be synchronous";
-    }
+  for (auto& hnsw : hnsw_shard_indices_) {
+    hnsw.RemoveById(global_id);
   }
 }
 
 void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
-  // Don't run loop if no vector fields are present
-  if (rng::empty(GetIndexedHnswFields(base_->schema)))
+  if (hnsw_shard_indices_.empty())
     return;
 
   LOG(INFO) << "Restoring vector index '" << index_name << "' from serialized graph on shard "
@@ -633,27 +676,24 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
     auto doc = GetAccessor(op_args.db_cntx, pv);
     GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
 
-    for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
-          index) {
-        bool success = index->UpdateVectorData(global_id, *doc, field_ident);
-        if (success) {
+    for (auto& hnsw : hnsw_shard_indices_) {
+      bool success = hnsw.UpdateVectorData(global_id, *doc);
+      if (success) {
+        ++successful_updates;
+        if (!hnsw.IsVectorCopied()) {
+          pv.SetOmitDefrag(true);
+        }
+      } else {
+        // Node not in restored HNSW graph (new doc added during full sync via journal
+        // events before index was created). Fall back to Add.
+        bool added = hnsw.Add(global_id, *doc);
+        if (added) {
           ++successful_updates;
-          if (!index->IsVectorCopied()) {
+          if (!hnsw.IsVectorCopied()) {
             pv.SetOmitDefrag(true);
           }
         } else {
-          // Node not in restored HNSW graph (new doc added during full sync via journal
-          // events before index was created). Fall back to Add.
-          bool added = index->Add(global_id, *doc, field_ident);
-          if (added) {
-            ++successful_updates;
-            if (!index->IsVectorCopied()) {
-              pv.SetOmitDefrag(true);
-            }
-          } else {
-            ++failed_updates;
-          }
+          ++failed_updates;
         }
       }
     }
@@ -669,11 +709,8 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   // inconsistent KNN search results compared to the master.
   // Re-validate each entry: concurrent fibers may have freed and reused the DocId.
   for (const auto& [key, local_id, global_id] : missing_doc_ids) {
-    for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-      if (auto index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_info.short_name);
-          index) {
-        index->Remove(global_id);
-      }
+    for (auto& hnsw : hnsw_shard_indices_) {
+      hnsw.RemoveById(global_id);
     }
     // Only remove from key_index_ if the mapping still matches the snapshot.
     if (key_index_.Find(key) == local_id) {
@@ -1100,6 +1137,8 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr));
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
+  it->second->InitHnswShardIndices();
+
   // Don't build while loading, shutting down, etc.
   // After loading, indices are rebuilt separately
   if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
@@ -1136,6 +1175,7 @@ void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index)
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args, bool is_restored) {
   for (auto& [index_name, ptr] : indices_) {
+    ptr->InitHnswShardIndices();
     // Only use the restore path for indices that have populated key mappings.
     // When shard counts differ, PerformPostLoad remaps the mappings; if remapping fails,
     // the mappings are removed so the index falls back to full rebuild here.
@@ -1172,9 +1212,6 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeVal
       if (doc_id) {
         index->AddDocToGlobalVectorIndex(*doc_id, db_cntx, pv);
       }
-      // Add always acquires the write lock (blocking, not try_to_lock), so ProcessDeferred
-      // drains all pending ops before the Add executes. Safe to release preserved data.
-      index->ClearPreservedData();
     }
   }
 }
@@ -1182,20 +1219,20 @@ void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, PrimeVal
 void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, PrimeValue& pv,
                                 absl::Span<const std::string_view> modified_fields) {
   DCHECK(IsIndexedKeyType(pv));
+
+  // Shared extraction cache: when multiple search indices reference the same hash field,
+  // each sds entry is extracted once and shared via shared_ptr across all indices.
+  HnswShardIndex::ExtractionCache extraction_cache;
+
   for (auto& [index_name, index] : indices_) {
     if (index->Matches(key, pv.ObjType())) {
       std::optional<search::DocId> doc_id = index->GetDocId(key, db_cntx);
       if (doc_id) {
-        index->RemoveDocFromGlobalVectorIndex(*doc_id, db_cntx, pv, modified_fields);
+        index->RemoveDocFromGlobalVectorIndex(*doc_id, db_cntx, pv, modified_fields,
+                                              &extraction_cache);
         index->RemoveDoc(*doc_id, db_cntx, pv);
       }
     }
-  }
-}
-
-void ShardDocIndices::ClearAllPreservedData() {
-  for (auto& [_, index] : indices_) {
-    index->ClearPreservedData();
   }
 }
 
