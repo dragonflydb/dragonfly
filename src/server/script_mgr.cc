@@ -32,7 +32,7 @@ ABSL_FLAG(std::string, default_lua_flags, "",
           "disable-atomicity' runs scripts non-atomically and allows accessing undeclared keys");
 
 ABSL_FLAG(
-    bool, lua_auto_async, false,
+    bool, lua_auto_async, true,
     "If enabled, call/pcall with discarded values are automatically replaced with acall/apcall.");
 
 ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
