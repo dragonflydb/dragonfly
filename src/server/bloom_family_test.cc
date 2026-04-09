@@ -48,41 +48,60 @@ TEST_F(BloomFamilyTest, Multiple) {
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
 }
 
-TEST_F(BloomFamilyTest, ScanDump) {
+TEST_F(BloomFamilyTest, ScanDumpAndLoadChunk) {
+  constexpr int kNumItems = 100;
+
   Run({"bf.reserve", "b1", "0.01", "1000"});
-  for (int i = 0; i < 100; ++i) {
+  for (int i = 0; i < kNumItems; ++i) {
     Run({"bf.add", "b1", absl::StrCat("item", i)});
   }
 
-  auto resp = Run({"bf.scandump", "b1", "0"});
-  auto vec = resp.GetVec();
+  struct Chunk {
+    int64_t cursor;
+    std::string data;
+  };
+  std::vector<Chunk> chunks;
 
-  ASSERT_EQ(vec.size(), 2u);
-  int64_t cursor = *vec[0].GetInt();
-
-  EXPECT_EQ(cursor, 1);
-  EXPECT_EQ(vec[1].type, RespExpr::STRING);
-
-  int chunk_count = 1;
-  while (cursor != 0) {
-    resp = Run({"bf.scandump", "b1", std::to_string(cursor)});
-    vec = resp.GetVec();
+  int64_t cursor = 0;
+  do {
+    auto resp = Run({"bf.scandump", "b1", std::to_string(cursor)});
+    const auto& vec = resp.GetVec();
     ASSERT_EQ(vec.size(), 2u);
 
-    const auto next_cursor = *vec[0].GetInt();
+    int64_t next_cursor = *vec[0].GetInt();
     ASSERT_TRUE(next_cursor > cursor || next_cursor == 0);
-    cursor = next_cursor;
 
-    EXPECT_EQ(vec[1].type, RespExpr::STRING);
-    if (cursor != 0) {
-      ++chunk_count;
+    if (next_cursor != 0) {
+      EXPECT_EQ(vec[1].type, RespExpr::STRING);
       EXPECT_FALSE(vec[1].GetBuf().empty());
-    } else {
-      EXPECT_TRUE(vec[1].GetBuf().empty());
+      chunks.push_back({next_cursor, vec[1].GetString()});
     }
-  }
+    cursor = next_cursor;
+  } while (cursor != 0);
 
-  EXPECT_GE(chunk_count, 1);
+  ASSERT_GE(chunks.size(), 2);
+
+  // Load the header separately
+  const auto& [crs, data] = chunks.front();
+  EXPECT_EQ(Run({"bf.loadchunk", "b2", std::to_string(crs), data}), "OK");
+
+  // Test that payload > filter size triggers validation failure
+  std::string oversized = chunks[1].data;
+  oversized.push_back('x');
+  EXPECT_THAT(Run({"bf.loadchunk", "b2", std::to_string(chunks[1].cursor), oversized}),
+              ErrArg("index out of range"));
+
+  // Load all data chunks into new key
+  for (auto it = chunks.begin() + 1; it != chunks.end(); ++it)
+    EXPECT_EQ(Run({"bf.loadchunk", "b2", std::to_string(it->cursor), it->data}), "OK")
+        << "failed to add cursor " << it->cursor;
+
+  for (int i = 0; i < kNumItems; ++i)
+    EXPECT_THAT(Run({"bf.exists", "b2", absl::StrCat("item", i)}), IntArg(1))
+        << "missing item " << i;
+  for (int i = kNumItems; i < kNumItems + 50; ++i)
+    EXPECT_THAT(Run({"bf.exists", "b2", absl::StrCat("item", i)}), IntArg(0))
+        << "false positive for item " << i;
 }
 
 TEST_F(BloomFamilyTest, ScanDumpPastEnd) {
@@ -97,6 +116,14 @@ TEST_F(BloomFamilyTest, ScanDumpPastEnd) {
   EXPECT_EQ(*vec[0].GetInt(), 0);
   EXPECT_EQ(vec[1].type, RespExpr::STRING);
   EXPECT_TRUE(vec[1].GetBuf().empty());
+}
+
+TEST_F(BloomFamilyTest, LoadChunkErrors) {
+  Run({"bf.reserve", "b1", "0.01", "100"});
+  Run({"bf.add", "b1", "x"});
+
+  EXPECT_THAT(Run({"bf.loadchunk", "b1", "0", "data"}), ErrArg("not an integer"));
+  EXPECT_THAT(Run({"bf.loadchunk", "b1", "-1", "data"}), ErrArg("not an integer"));
 }
 
 }  // namespace dfly

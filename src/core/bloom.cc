@@ -12,6 +12,7 @@
 #include <cmath>
 
 #include "base/logging.h"
+#include "core/compact_object.h"
 
 namespace dfly {
 
@@ -33,6 +34,10 @@ uint64_t BitIndex(uint64_t low, uint64_t hi, unsigned i, uint64_t mask) {
 
 constexpr double kDenom = M_LN2 * M_LN2;
 constexpr double kSBFErrorFactor = 0.5;
+
+constexpr uint32_t kSbfDumpVersion = 1;
+constexpr size_t kDumpHeaderFixedSize = 48;  // version(4) + 5x u64(40) + num_filters(4)
+constexpr size_t kDumpFilterMetaSize = 12;   // hash_cnt(4) + data_length(8)
 
 double BPE(double fp_prob) {
   return -log(fp_prob) / kDenom;
@@ -234,6 +239,13 @@ size_t SBF::MallocUsed() const {
   return res;
 }
 
+void SBF::AddEmptyFilter(size_t size, unsigned hash_cnt) {
+  PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
+  const auto ptr = static_cast<uint8_t*>(mr->allocate(size, 1));
+  memset(ptr, 0, size);
+  filters_.emplace_back().Init(ptr, size, hash_cnt);
+}
+
 SBFDumpIterator::SBFDumpIterator(const SBF& sbf, int64_t cursor) : sbf_{sbf}, cursor_{cursor} {
   ResolveCursorToPos();
 }
@@ -270,11 +282,6 @@ bool SBFDumpIterator::Done() const {
 }
 
 std::string SBFDumpIterator::SerializeHeader() const {
-  constexpr uint32_t kSbfDumpVersion = 1;
-
-  constexpr size_t kDumpHeaderFixedSize = 48;  // version + 5x u64 + num_filters
-  constexpr size_t kDumpFilterMetaSize = 12;   // hash_cnt + data_length
-
   const uint32_t num_filters = sbf_.num_filters();
 
   std::string out;
@@ -308,28 +315,95 @@ std::string SBFDumpIterator::SerializeHeader() const {
   return out;
 }
 
+std::optional<SBFDataPosition> ResolveSBFCursor(const SBF& sbf, int64_t cursor) {
+  if (cursor < 1)
+    return std::nullopt;
+
+  size_t global_offset = cursor - 1;
+  for (uint32_t i = 0; i < sbf.num_filters(); ++i) {
+    const size_t filter_size = sbf.data(i).size();
+    if (global_offset < filter_size) {
+      return SBFDataPosition{i, global_offset};
+    }
+    global_offset -= filter_size;
+  }
+
+  return std::nullopt;
+}
+
 void SBFDumpIterator::ResolveCursorToPos() {
-  header_sent_ = cursor_ > 0;
   if (cursor_ == 0) {
+    header_sent_ = false;
     filter_index_ = 0;
     byte_offset_ = 0;
     return;
   }
 
-  size_t global_offset = cursor_ - 1;
-  for (uint32_t i = 0; i < sbf_.num_filters(); ++i) {
-    const size_t curr_filter_size = sbf_.data(i).size();
-    if (global_offset < curr_filter_size) {
-      filter_index_ = i;
-      byte_offset_ = global_offset;
-      return;
-    }
-    global_offset -= curr_filter_size;
+  header_sent_ = true;
+  if (const auto pos = ResolveSBFCursor(sbf_, cursor_)) {
+    filter_index_ = pos->filter_index;
+    byte_offset_ = pos->byte_offset;
+  } else {
+    filter_index_ = sbf_.num_filters();
+    byte_offset_ = 0;
+  }
+}
+
+SBF* SBFDumpHeader::Create(PMR_NS::memory_resource* mr) {
+  SBF* sbf =
+      CompactObj::AllocateMR<SBF>(grow_factor, fp_prob, max_capacity, prev_size, current_size, mr);
+  for (const auto& [hash_cnt, data_length] : filters) {
+    sbf->AddEmptyFilter(data_length, hash_cnt);
+  }
+  return sbf;
+}
+
+std::optional<SBFDumpHeader> ParseSBFDumpHeader(std::string_view data) {
+  if (data.size() < kDumpHeaderFixedSize)
+    return std::nullopt;
+
+  const char* ptr = data.data();
+
+  auto read_u32 = [&ptr] {
+    const auto v = absl::little_endian::Load32(ptr);
+    ptr += sizeof(v);
+    return v;
+  };
+
+  auto read_u64 = [&ptr] {
+    const auto v = absl::little_endian::Load64(ptr);
+    ptr += sizeof(v);
+    return v;
+  };
+
+  if (const auto version = read_u32(); version != kSbfDumpVersion)
+    return std::nullopt;
+
+  SBFDumpHeader header;
+  header.grow_factor = std::bit_cast<double>(read_u64());
+  header.fp_prob = std::bit_cast<double>(read_u64());
+  header.prev_size = read_u64();
+  header.current_size = read_u64();
+  header.max_capacity = read_u64();
+  if (header.current_size >= header.max_capacity)
+    return std::nullopt;
+
+  const auto num_filters = read_u32();
+
+  if (const size_t expected_size = kDumpHeaderFixedSize + num_filters * kDumpFilterMetaSize;
+      data.size() != expected_size || num_filters == 0)
+    return std::nullopt;
+
+  header.filters.resize(num_filters);
+  for (uint32_t i = 0; i < num_filters; ++i) {
+    header.filters[i].hash_cnt = read_u32();
+    header.filters[i].data_length = read_u64();
+    if (header.filters[i].hash_cnt == 0 || header.filters[i].data_length == 0 ||
+        !has_single_bit(header.filters[i].data_length))
+      return std::nullopt;
   }
 
-  // cursor is beyond data boundary
-  filter_index_ = sbf_.num_filters();
-  byte_offset_ = 0;
+  return header;
 }
 
 }  // namespace dfly

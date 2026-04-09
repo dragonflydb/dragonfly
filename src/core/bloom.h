@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,6 +65,10 @@ class Bloom {
 
   unsigned hash_cnt() const {
     return hash_cnt_;
+  }
+
+  uint8_t* mutable_data() {  // NOLINT cannot be made const, hands out mutable ptr
+    return bf_;
   }
 
  private:
@@ -130,12 +135,20 @@ class SBF {
     return filters_[idx].hash_cnt();
   }
 
+  uint8_t* filter_data(size_t idx) {
+    return filters_[idx].mutable_data();
+  }
+
   // max capacity of the current filter.
   size_t max_capacity() const {
     return max_capacity_;
   }
 
   size_t MallocUsed() const;
+
+  // Adds empty filter with zero memory, for use in LOADCHUNK where the caller will later supply
+  // data to be filled in
+  void AddEmptyFilter(size_t size, unsigned hash_cnt);
 
  private:
   // multiple filters from the smallest to the largest.
@@ -146,6 +159,14 @@ class SBF {
   size_t current_size_ = 0;
   size_t max_capacity_;
 };
+
+struct SBFDataPosition {
+  uint32_t filter_index;
+  size_t byte_offset;
+};
+
+// Resolves cursor to a filter index and byte offset in filter
+std::optional<SBFDataPosition> ResolveSBFCursor(const SBF& sbf, int64_t cursor);
 
 struct SBFChunk {
   int64_t cursor;
@@ -177,5 +198,24 @@ class SBFDumpIterator {
   uint32_t filter_index_ = 0;
   size_t byte_offset_ = 0;
 };
+
+struct SBFDumpHeader {
+  double grow_factor;
+  double fp_prob;
+  uint64_t prev_size;
+  uint64_t current_size;
+  uint64_t max_capacity;
+
+  struct FilterMeta {
+    uint32_t hash_cnt;
+    uint64_t data_length;
+  };
+  std::vector<FilterMeta> filters;
+
+  // Creates SBF using current header data using given mr
+  SBF* Create(PMR_NS::memory_resource*);
+};
+
+std::optional<SBFDumpHeader> ParseSBFDumpHeader(std::string_view data);
 
 }  // namespace dfly
