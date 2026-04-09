@@ -202,14 +202,14 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   ProcessBucket(db_index, it, true);
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& buckets) {
+void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set) {
   // We must acquire the mutex ahead and process all buckets under the same lock.
-  // This ensures that CVCUponInsert and the table insertion that invoked this callback
+  // This ensures that bucket processing and the table insertion that invoked this callback
   // will be operating on the same state as all writes are linarly ordered by this mutex.
   std::unique_lock lk{big_value_mu_};
 
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : buckets.buckets())
+  for (auto it : set.buckets())
     ProcessBucketInternal(db_index, it, true);
 }
 

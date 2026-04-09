@@ -92,9 +92,8 @@ class SerializerBase : public DelayedEntryHandler {
   // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
   void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
 
-  // Called when a new key is about to be inserted,
-  // calls CVCUponInsert -> OnChangeBlocking(bucket_iterator) for every touched bucket.
-  void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& buckets);
+  // Called when a new key is about to be inserted. Calls ProcessBucket for the buckets.
+  void OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set);
 
   // --- Shared members (to be moved from subclasses in later PRs) ---
 
