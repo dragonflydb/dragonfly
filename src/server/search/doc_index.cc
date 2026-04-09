@@ -525,7 +525,7 @@ bool HnswShardIndex::Add(search::GlobalDocId id, const BaseAccessor& doc) {
 
 void HnswShardIndex::Remove(search::GlobalDocId id, const BaseAccessor& doc, PrimeValue& pv,
                             absl::Span<const std::string_view> modified_fields,
-                            ExtractionCache* cache) {
+                            FieldExtractionCache* cache) {
   bool sync = global_index_->Remove(id, doc, field_ident_);
   if (sync) {
     // Write lock acquired, ProcessDeferred drained all pending ops for this field.
@@ -610,7 +610,7 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
 
 void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
     ShardDocIndex::DocId doc_id, const DbContext& db_cntx, PrimeValue& pv,
-    absl::Span<const std::string_view> modified_fields, HnswShardIndex::ExtractionCache* cache) {
+    absl::Span<const std::string_view> modified_fields, FieldExtractionCache* cache) {
   if (is_restoring_vectors_) {
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
@@ -1222,7 +1222,7 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, Prime
 
   // Shared extraction cache: when multiple search indices reference the same hash field,
   // each sds entry is extracted once and shared via shared_ptr across all indices.
-  HnswShardIndex::ExtractionCache extraction_cache;
+  FieldExtractionCache extraction_cache;
 
   for (auto& [index_name, index] : indices_) {
     if (index->Matches(key, pv.ObjType())) {

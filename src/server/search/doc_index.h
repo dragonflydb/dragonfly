@@ -226,28 +226,21 @@ struct DocIndexInfo {
 
 class ShardDocIndices;
 
+// Extraction cache: ensures each sds field is swapped at most once per document removal,
+// even when multiple search indices reference the same hash field.
+using FieldExtractionCache = absl::flat_hash_map<std::string_view, std::shared_ptr<void>>;
+
 // Per-shard wrapper around a global HnswVectorIndex. Encapsulates shard-local state
 // (preserved field data for deferred removes) and delegates to the global index.
 // One instance per HNSW field per shard.
 class HnswShardIndex {
  public:
-  // field_ident: the actual hash key name (not the AS alias).
   HnswShardIndex(std::shared_ptr<search::HnswVectorIndex> global_index, std::string field_ident);
 
-  // Add a document's vector to the global HNSW index. Returns true if added.
   bool Add(search::GlobalDocId id, const BaseAccessor& doc);
 
-  // Extraction cache shared across indices for the same document.
-  // Ensures each sds field is extracted at most once and shared via shared_ptr.
-  using ExtractionCache = absl::flat_hash_map<std::string_view, std::shared_ptr<void>>;
-
-  // Remove a document's vector. If the write lock can't be acquired (e.g. serialization
-  // holds a read lock), the operation is deferred. When deferred and using external vectors,
-  // preserves the old sds entry from pv so the deferred op can still dereference it.
-  // modified_fields: when non-empty, only preserve if this field is being modified.
-  // cache: shared across indices so each field is extracted at most once per document.
   void Remove(search::GlobalDocId id, const BaseAccessor& doc, PrimeValue& pv,
-              absl::Span<const std::string_view> modified_fields, ExtractionCache* cache);
+              absl::Span<const std::string_view> modified_fields, FieldExtractionCache* cache);
 
   // Unconditional remove by id (no preservation). Used during restoration.
   void RemoveById(search::GlobalDocId id);
@@ -404,7 +397,7 @@ class ShardDocIndex {
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       PrimeValue& pv,
                                       absl::Span<const std::string_view> modified_fields,
-                                      HnswShardIndex::ExtractionCache* cache);
+                                      FieldExtractionCache* cache);
 
   // Clear preserved field data on all per-shard HNSW indices.
   // Called after serialization drains deferred ops under held write locks.

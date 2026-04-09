@@ -329,13 +329,10 @@ TEST_F(MRMWMutexTest, MoveConstructorTransfersOwnership) {
   EXPECT_TRUE(lock1.locked());
   EXPECT_TRUE(mutex_.IsReadLocked());
 
-  // Move-construct lock2 from lock1.
   MRMWMutexLock lock2(std::move(lock1));
   EXPECT_TRUE(lock2.locked());
   EXPECT_FALSE(lock1.locked());
   EXPECT_TRUE(mutex_.IsReadLocked());
-
-  // Destroying lock1 should not unlock (ownership transferred).
 }
 
 TEST_F(MRMWMutexTest, MoveConstructorUnlocksOnDestruction) {
@@ -345,7 +342,6 @@ TEST_F(MRMWMutexTest, MoveConstructorUnlocksOnDestruction) {
     EXPECT_TRUE(lock2.locked());
     EXPECT_FALSE(lock1.locked());
   }
-  // Both destroyed — mutex should be free. Verify by acquiring a read lock.
   EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
   mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
 }
@@ -353,14 +349,12 @@ TEST_F(MRMWMutexTest, MoveConstructorUnlocksOnDestruction) {
 TEST_F(MRMWMutexTest, MoveAssignmentTransfersOwnership) {
   MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kReadLock);
 
-  // Default-ish: move into a try-lock that failed (unlocked state).
   MRMWMutex other_mutex;
   other_mutex.Lock(MRMWMutex::LockMode::kReadLock);
   MRMWMutexLock lock2(&other_mutex, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
   EXPECT_FALSE(lock2.locked());
   other_mutex.Unlock(MRMWMutex::LockMode::kReadLock);
 
-  // Move-assign lock1 into lock2.
   lock2 = std::move(lock1);
   EXPECT_TRUE(lock2.locked());
   EXPECT_FALSE(lock1.locked());
@@ -368,7 +362,6 @@ TEST_F(MRMWMutexTest, MoveAssignmentTransfersOwnership) {
 }
 
 TEST_F(MRMWMutexTest, MoveIntoVector) {
-  // Verify MRMWMutexLock works correctly in a std::vector (the motivating use case).
   std::vector<MRMWMutexLock> locks;
   MRMWMutex mutex2;
 
@@ -380,7 +373,6 @@ TEST_F(MRMWMutexTest, MoveIntoVector) {
   EXPECT_TRUE(locks[1].locked());
 
   locks.clear();
-  // Both mutexes should be free now.
   EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
   mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
   EXPECT_TRUE(mutex2.TryLock(MRMWMutex::LockMode::kReadLock));

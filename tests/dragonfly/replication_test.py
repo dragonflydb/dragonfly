@@ -4275,8 +4275,13 @@ async def test_hnsw_search_replication_with_network_disruptions(
 
     traffic_task = asyncio.create_task(seeder.run_traffic(c_master))
     search_task = asyncio.create_task(seeder.run_search_queries(c_master))
-    replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
     await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+    # Wait for initial sync before running search queries on replica.
+    # During HNSW graph restoration with external vectors, nodes have
+    # uninitialized data pointers — search queries could dereference them.
+    await wait_available_async(c_replica)
+    replica_search_task = asyncio.create_task(seeder.run_search_queries(c_replica))
 
     try:
         await asyncio.sleep(random.uniform(0, 10))
