@@ -8,11 +8,10 @@
 
 #include <vector>
 
-#include "server/db_slice.h"
-#include "server/journal/types.h"
+#include "io/io.h"
 #include "server/synchronization.h"
 #include "server/table.h"
-#include "server/tiered_storage.h"
+#include "util/fibers/future.h"
 
 namespace dfly {
 
@@ -21,6 +20,14 @@ class ExecutionState;
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
+
+struct TieredDelayedEntry {
+  DbIndex dbid;
+  PrimeKey key;
+  util::fb2::Future<io::Result<std::string>> value;
+  time_t expire;
+  uint32_t mc_flags;
+};
 
 // Tracks serialization progress of offloaded (delayed) entries.
 struct DelayedEntryHandler {
@@ -80,7 +87,9 @@ class SerializerBase : public DelayedEntryHandler {
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
-  // Process bucket if needed
+  // Process bucket if needed,
+  // on_update is true if it's being called in the OnChangeBlocking flow,
+  // and false if called by the traversal loop.
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.

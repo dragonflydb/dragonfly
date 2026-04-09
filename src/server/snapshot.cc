@@ -180,7 +180,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
 
       snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
-        return ProcessBucket(snapshot_db_indx, it, false);
+        ProcessBucket(snapshot_db_indx, it, false);
       });
 
       if (use_background_mode_) {
@@ -232,10 +232,8 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
   unsigned serialized = 0;
 
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    // Version is already stamped by SerializerBase::OnChangeBlocking.
-    // TODO: this dcheck should be established as we assume nothing can mutate this bucket
-    // until SerializeBucketLocked finishes.
-    // DCHECK_EQ(it.GetVersion(), snapshot_version_);
+    // Version is already stamped by SerializerBase::ProcessBucketInternal.
+    DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
     ++serialized;
 
