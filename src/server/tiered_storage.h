@@ -44,14 +44,6 @@ struct TieredStorageBase {
   template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 };
 
-struct TieredDelayedEntry {
-  DbIndex dbid;
-  PrimeKey key;
-  util::fb2::Future<io::Result<std::string>> value;
-  time_t expire;
-  uint32_t mc_flags;
-};
-
 using BackPressureFuture = std::optional<util::fb2::Future<bool>>;
 
 #ifdef WITH_TIERING

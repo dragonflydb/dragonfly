@@ -9,11 +9,10 @@
 #include <memory>
 #include <vector>
 
-#include "server/db_slice.h"
-#include "server/journal/types.h"
+#include "io/io.h"
 #include "server/synchronization.h"
 #include "server/table.h"
-#include "server/tiered_storage.h"
+#include "util/fibers/future.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
@@ -39,6 +38,14 @@ struct BucketDependencies {
  private:
   using SharedLatch = std::shared_ptr<LocalLatch>;
   absl::flat_hash_map<BucketIdentity, SharedLatch> deps_;
+};
+
+struct TieredDelayedEntry {
+  DbIndex dbid;
+  PrimeKey key;
+  util::fb2::Future<io::Result<std::string>> value;
+  time_t expire;
+  uint32_t mc_flags;
 };
 
 // Tracks serialization progress of offloaded (delayed) entries.
@@ -93,7 +100,9 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   }
 
  protected:
-  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  // Process bucket if needed,
+  // on_update is true if it's being called in the OnChangeBlocking flow,
+  // and false if called by the traversal loop.
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.
@@ -121,6 +130,9 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   Stats stats_;
 
  private:
+  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  bool ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
+
   uint64_t change_cb_id_ = 0;
 };
 
