@@ -8,11 +8,10 @@
 
 #include <vector>
 
-#include "server/db_slice.h"
-#include "server/journal/types.h"
+#include "io/io.h"
 #include "server/synchronization.h"
 #include "server/table.h"
-#include "server/tiered_storage.h"
+#include "util/fibers/future.h"
 
 namespace dfly {
 
@@ -21,6 +20,14 @@ class ExecutionState;
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
 using BucketIdentity = uintptr_t;
+
+struct TieredDelayedEntry {
+  DbIndex dbid;
+  PrimeKey key;
+  util::fb2::Future<io::Result<std::string>> value;
+  time_t expire;
+  uint32_t mc_flags;
+};
 
 // Tracks serialization progress of offloaded (delayed) entries.
 struct DelayedEntryHandler {
@@ -55,7 +62,7 @@ class SerializerBase : public DelayedEntryHandler {
   struct Stats {
     uint64_t keys_serialized = 0;              // total number of keys serialized
     uint64_t buckets_serialized = 0;           // total number of buckets serialized
-    uint64_t buckets_on_change = 0;            // buckets serialized by OnChange flow
+    uint64_t buckets_on_change = 0;            // buckets serialized by OnChangeBlocking flow
     uint64_t buckets_skipped = 0;              // already Covered when seen
     uint64_t change_during_serialization = 0;  // change hit an in-flight bucket
   };
@@ -76,24 +83,27 @@ class SerializerBase : public DelayedEntryHandler {
  protected:
   // Phase of an in-flight bucket (only stored while transient).
   enum class BucketPhase : uint8_t {
-    kSerializing,     // bucket is being iterated by the main loop / OnChange
+    kSerializing,     // bucket is being iterated by the main loop / OnChangeBlocking
     kDelayedPending,  // all entries serialized but tiered reads still in-flight
   };
 
-  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  // Process bucket if needed,
+  // on_update is true if it's being called in the OnChangeBlocking flow,
+  // and false if called by the traversal loop.
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
-  virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                   bool on_update) = 0;
+  // Currently runs with big_value_mu_ held.
+  virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                         bool on_update) = 0;
 
   // Called when an existing bucket is about to be mutated. Calls ProcessBucket.
-  void OnChange(DbIndex db_index, PrimeTable::bucket_iterator it);
+  void OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it);
 
   // Called when a new key is about to be inserted,
-  // calls CVCUponInsert -> OnChange(bucket_iterator) for every touched bucket.
-  void OnChange(DbIndex db_index, std::string_view key);
+  // calls CVCUponInsert -> OnChangeBlocking(bucket_iterator) for every touched bucket.
+  void OnChangeBlocking(DbIndex db_index, std::string_view key);
 
   // --- Shared members (to be moved from subclasses in later PRs) ---
 
@@ -114,6 +124,9 @@ class SerializerBase : public DelayedEntryHandler {
   // Return identity if bucket should be processed.
   // Checks bucket validity, version and state
   bool ShouldProcessBucket(PrimeTable::bucket_iterator);
+
+  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
+  bool ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Transition bucket from NotVisited -> Serializing.
   void MarkBucketSerializing(BucketIdentity bid);

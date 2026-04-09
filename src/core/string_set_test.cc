@@ -869,6 +869,21 @@ TEST_F(StringSetTest, ReallocIfNeeded) {
     EXPECT_EQ(*ss_->Find(build_str(i * 10)), build_str(i * 10));
 }
 
+// Regression: MayHaveTtl didn't account for SDS header size, causing a heap buffer overread
+// in DuplicateEntryIfFragmented for non-TTL entries. Caught by DCHECK inside the function.
+TEST_F(StringSetTest, ReallocIfNeededNoTtlOverread) {
+  // strlen=11 with sdshdr5 (hdr=1): alloc request=13, usable=16.
+  // Old MayHaveTtl: 11+5=16 <= 16 → true, but only 15 bytes available from data ptr.
+  ss_->Add(string(11, 'x'));
+
+  PageUsage page_usage{CollectPageStats::NO, 0.9};
+  page_usage.SetForceReallocate(true);
+  for (auto it = ss_->begin(); it != ss_->end(); ++it)
+    it.ReallocIfNeeded(&page_usage);
+
+  EXPECT_EQ(*ss_->Find(string(11, 'x')), string(11, 'x'));
+}
+
 TEST_F(StringSetTest, TransferTTLFlagLinkToObjectOnDelete) {
   for (size_t i = 0; i < 10; i++) {
     EXPECT_TRUE(ss_->Add(absl::StrCat(i), 1));

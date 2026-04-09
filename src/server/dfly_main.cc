@@ -82,6 +82,7 @@ ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
+ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
@@ -1080,6 +1081,14 @@ Usage: dragonfly [FLAGS]
 
 #ifdef __linux__
   UpdateResourceLimitsIfInsideContainer(&mem_info, &max_available_threads);
+  // If --proactor_threads (or DFLY_proactor_threads env var) was explicitly set by the user,
+  // honor it over the cgroup-derived CPU limit. The flag defaults to 0, so any non-zero value
+  // means the user explicitly requested a specific thread count.
+  if (absl::GetFlag(FLAGS_proactor_threads) > 0) {
+    LOG(INFO) << "Using proactor_threads=" << absl::GetFlag(FLAGS_proactor_threads)
+              << " (overriding cgroup-derived " << max_available_threads << ")";
+    max_available_threads = 0;  // causes ProactorPool to use FLAGS_proactor_threads
+  }
 #endif
 
   if (mem_info.swap_total != 0)

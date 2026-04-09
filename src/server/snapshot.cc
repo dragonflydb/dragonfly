@@ -25,7 +25,6 @@
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(bool, point_in_time_snapshot, true, "If true replication uses point in time snapshoting");
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 
@@ -181,7 +180,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
 
       snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
-        return ProcessBucket(snapshot_db_indx, it, false);
+        ProcessBucket(snapshot_db_indx, it, false);
       });
 
       if (use_background_mode_) {
@@ -225,17 +224,19 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 }
 
-unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                        bool on_update) {
-  // Version is already stamped by the caller (BucketSaveCb or SerializerBase::OnChange).
-  DCHECK_EQ(it.GetVersion(), snapshot_version_);
-
+unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                              bool on_update) {
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
 
   unsigned serialized = 0;
+
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+    // Version is already stamped by SerializerBase::ProcessBucketInternal.
+    DCHECK_EQ(it.GetVersion(), snapshot_version_);
+
     ++serialized;
+
     // might preempt due to big value serialization.
     SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
   }

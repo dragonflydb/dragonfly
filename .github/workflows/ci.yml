@@ -187,6 +187,82 @@ jobs:
           name: regression_logs
           path: /tmp/failed/*
 
+      - name: Upload dragonfly binary for cgroup test
+        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.sanitizers == 'NoSanitizers' && matrix.compiler.cxx == 'g++'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dragonfly-binary
+          path: ${{ github.workspace }}/build/dragonfly
+          retention-days: 1
+
+  cgroup-thread-detection:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: dragonfly-binary
+          path: build
+
+      - name: Install redis-tools
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      - name: Prepare cgroup test image
+        run: |
+          chmod +x build/dragonfly
+          # Verify the binary's runtime dependencies and install them in a local image.
+          # The binary is built in ubuntu-dev:24 and links dynamically against Boost,
+          # which is not present in the minimal ubuntu:24.04 image.
+          echo "Runtime deps of dragonfly binary:"
+          ldd build/dragonfly
+          docker build -t df-cgroup-test - <<'EOF'
+          FROM ubuntu:24.04
+          RUN apt-get update -qq && \
+              apt-get install -y --no-install-recommends libboost-context1.83.0 libssl3 && \
+              rm -rf /var/lib/apt/lists/*
+          EOF
+
+      - name: Test cgroup CPU auto-detection
+        run: |
+          wait_for_server() {
+            local port=$1
+            local cid=$2
+            for i in $(seq 1 30); do
+              sleep 1
+              redis-cli -p "$port" PING 2>/dev/null | grep -q PONG && return 0
+            done
+            echo "ERROR: dragonfly on port $port did not start within 30s"
+            docker logs "$cid" 2>&1 || true
+            docker rm -f "$cid" 2>/dev/null || true
+            return 1
+          }
+
+          # Scenario 1: --cpus=2, no flag -> should auto-detect 2 threads
+          CID=$(docker run --rm -d --cpus=2 --security-opt seccomp=unconfined \
+            -v "$PWD/build/dragonfly:/dragonfly" -p 16380:6379 df-cgroup-test \
+            /dragonfly --port 6379 --maxmemory 1G --dbfilename "" --noversion_check)
+
+          wait_for_server 16380 "$CID"
+
+          THREADS=$(redis-cli -p 16380 INFO server | grep -oP 'thread_count:\K\d+')
+          docker rm -f "$CID" 2>/dev/null || true
+          echo "Scenario 1: expected 2, got $THREADS"
+          [ "$THREADS" -eq 2 ]
+
+          # Scenario 2: --cpus=2 + --proactor_threads=4 -> flag must win
+          CID=$(docker run --rm -d --cpus=2 --security-opt seccomp=unconfined \
+            -v "$PWD/build/dragonfly:/dragonfly" -p 16381:6379 df-cgroup-test \
+            /dragonfly --port 6379 --proactor_threads 4 --maxmemory 1G --dbfilename "" --noversion_check)
+
+          wait_for_server 16381 "$CID"
+
+          THREADS=$(redis-cli -p 16381 INFO server | grep -oP 'thread_count:\K\d+')
+          docker rm -f "$CID" 2>/dev/null || true
+          echo "Scenario 2: expected 4, got $THREADS"
+          [ "$THREADS" -eq 4 ]
+
   lint-test-chart:
     runs-on: ubuntu-latest
     needs: [build]
