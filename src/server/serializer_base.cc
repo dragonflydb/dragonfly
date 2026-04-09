@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
+#include "server/db_slice.h"
 #include "server/engine_shard.h"
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
@@ -156,7 +157,10 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
     return false;
   }
 
-  // For non updates, flush change to earlier snapshots and acquire serialization latch
+  // For non updates (traversal flow), flush change to earlier snapshots and
+  // acquire serialization latch.
+  // We must make sure that earlier snapshots serialized this bucket before we update its
+  // version below.
   std::optional<std::lock_guard<LocalLatch>> db_guard;
   if (!on_update) {
     db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
