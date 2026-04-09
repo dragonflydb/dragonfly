@@ -1941,7 +1941,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
-void Service::TryEnqueueEvalAsyncCmd(Interpreter::CallArgs& ca, CommandContext* cmd_cntx,
+void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandContext* cmd_cntx,
                                      facade::RedisReplyBuilder* replier) {
   using CT = Interpreter::CallArgs::Type;
   auto* cntx = cmd_cntx->server_conn_cntx();

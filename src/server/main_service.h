@@ -174,7 +174,7 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                              bool force = false);
 
-  void TryEnqueueEvalAsyncCmd(Interpreter::CallArgs& args, CommandContext* cmd_cntx,
+  void TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& args, CommandContext* cmd_cntx,
                               facade::RedisReplyBuilder* replier);
 
   void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);

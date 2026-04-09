@@ -140,6 +140,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
       return SquashResult::NOT_SQUASHED;  // at least two shards
   }
 
+  // Transaction is not active on the requested shard.
+  // Command should result in undeclared key error
   if (IsAtomic() && !cntx_->transaction->IsActive(last_sid))
     return SquashResult::NOT_SQUASHED;
 
