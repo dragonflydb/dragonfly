@@ -26,6 +26,7 @@ typedef struct stream {
     streamID max_deleted_entry_id; /* The maximal ID that was deleted. */
     uint64_t entries_added;        /* All time count of elements added. */
     struct rax *cgroups;                  /* Consumer groups dictionary: name -> streamCG */
+    unsigned char *(*getNodeLp)(const void *node); /* Stream node data to a listpack. */
 } stream;
 
 /* We define an iterator to iterate stream items in an abstract way, without
