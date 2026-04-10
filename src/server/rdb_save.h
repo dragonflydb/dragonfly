@@ -79,6 +79,59 @@ CompressionMode GetDefaultCompressionMode();
 
 using StringVec = std::vector<std::string>;
 
+class MemBufController {
+  friend class MemBufControllerTest;
+  struct EntryState {
+    std::unique_ptr<io::IoBuf> buffer;
+    bool was_split = false;
+  };
+  using EntryId = uint32_t;
+
+ public:
+  static constexpr auto kHeaderSize = 9;
+
+  void StartEntry();
+  void FinishEntry();
+
+  void TagAndDrainToDefaultBuffer();
+  io::IoBuf* CurrentBuffer() const {
+    return current_buffer_;
+  }
+
+  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
+
+  void MarkMidFlush() {
+    entries_.at(active_id_).was_split = true;
+  }
+
+  size_t FlushableSize() const;
+
+  struct SaveEntryState {
+    uint32_t id;
+    io::IoBuf* ptr;
+    bool operator<=>(const SaveEntryState&) const = default;
+  };
+
+  SaveEntryState SaveStateBeforeConsume();
+  void RestoreStateAfterConsume(SaveEntryState state);
+
+  std::string BuildBlob(io::Bytes current_bytes);
+
+  void SetTagEntries(bool tag_entries) {
+    send_tagged_entries_ = tag_entries;
+  }
+
+ private:
+  bool send_tagged_entries_ = false;
+
+  EntryId next_id_ = 1;
+  EntryId active_id_ = 0;
+
+  io::IoBuf default_buffer_{4096};
+  io::IoBuf* current_buffer_ = &default_buffer_;
+  absl::flat_hash_map<EntryId, EntryState> entries_;
+};
+
 class RdbSaver {
  public:
   // Global data which doesn't belong to shards and is serialized in header
@@ -182,7 +235,9 @@ class RdbSerializer {
                                bool ignore_crc = false);
 
   // Internal buffer size. Might shrink after flush due to compression.
-  size_t SerializedLen() const;
+  size_t SerializedLen() const {
+    return mem_buf_controller_.FlushableSize();
+  }
 
   // Flush internal buffer and return serialized blob.
   std::string Flush(FlushState flush_state);
@@ -237,6 +292,11 @@ class RdbSerializer {
 
   std::error_code SendEofAndChecksum();
 
+  void SetTagEntries(bool tag_entries) {
+    mem_buf_controller_.SetTagEntries(tag_entries);
+    allow_prepare_flush_compression_ = !tag_entries;
+  }
+
  private:
   // Prepare internal buffer for flush. Compress it.
   io::Bytes PrepareFlush(FlushState flush_state);
@@ -244,6 +304,7 @@ class RdbSerializer {
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
   void AllocateCompressorOnce();
+  std::optional<std::string> CompressBlob(std::string_view input);
 
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
 
@@ -279,18 +340,24 @@ class RdbSerializer {
   };
 
   CompressionMode compression_mode_;
-  io::IoBuf mem_buf_;
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
   std::optional<CompressionStats> compression_stats_;
   base::PODArray<uint8_t> tmp_buf_;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   size_t number_of_chunks_ = 0;
+
+  // If tagged chunks are set, compression is not done during PrepareFlush on small chunks. Instead
+  // we compress before flush, after appending the memory buffer to stash
+  bool allow_prepare_flush_compression_ = true;
+
   uint64_t serialization_peak_bytes_ = 0;
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
   ConsumeFun consume_fun_;
   size_t flush_threshold_ = 0;
+
+  MemBufController mem_buf_controller_;
 };
 
 }  // namespace dfly

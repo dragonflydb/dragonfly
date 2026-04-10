@@ -3,6 +3,9 @@
 //
 #include <gmock/gmock.h>
 
+#include "rdb_extensions.h"
+#include "serializer_commons.h"
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/listpack.h"
@@ -40,6 +43,7 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
+ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
 
 namespace dfly {
 
@@ -65,8 +69,9 @@ class RdbTest : public BaseFamilyTest {
 void RdbTest::SetUp() {
   // Setting max_memory_limit must be before calling  InitWithDbFilename
   max_memory_limit = 40000000;
-  absl::SetFlag(&FLAGS_serialize_hnsw_index, true);
-  absl::SetFlag(&FLAGS_deserialize_hnsw_index, true);
+  SetFlag(&FLAGS_serialize_hnsw_index, true);
+  SetFlag(&FLAGS_deserialize_hnsw_index, true);
+  SetFlag(&FLAGS_serialization_tagged_chunks, true);
   InitWithDbFilename();
   CHECK_EQ(zmalloc_used_memory_tl, 0);
 }
@@ -1214,6 +1219,476 @@ TEST_F(RdbTest, TopkSerializationDecayParameter) {
 
   auto resp2 = Run({"TOPK.LIST", "topk_decay_high"});
   EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
+}
+
+class MemBufControllerTest : public Test {
+ protected:
+  MemBufController controller_;
+  uint32_t ActiveId() const {
+    return controller_.active_id_;
+  }
+
+  const io::IoBuf* DefaultBuffer() const {
+    return &controller_.default_buffer_;
+  }
+
+  auto& Entries() const {
+    return controller_.entries_;
+  }
+
+  std::string Flush() {
+    auto current = controller_.CurrentBuffer()->InputBuffer();
+    const auto blob = controller_.BuildBlob(current);
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    return blob;
+  }
+
+  void Write(std::string_view s) {
+    controller_.CurrentBuffer()->WriteAndCommit(s.data(), s.size());
+  }
+
+  void AssertDefaultState() const {
+    EXPECT_EQ(ActiveId(), 0);
+    EXPECT_EQ(controller_.CurrentBuffer(), DefaultBuffer());
+  }
+
+  void MarkMidFlush() {
+    controller_.MarkMidFlush();
+    EXPECT_TRUE(Entries().at(controller_.active_id_).was_split);
+  }
+};
+
+TEST_F(MemBufControllerTest, StartAndEndEntry) {
+  controller_.StartEntry();
+  EXPECT_EQ(ActiveId(), 1);
+  EXPECT_NE(controller_.CurrentBuffer(), DefaultBuffer());
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+  AssertDefaultState();
+  EXPECT_EQ(controller_.FlushableSize(), 0);
+}
+
+void AssertTaggedData(std::string_view blob, std::string_view expected, uint32_t expected_id = 1) {
+  using namespace absl::little_endian;
+
+  EXPECT_EQ(blob.size(), MemBufController::kHeaderSize + expected.size());
+  EXPECT_EQ(static_cast<uint8_t>(blob[0]), RDB_OPCODE_TAGGED_CHUNK);
+
+  auto id = Load32(reinterpret_cast<const uint8_t*>(blob.data()) + 1);
+  auto len = Load32(reinterpret_cast<const uint8_t*>(blob.data()) + 5);
+
+  EXPECT_EQ(id, expected_id);
+  EXPECT_EQ(len, expected.size());
+  EXPECT_EQ(blob.substr(9), expected);
+}
+
+TEST_F(MemBufControllerTest, TaggedData) {
+  controller_.SetTagEntries(true);
+
+  controller_.StartEntry();
+
+  // write some data to entry buffer
+  const std::string_view data = "a_a_a_";
+  Write(data);
+  EXPECT_EQ(controller_.FlushableSize(), data.size());
+
+  // entry will be tagged for id=1
+  MarkMidFlush();
+
+  AssertTaggedData(Flush(), data);
+
+  // switch to default buffer
+  const auto entry_buf = controller_.CurrentBuffer();
+  const auto state = controller_.SaveStateBeforeConsume();
+
+  EXPECT_EQ(state, MemBufController::SaveEntryState(1, entry_buf));
+  AssertDefaultState();
+  EXPECT_FALSE(Entries().empty());
+
+  EXPECT_EQ(controller_.FlushableSize(), 0);
+
+  // write to default buffer
+  Write("a");
+
+  // restore entry buffer
+  controller_.RestoreStateAfterConsume(state);
+
+  EXPECT_EQ(controller_.CurrentBuffer(), entry_buf);
+  EXPECT_EQ(ActiveId(), state.id);
+
+  // flushable adds default buffer
+  EXPECT_EQ(controller_.FlushableSize(), 1);
+
+  Write("b");
+  EXPECT_EQ(controller_.FlushableSize(), 2);
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+
+  const std::string blob = Flush();
+
+  // "a" is attached as prefix
+  EXPECT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
+  EXPECT_EQ(blob[0], 'a');
+  AssertTaggedData(blob.substr(1), "b");
+}
+
+TEST_F(MemBufControllerTest, Interleaving) {
+  controller_.SetTagEntries(true);
+  // A starts and produces first tagged chunk
+  controller_.StartEntry();
+  Write("aaa");
+  MarkMidFlush();
+  AssertTaggedData(Flush(), "aaa");
+
+  const auto state_a = controller_.SaveStateBeforeConsume();
+  AssertDefaultState();
+
+  // B writes while A is suspended and finishes without yielding/split
+  controller_.StartEntry();
+  EXPECT_EQ(ActiveId(), 2);
+  Write("bbb");
+  controller_.FinishEntry();
+  EXPECT_FALSE(Entries().empty());
+
+  AssertDefaultState();
+  // After finishing B, it is drained into default buffer
+  EXPECT_EQ(controller_.FlushableSize(), 3);
+
+  // Simulate a public API Flush on serializer (such as snapshot calls)
+  EXPECT_EQ(Flush(), "bbb");
+
+  // Restore A and write its tail
+  controller_.RestoreStateAfterConsume(state_a);
+  EXPECT_EQ(ActiveId(), 1);
+  Write("c");
+  // Drains tail of A into default buffer (with tagging)
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+
+  // Now default has the tagged tail of A
+  AssertTaggedData(Flush(), "c");
+}
+
+TEST_F(MemBufControllerTest, NestedInterleaving) {
+  controller_.SetTagEntries(true);
+
+  // A starts, splits, and emits first chunk.
+  controller_.StartEntry();
+  Write("aaa");
+  MarkMidFlush();
+  AssertTaggedData(Flush(), "aaa");
+
+  const auto state_a = controller_.SaveStateBeforeConsume();
+  EXPECT_EQ(state_a.id, 1u);
+  AssertDefaultState();
+
+  // B starts while A is suspended and yields mid chunk
+  controller_.StartEntry();
+  Write("bbb");
+  MarkMidFlush();
+  AssertTaggedData(Flush(), "bbb", 2);
+
+  const auto state_b = controller_.SaveStateBeforeConsume();
+  EXPECT_EQ(state_b.id, 2u);
+  AssertDefaultState();
+
+  // C written fully without split/yield
+  controller_.StartEntry();
+  Write("ccc");
+  controller_.FinishEntry();
+  AssertDefaultState();
+  EXPECT_FALSE(Entries().empty());
+
+  EXPECT_EQ(controller_.FlushableSize(), 3);
+
+  // no tagging
+  EXPECT_EQ(Flush(), "ccc");
+
+  // Restore B, write tail, finish B.
+  controller_.RestoreStateAfterConsume(state_b);
+  EXPECT_EQ(ActiveId(), 2);
+  EXPECT_EQ(controller_.CurrentBuffer(), state_b.ptr);
+  Write("x");
+  controller_.FinishEntry();
+  EXPECT_FALSE(Entries().empty());
+
+  AssertTaggedData(Flush(), "x", 2);
+
+  // Restore A, write tail, finish A
+  controller_.RestoreStateAfterConsume(state_a);
+  EXPECT_EQ(ActiveId(), 1);
+  EXPECT_EQ(controller_.CurrentBuffer(), state_a.ptr);
+  Write("y");
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+
+  AssertTaggedData(Flush(), "y");
+}
+
+TEST_F(MemBufControllerTest, TagAndDrain) {
+  // This is a low level api test
+  controller_.SetTagEntries(true);
+
+  {
+    // unsplit case
+    controller_.StartEntry();
+    Write("abc");
+    controller_.TagAndDrainToDefaultBuffer();
+    EXPECT_EQ(Flush(), "abc");
+    controller_.FinishEntry();
+    AssertDefaultState();
+  }
+
+  controller_.StartEntry();
+  Write("abc");
+  MarkMidFlush();
+  controller_.TagAndDrainToDefaultBuffer();
+  AssertTaggedData(Flush(), "abc", 2);
+  controller_.FinishEntry();
+  AssertDefaultState();
+  EXPECT_EQ(controller_.FlushableSize(), 0);
+}
+
+TEST_F(MemBufControllerTest, BuildBlobEdgeCases) {
+  controller_.SetTagEntries(true);
+
+  // plain untagged data, no entries in flight
+  Write("p");
+  EXPECT_EQ(Flush(), "p");
+
+  // some untagged data, then some tagged data
+  Write("p");
+  controller_.StartEntry();
+  Write("x");
+  MarkMidFlush();
+  {
+    const auto blob = Flush();
+    ASSERT_EQ(blob[0], 'p');
+    AssertTaggedData(blob.substr(1), "x");
+  }
+
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+  AssertDefaultState();
+
+  // Empty current does not emit 0 len tag
+  Write("p");
+  controller_.StartEntry();
+  MarkMidFlush();
+  EXPECT_EQ(Flush(), "p");
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+  AssertDefaultState();
+
+  //  default prefix + unsplit current, nothing tagged
+  Write("p");
+  controller_.StartEntry();
+  Write("x");
+  EXPECT_EQ(Flush(), "px");
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+  AssertDefaultState();
+}
+
+TEST_F(MemBufControllerTest, NonTaggedData) {
+  // No tagging data added anywhere when send_tagged_entries_=false
+  controller_.StartEntry();
+
+  const std::string_view data = "a_a_a_";
+  Write(data);
+  MarkMidFlush();
+  EXPECT_EQ(Flush(), data);
+
+  const auto entry_buf = controller_.CurrentBuffer();
+  const auto state = controller_.SaveStateBeforeConsume();
+
+  EXPECT_EQ(state, MemBufController::SaveEntryState(1, entry_buf));
+  AssertDefaultState();
+  EXPECT_FALSE(Entries().empty());
+
+  EXPECT_EQ(controller_.FlushableSize(), 0);
+  Write("a");
+
+  controller_.RestoreStateAfterConsume(state);
+  EXPECT_EQ(controller_.CurrentBuffer(), entry_buf);
+  EXPECT_EQ(ActiveId(), state.id);
+
+  EXPECT_EQ(controller_.FlushableSize(), 1);
+
+  Write("b");
+  EXPECT_EQ(controller_.FlushableSize(), 2);
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+  EXPECT_EQ(Flush(), "ab");
+}
+
+TEST_F(MemBufControllerTest, NonTaggedInterleave) {
+  controller_.StartEntry();
+  Write("aaa");
+  MarkMidFlush();
+  EXPECT_EQ(Flush(), "aaa");
+
+  const auto state_a = controller_.SaveStateBeforeConsume();
+  AssertDefaultState();
+
+  controller_.StartEntry();
+  EXPECT_EQ(ActiveId(), 2);
+  Write("bbb");
+  controller_.FinishEntry();
+  EXPECT_FALSE(Entries().empty());
+
+  AssertDefaultState();
+  EXPECT_EQ(Flush(), "bbb");
+
+  controller_.RestoreStateAfterConsume(state_a);
+  EXPECT_EQ(ActiveId(), 1);
+  Write("c");
+  controller_.FinishEntry();
+  EXPECT_TRUE(Entries().empty());
+  EXPECT_EQ(Flush(), "c");
+}
+
+namespace {
+
+std::string WrapInRdb(std::string_view body) {
+  std::string out = absl::StrFormat("REDIS%04d", RDB_SER_VERSION);
+  out.append(body);
+  out.push_back(static_cast<char>(RDB_OPCODE_EOF));
+  constexpr uint8_t checksum[8] = {0};
+  out.append(reinterpret_cast<const char*>(checksum), sizeof(checksum));
+  return out;
+}
+
+std::error_code LoadRdbBytes(Service* service, const std::string& rdb,
+                             std::optional<uint64_t> expected_journal_offset) {
+  io::BytesSource src{io::Buffer(rdb)};
+  RdbLoadContext load_context;
+  RdbLoader loader(service, &load_context);
+  auto ec = loader.Load(&src);
+  EXPECT_EQ(loader.journal_offset(), expected_journal_offset);
+  return ec;
+}
+
+struct InterleaveHarness {
+  struct Pending {
+    std::string key;
+    const PrimeValue* value;
+  };
+
+  std::vector<Pending> queued;
+  size_t next = 0;
+  std::string body;
+  RdbSerializer* serializer = nullptr;
+  std::optional<uint64_t> last_journal_offset;
+
+  void AddKey(std::string_view key, DbContext& ctx) {
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, key, OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+    queued.push_back(Pending{std::string{key}, &it.value()->second});
+  }
+
+  // picks next item from queue, inserts it as SaveEntry between a SendJournalOffset and a
+  // WriteJournalEntry. The injected SaveEntry will also call this same method.
+  void operator()(std::string blob) {
+    body += blob;
+    // No op if queue is finished
+    if (next >= queued.size())
+      return;
+
+    uint64_t offset = last_journal_offset.value_or(0) + 100;
+    last_journal_offset = offset;
+    ASSERT_FALSE(serializer->SendJournalOffset(offset));
+
+    const auto& entry = queued[next++];
+    ASSERT_TRUE(serializer->SaveEntry(PrimeKey{entry.key}, *entry.value, 0, 0, 0).has_value());
+
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    writer.Write(journal::Entry{journal::Op::PING, 0, std::nullopt});
+    ASSERT_FALSE(serializer->WriteJournalEntry(std::move(sink).str()));
+  }
+};
+
+}  // namespace
+
+TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "false");
+  SetTestFlag("num_shards", "1");
+  SetTestFlag("serialization_tagged_chunks", "true");
+  ResetService();
+
+  auto fill_hash = [&](std::string_view key, int count, char ch) {
+    for (int i = 0; i < count; ++i) {
+      EXPECT_THAT(Run({"HSET", std::string{key}, StrCat("field:", i), std::string(128, ch)}),
+                  IntArg(1));
+    }
+  };
+
+  auto get_key_size = [](std::string s) {
+    if ((s[0] - 'A') % 3 == 2)
+      return 4;
+    return 200;
+  };
+
+  constexpr auto from = 'A';
+  constexpr auto to = 'F';
+  for (auto ch = from; ch <= to; ++ch) {
+    std::string s{ch};
+    fill_hash(s, get_key_size(s), ch);
+  }
+
+  std::string body;
+  std::optional<uint64_t> last_journal_offset;
+
+  pp_->at(0)->Await([&] {
+    DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+
+    InterleaveHarness harness;
+    // queue up B -> F, when A will yield during SaveEntry -> PushToConsumerIfNeeded
+    for (auto ch = 'B'; ch <= to; ++ch) {
+      std::string s{ch};
+      harness.AddKey(s, ctx);
+    }
+
+    RdbSerializer serializer(
+        CompressionMode::NONE, [&](std::string blob) { harness(std::move(blob)); }, 256);
+
+    harness.serializer = &serializer;
+    serializer.SetTagEntries(true);
+
+    auto& db = ctx.GetDbSlice(0);
+    auto it = db.FindReadOnly(ctx, "A", OBJ_HASH);
+    ASSERT_TRUE(it.ok());
+
+    // kick off A
+    ASSERT_TRUE(serializer.SaveEntry(PrimeKey{"A"}, it.value()->second, 0, 0, 0).has_value());
+
+    if (auto tail = serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry); !tail.empty())
+      harness.body += tail;
+
+    body = std::move(harness.body);
+    last_journal_offset = harness.last_journal_offset;
+  });
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  auto ec = pp_->at(0)->Await(
+      [&] { return LoadRdbBytes(service_.get(), WrapInRdb(body), last_journal_offset); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto verify_hash = [&](std::string_view key, int count, char ch) {
+    EXPECT_EQ(CheckedInt({"HLEN", std::string{key}}), count);
+    for (int i = 0; i < count; ++i) {
+      EXPECT_EQ(Run({"HGET", std::string{key}, StrCat("field:", i)}), std::string(128, ch));
+    }
+  };
+
+  for (auto ch = from; ch <= to; ++ch) {
+    std::string s{ch};
+    verify_hash(s, get_key_size(s), ch);
+  }
 }
 
 }  // namespace dfly
