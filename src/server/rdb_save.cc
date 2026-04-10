@@ -11,6 +11,8 @@
 #include <bit>
 #include <queue>
 
+#include "core/stream_node.h"
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/intset.h"
@@ -566,8 +568,9 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
   auto stop_listpacks_rax = absl::MakeCleanup([&] { raxStop(&ri); });
 
   for (size_t i = 0; raxNext(&ri); i++) {
-    uint8_t* lp = (uint8_t*)ri.data;
-    size_t lp_bytes = lpBytes(lp);
+    StreamNodeObj node(ri.data);
+    uint8_t* lp = node.GetListpack();
+    size_t lp_bytes = node.UncompressedSize();
 
     RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
