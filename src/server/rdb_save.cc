@@ -572,7 +572,11 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    PushToConsumerIfNeeded(FlushState::kFlushMidEntry);
+    // Do not split after the final listpack. The loader can resume between listpacks,
+    // but the stream metadata tail is expected to stay bundled with the last listpack chunk, not
+    // in its own separate chunk.
+    if (i + 1 < rax_size)
+      PushToConsumerIfNeeded(FlushState::kFlushMidEntry);
   }
 
   std::move(stop_listpacks_rax).Invoke();
