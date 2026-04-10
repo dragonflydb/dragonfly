@@ -883,6 +883,23 @@ TEST_F(GenericFamilyTest, SortStore) {
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
 }
 
+// Regression test for SORT ... STORE with empty result must delete destination key,
+// not leave an empty list which crashes SAVE (DFATAL in rdb_save.cc).
+TEST_F(GenericFamilyTest, SortStoreEmptyResult) {
+  Run({"lpush", "list-src", "3", "1", "2"});
+
+  // LIMIT offset beyond list length -> empty result
+  auto resp = Run({"sort", "list-src", "LIMIT", "10", "5", "store", "dest"});
+  EXPECT_EQ(0, resp.GetInt());
+  EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must not leave a key";
+
+  // LIMIT count=0 -> empty result
+  Run({"set", "dest", "old"});  // pre-existing key should be deleted
+  resp = Run({"sort", "list-src", "LIMIT", "0", "0", "store", "dest"});
+  EXPECT_EQ(0, resp.GetInt());
+  EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must delete existing key";
+}
+
 TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
   // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
   Run({"del", "src", "dest"});

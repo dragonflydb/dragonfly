@@ -1705,9 +1705,12 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   // If we are about to overwrite an existing indexed document (HASH/JSON),
   // remove it from search indices first to avoid duplicate entries.
-  auto existing = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
-  if (IsValid(existing)) {
-    RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing->second, op_args.shard);
+  // Use FindMutable (not FindReadOnly) because HNSW preservation may modify the PrimeValue.
+  {
+    auto existing = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
+    if (IsValid(existing.it)) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing.it->second, op_args.shard);
+    }
   }
 
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
@@ -1724,6 +1727,15 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
     }
   }
   len = ql_v2->Size();
+
+  if (len == 0) {
+    CompactObj::DeleteMR<QList>(ql_v2);
+    auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
+    if (IsValid(it_res.it)) {
+      op_args.GetDbSlice().DelMutable(op_args.db_cntx, std::move(it_res));
+    }
+    return 0;
+  }
 
   PrimeValue pv;
   pv.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);

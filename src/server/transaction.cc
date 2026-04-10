@@ -1623,20 +1623,12 @@ bool Transaction::CanRunInlined() const {
   auto* ss = ServerState::tlocal();
   auto* es = EngineShard::tlocal();
 
-  // When a global transaction (e.g. SAVE) runs inline, its callback may yield during I/O
-  // (OpenWriteFile, SaveHeader).  While it is yielded another connection's command may enter
-  // CanRunInlined(), pass every check (callbacks are not registered yet), and get placed into
-  // the TxQueue behind the global transaction.  When the global transaction resumes and
-  // concludes, the inline PollExecution continues draining the queue and executes the queued
-  // command on the *connection* fiber instead of the shard-queue fiber.  If the global
-  // transaction registered snapshot change-listeners before concluding, OnChangeBlocking fires
-  // on the wrong fiber and hits the DFATAL assertion.
-  //
-  // Checking that the shard lock is free prevents inlining while a global transaction is in
-  // progress, so the queued command is dispatched through the shard queue instead.
+  // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
+  // This guarantees that their PollExecution batch executes on the shard-queue fiber
+  // when the conditions update
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
       ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks() &&
-      es->shard_lock()->IsFree()) {
+      !IsGlobal()) {
     ss->stats.tx_inline_runs++;
     return true;
   }
