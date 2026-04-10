@@ -4533,17 +4533,20 @@ async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
     await wait_available_async(c_replica)
     await check_all_replicas_finished([c_replica], c_master)
 
-    # Stream writes to build up journal state while replica is in STABLE_SYNC.
+    # Stream writes during DFLY LOAD to exercise the race between journal
+    # writes and the load that bypasses the journal. LOADING state rejects
+    # seeder Lua scripts, so the seeder task may fail.
     stream_seeder = SeederV2(key_target=500)
-    await stream_seeder.run(c_master, target_deviation=0.1)
-    await check_all_replicas_finished([c_replica], c_master)
-
-    # DFLY LOAD overwrites the database with the saved snapshot.
-    # This bypasses the journal, so replicas must be force-resynced.
+    seed_task = asyncio.create_task(stream_seeder.run(c_master, target_deviation=0.1))
     await c_master.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+    seed_task.cancel()
+    try:
+        await seed_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
     # Wait for the replica to complete the new full sync.
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1)
     await wait_for_replicas_state(c_replica)
     await check_all_replicas_finished([c_replica], c_master)
 
