@@ -168,6 +168,101 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser(args);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const string_view key = parser.Next();
+  const int64_t cursor = parser.Next<int64_t>();
+  if (cursor < 0)
+    return rb->SendError(kInvalidIntErr);
+
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<SBFChunk> {
+    const auto& db_slice = t->GetDbSlice(shard->shard_id());
+    OpResult op_res = db_slice.FindReadOnly(t->GetOpArgs(shard).db_cntx, key, OBJ_SBF);
+    if (!op_res)
+      return op_res.status();
+
+    const SBF* sbf = op_res.value()->second.GetSBF();
+    SBFDumpIterator it(*sbf, cursor);
+    return it.Next();
+  };
+
+  OpResult<SBFChunk> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res) {
+    return rb->SendError(res.status());
+  }
+
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendLong(res->cursor);
+  if (res->cursor == 0)
+    DCHECK(res->data.empty()) << " scan ended with inconsistent state";
+  rb->SendBulkString(res->data);
+}
+
+void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser(args);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  string_view key = parser.Next();
+
+  const int64_t cursor = parser.Next<int64_t>();
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  if (cursor <= 0)
+    return rb->SendError(kInvalidIntErr);
+
+  string_view data = parser.Next();
+  std::optional<SBFDumpHeader> header;
+  if (cursor == 1) {
+    header = ParseSBFDumpHeader(data);
+    if (!header)
+      return rb->SendError("INVALIDOBJ invalid bloom dump payload");
+  }
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+    auto op_args = t->GetOpArgs(shard);
+    auto& db_slice = op_args.GetDbSlice();
+
+    // First chunk contains metadata. use it to create empty SBF
+    if (cursor == 1) {
+      auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_SBF);
+      if (!op_res)
+        return op_res.status();
+
+      op_res->it->second.SetSBF(header->Create(CompactObj::memory_resource()));
+      return OpStatus::OK;
+    }
+
+    // >1 chunks contain data to write into filters at cursor position
+    auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SBF);
+    if (!op_res)
+      return op_res.status();
+
+    SBF* sbf = op_res->it->second.GetSBF();
+    int64_t write_cursor = cursor - static_cast<int64_t>(data.size());
+    auto pos = ResolveSBFCursor(*sbf, write_cursor);
+    if (!pos)
+      return OpStatus::OUT_OF_RANGE;
+
+    // The data supplied must fit in a single filter, not span multiple filters
+    if (const size_t filter_size = sbf->data(pos->filter_index).size();
+        pos->byte_offset + data.size() > filter_size)
+      return OpStatus::OUT_OF_RANGE;
+
+    memcpy(sbf->filter_data(pos->filter_index) + pos->byte_offset, data.data(), data.size());
+    return OpStatus::OK;
+  };
+
+  OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (res == OpStatus::OK) {
+    return rb->SendOk();
+  }
+  return rb->SendError(res);
+}
+
 void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
@@ -194,13 +289,15 @@ using CI = CommandId;
 void RegisterBloomFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
-  *registry << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
-                   Reserve)
-            << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
-            << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(
-                   MAdd)
-            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists);
+  *registry
+      << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
+             Reserve)
+      << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
+      << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MAdd)
+      << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
+      << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
+      << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
+      << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk);
 };
 
 }  // namespace dfly

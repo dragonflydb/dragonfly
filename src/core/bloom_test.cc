@@ -88,6 +88,74 @@ TEST_F(BloomTest, SBF) {
   EXPECT_LE(collisions, kNumElems * 0.008);
 }
 
+TEST_F(BloomTest, DumpSBFInChunks) {
+  using namespace absl::little_endian;
+
+  SBF sbf(10, 0.001, 2, PMR_NS::get_default_resource());
+
+  constexpr unsigned kNumElems = 200;
+  for (unsigned i = 0; i < kNumElems; ++i) {
+    sbf.Add(absl::StrCat("item", i));
+  }
+
+  SBFDumpIterator it(sbf, 0);
+  std::vector<SBFChunk> chunks;
+  while (!it.Done())
+    chunks.push_back(it.Next());
+
+  // First chunk is the header with cursor=1
+  ASSERT_GE(chunks.size(), 2u);
+  EXPECT_EQ(chunks[0].cursor, 1);
+
+  const auto& header_data = chunks[0].data;
+  ASSERT_GE(header_data.size(), 48u);
+
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(header_data.data());
+
+  // kSbfDumpVersion
+  EXPECT_EQ(Load32(p + 0), 1u);
+
+  EXPECT_DOUBLE_EQ(std::bit_cast<double>(Load64(p + 4)), sbf.grow_factor());
+  EXPECT_DOUBLE_EQ(std::bit_cast<double>(Load64(p + 12)), sbf.fp_probability());
+  EXPECT_EQ(Load64(p + 20), sbf.prev_size());
+  EXPECT_EQ(Load64(p + 28), sbf.current_size());
+  EXPECT_EQ(Load64(p + 36), sbf.max_capacity());
+
+  const uint32_t num_filters = Load32(p + 44);
+  EXPECT_EQ(num_filters, sbf.num_filters());
+
+  ASSERT_EQ(header_data.size(), 48u + num_filters * 12u);
+
+  std::vector<uint64_t> filter_sizes;
+  size_t filter_start_offset = 48u;
+
+  for (uint32_t i = 0; i < num_filters; ++i, filter_start_offset += 12) {
+    auto hash_cnt = Load32(p + filter_start_offset);
+    auto size = Load64(p + filter_start_offset + 4);
+
+    EXPECT_EQ(hash_cnt, sbf.hashfunc_cnt(i));
+    EXPECT_EQ(size, sbf.data(i).size());
+
+    filter_sizes.emplace_back(size);
+  }
+
+  // header is finished, read data
+  std::string all_data;
+  for (size_t i = 1; i < chunks.size(); ++i) {
+    all_data.append(chunks[i].data);
+  }
+
+  size_t offset = 0;
+  for (uint32_t i = 0; i < num_filters; ++i) {
+    const auto filter_size = filter_sizes[i];
+    ASSERT_LE(offset + filter_size, all_data.size());
+    string_view chunk_data(all_data.data() + offset, filter_size);
+    EXPECT_EQ(chunk_data, sbf.data(i));
+    offset += filter_size;
+  }
+  EXPECT_EQ(offset, all_data.size());
+}
+
 static void BM_BloomExist(benchmark::State& state) {
   constexpr size_t kCapacity = 1U << 22;
   Bloom bloom;
