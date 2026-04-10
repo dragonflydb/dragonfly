@@ -287,13 +287,17 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
-  SBF* sbf =
-      CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+  SBF* sbf = config_.append ? pv_->GetSBF()
+                            : CompactObj::AllocateMR<SBF>(
+                                  src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
                                   src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
-  pv_->SetSBF(sbf);
+
+  // new obj
+  if (!config_.append)
+    pv_->SetSBF(sbf);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
@@ -1821,62 +1825,116 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
 
-auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj> {
   RdbSBF res;
-  uint64_t options;
-  SET_OR_UNEXPECT(LoadLen(nullptr), options);
-  if (options != 0)
-    return Unexpected(errc::rdb_file_corrupted);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-  if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
-
-  unsigned num_filters = 0;
-  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
   auto is_power2 = [](size_t n) { return (n & (n - 1)) == 0; };
 
-  for (unsigned i = 0; i < num_filters; ++i) {
+  unsigned num_filters = 0;
+
+  // Only read SBF metadata if not continuing.
+  if (!pending_read_.sbf_filter.has_value() && pending_read_.remaining == 0) {
+    uint64_t options;
+    SET_OR_UNEXPECT(LoadLen(nullptr), options);
+    if (options != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
+    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+  } else {
+    num_filters = pending_read_.remaining;
+    pending_read_.remaining = 0;
+  }
+
+  // Read one SBF filter encoded as [chunk_size][chunk_data][chunk_size][chunk_data] up to a total
+  // size which is the size of the `data` string.
+  // We may stop between chunks if the outer tagged chunk ends.
+  auto read_filter_chunks = [&](string& data, size_t start_offset) -> io::Result<size_t> {
+    // data size never changes after initial reserve, we memcpy directly into it in FetchBuf
+    const size_t total = data.size();
+    size_t curr_offset = start_offset;
+    while (curr_offset < total && !ChunkBudgetExhausted()) {
+      auto chunk_res = LoadLen(nullptr);
+      if (!chunk_res)
+        return make_unexpected(chunk_res.error());
+      const size_t chunk_size = *chunk_res;
+      if (chunk_size == 0 || chunk_size > total - curr_offset)
+        return Unexpected(errc::rdb_file_corrupted);
+      if (auto ec = FetchBuf(chunk_size, data.data() + curr_offset))
+        return make_unexpected(ec);
+      curr_offset += chunk_size;
+    }
+    return curr_offset;
+  };
+
+  // Adds a fully read filter into the SBF object after size validation
+  auto append_filter = [&](unsigned hash_cnt, string filter_data) -> error_code {
+    if (const size_t bit_len = filter_data.size() * 8; !is_power2(bit_len))
+      return RdbError(errc::rdb_file_corrupted);
+    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    return {};
+  };
+
+  // First, complete a partially read filter from the previous state if there is one
+  // In this code path num_filters still includes the partially read filter. So num_filters is
+  // decremented only once the current filter is fully read.
+  if (pending_read_.sbf_filter) {
+    auto& sf = *pending_read_.sbf_filter;
+
+    SET_OR_UNEXPECT(read_filter_chunks(sf.filter_data, sf.offset), sf.offset);
+
+    if (sf.offset < sf.filter_data.size()) {
+      // restore pending_read_ as we did not finish the partially read filter. Also, do not
+      // decrement num_filters. We still need to read the same number of filters next time.
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_SBF};
+    }
+
+    if (auto ec = append_filter(sf.hash_cnt, std::move(sf.filter_data)))
+      return make_unexpected(ec);
+
+    pending_read_.sbf_filter.reset();
+    num_filters--;
+  }
+
+  unsigned filters_read = 0;
+  for (; filters_read < num_filters && !ChunkBudgetExhausted(); ++filters_read) {
     unsigned hash_cnt;
     string filter_data;
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
-    if (chunking) {
+    if (filter_is_chunked) {
       size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
-      if (total_size == 0) {
+      if (total_size == 0)
         return Unexpected(errc::rdb_file_corrupted);
-      }
 
+      // This size is fixed and never changes. It acts as a limit of how much to read.
       filter_data.resize(total_size);
       size_t offset = 0;
-      while (offset < total_size) {
-        size_t chunk_size = 0;
-        SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
-        if (chunk_size == 0 || chunk_size > total_size - offset) {
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-        error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
-        if (ec) {
-          return make_unexpected(ec);
-        }
+      SET_OR_UNEXPECT(read_filter_chunks(filter_data, 0), offset);
 
-        offset += chunk_size;
+      if (offset < total_size) {
+        DCHECK(ChunkBudgetExhausted()) << "chunk budget not exhausted but filter read ended early";
+        pending_read_.sbf_filter = {std::move(filter_data), offset, hash_cnt};
+        pending_read_.remaining = num_filters - filters_read;
+        return OpaqueObj{std::move(res), RDB_TYPE_SBF};
       }
     } else {
       SET_OR_UNEXPECT(FetchGenericString(), filter_data);
     }
 
-    size_t bit_len = filter_data.size() * 8;
-    if (!is_power2(bit_len)) {  // must be power of two
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    if (auto ec = append_filter(hash_cnt, std::move(filter_data)))
+      return make_unexpected(ec);
   }
+
+  pending_read_.remaining = num_filters - filters_read;
   return OpaqueObj{std::move(res), RDB_TYPE_SBF};
 }
 
