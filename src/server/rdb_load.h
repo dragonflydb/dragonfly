@@ -206,6 +206,18 @@ class RdbLoaderBase {
 
   std::error_code EnsureReadInternal(size_t min_to_read);
 
+  // Wrapper to consume n bytes from mem buf, and also decrement remaining_payload_bytes if a chunk
+  // read is in progress
+  std::error_code ConsumeInput(size_t n);
+
+  // If reading a chunk, deducts n bytes from size with error checking. No op if chunk is not being
+  // read such as journal data etc
+  std::error_code ConsumeChunkBudget(size_t n);
+
+  bool ChunkBudgetExhausted() const {
+    return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
+  }
+
   static void CopyStreamId(const StreamID& src, struct streamID* dest);
 
   base::IoBuf* mem_buf_ = nullptr;
@@ -220,6 +232,18 @@ class RdbLoaderBase {
   std::optional<uint64_t> journal_offset_ = std::nullopt;
   RdbVersion rdb_version_ = RDB_VERSION;
   PendingRead pending_read_;
+
+  // State for the tagged chunk currently being parsed
+  struct ActiveTaggedChunk {
+    // Identifies which interleaved object stream this chunk belongs to
+    uint32_t stream_id;
+    // Number of payload bytes still unread in this tagged chunk
+    uint32_t remaining_payload_bytes;
+  };
+
+  // Set while parsing a tagged chunk. nullopt means the current input is a regular top-level RDB
+  // entry or opcode, not tagged chunk payload
+  std::optional<ActiveTaggedChunk> current_chunk_state_ = std::nullopt;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -325,6 +349,10 @@ class RdbLoader : protected RdbLoaderBase {
   struct ObjSettings;
 
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+
+  io::Result<bool> ReadAndDispatchObject(int object_type, std::string& key,
+                                         const ObjSettings& obj_settings, DbIndex db_index);
+
   // Returns whether to discard the read key pair.
   bool ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const;
 
@@ -396,8 +424,11 @@ class RdbLoader : protected RdbLoaderBase {
   // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 
-  // Map of currently chunked big values
-  std::unordered_map<std::string, std::unique_ptr<PrimeValue>> now_chunked_;
+  // Map of currently chunked big values, keyed by (db index, key) to avoid
+  // collisions when the same key name exists in different databases, and we
+  // receive chunked data from >1 db with the same key name
+  using ChunkedKey = std::pair<DbIndex, std::string>;
+  std::unordered_map<ChunkedKey, std::unique_ptr<PrimeValue>, absl::Hash<ChunkedKey>> now_chunked_;
   base::SpinLock now_chunked_mu_;  // guards now_chunked_
 
   std::string last_key_loaded_;
