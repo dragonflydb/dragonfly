@@ -4510,3 +4510,45 @@ async def test_set_member_expiry_replication(
         f"Replica still has 'myset' after lazy expiry triggered by {trigger_cmd[0]}. "
         "DeleteSetIfEmpty must journal the deletion so the replica stays in sync."
     )
+
+
+async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Populate initial data and save a snapshot.
+    seeder = DebugPopulateSeeder(key_target=1000, data_size=100)
+    await seeder.run(c_master)
+    await c_master.execute_command("SAVE", "DF", dbfilename)
+
+    # Set up replication while master has data, so the replica syncs it
+    # and enters STABLE_SYNC with journal streaming active.
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+    await wait_available_async(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Stream writes to build up journal state while replica is in STABLE_SYNC.
+    stream_seeder = SeederV2(key_target=500)
+    await stream_seeder.run(c_master, target_deviation=0.1)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # DFLY LOAD overwrites the database with the saved snapshot.
+    # This bypasses the journal, so replicas must be force-resynced.
+    await c_master.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    # Wait for the replica to complete the new full sync.
+    await asyncio.sleep(0.5)
+    await wait_for_replicas_state(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    master_capture = await DebugPopulateSeeder.capture(c_master)
+    replica_capture = await DebugPopulateSeeder.capture(c_replica)
+    assert master_capture == replica_capture
+
+    await c_replica.execute_command("REPLICAOF", "NO", "ONE")

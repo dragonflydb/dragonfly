@@ -3835,3 +3835,56 @@ async def test_cluster_config_slot_overflow_doesnt_crash(df_factory: DflyInstanc
     # CONFIG must return an error (not crash), MYID must still work
     assert isinstance(results[0], Exception)
     assert results[1] == node_id
+
+
+@dfly_args({"cluster_mode": "yes"})
+async def test_cluster_snapshot_load_replication(df_factory: DflyInstanceFactory):
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+    m1_node, r1_node = nodes
+    master_nodes = [m1_node]
+
+    m1_node.slots = [(0, 16383)]
+    m1_node.replicas = [r1_node]
+
+    logging.debug("Push initial config")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    # Populate initial data and save a snapshot.
+    seeder = DebugPopulateSeeder(key_target=1000, data_size=100)
+    await seeder.run(m1_node.client)
+    await m1_node.client.execute_command("SAVE", "DF", dbfilename)
+
+    # Set up replication while master has data, so the replica syncs it
+    # and enters STABLE_SYNC with journal streaming active.
+    await r1_node.client.execute_command("REPLICAOF", "localhost", str(m1_node.instance.port))
+    await wait_available_async(r1_node.client)
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
+
+    # Stream writes to build up journal state while replica is in STABLE_SYNC.
+    stream_seeder = Seeder(key_target=500)
+    await stream_seeder.run(m1_node.client, target_deviation=0.1)
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
+
+    # DFLY LOAD overwrites the database with the saved snapshot.
+    # This bypasses the journal, so replicas must be force-resynced.
+    await m1_node.client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    # Wait for the replica to complete the new full sync.
+    await asyncio.sleep(0.5)
+    await wait_for_replicas_state(r1_node.client)
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
+
+    master_capture = await DebugPopulateSeeder.capture(m1_node.client)
+    replica_capture = await DebugPopulateSeeder.capture(r1_node.client)
+    assert master_capture == replica_capture
+
+    await r1_node.client.execute_command("REPLICAOF", "NO", "ONE")
