@@ -48,9 +48,9 @@ class RdbLoaderBase {
   };
 
   struct RdbSBF {
-    double grow_factor, fp_prob;
-    size_t prev_size, current_size;
-    size_t max_capacity;
+    double grow_factor = 0, fp_prob = 0;
+    size_t prev_size = 0, current_size = 0;
+    size_t max_capacity = 0;
 
     struct Filter {
       unsigned hash_cnt;
@@ -143,7 +143,22 @@ class RdbLoaderBase {
     size_t reserve = 0;
 
     // Number of elements remaining in the object.
+    // For SBF2 object, this means the number of filters remaining.
+    // If the sbf_filter field is set, then this number also includes the partially read filter.
     size_t remaining = 0;
+
+    // partial state for single filter in an SBF
+    // when chunk size runs out mid-filter, saves the partially filled buffer and resumes on the
+    // next chunk.
+    struct SbfFilterState {
+      // Pre-allocated to total_size, partially filled
+      std::string filter_data;
+      // Bytes read so far, the point to which we will write next
+      size_t offset = 0;
+      // Only read on first chunk of a filter
+      unsigned hash_cnt = 0;
+    };
+    std::optional<SbfFilterState> sbf_filter;
   };
 
   struct LoadConfig {
@@ -187,7 +202,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
   ::io::Result<OpaqueObj> ReadRedisJson();
-  ::io::Result<OpaqueObj> ReadSBFImpl(bool chunking);
+  ::io::Result<OpaqueObj> ReadSBFImpl(bool filter_is_chunked);
   ::io::Result<OpaqueObj> ReadSBF();
   ::io::Result<OpaqueObj> ReadSBF2();
   ::io::Result<OpaqueObj> ReadCMS();
