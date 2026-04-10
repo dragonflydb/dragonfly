@@ -9,6 +9,8 @@
 
 #include <array>
 
+#include "core/stream_node.h"
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -159,9 +161,9 @@ size_t MallocUsedStream(stream* s) {
   raxSeek(&ri, "^", NULL, 0);
   size_t lpsize = 0, samples = 0;
   while (raxNext(&ri)) {
-    uint8_t* lp = (uint8_t*)ri.data;
+    StreamNode* node = static_cast<StreamNode*>(ri.data);
     /* Use the allocated size, since we overprovision the node initially. */
-    lpsize += zmalloc_size(lp);
+    lpsize += node->MallocSize();
     samples++;
   }
   if (s->rax->numele <= samples) {
@@ -175,7 +177,8 @@ size_t MallocUsedStream(stream* s) {
     raxSeek(&ri, "$", NULL, 0);
     raxNext(&ri);
     /* Use the allocated size, since we overprovision the node initially. */
-    asize += zmalloc_size(ri.data);
+    StreamNode* node = static_cast<StreamNode*>(ri.data);
+    asize += node->MallocSize();
   }
   raxStop(&ri);
 
@@ -385,6 +388,13 @@ struct TL {
     return huffman_domain == CompactObj::HUFF_KEYS ? huff_keys.decoder : huff_string_values.decoder;
   }
 };
+
+// Callback function used in redis/t_stream.cc implementation to
+// extract listpack data from StreamNode.
+uint8_t* StreamNodeGetLp(const void* p) {
+  const StreamNode* node = static_cast<const StreamNode*>(p);
+  return node->GetListpack();
+}
 
 thread_local TL tl;
 
@@ -1945,6 +1955,7 @@ stream* streamNew() {
   s->max_deleted_entry_id.ms = 0;
   s->entries_added = 0;
   s->cgroups = NULL; /* Created on demand to save memory when not used. */
+  s->getNodeLp = StreamNodeGetLp;
   return s;
 }
 
@@ -1973,13 +1984,9 @@ static void streamFreeCGVoid(void* cg_) {
   zfree(cg);
 }
 
-static void lpFreeVoid(void* lp) {
-  lpFree((uint8_t*)lp);
-}
-
-/* Free a stream, including the listpacks stored inside the radix tree. */
+/* Free a stream, including the listpack nodes stored inside the radix tree. */
 void freeStream(stream* s) {
-  raxFreeWithCallback(s->rax, lpFreeVoid);
+  raxFreeWithCallback(s->rax, StreamNode::Free);
   if (s->cgroups)
     raxFreeWithCallback(s->cgroups, streamFreeCGVoid);
   zfree(s);
