@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -15,6 +16,8 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
+
+ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 
 using namespace testing;
 using namespace std;
@@ -1775,6 +1778,34 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
   EXPECT_EQ(Run({"exists", "foo0"}), 0);
   EXPECT_EQ(Run({"exists", "bar0"}), 1);
   EXPECT_EQ(Run({"dbsize"}), 5);
+}
+
+// Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
+// non-concluding Execute() hop to fetch elements, then falls through to the
+// unsorted reply path without a concluding hop or Conclude().
+// This leaves the parent transaction as continuation_trans_ on the shard.
+// When the EXEC transaction is later destroyed, continuation_trans_ becomes
+// a dangling pointer, crashing in DisarmInShard() on the next EXEC.
+TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  Run({"lpush", "mylist", "c", "b", "a"});
+
+  // SORT BY nosort STORE goes through ExecuteStandalone (multi-key, possibly
+  // cross-shard) and calls Execute(fetch_cb, conclude=false) on the parent
+  // EXEC transaction but never concludes it.
+  for (int i = 0; i < 10; ++i) {
+    Run({"multi"});
+    Run({"set", "x", StrCat(i)});
+    Run({"sort", "mylist", "BY", "nosort", "STORE", "dest"});
+    auto resp = Run({"exec"});
+    ASSERT_THAT(resp, ArrLen(2));
+  }
+
+  // Verify the store actually happened and the server is healthy.
+  EXPECT_THAT(Run({"lrange", "dest", "0", "-1"}), ArrLen(3));
+  EXPECT_EQ(Run({"get", "x"}), "9");
 }
 
 }  // namespace dfly

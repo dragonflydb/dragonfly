@@ -2133,7 +2133,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     return;
   }
 
-  // No sorting required, just reply with fetched raw elements (with LIMIT if any)
+  // No sorting required — either reply with raw elements or store them.
   DVLOG(1) << "Replying with unsorted " << raw_elements.size() << " elements from key " << key;
   DCHECK(!raw_elements.empty());
 
@@ -2150,6 +2150,46 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
         [&](size_t elem_idx, size_t pattern_idx, string value) {
           get_values_per_element[elem_idx][pattern_idx] = std::move(value);
         });
+  }
+
+  if (params.store_key) {
+    // STORE path: build SortEntryBase vector from raw elements (with GET pattern
+    // values when present) and reuse OpStore — same as the sorted STORE path.
+    auto [start_it, end_it] = GetSortRange(raw_elements, params.bounds);
+    size_t start_idx = start_it - raw_elements.begin();
+    size_t count = end_it - start_it;
+
+    vector<SortEntryBase> entries;
+    entries.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      SortEntryBase entry;
+      entry.key = std::move(raw_elements[start_idx + i]);
+      if (!get_values_per_element.empty()) {
+        entry.get_values = std::move(get_values_per_element[start_idx + i]);
+      }
+      entries.push_back(std::move(entry));
+    }
+
+    string_view store_key_sv = params.store_key.value();
+    ShardId dest_sid = Shard(store_key_sv, shard_set->size());
+    OpResult<uint32_t> store_len;
+    bool has_get_patterns = !params.get_patterns.empty();
+
+    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == dest_sid) {
+        store_len = OpStore(t->GetOpArgs(shard), store_key_sv, entries.begin(), entries.end(),
+                            has_get_patterns);
+      }
+      return OpStatus::OK;
+    };
+    cmd_cntx->tx()->Execute(std::move(store_cb), true);
+
+    if (store_len) {
+      cmd_cntx->SendLong(store_len.value());
+    } else {
+      cmd_cntx->SendError(store_len.status());
+    }
+    return;
   }
 
   auto replier = [raw_elements = std::move(raw_elements), params, source_type,
