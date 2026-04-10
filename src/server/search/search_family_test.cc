@@ -349,7 +349,37 @@ TEST_F(SearchFamilyTest, Stats) {
   size_t expected_usage = 2 * (50 + 3 /* number of distinct words*/) * (24 + 48 /* kv size */) +
                           50 * 2 * 1 /* posting list entries */;
   EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
-  EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
+  // Upper bound accounts for index data + DocKeyIndex + FieldIndices overhead
+  EXPECT_LE(metrics.search_stats.used_memory, 4 * expected_usage);
+}
+
+// Verify that search memory tracking accounts for DocKeyIndex and FieldIndices allocations
+TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
+  constexpr size_t kNumDocs = 500;
+  constexpr size_t kKeyLen = 30;  // "doc-XXXX-padding-padding-pad" ~30 chars
+
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TAG"}),
+            "OK");
+
+  auto metrics_before = GetMetrics();
+  size_t mem_before = metrics_before.search_stats.used_memory;
+
+  for (size_t i = 0; i < kNumDocs; i++) {
+    // Use long keys so their memory contribution is significant
+    Run({"hset", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad"),
+         "name", absl::StrCat("tag", i % 10)});
+  }
+
+  auto metrics_after = GetMetrics();
+  size_t mem_after = metrics_after.search_stats.used_memory;
+  size_t mem_delta = mem_after - mem_before;
+
+  // DocKeyIndex stores each key twice (in ids_ map and keys_ vector), plus DocId vectors.
+  // FieldIndices::all_ids_ stores one DocId per doc.
+  // Minimum expected: kNumDocs * kKeyLen for keys_ vector string data alone.
+  size_t min_key_memory = kNumDocs * kKeyLen;
+  EXPECT_GE(mem_delta, min_key_memory)
+      << "Search memory tracking should account for DocKeyIndex key storage";
 }
 
 // Test how asynchronous indexing indexes documents and reports its progress

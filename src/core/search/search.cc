@@ -660,6 +660,10 @@ const vector<DocId>& FieldIndices::GetAllDocs() const {
   return all_ids_;
 }
 
+size_t FieldIndices::GetNonPmrMemoryUsage() const {
+  return all_ids_.capacity() * sizeof(DocId);
+}
+
 const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }

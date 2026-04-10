@@ -291,7 +291,7 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Find(string_view
 }
 
 void ShardDocIndex::DocKeyIndex::Remove(DocId id) {
-  ids_.extract(keys_[id]);
+  ids_.erase(std::string_view(keys_[id]));
   keys_[id] = "";
   free_ids_.push_back(id);
 }
@@ -323,7 +323,7 @@ std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::S
   result.reserve(ids_.size());
   for (search::DocId id = 0; id < keys_.size(); ++id) {
     if (!keys_[id].empty()) {
-      result.emplace_back(keys_[id], id);
+      result.emplace_back(std::string(keys_[id]), id);
     }
   }
   return result;
@@ -344,7 +344,7 @@ void ShardDocIndex::DocKeyIndex::Restore(
 
   // Restore the mappings
   for (const auto& [key, doc_id] : mappings) {
-    keys_[doc_id] = key;
+    keys_[doc_id].assign(key.data(), key.size());
     ids_[key] = doc_id;
   }
 
@@ -360,8 +360,9 @@ void ShardDocIndex::DocKeyIndex::Restore(const std::vector<std::string>& keys) {
   DCHECK(ids_.empty()) << "Restore should only be called on an empty DocKeyIndex";
   keys_.resize(keys.size());
   for (DocId id = 0; id < static_cast<DocId>(keys.size()); ++id) {
-    keys_[id] = keys[id];
-    ids_[keys[id]] = id;
+    keys_[id].assign(keys[id].data(), keys[id].size());
+    std::string_view sv(keys[id]);
+    ids_[sv] = id;
   }
   last_id_ = static_cast<DocId>(keys.size());
 }
@@ -1105,6 +1106,13 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
   return result;
 }
 
+size_t ShardDocIndex::GetNonPmrMemoryUsage() const {
+  size_t mem = 0;
+  if (indices_)
+    mem += indices_->GetNonPmrMemoryUsage();
+  return mem;
+}
+
 DocIndexInfo ShardDocIndex::GetInfo() const {
   return {.base_index = *base_,
           .num_docs = key_index_.Size(),
@@ -1241,7 +1249,10 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, Prime
 }
 
 size_t ShardDocIndices::GetUsedMemory() const {
-  return local_mr_.used();
+  size_t mem = local_mr_.used();
+  for (const auto& [_, index] : indices_)
+    mem += index->GetNonPmrMemoryUsage();
+  return mem;
 }
 
 SearchStats ShardDocIndices::GetStats() const {
