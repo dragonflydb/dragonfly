@@ -15,18 +15,42 @@ async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbco
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
         await c_master.set(key, "dummy")
-        logging.debug(f"set {key} MASTER db = {db}")
+        logging.info(
+            f"set {key} on MASTER db={db}, waiting for replica to sync (timeout={timeout}s)"
+        )
         remaining = timeout
         while remaining > 0:
             v = await c_replica.get(key)
-            logging.debug(f"get {key} from REPLICA db = {db} got {v}")
             if v is not None:
+                logging.info(f"replica synced key {key} db={db} after {timeout - remaining}s")
                 break
-            repl_state = await c_master.info("replication")
-            logging.debug(f"replication info: {repl_state}")
+            master_repl = await c_master.info("replication")
+            replica_repl = await c_replica.info("replication")
+            master_dbsize = await c_master.dbsize()
+            replica_dbsize = await c_replica.dbsize()
+            logging.info(
+                f"waiting for sync key={key} db={db} remaining={remaining}s "
+                f"master_offset={master_repl.get('master_repl_offset', 'N/A')} "
+                f"replica_offset={replica_repl.get('master_repl_offset', replica_repl.get('slave_repl_offset', 'N/A'))} "
+                f"replica_link_status={replica_repl.get('master_link_status', 'N/A')} "
+                f"replica_role={replica_repl.get('role', 'N/A')} "
+                f"master_dbsize={master_dbsize} replica_dbsize={replica_dbsize}"
+            )
             await asyncio.sleep(1)
-
             remaining -= 1
+        if remaining <= 0:
+            master_repl = await c_master.info("replication")
+            replica_repl = await c_replica.info("replication")
+            master_dbsize = await c_master.dbsize()
+            replica_dbsize = await c_replica.dbsize()
+            logging.error(
+                f"TIMEOUT waiting for replica to sync key={key} db={db} "
+                f"master_repl={master_repl} "
+                f"replica_repl={replica_repl} "
+                f"master_dbsize={master_dbsize} replica_dbsize={replica_dbsize}"
+            )
+        await c_master.close()
+        await c_replica.close()
         assert remaining > 0, "Timeout while waiting for replica to sync"
 
 
