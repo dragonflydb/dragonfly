@@ -363,7 +363,13 @@ class RdbLoader : protected RdbLoaderBase {
 
   struct ObjSettings;
 
+  struct StreamState;
+
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+
+  // Loads a continuation tagged chunk. The first chunk has already loaded the key and object type.
+  // This restores the saved stream state and continues loading only the remaining payload.
+  std::error_code LoadValueChunk();
 
   io::Result<bool> ReadAndDispatchObject(int object_type, std::string& key,
                                          const ObjSettings& obj_settings, DbIndex db_index);
@@ -447,6 +453,9 @@ class RdbLoader : protected RdbLoaderBase {
   base::SpinLock now_chunked_mu_;  // guards now_chunked_
 
   std::string last_key_loaded_;
+
+  // Maps tagged stream id to the loader state needed to resume a partially read object
+  absl::flat_hash_map<uint32_t, StreamState> stream_states_;
 };
 
 }  // namespace dfly
