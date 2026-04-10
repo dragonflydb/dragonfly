@@ -10,6 +10,8 @@
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
+ABSL_DECLARE_FLAG(bool, enable_stream_node_compress);
+
 using namespace testing;
 using namespace std;
 using namespace util;
@@ -1599,6 +1601,98 @@ TEST_F(StreamFamilyTest, XAutoClaimEmptyConsumer) {
   Run({"xgroup", "create", "stream4", "group2", "0"});
   auto resp = Run({"xautoclaim", "stream4", "group2", "", "0", "0-0"});
   EXPECT_THAT(resp, AnyOf(ErrArg(""), ArgType(RespExpr::ARRAY)));
+}
+
+// Tests for stream node compression (enable_stream_node_compress flag).
+class StreamNodeCompressTest : public StreamFamilyTest {
+ protected:
+  void SetUp() override {
+    StreamFamilyTest::SetUp();
+    absl::SetFlag(&FLAGS_enable_stream_node_compress, true);
+  }
+
+  void TearDown() override {
+    absl::SetFlag(&FLAGS_enable_stream_node_compress, false);
+    StreamFamilyTest::TearDown();
+  }
+
+  // Adds `count` entries to `key` with IDs "<i>-0" and field "f" value "v<i><pad>".
+  // The padding ensures ZSTD achieves the required >30% compression ratio while keeping
+  // 100 entries well under the 4096-byte node size limit (count limit triggers the split).
+  void AddEntries(string_view key, int count) {
+    for (int i = 1; i <= count; i++) {
+      Run({"xadd", string(key), absl::StrCat(i, "-0"), "f", absl::StrCat("v", i, kValuePad)});
+    }
+  }
+
+  // 20 repeated chars give ~3600 bytes for 100 entries (< 4096) and compress >30% with ZSTD.
+  static constexpr std::string_view kValuePad = "xxxxxxxxxxxxxxxxxxxx";  // 20 'x'
+};
+
+// Verify that XRANGE returns all entries correctly after compression.
+TEST_F(StreamNodeCompressTest, RoundTrip) {
+  // 110 entries: node 0 (100 entries, compressed) + node 1 (10 entries, raw)
+  AddEntries("s", 110);
+
+  EXPECT_THAT(Run({"xlen", "s"}), IntArg(110));
+
+  auto resp = Run({"xrange", "s", "-", "+"});
+  ASSERT_THAT(resp, ArrLen(110));
+
+  const auto& entries = resp.GetVec();
+  EXPECT_EQ(entries[0].GetVec()[0], "1-0");
+  EXPECT_THAT(entries[0].GetVec()[1].GetVec(), ElementsAre("f", absl::StrCat("v1", kValuePad)));
+  EXPECT_EQ(entries[109].GetVec()[0], "110-0");
+  EXPECT_THAT(entries[109].GetVec()[1].GetVec(), ElementsAre("f", absl::StrCat("v110", kValuePad)));
+}
+
+// Verify XDEL on an entry inside a compressed node.
+TEST_F(StreamNodeCompressTest, XDelFromCompressedNode) {
+  // node 0 (entries 1-0..100-0, compressed), node 1 (entry 101-0, raw).
+  AddEntries("s", 101);
+
+  // Delete an entry from the compressed node 0.
+  EXPECT_THAT(Run({"xdel", "s", "50-0"}), IntArg(1));
+  EXPECT_THAT(Run({"xlen", "s"}), IntArg(100));
+
+  // The deleted entry must not appear in range.
+  EXPECT_THAT(Run({"xrange", "s", "50-0", "50-0"}), ArrLen(0));
+
+  // Neighbours must still be readable.
+  EXPECT_THAT(Run({"xrange", "s", "49-0", "51-0"}), ArrLen(2));
+
+  // Full range count must match.
+  EXPECT_THAT(Run({"xrange", "s", "-", "+"}), ArrLen(100));
+}
+
+// Verify XTRIM that partially removes entries from a compressed node.
+TEST_F(StreamNodeCompressTest, XTrimPartialCompressedNode) {
+  // node 0 (entries 1-0..100-0, compressed), node 1 (entry 101-0, raw).
+  AddEntries("s", 101);
+
+  // Trim to 60: removes 41 entries from the start of compressed node 0.
+  EXPECT_THAT(Run({"xtrim", "s", "maxlen", "=", "60"}), IntArg(41));
+  EXPECT_THAT(Run({"xlen", "s"}), IntArg(60));
+
+  // The first surviving entry is 42-0 (entry 41 removed, 42 is the first kept).
+  auto resp = Run({"xrange", "s", "-", "+"});
+  ASSERT_THAT(resp, ArrLen(60));
+  EXPECT_EQ(resp.GetVec()[0].GetVec()[0], "42-0");
+}
+
+// Verify XTRIM that removes an entire compressed node.
+TEST_F(StreamNodeCompressTest, XTrimRemoveCompressedNode) {
+  // node 0 (entries 1-0..100-0, compressed), node 1 (entry 101-0, raw).
+  AddEntries("s", 101);
+
+  // Trim to 1: compressed node 0 is removed entirely, only raw node 1 survives.
+  EXPECT_THAT(Run({"xtrim", "s", "maxlen", "=", "1"}), IntArg(100));
+  EXPECT_THAT(Run({"xlen", "s"}), IntArg(1));
+
+  // Single entry: xrange returns [id, fields] directly (2 elements).
+  auto resp = Run({"xrange", "s", "-", "+"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_EQ(resp.GetVec()[0], "101-0");
 }
 
 }  // namespace dfly

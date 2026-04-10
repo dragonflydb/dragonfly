@@ -18,12 +18,20 @@ class __attribute__((packed)) StreamNode {
   // Frees the node's data and the node itself.
   static void Free(void* node);
 
+  // Reset internal state for nodes that are compressed.
+  void Reset();
+
+  // Prerequisite: StreamNode holds RAW listpack.
   // Updates the node's listpack state. Always refreshes the uncompressed size.
   // Updates the pointer if the listpack was reallocated.
   void SetListpack(uint8_t* lp);
 
   // Returns a pointer to the raw uncompressed listpack.
   uint8_t* GetListpack() const;
+
+  // Compress stream node using ZSTD. Returns true on success.
+  // False, no-op, when compression is rejected.
+  bool TryCompress();
 
   // Uncompressed listpack size in bytes.
   uint32_t UncompressedSize() const {

@@ -16,6 +16,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -29,6 +30,8 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
+
+ABSL_FLAG(bool, enable_stream_node_compress, false, "Compress finalized stream nodes.");
 
 namespace dfly {
 
@@ -169,7 +172,7 @@ int64_t LpGetInteger(uint8_t* ele) {
 
 void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
   StreamNode* node = static_cast<StreamNode*>(si->ri.data);
-  uint8_t* lp = node->GetListpack();
+  uint8_t* lp = si->lp;
   int64_t aux;
 
   int64_t flags = LpGetInteger(si->lp_flags);
@@ -187,7 +190,9 @@ void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
     p = lpNext(lp, p);
     aux = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, aux + 1);
+    node->Reset();  // Reset node state if not holding raw data.
     node->SetListpack(lp);
+    // TODO: Maybe it's worth compressing here again.
     CHECK_GT(node->UncompressedSize(), 0u);
   }
 
@@ -467,7 +472,9 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     int64_t marked_deleted = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, marked_deleted + deleted_from_lp);
 
+    node->Reset();  // Reset node state if not holding raw data.
     node->SetListpack(lp);
+    // TODO: Maybe it's worth compressing here again.
     CHECK_GT(node->UncompressedSize(), 0u);
     break;
   }
@@ -690,6 +697,7 @@ const char kSameStreamFound[] = "Same stream specified multiple time";
 
 const uint32_t STREAM_LISTPACK_MAX_SIZE = 1 << 30;
 const uint32_t kStreamNodeMaxBytes = 4096;
+static_assert(kStreamNodeMaxBytes > 0);
 const uint32_t kStreamNodeMaxEntries = 100;
 const uint32_t STREAM_LISTPACK_MAX_PRE_ALLOCATE = 4096;
 
@@ -912,7 +920,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   uint8_t rax_key[16]; /* Key in the radix tree containing the listpack.*/
   streamID master_id;  /* ID of the master entry in the listpack. */
 
-  StreamNode* current_node = NULL; /* Node in the rax tree we are appending to. */
+  StreamNode* current_node = nullptr;  // Node in the rax tree we are appending to.
 
   if (!raxEOF(&ri)) {
     /* Get a reference to the tail node listpack. */
@@ -979,7 +987,11 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
         LOG(DFATAL) << "StreamAppendItem: Key mismatch";
       }
       current_node->SetListpack(lp);
-      current_node = NULL;
+      /* Try to compress finalized node. */
+      if (absl::GetFlag(FLAGS_enable_stream_node_compress)) {
+        current_node->TryCompress();
+      }
+      current_node = nullptr;
       lp = NULL;
     }
   }
