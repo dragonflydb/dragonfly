@@ -159,8 +159,8 @@ class FieldIndices {
 
   const Schema& schema_;
   const IndicesOptions& options_;
-  // NOTE: all_ids_ uses default allocator — tracked manually via GetNonPmrMemoryUsage().
-  // If adding new untracked containers, update GetNonPmrMemoryUsage() accordingly.
+  // These containers use default allocators — tracked manually via GetNonPmrMemoryUsage().
+  // If adding new default-allocator containers, update GetNonPmrMemoryUsage() accordingly.
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;

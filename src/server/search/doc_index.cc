@@ -1168,7 +1168,6 @@ unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   DropIndexCache(*it->second);
   auto index = std::move(it->second);
   indices_.erase(it);
-
   return index;
 }
 
