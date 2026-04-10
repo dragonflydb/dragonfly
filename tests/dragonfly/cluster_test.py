@@ -3862,19 +3862,23 @@ async def test_cluster_snapshot_load_replication(df_factory: DflyInstanceFactory
     seeder = DebugPopulateSeeder(key_target=1000, data_size=100)
     await seeder.run(m1_node.client)
     await m1_node.client.execute_command("SAVE", "DF", dbfilename)
+    await m1_node.client.execute_command("FLUSHALL")
 
-    # Set up replication while master has data, so the replica syncs it
-    # and enters STABLE_SYNC with journal streaming active.
     await r1_node.client.execute_command("REPLICAOF", "localhost", str(m1_node.instance.port))
     await wait_available_async(r1_node.client)
-    await check_all_replicas_finished([r1_node.client], m1_node.client)
 
     # Stream writes during DFLY LOAD to exercise the race between journal
     # writes and the load that bypasses the journal. LOADING state rejects
     # seeder Lua scripts, so the seeder task may fail.
     stream_seeder = Seeder(key_target=500)
     seed_task = asyncio.create_task(stream_seeder.run(m1_node.client, target_deviation=0.1))
+    await asyncio.sleep(
+        0.5
+    )  # Let the seeder start and write some data before we load the snapshot.
+
     await m1_node.client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    await asyncio.sleep(0.5)  # Let the seeder fails because of the loading state.
     seed_task.cancel()
     try:
         await seed_task
@@ -3882,7 +3886,6 @@ async def test_cluster_snapshot_load_replication(df_factory: DflyInstanceFactory
         pass
 
     # Wait for the replica to complete the new full sync.
-    await asyncio.sleep(1)
     await wait_for_replicas_state(r1_node.client)
     await check_all_replicas_finished([r1_node.client], m1_node.client)
 
