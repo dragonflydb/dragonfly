@@ -1725,6 +1725,15 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   }
   len = ql_v2->Size();
 
+  if (len == 0) {
+    CompactObj::DeleteMR<QList>(ql_v2);
+    auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
+    if (IsValid(it_res.it)) {
+      op_args.GetDbSlice().DelMutable(op_args.db_cntx, std::move(it_res));
+    }
+    return 0;
+  }
+
   PrimeValue pv;
   pv.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
 
