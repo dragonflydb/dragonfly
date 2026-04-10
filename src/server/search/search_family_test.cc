@@ -356,30 +356,46 @@ TEST_F(SearchFamilyTest, Stats) {
 // Verify that search memory tracking accounts for DocKeyIndex and FieldIndices allocations
 TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
   constexpr size_t kNumDocs = 500;
-  constexpr size_t kKeyLen = 30;  // "doc-XXXX-padding-padding-pad" ~30 chars
+  // "doc-0000-padding-padding-pad" = 28 chars, above SSO threshold so heap-allocated
+  constexpr size_t kKeyLen = 28;
 
   EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TAG"}),
             "OK");
 
-  auto metrics_before = GetMetrics();
-  size_t mem_before = metrics_before.search_stats.used_memory;
+  size_t mem_before = GetMetrics().search_stats.used_memory;
 
   for (size_t i = 0; i < kNumDocs; i++) {
-    // Use long keys so their memory contribution is significant
     Run({"hset", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad"),
          "name", absl::StrCat("tag", i % 10)});
   }
 
-  auto metrics_after = GetMetrics();
-  size_t mem_after = metrics_after.search_stats.used_memory;
+  size_t mem_after = GetMetrics().search_stats.used_memory;
+  ASSERT_GE(mem_after, mem_before) << "Memory should not decrease after adding documents";
   size_t mem_delta = mem_after - mem_before;
 
-  // DocKeyIndex stores each key twice (in ids_ map and keys_ vector), plus DocId vectors.
-  // FieldIndices::all_ids_ stores one DocId per doc.
-  // Minimum expected: kNumDocs * kKeyLen for keys_ vector string data alone.
-  size_t min_key_memory = kNumDocs * kKeyLen;
-  EXPECT_GE(mem_delta, min_key_memory)
-      << "Search memory tracking should account for DocKeyIndex key storage";
+  // Per document, tracked allocations via local_mr_:
+  //   keys_ vector:  StatelessString object (sizeof(string)=32) + heap chars (~kKeyLen)
+  //   ids_ map:      StatelessString key (32 + kKeyLen heap) + DocId + slot/control overhead
+  //   all_ids_:      one DocId (4 bytes) via GetNonPmrMemoryUsage
+  // Lower bound: just the string heap data (stored twice) + DocId.
+  // Upper bound: generous per-doc estimate covering allocator rounding and index metadata.
+  constexpr size_t kMinPerDoc = 2 * kKeyLen + sizeof(search::DocId);
+  constexpr size_t kMaxPerDoc = 2 * (sizeof(std::string) + kKeyLen + 16 /*allocator rounding*/) +
+                                sizeof(search::DocId) + 64 /*tag index + map slot overhead*/;
+  EXPECT_GE(mem_delta, kNumDocs * kMinPerDoc)
+      << "Memory tracking should account for DocKeyIndex and FieldIndices storage";
+  EXPECT_LE(mem_delta, kNumDocs * kMaxPerDoc)
+      << "Memory tracking should not over-count (possible double tracking)";
+
+  // Delete half the documents and verify memory decreases proportionally
+  for (size_t i = 0; i < kNumDocs / 2; i++) {
+    Run({"del", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad")});
+  }
+
+  size_t mem_after_delete = GetMetrics().search_stats.used_memory;
+  EXPECT_LT(mem_after_delete, mem_after) << "Memory should decrease after removing documents";
+  EXPECT_GE(mem_after_delete - mem_before, (kNumDocs / 2) * kMinPerDoc)
+      << "Remaining half should still be tracked";
 }
 
 // Test how asynchronous indexing indexes documents and reports its progress
