@@ -10,7 +10,7 @@
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
-ABSL_DECLARE_FLAG(bool, enable_stream_node_compress);
+ABSL_DECLARE_FLAG(uint32_t, stream_node_zstd_dict_threshold);
 
 using namespace testing;
 using namespace std;
@@ -1608,11 +1608,11 @@ class StreamNodeCompressTest : public StreamFamilyTest {
  protected:
   void SetUp() override {
     StreamFamilyTest::SetUp();
-    absl::SetFlag(&FLAGS_enable_stream_node_compress, true);
+    absl::SetFlag(&FLAGS_stream_node_zstd_dict_threshold, 1u);
   }
 
   void TearDown() override {
-    absl::SetFlag(&FLAGS_enable_stream_node_compress, false);
+    absl::SetFlag(&FLAGS_stream_node_zstd_dict_threshold, 0u);
     StreamFamilyTest::TearDown();
   }
 

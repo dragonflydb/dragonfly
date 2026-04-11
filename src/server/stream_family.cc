@@ -31,7 +31,9 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(bool, enable_stream_node_compress, false, "Compress finalized stream nodes.");
+ABSL_FLAG(uint32_t, stream_node_zstd_dict_threshold, 0,
+          "Minimum stream node bytes accumulated before training ZSTD dictionary for stream node "
+          "compression. 0 disables compression.");
 
 namespace dfly {
 
@@ -988,7 +990,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
       }
       current_node->SetListpack(lp);
       /* Try to compress finalized node. */
-      if (absl::GetFlag(FLAGS_enable_stream_node_compress)) {
+      if (absl::GetFlag(FLAGS_stream_node_zstd_dict_threshold) > 0) {
         current_node->TryCompress();
       }
       current_node = nullptr;
