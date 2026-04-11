@@ -24,7 +24,8 @@ namespace {
 
 inline bool MayHaveTtl(sds s) {
   char* alloc_ptr = (char*)sdsAllocPtr(s);
-  return sdslen(s) + 1 + 4 <= zmalloc_usable_size(alloc_ptr);
+  size_t hdr_size = s - alloc_ptr;
+  return sdslen(s) + 1 + sizeof(uint32_t) + hdr_size <= zmalloc_usable_size(alloc_ptr);
 }
 
 sds AllocImmutableWithTtl(uint32_t len, uint32_t at) {
@@ -215,6 +216,12 @@ pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, PageUsage* page
   bool has_ttl = MayHaveTtl(key);
 
   if (has_ttl) {
+    // Verify the memcpy below won't overread: bytes we copy (data + '\0' + TTL)
+    // must not exceed the usable space from the data pointer to the end of the allocation.
+    [[maybe_unused]] size_t bytes_to_copy = key_len + 1 + sizeof(uint32_t);
+    [[maybe_unused]] size_t usable_from_key =
+        zmalloc_usable_size(sdsAllocPtr(key)) - (key - (char*)sdsAllocPtr(key));
+    DCHECK_LE(bytes_to_copy, usable_from_key);
     sds res = AllocSdsWithSpace(key_len, sizeof(uint32_t));
     std::memcpy(res, key, key_len + 1 + sizeof(uint32_t));  // +1 for null terminator
     return {res, true};

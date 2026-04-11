@@ -1152,6 +1152,9 @@ pair<uint16_t, bool> Transaction::DisarmInShardWhen(ShardId sid, uint16_t releva
 }
 
 bool Transaction::IsActive(ShardId sid) const {
+  if (unique_shard_cnt_ == 0)  // Not initialized
+    return false;
+
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
   if (unique_shard_cnt_ == 1) {
