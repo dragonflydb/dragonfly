@@ -19,6 +19,7 @@
 #include "core/search/index_result.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/scoring.h"
 #include "core/search/sort_indices.h"
 #include "core/search/tag_types.h"
 #include "core/search/vector_utils.h"
@@ -114,7 +115,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices) : indices_{indices} {
+  BasicSearch(const FieldIndices* indices, std::optional<ScorerType> scorer = std::nullopt)
+      : indices_{indices}, scorer_type_{scorer} {
   }
 
   void EnableProfiling() {
@@ -230,6 +232,27 @@ struct BasicSearch {
       indices = indices_->GetAllTextIndices();
     }
 
+    // Track matched terms for scoring (prefix/suffix/infix expand to multiple terms).
+    // Synonym shadow entries (freq=0) are resolved to their group_id for correct scoring.
+    if (scorer_type_) {
+      for (auto* index : indices) {
+        auto term_cb = [this, index](string_view term, const auto*) {
+          std::string resolved{term};
+          if (auto synonyms = indices_->GetSynonyms(); synonyms) {
+            if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
+              resolved = std::move(*group_id);
+          }
+          AddMatchedTerm(index, std::move(resolved));
+        };
+        if constexpr (T == TagType::PREFIX)
+          index->MatchPrefixWithTerm(node.affix, term_cb);
+        else if constexpr (T == TagType::SUFFIX)
+          index->MatchSuffixWithTerm(node.affix, term_cb);
+        else if constexpr (T == TagType::INFIX)
+          index->MatchInfixWithTerm(node.affix, term_cb);
+      }
+    }
+
     auto mapping = [&node, this](TextIndex* index) {
       if constexpr (T == TagType::PREFIX)
         return CollectMatches(index, node.affix, &TextIndex::MatchPrefix);
@@ -256,12 +279,22 @@ struct BasicSearch {
     }
 
     if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index)
+      if (auto* index = GetIndex<TextIndex>(active_field); index) {
+        if (scorer_type_)
+          AddMatchedTerm(index, term);
         return IndexResult{index->Matching(term, strip_whitespace)};
+      }
       return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
+
+    // Track terms for scoring
+    if (scorer_type_) {
+      for (auto* index : selected_indices)
+        AddMatchedTerm(index, term);
+    }
+
     auto mapping = [&term, strip_whitespace](TextIndex* index) {
       return index->Matching(term, strip_whitespace);
     };
@@ -473,17 +506,100 @@ struct BasicSearch {
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
     auto [out, total_size] = result.Take(cuttoff_limit);
-    return SearchResult{total_size, std::move(out), std::move(knn_scores_), std::move(profile),
-                        std::move(error_)};
+
+    // Compute text relevance scores if scorer is active
+    auto text_scores = ComputeTextScores(out);
+
+    return SearchResult{
+        total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
+        std::move(profile), std::move(error_)};
+  }
+
+  // Compute text relevance scores for matched documents.
+  // Pre-builds per-term freq maps from posting lists for O(1) lookup per (doc, term).
+  vector<pair<DocId, float>> ComputeTextScores(const vector<DocId>& doc_ids) {
+    if (!scorer_type_ || matched_text_terms_.empty())
+      return {};
+
+    // Build sorted vector for binary search (faster than hash set for intersection)
+    vector<DocId> sorted_ids(doc_ids.begin(), doc_ids.end());
+    sort(sorted_ids.begin(), sorted_ids.end());
+
+    // Pre-build per-term data: (index, term_docs, {DocId -> freq} map)
+    struct TermData {
+      TextIndex* index = nullptr;
+      size_t term_docs = 0;
+      absl::flat_hash_map<DocId, uint32_t> doc_freqs;
+    };
+
+    vector<TermData> term_data(matched_text_terms_.size());
+    for (size_t t = 0; t < matched_text_terms_.size(); t++) {
+      auto& [index, term] = matched_text_terms_[t];
+      auto* container = index->Matching(term, /*strip_whitespace=*/false);
+      if (!container)
+        continue;
+
+      term_data[t].index = index;
+      term_data[t].term_docs = container->Size();
+
+      // Early termination: iterate posting list and use binary search in matched set
+      for (auto it = container->begin(); it != container->end(); ++it) {
+        DocId id = *it;
+        if (binary_search(sorted_ids.begin(), sorted_ids.end(), id))
+          term_data[t].doc_freqs[id] = it.Freq();
+      }
+    }
+
+    size_t num_docs = indices_->GetAllDocs().size();
+    ScoringContext ctx;
+    ctx.num_docs = num_docs;
+
+    vector<pair<DocId, float>> scores;
+    scores.reserve(doc_ids.size());
+
+    for (DocId doc : doc_ids) {
+      vector<ScoringTermInfo> term_infos;
+      term_infos.reserve(matched_text_terms_.size());
+
+      for (size_t t = 0; t < matched_text_terms_.size(); t++) {
+        ScoringTermInfo ti;
+        ti.term_docs = term_data[t].term_docs;
+        if (auto it = term_data[t].doc_freqs.find(doc); it != term_data[t].doc_freqs.end())
+          ti.term_freq = it->second;
+        // Per-field document length and average
+        if (term_data[t].index) {
+          ti.field_doc_len = term_data[t].index->GetFieldDocLength(doc);
+          ti.field_avg_doc_len = term_data[t].index->GetFieldAvgDocLen();
+        }
+        term_infos.push_back(ti);
+      }
+
+      float score = static_cast<float>(ScoreDocument(*scorer_type_, ctx, term_infos));
+      scores.emplace_back(doc, score);
+    }
+
+    return scores;
   }
 
   const FieldIndices* indices_;
+  std::optional<ScorerType> scorer_type_;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
   std::vector<pair<DocId, float>> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
+
+  // Tracked text terms for scoring: (TextIndex*, normalized_term)
+  // Deduplicated via matched_terms_set_ to avoid double-counting synonyms resolved to same
+  // group_id.
+  vector<pair<TextIndex*, string>> matched_text_terms_;
+  absl::flat_hash_set<pair<TextIndex*, string>> matched_terms_set_;
+
+  void AddMatchedTerm(TextIndex* index, string term) {
+    if (matched_terms_set_.emplace(index, term).second)
+      matched_text_terms_.emplace_back(index, std::move(term));
+  }
 };
 
 #ifndef __clang__
@@ -717,7 +833,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
 SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
   DCHECK(query_);
 
-  auto bs = BasicSearch{index};
+  auto bs = BasicSearch{index, scorer_type_};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_, cuttoff_limit);
@@ -764,6 +880,10 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
 
 void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
+}
+
+void SearchAlgorithm::SetScorer(ScorerType type) {
+  scorer_type_ = type;
 }
 
 const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {
