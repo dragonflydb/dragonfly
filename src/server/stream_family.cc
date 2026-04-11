@@ -192,8 +192,7 @@ void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
     p = lpNext(lp, p);
     aux = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, aux + 1);
-    node->Reset();  // Reset node state if not holding raw data.
-    node->SetListpack(lp);
+    node->Reset(lp);  // Reset node state and update listpack pointer.
     // TODO: Maybe it's worth compressing here again.
     CHECK_GT(node->UncompressedSize(), 0u);
   }
@@ -474,8 +473,7 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     int64_t marked_deleted = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, marked_deleted + deleted_from_lp);
 
-    node->Reset();  // Reset node state if not holding raw data.
-    node->SetListpack(lp);
+    node->Reset(lp);  // Reset node state and update listpack pointer.
     // TODO: Maybe it's worth compressing here again.
     CHECK_GT(node->UncompressedSize(), 0u);
     break;

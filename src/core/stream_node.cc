@@ -138,26 +138,28 @@ void StreamNode::Free(void* node) {
   zfree(stream_node);
 }
 
-void StreamNode::Reset() {
+void StreamNode::Reset(uint8_t* lp) {
+  DCHECK(lp != nullptr);
   if (encoding_ != kRaw) {
     zfree(data_);
-    data_ = nullptr;
     encoding_ = kRaw;
-    if (tl_zstd_ctx) {
-      zfree(tl_zstd_ctx->decompress_buf);
-      tl_zstd_ctx->decompress_buf = nullptr;
-      tl_zstd_ctx->decompress_buf_capacity = 0;
-    }
   }
+  SetListpack(lp);
 }
 
 void StreamNode::SetListpack(uint8_t* lp) {
   DCHECK(lp != nullptr);
-  DCHECK(lpBytes(lp) < (1u << 30));
   DCHECK(encoding_ == kRaw);
+  DCHECK(lpBytes(lp) < (1u << 30));
   uncompressed_size_ = static_cast<uint32_t>(lpBytes(lp));
-
-  if (data_ != lp) {
+  // When compressed data is decompressed into a temporary buffer and the underlying
+  // pointer remains unchanged after modification (StreamIteratorRemoveEntry). We
+  // must allocate new memory and perform a deep copy to preserve ownership.
+  if (tl_zstd_ctx && tl_zstd_ctx->IsDictReady() && lp == tl_zstd_ctx->decompress_buf) {
+    uint8_t* owned = static_cast<uint8_t*>(zmalloc(uncompressed_size_));
+    memcpy(owned, lp, uncompressed_size_);
+    data_ = owned;
+  } else if (data_ != lp) {
     data_ = lp;
   }
 }

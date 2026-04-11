@@ -18,8 +18,8 @@ class __attribute__((packed)) StreamNode {
   // Frees the node's data and the node itself.
   static void Free(void* node);
 
-  // Reset internal state for nodes that are compressed.
-  void Reset();
+  // Reset internal state for nodes that are compressed and update pointer.
+  void Reset(uint8_t* lp);
 
   // Prerequisite: StreamNode holds RAW listpack.
   // Updates the node's listpack state. Always refreshes the uncompressed size.
@@ -34,7 +34,7 @@ class __attribute__((packed)) StreamNode {
   //
   // Compression is a no-op if:
   // 1. the dictionary is not ready (still training or dictionary construction failed),
-  // 2. raw size is less than 1024 bytes,
+  // 2. raw size is less than 512 bytes,
   // 3. the data compression returned error,
   // 4. the compressed result does not achieve ≥30% size reduction.
   //
