@@ -291,7 +291,7 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Find(string_view
 }
 
 void ShardDocIndex::DocKeyIndex::Remove(DocId id) {
-  ids_.extract(keys_[id]);
+  ids_.erase(std::string_view(keys_[id]));
   keys_[id] = "";
   free_ids_.push_back(id);
 }
@@ -308,7 +308,7 @@ bool ShardDocIndex::DocKeyIndex::IsValid(DocId id) const {
   if (id >= last_id_ || id >= keys_.size())
     return false;
   // Check if the key at this slot is still tracked in the reverse map with the same id.
-  // This correctly handles empty keys: freed slots have their key extracted from ids_,
+  // This correctly handles empty keys: freed slots have their key erased from ids_,
   // while valid empty-key docs still have ids_[""] == id.
   auto it = ids_.find(keys_[id]);
   return it != ids_.end() && it->second == id;
@@ -323,7 +323,7 @@ std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::S
   result.reserve(ids_.size());
   for (search::DocId id = 0; id < keys_.size(); ++id) {
     if (!keys_[id].empty()) {
-      result.emplace_back(keys_[id], id);
+      result.emplace_back(std::string(keys_[id]), id);
     }
   }
   return result;
@@ -342,10 +342,11 @@ void ShardDocIndex::DocKeyIndex::Restore(
   keys_.resize(max_id + 1);
   last_id_ = max_id + 1;
 
-  // Restore the mappings
+  // Restore the mappings — insert into ids_ using keys_[doc_id] (the persistent
+  // StatelessString storage) to avoid implicit cross-allocator conversion from std::string.
   for (const auto& [key, doc_id] : mappings) {
-    keys_[doc_id] = key;
-    ids_[key] = doc_id;
+    keys_[doc_id].assign(key.data(), key.size());
+    ids_[std::string_view(keys_[doc_id])] = doc_id;
   }
 
   // Build free_ids_ list for any gaps in the id sequence
@@ -360,8 +361,8 @@ void ShardDocIndex::DocKeyIndex::Restore(const std::vector<std::string>& keys) {
   DCHECK(ids_.empty()) << "Restore should only be called on an empty DocKeyIndex";
   keys_.resize(keys.size());
   for (DocId id = 0; id < static_cast<DocId>(keys.size()); ++id) {
-    keys_[id] = keys[id];
-    ids_[keys[id]] = id;
+    keys_[id].assign(keys[id].data(), keys[id].size());
+    ids_[std::string_view(keys_[id])] = id;
   }
   last_id_ = static_cast<DocId>(keys.size());
 }
@@ -1105,6 +1106,13 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
   return result;
 }
 
+size_t ShardDocIndex::GetNonPmrMemoryUsage() const {
+  size_t mem = 0;
+  if (indices_)
+    mem += indices_->GetNonPmrMemoryUsage();
+  return mem;
+}
+
 DocIndexInfo ShardDocIndex::GetInfo() const {
   return {.base_index = *base_,
           .num_docs = key_index_.Size(),
@@ -1160,15 +1168,20 @@ unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   DropIndexCache(*it->second);
   auto index = std::move(it->second);
   indices_.erase(it);
-
   return index;
 }
 
 void ShardDocIndices::DropAllIndices() {
-  for (const auto& [_, idx] : indices_)
+  // Move indices out before destroying — ShardDocIndex destructors can yield
+  // (CancelBuilder joins a fiber), and destroying inside the map would trigger
+  // Abseil's reentrance assert if the heartbeat iterates indices_ mid-clear.
+  decltype(indices_) to_destroy;
+  std::swap(to_destroy, indices_);
+  for (auto& [_, idx] : to_destroy) {
     DropIndexCache(*idx);
-  indices_.clear();
+  }
   GlobalHnswIndexRegistry::Instance().Reset();
+  // to_destroy goes out of scope here — destructors run outside the map mutation
 }
 
 void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {
@@ -1241,7 +1254,10 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, Prime
 }
 
 size_t ShardDocIndices::GetUsedMemory() const {
-  return local_mr_.used();
+  size_t mem = local_mr_.used();
+  for (const auto& [_, index] : indices_)
+    mem += index->GetNonPmrMemoryUsage();
+  return mem;
 }
 
 SearchStats ShardDocIndices::GetStats() const {
