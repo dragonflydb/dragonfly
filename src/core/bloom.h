@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -144,6 +145,63 @@ class SBF {
   size_t prev_size_ = 0;
   size_t current_size_ = 0;
   size_t max_capacity_;
+};
+
+// Pair of values returned to a client.
+struct SBFChunk {
+  // The cursor can have the following values:
+  // 1: The data field is a header that should be used to reconstruct the SBF object itself.
+  // >1: The data field should be appended to the SBF filter, and the cursor value should be sent
+  // back in the next call to receive more data.
+  // 0: The filter is fully consumed, iteration has reached the end of data. The data field must be
+  // empty.
+  int64_t cursor;
+  // Bytes containing either the SBF metadata or filter data, depending on cursor value
+  // Maximum size returned is 16MiB. Will always contain data from exactly one filter, does not
+  // span multiple filters.
+  std::string data;
+};
+
+// This class allows sending the contents of an SBF to the caller in chunks, where each chunk is a
+// maximum of 16MiB in size. The first chunk sent back contains only the SBF metadata. Following
+// chunks contain filter data.
+// Note on correctness:
+// The data sent back represents a snapshot of the SBF at the moment this iterator was
+// created. It expects the filters to be unchanged from that point until the iteration finishes. If
+// a BF.ADD or similar command changes the data in the SBF, this breaks the data being sent back. It
+// can cause the following issues:
+// Filter integrity: a filter which has been sent is modified in place: the data the client has is
+// out of date.
+// SBF data corruption: if the SBF grows after the header is sent, and more filters are added.
+// This means the header and filter data are out of sync, and the client will not be able to
+// reconstruct the SBF from the produced data. The LOADCHUNK command should add validation for this
+// scenario.
+class SBFDumpIterator {
+ public:
+  static constexpr uint64_t kMaxChunkSize = 16 * 1024 * 1024;
+
+  // The cursor is input from client, used to seek within a given SBF. 0 is used to start iteration
+  // from the beginning.
+  SBFDumpIterator(const SBF& sbf, int64_t cursor);
+
+  // Returns (next cursor, data between current and next cursor)
+  // Once the filter is fully read returns 0,""
+  SBFChunk Next();
+
+ private:
+  // On first call to Next(), serializes metadata. The SBF wide data is written first, then the per-
+  // filter data in sequence (hash count and size per filter)
+  std::string SerializeHeader() const;
+
+  // Converts a cursor to the specific filter and the offset inside it
+  // O(n) in number of filters
+  void ResolveCursorToPos();
+
+  const SBF& sbf_;
+  int64_t cursor_;
+  bool header_sent_ = false;
+  uint32_t filter_index_ = 0;
+  size_t byte_offset_ = 0;
 };
 
 }  // namespace dfly
