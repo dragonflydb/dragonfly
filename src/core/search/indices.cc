@@ -77,10 +77,8 @@ absl::flat_hash_map<string, uint32_t> NormalizeTags(string_view taglist, bool ca
   absl::flat_hash_map<string, uint32_t> tags;
   for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
     string_view str = absl::StripAsciiWhitespace(tag);
-    if (case_sensitive)
-      tags.emplace(string{str}, 1);
-    else
-      tags.emplace(ToLower(str), 1);
+    std::string s = case_sensitive ? string{str} : ToLower(str);
+    tags.emplace(std::move(s), 1);
   }
   return tags;
 }
@@ -315,7 +313,7 @@ void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
 
   // TODO(vlad): Use right iterator to avoid string comparison?
   for (auto it = entries_.lower_bound(prefix);
-       it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
+       it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
     cb(&(*it).second);
   }
 }
@@ -335,8 +333,7 @@ void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
 
   // Otherwise, iterate over all entries and look for the suffix
   for (const auto& entry : entries_) {
-    if (entry.first.size() >= suffix.size() &&
-        entry.first.substr(entry.first.size() - suffix.size()) == suffix)
+    if (entry.first.ends_with(suffix))
       cb(&entry.second);
   }
 }
@@ -350,7 +347,7 @@ void BaseStringIndex<C>::MatchInfix(std::string_view infix,
   // If we have a suffix trie built, we just need to match the prefix
   if (suffix_trie_) {
     for (auto it = suffix_trie_->lower_bound(infix);
-         it != suffix_trie_->end() && (*it).first.rfind(infix, 0) == 0; ++it)
+         it != suffix_trie_->end() && (*it).first.starts_with(infix); ++it)
       cb(&(*it).second);
     return;
   }
@@ -370,7 +367,7 @@ void BaseStringIndex<C>::MatchPrefixWithTerm(
   prefix = prefix_norm.view();
 
   for (auto it = entries_.lower_bound(prefix);
-       it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
+       it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
     cb((*it).first, &(*it).second);
   }
 }
@@ -390,8 +387,7 @@ void BaseStringIndex<C>::MatchSuffixWithTerm(
   }
 
   for (const auto& entry : entries_) {
-    if (entry.first.size() >= suffix.size() &&
-        entry.first.substr(entry.first.size() - suffix.size()) == suffix)
+    if (entry.first.ends_with(suffix))
       cb(entry.first, &entry.second);
   }
 }
@@ -407,7 +403,7 @@ void BaseStringIndex<C>::MatchInfixWithTerm(
   // If no suffixes match the infix as prefix, no terms contain the infix.
   if (suffix_trie_) {
     auto it = suffix_trie_->lower_bound(infix);
-    if (it == suffix_trie_->end() || (*it).first.rfind(infix, 0) != 0)
+    if (it == suffix_trie_->end() || !(*it).first.starts_with(infix))
       return;
   }
 
