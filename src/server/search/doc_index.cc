@@ -1172,10 +1172,16 @@ unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
 }
 
 void ShardDocIndices::DropAllIndices() {
-  for (const auto& [_, idx] : indices_)
+  // Move indices out before destroying — ShardDocIndex destructors can yield
+  // (CancelBuilder joins a fiber), and destroying inside the map would trigger
+  // Abseil's reentrance assert if the heartbeat iterates indices_ mid-clear.
+  decltype(indices_) to_destroy;
+  std::swap(to_destroy, indices_);
+  for (auto& [_, idx] : to_destroy) {
     DropIndexCache(*idx);
-  indices_.clear();
+  }
   GlobalHnswIndexRegistry::Instance().Reset();
+  // to_destroy goes out of scope here — destructors run outside the map mutation
 }
 
 void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {
