@@ -308,7 +308,7 @@ bool ShardDocIndex::DocKeyIndex::IsValid(DocId id) const {
   if (id >= last_id_ || id >= keys_.size())
     return false;
   // Check if the key at this slot is still tracked in the reverse map with the same id.
-  // This correctly handles empty keys: freed slots have their key extracted from ids_,
+  // This correctly handles empty keys: freed slots have their key erased from ids_,
   // while valid empty-key docs still have ids_[""] == id.
   auto it = ids_.find(keys_[id]);
   return it != ids_.end() && it->second == id;
@@ -342,10 +342,11 @@ void ShardDocIndex::DocKeyIndex::Restore(
   keys_.resize(max_id + 1);
   last_id_ = max_id + 1;
 
-  // Restore the mappings
+  // Restore the mappings — insert into ids_ using keys_[doc_id] (the persistent
+  // StatelessString storage) to avoid implicit cross-allocator conversion from std::string.
   for (const auto& [key, doc_id] : mappings) {
     keys_[doc_id].assign(key.data(), key.size());
-    ids_[key] = doc_id;
+    ids_[std::string_view(keys_[doc_id])] = doc_id;
   }
 
   // Build free_ids_ list for any gaps in the id sequence
@@ -361,8 +362,7 @@ void ShardDocIndex::DocKeyIndex::Restore(const std::vector<std::string>& keys) {
   keys_.resize(keys.size());
   for (DocId id = 0; id < static_cast<DocId>(keys.size()); ++id) {
     keys_[id].assign(keys[id].data(), keys[id].size());
-    std::string_view sv(keys[id]);
-    ids_[sv] = id;
+    ids_[std::string_view(keys_[id])] = id;
   }
   last_id_ = static_cast<DocId>(keys.size());
 }
