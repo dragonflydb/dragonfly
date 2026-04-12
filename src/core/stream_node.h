@@ -3,40 +3,67 @@
 
 #pragma once
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 
 namespace dfly {
 
-class __attribute__((packed)) StreamNode {
+// StreamNodeObj represents a stream node stored in the rax tree.
+//
+// Each node is:
+//   - Raw: a pointer to a listpack
+//
+// The representation is explicit and zero-copy.
+class StreamNodeObj {
  public:
-  StreamNode() = delete;
+  static constexpr uintptr_t kTagMask = 1ULL << 52;
 
-  // Allocates a new StreamNode and takes ownership of the given listpack pointer.
-  static StreamNode* New(uint8_t* lp);
+  // Construct from a raw tagged value retrieved from the rax tree.
+  explicit StreamNodeObj(void* p = nullptr) : ptr_(reinterpret_cast<uintptr_t>(p)) {
+  }
 
-  // Frees the node's data and the node itself.
-  static void Free(void* node);
+  bool operator==(StreamNodeObj other) const {
+    return ptr_ == other.ptr_;
+  }
+  bool operator!=(StreamNodeObj other) const {
+    return ptr_ != other.ptr_;
+  }
 
-  // Updates the node's listpack state. Always refreshes the uncompressed size.
-  // Updates the pointer if the listpack was reallocated.
-  void SetListpack(uint8_t* lp);
+  static StreamNodeObj Raw(const uint8_t* lp) {
+    StreamNodeObj r;
+    r.ptr_ = reinterpret_cast<uintptr_t>(lp);
+    return r;
+  }
 
-  // Returns a pointer to the raw uncompressed listpack.
+  bool IsRaw() const {
+    return (ptr_ & kTagMask) == 0;
+  }
+
+  // Raw pointer with tag bits stripped.
+  uint8_t* Ptr() const {
+    return std::bit_cast<uint8_t*>(reinterpret_cast<uintptr_t>(ptr_) & ~kTagMask);
+  }
+
+  // Raw tagged pointer
+  void* Get() const {
+    return std::bit_cast<void*>(ptr_);
+  }
+
+  // Returns the uncompressed listpack pointer.
   uint8_t* GetListpack() const;
 
   // Uncompressed listpack size in bytes.
-  uint32_t UncompressedSize() const {
-    return uncompressed_size_;
-  }
+  uint32_t UncompressedSize() const;
 
-  // Returns the total allocated memory in bytes for this node (header + data).
-  std::size_t MallocSize() const;
+  // Frees the node's underlying pointer
+  void Free() const;
+
+  // Total allocated bytes for this node.
+  size_t MallocSize() const;
 
  private:
-  uint32_t encoding_ : 2;
-  uint32_t uncompressed_size_ : 30;
-  uint8_t* data_;
+  uintptr_t ptr_;
 };
 
 }  // namespace dfly

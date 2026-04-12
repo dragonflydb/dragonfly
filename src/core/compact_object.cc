@@ -161,9 +161,8 @@ size_t MallocUsedStream(stream* s) {
   raxSeek(&ri, "^", NULL, 0);
   size_t lpsize = 0, samples = 0;
   while (raxNext(&ri)) {
-    StreamNode* node = static_cast<StreamNode*>(ri.data);
     /* Use the allocated size, since we overprovision the node initially. */
-    lpsize += node->MallocSize();
+    lpsize += StreamNodeObj(ri.data).MallocSize();
     samples++;
   }
   if (s->rax->numele <= samples) {
@@ -177,8 +176,7 @@ size_t MallocUsedStream(stream* s) {
     raxSeek(&ri, "$", NULL, 0);
     raxNext(&ri);
     /* Use the allocated size, since we overprovision the node initially. */
-    StreamNode* node = static_cast<StreamNode*>(ri.data);
-    asize += node->MallocSize();
+    asize += StreamNodeObj(ri.data).MallocSize();
   }
   raxStop(&ri);
 
@@ -390,10 +388,9 @@ struct TL {
 };
 
 // Callback function used in redis/t_stream.cc implementation to
-// extract listpack data from StreamNode.
+// extract listpack data from a stream rax entry.
 uint8_t* StreamNodeGetLp(const void* p) {
-  const StreamNode* node = static_cast<const StreamNode*>(p);
-  return node->GetListpack();
+  return StreamNodeObj(const_cast<void*>(p)).GetListpack();
 }
 
 thread_local TL tl;
@@ -1986,7 +1983,11 @@ static void streamFreeCGVoid(void* cg_) {
 
 /* Free a stream, including the listpack nodes stored inside the radix tree. */
 void freeStream(stream* s) {
-  raxFreeWithCallback(s->rax, StreamNode::Free);
+  raxFreeWithCallback(s->rax, [](void* p) {
+    if (p) {
+      StreamNodeObj(p).Free();
+    }
+  });
   if (s->cgroups)
     raxFreeWithCallback(s->cgroups, streamFreeCGVoid);
   zfree(s);

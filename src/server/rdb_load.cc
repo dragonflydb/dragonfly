@@ -759,10 +759,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     CHECK(lpFirst(lp) != NULL);
     uint8_t* copy_lp = (uint8_t*)zmalloc(data.size());
     ::memcpy(copy_lp, lp, data.size());
-    StreamNode* node = StreamNode::New(copy_lp);
-    int retval = raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), node, NULL);
+    int retval =
+        raxTryInsert(s->rax, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
     if (!retval) {
-      StreamNode::Free(node);
+      zfree(copy_lp);
       LOG(ERROR) << "Listpack re-added with existing key";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;

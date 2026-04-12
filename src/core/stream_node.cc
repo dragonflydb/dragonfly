@@ -12,49 +12,22 @@ extern "C" {
 
 namespace dfly {
 
-namespace {
-
-enum Encoding : uint8_t {
-  kRaw = 0,
-};
-
-constexpr size_t kStreamNodeSize = sizeof(StreamNode);
-static_assert(kStreamNodeSize == 12);
-
-}  // namespace
-
-StreamNode* StreamNode::New(uint8_t* lp) {
-  DCHECK(lp != nullptr);
-  StreamNode* node = static_cast<StreamNode*>(zcalloc(sizeof(StreamNode)));
-  node->encoding_ = kRaw;
-  node->SetListpack(lp);
-  return node;
+uint8_t* StreamNodeObj::GetListpack() const {
+  DCHECK(IsRaw());
+  return Ptr();
 }
 
-void StreamNode::Free(void* node) {
-  DCHECK(node != nullptr);
-  StreamNode* stream_node = static_cast<StreamNode*>(node);
-  zfree(stream_node->data_);
-  zfree(stream_node);
+uint32_t StreamNodeObj::UncompressedSize() const {
+  DCHECK(IsRaw());
+  return static_cast<uint32_t>(lpBytes(Ptr()));
 }
 
-void StreamNode::SetListpack(uint8_t* lp) {
-  DCHECK(lp != nullptr);
-  DCHECK(lpBytes(lp) < (1u << 30));
-  DCHECK(encoding_ == kRaw);
-  uncompressed_size_ = static_cast<uint32_t>(lpBytes(lp));
-  if (data_ != lp) {
-    data_ = lp;
-  }
+void StreamNodeObj::Free() const {
+  zfree(Ptr());
 }
 
-uint8_t* StreamNode::GetListpack() const {
-  DCHECK(encoding_ == kRaw);
-  return data_;
-}
-
-size_t StreamNode::MallocSize() const {
-  return kStreamNodeSize + zmalloc_size(data_);
+size_t StreamNodeObj::MallocSize() const {
+  return zmalloc_size(Ptr());
 }
 
 }  // namespace dfly
