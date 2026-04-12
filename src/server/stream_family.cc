@@ -8,6 +8,8 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
+#include "core/stream_node.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
@@ -166,7 +168,8 @@ int64_t LpGetInteger(uint8_t* ele) {
 }
 
 void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
-  uint8_t* lp = static_cast<uint8_t*>(si->lp);
+  StreamNodeObj node(si->ri.data);
+  uint8_t* lp = node.GetListpack();
   int64_t aux;
 
   int64_t flags = LpGetInteger(si->lp_flags);
@@ -177,15 +180,16 @@ void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
   aux = LpGetInteger(p);
 
   if (aux == 1) {
-    lpFree(lp);
+    node.Free();
     checkedRaxRemove(si->stream->rax, si->ri.key, si->ri.key_len, NULL);
   } else {
     lp = lpReplaceInteger(lp, &p, aux - 1);
     p = lpNext(lp, p);
     aux = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, aux + 1);
-    if (si->lp != lp)
-      raxInsert(si->stream->rax, si->ri.key, si->ri.key_len, lp, NULL);
+    if (lp != node.Ptr()) {
+      raxInsert(si->stream->rax, si->ri.key, si->ri.key_len, lp, nullptr);
+    }
     CHECK_GT(lpBytes(lp), 0u);
   }
 
@@ -368,8 +372,9 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     if (trim_strategy == TRIM_STRATEGY_MAXLEN && s->length <= maxlen)
       break;
 
-    uint8_t* lp = static_cast<uint8_t*>(ri.data);
-    CHECK_GT(lpBytes(lp), 0u);
+    StreamNodeObj node(ri.data);
+    uint8_t* lp = node.GetListpack();
+    CHECK_GT(node.UncompressedSize(), 0u);
     uint8_t* p = lpFirst(lp);
     int64_t entries = LpGetInteger(p);
 
@@ -388,7 +393,7 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     }
 
     if (remove_node) {
-      lpFree(lp);
+      node.Free();
       checkedRaxRemove(s->rax, ri.key, ri.key_len, NULL);
       raxSeek(&ri, ">=", ri.key, ri.key_len);
       s->length -= entries;
@@ -464,7 +469,9 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     int64_t marked_deleted = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, marked_deleted + deleted_from_lp);
 
-    raxInsert(s->rax, ri.key, ri.key_len, lp, NULL);
+    if (lp != node.Ptr()) {
+      raxInsert(s->rax, ri.key, ri.key_len, lp, nullptr);
+    }
     CHECK_GT(lpBytes(lp), 0u);
     break;
   }
@@ -909,10 +916,13 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   uint8_t rax_key[16]; /* Key in the radix tree containing the listpack.*/
   streamID master_id;  /* ID of the master entry in the listpack. */
 
+  void* current_node = nullptr;  // Tagged rax value for the node we are appending to.
+
   if (!raxEOF(&ri)) {
     /* Get a reference to the tail node listpack. */
-    lp = (uint8_t*)ri.data;
-    lp_bytes = lpBytes(lp);
+    current_node = ri.data;
+    lp = StreamNodeObj(current_node).GetListpack();
+    lp_bytes = StreamNodeObj(current_node).UncompressedSize();
     CHECK_GT(lp_bytes, 0U);
     DCHECK(ri.key_len == sizeof(rax_key));
     memcpy(rax_key, ri.key, sizeof(rax_key));
@@ -955,10 +965,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
    * the current node is full. */
   if (lp != NULL) {
     int new_node = 0;
-    size_t node_max_bytes = kStreamNodeMaxBytes;
-    if (node_max_bytes == 0 || node_max_bytes > STREAM_LISTPACK_MAX_SIZE)
-      node_max_bytes = STREAM_LISTPACK_MAX_SIZE;
-    if (lp_bytes + totelelen >= node_max_bytes) {
+    if (lp_bytes + totelelen >= kStreamNodeMaxBytes) {
       new_node = 1;
     } else if (kStreamNodeMaxEntries) {
       unsigned char* lp_ele = lpFirst(lp);
@@ -975,15 +982,16 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
       if (ri.key_len != sizeof(rax_key) || memcmp(ri.key, rax_key, sizeof(rax_key)) != 0) {
         LOG(DFATAL) << "StreamAppendItem: Key mismatch";
       }
-      if (ri.data != lp)
-        raxInsert(s->rax, ri.key, ri.key_len, lp, NULL);
+      if (lp != StreamNodeObj(current_node).Ptr()) {
+        raxInsert(s->rax, rax_key, sizeof(rax_key), lp, nullptr);
+      }
+      current_node = nullptr;
       lp = NULL;
     }
   }
 
   int flags = 0;
   unsigned numfields = fields.size() / 2;
-  uint8_t* old_lp = lp;
   if (lp == NULL) {
     master_id = id;
     StreamEncodeID(rax_key, id);
@@ -1005,8 +1013,8 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
       lp = lpAppend(lp, SafePtr(field), field.size());
     }
     lp = lpAppendInteger(lp, 0); /* Master entry zero terminator. */
-    raxInsert(s->rax, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
-    old_lp = lp;
+    raxInsert(s->rax, rax_key, sizeof(rax_key), lp, nullptr);
+    current_node = lp;
     /* The first entry we insert, has obviously the same fields of the
      * master entry. */
     flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
@@ -1092,8 +1100,8 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   lp = lpAppendInteger(lp, lp_count);
 
   /* Insert back into the tree in order to update the listpack pointer. */
-  if (old_lp != lp) {
-    raxInsert(s->rax, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
+  if (lp != StreamNodeObj(current_node).Ptr()) {
+    raxInsert(s->rax, rax_key, sizeof(rax_key), lp, nullptr);
   }
   s->length++;
   s->entries_added++;
@@ -1101,8 +1109,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
 
   // Must find the last entry as we just inserted it.
   CHECK_EQ(1, raxSeek(&ri, "$", NULL, 0));
-  lp_bytes = lpBytes((uint8_t*)ri.data);
-  CHECK_GT(lp_bytes, 0U);
+  CHECK_GT(lpBytes(lp), 0U);
   raxStop(&ri);
 
   if (s->length == 1)
@@ -2092,8 +2099,7 @@ ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid)
 
   if (!raxEOF(&ri)) {
     /* Get a reference to the tail node listpack. */
-    size_t lp_bytes = lpBytes((uint8_t*)ri.data);
-    CHECK_GT(lp_bytes, 0U);
+    CHECK_GT(StreamNodeObj(ri.data).UncompressedSize(), 0U);
   }
   raxStop(&ri);
 
