@@ -173,6 +173,16 @@ command: []
 # -- Extra arguments to pass to the dragonfly binary
 extraArgs: []
 
+cluster:
+  # -- Redis cluster protocol mode passed to Dragonfly as --cluster_mode.
+  # -- Accepts "emulated" or "yes". Unquoted `yes` (parsed as boolean by YAML)
+  # -- is also supported and treated as the string "yes".
+  # -- Leave empty to disable cluster mode.
+  mode: ""
+  # -- When cluster mode is enabled, pass --experimental_cluster_shard_by_slot=true
+  # -- so sharding follows slots instead of hash tags.
+  experimentalShardBySlot: false
+
 # -- Extra volumes to mount into the pods
 extraVolumes: []
 
