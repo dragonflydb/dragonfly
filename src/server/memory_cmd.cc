@@ -7,6 +7,8 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
+#include <limits>
+
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -25,6 +27,7 @@
 #include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/tiered_storage.h"
 
 using namespace std;
 using namespace facade;
@@ -204,8 +207,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "USAGE <key> [WITHOUTKEY]",
         "    Show memory usage of a key.",
         "    If WITHOUTKEY is specified, the key itself is not accounted.",
-        "DECOMMIT",
+        "DECOMMIT [COOL]",
         "    Force decommit the memory freed by the server back to OS.",
+        "    If COOL is specified, flush the tiered storage cool queue to disk.",
         "TRACK",
         "    Allow tracking of memory allocation via `new` and `delete` based on input criteria.",
         "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
@@ -249,6 +253,16 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DECOMMIT")) {
+    if (parser.Check("COOL")) {
+      shard_set->pool()->AwaitFiberOnAll([](util::ProactorBase*) {
+        if (auto* shard = EngineShard::tlocal(); shard) {
+          if (auto* ts = shard->tiered_storage(); ts) {
+            ts->ReclaimMemory(std::numeric_limits<size_t>::max());
+          }
+        }
+      });
+      return cmd_cntx_->rb()->SendSimpleString("OK");
+    }
     shard_set->pool()->AwaitBrief(
         [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
     return cmd_cntx_->rb()->SendSimpleString("OK");
