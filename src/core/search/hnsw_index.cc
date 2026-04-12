@@ -436,11 +436,23 @@ struct HnswlibAdapter {
              world_.size_data_per_element_);
       world_.setExternalLabel(internal_id, node.global_id);
 
-      // In copy mode, zero the vector memory so distance computations don't use
-      // uninitialized data for nodes that are marked deleted.
       if (world_.copy_vector_) {
+        // In copy mode, zero the vector memory so distance computations don't use
+        // uninitialized data for nodes that are marked deleted.
         char* data_ptr = world_.data_vector_memory_ + internal_id * world_.data_size_;
         memset(data_ptr, 0, world_.data_size_);
+      } else {
+        // Borrowed-vector mode: point to a valid placeholder so graph traversal
+        // never dereferences nullptr. Filled with 1.0f (not zeros) because
+        // CosineDistance returns 0 for zero-norm vectors, biasing traversal.
+        if (!restore_placeholder_buf_) {
+          restore_placeholder_buf_.reset(new char[data_size_]);
+          auto* fp = reinterpret_cast<float*>(restore_placeholder_buf_.get());
+          std::fill(fp, fp + data_size_ / sizeof(float), 1.0f);
+        }
+        char* safe_ptr = restore_placeholder_buf_.get();
+        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
+        memcpy(ptr_location, &safe_ptr, sizeof(void*));
       }
 
       // Allocate upper layer links if needed
@@ -534,6 +546,9 @@ struct HnswlibAdapter {
   size_t data_size_;                    // Byte size of a single vector.
   mutable base::SpinLock deferred_mu_;  // Protects deferred_ops_.
   absl::flat_hash_map<GlobalDocId, DeferredOp> deferred_ops_;  // GUARDED_BY(deferred_mu_)
+
+  // Non-zero placeholder for borrowed-vector nodes during RestoreFromNodes().
+  std::unique_ptr<char[]> restore_placeholder_buf_;
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,

@@ -560,8 +560,9 @@ void HnswShardIndex::Remove(search::GlobalDocId id, const BaseAccessor& doc, Pri
 }
 
 void HnswShardIndex::RemoveById(search::GlobalDocId id) {
-  [[maybe_unused]] bool sync = global_index_->Remove(id);
-  DCHECK(sync) << "RemoveById should only be called when no read lock is held";
+  // During restoration a concurrent operation (e.g. Add from a journal event)
+  // may hold the MRMW lock, so the remove can be deferred — that is fine.
+  global_index_->Remove(id);
 }
 
 bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc) {

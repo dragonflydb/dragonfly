@@ -4,6 +4,7 @@
 
 #include "server/search/index_builder.h"
 
+#include <algorithm>
 #include <ranges>
 
 #include "server/db_slice.h"
@@ -64,11 +65,16 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
       // GlobalDocIds stored in the serialized HNSW graph. Only add to regular indices
       // (text/tag/numeric); vector indices are handled separately by VectorLoop.
       if (auto doc_id = index_->key_index().Find(key); doc_id) {
-        auto accessor = GetAccessor(db_cntx, pv);
-        if (!index_->indices_->Add(*doc_id, *accessor)) {
-          LOG(WARNING) << "Failed to restore index entry for key: " << key
-                       << ", removing from key index";
-          index_->key_index_.Remove(*doc_id);
+        // A journal event may have already indexed this doc while CursorLoop
+        // was still running.  Check all_ids_ to avoid duplicate entries.
+        const auto& all = index_->indices_->GetAllDocs();
+        if (!std::binary_search(all.begin(), all.end(), *doc_id)) {
+          auto accessor = GetAccessor(db_cntx, pv);
+          if (!index_->indices_->Add(*doc_id, *accessor)) {
+            LOG(WARNING) << "Failed to restore index entry for key: " << key
+                         << ", removing from key index";
+            index_->key_index_.Remove(*doc_id);
+          }
         }
       } else {
         // New document not in the restored key_index_ (added by journal events during
