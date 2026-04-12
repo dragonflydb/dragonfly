@@ -83,6 +83,7 @@ ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
 
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
@@ -889,10 +890,38 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   }
 }
 
+// Clears the --dir directory so the server starts with a clean state.
+// Without this, dumps from a previous AFL++ loop cycle would be loaded on restart,
+// making RECORD files insufficient to reproduce crashes.
+void ClearDumpDirectory() {
+  string dbfilename = GetFlag(FLAGS_dbfilename);
+  if (dbfilename.empty())
+    return;
+
+  string dir = GetFlag(FLAGS_dir);
+  if (dir.empty())
+    return;
+
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    std::error_code remove_ec;
+    fs::remove_all(entry.path(), remove_ec);
+    if (remove_ec) {
+      LOG(WARNING) << "AFL++: Failed to remove " << entry.path() << ": " << remove_ec.message();
+    }
+  }
+  if (ec) {
+    LOG(WARNING) << "AFL++: Failed to iterate " << dir << ": " << ec.message();
+  }
+}
+
 // Initializes AFL++ fuzzing by starting the server in a separate thread,
 // waiting for it to become ready, and preparing stdin for fuzzing input.
 // Returns the server thread handle. The caller is responsible for the fuzzing loop.
 std::thread InitAflFuzzing(ProactorPool* pool, AcceptServer* acceptor) {
+  ClearDumpDirectory();
+
   // Start server in a separate thread
   std::thread server_thread([pool, acceptor]() {
     dfly::RunEngine(pool, acceptor);
