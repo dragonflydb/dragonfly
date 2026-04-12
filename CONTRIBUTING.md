@@ -32,6 +32,26 @@ pre-commit install
 
 This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` and `commit` hooks client-side.
 
+### Signing commits with GPG
+
+We require all commits to be signed with a GPG key. To set this up:
+
+```sh
+# List your GPG keys
+gpg --list-secret-keys --keyid-format=long
+
+# If you don't have a key, create one
+gpg --full-generate-key
+
+# Configure git to use your GPG key for signing (replace KEY_ID with your actual key)
+git config --global user.signingkey KEY_ID
+
+# Enable automatic signing for all commits
+git config --global commit.gpgsign true
+```
+
+All commits must be signed (this is enforced by the pre-commit hooks). When you commit, you'll be prompted for your GPG passphrase if it's not cached.
+
 Once you have done these things, we look forward to adding your contributions and improvements to the Dragonfly DB project.
 
 ## Unit testing
