@@ -1153,7 +1153,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // and replica recieved all the commands from all shards.
   multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
-  if (!exec_st_.IsRunning())
+  if (!cntx->IsRunning())
     return false;
   VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
 
@@ -1161,7 +1161,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // Wait until all shards flows get to execution step of this transaction.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (!exec_st_.IsRunning())
+  if (!cntx->IsRunning())
     return false;
   // Global command will be executed only from one flow fiber. This ensure corectness of data in
   // replica.
@@ -1173,7 +1173,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // executed.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (!exec_st_.IsRunning())
+  if (!cntx->IsRunning())
     return false;
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
