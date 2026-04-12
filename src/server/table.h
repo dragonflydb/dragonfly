@@ -61,7 +61,13 @@ struct DbTableStats {
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
 
+  // Number of entries currently offloaded to tiered storage.
   size_t tiered_entries = 0;
+
+  // Sum of the actual value sizes (in bytes) for all tiered entries.
+  // Unlike TieredStats::allocated_bytes, this reflects logical value sizes only —
+  // not the disk space physically reserved, which is larger due to block alignment
+  // and fragmentation in ExternalAllocator.
   size_t tiered_used_bytes = 0;
 
   struct {

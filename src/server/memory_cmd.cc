@@ -7,8 +7,6 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
-#include <limits>
-
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -254,17 +252,16 @@ void MemoryCmd::Run(CmdArgList args) {
 
   if (parser.Check("DECOMMIT")) {
     if (parser.Check("COOL")) {
-      shard_set->pool()->AwaitFiberOnAll([](util::ProactorBase*) {
-        if (auto* shard = EngineShard::tlocal(); shard) {
-          if (auto* ts = shard->tiered_storage(); ts) {
-            ts->ReclaimMemory(std::numeric_limits<size_t>::max());
-          }
+      shard_set->RunBriefInParallel([](EngineShard* shard) {
+        if (auto* ts = shard->tiered_storage(); ts) {
+          ts->ReclaimMemory(SIZE_MAX);
         }
       });
-      return cmd_cntx_->rb()->SendSimpleString("OK");
+    } else {
+      shard_set->pool()->AwaitBrief([](unsigned, auto* pb) {
+        ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory);
+      });
     }
-    shard_set->pool()->AwaitBrief(
-        [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
     return cmd_cntx_->rb()->SendSimpleString("OK");
   }
 
