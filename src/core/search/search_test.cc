@@ -1210,7 +1210,7 @@ TEST_P(HnswSerializationTest, RoundTrip) {
 // Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
 // but hnswlib still traverses it and dereferences its data pointer.  If the external
 // data is freed (as happens after DEL), the pointer dangles.  The fix in DoRemove
-// replaces it with safe_data_.  This test catches the use-after-free under ASAN;
+// replaces it with stub_vector_.  This test catches the use-after-free under ASAN;
 // without ASAN it exercises the code path but freed memory may still be readable.
 TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   constexpr size_t kDim = 256;

@@ -77,7 +77,7 @@ struct HnswlibAdapter {
                100 /* seed*/, copy_vector},
         copy_vector_{copy_vector},
         data_size_{params.dim * sizeof(float)},
-        safe_data_(data_size_ / sizeof(float), 1.0f) {
+        stub_vector_(data_size_ / sizeof(float), 1.0f) {
   }
 
   // Adds a point to the index. If the write lock cannot be acquired (e.g.
@@ -310,11 +310,11 @@ struct HnswlibAdapter {
 
     // In borrowed mode the node stays in the graph after markDelete and
     // traversal still computes distances for it.  Replace the external
-    // pointer with safe_data_ so the caller can free the original data.
+    // pointer with stub_vector_ so the caller can free the original data.
     // Uses 1.0f (not zero) because CosineDistance(v, 0) = 0 would bias
     // traversal toward deleted nodes.
     if (it != world_.label_lookup_.end()) {
-      const char* safe_ptr = reinterpret_cast<const char*>(safe_data_.data());
+      const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
       char* ptr_location = world_.getDataPtrByInternalId(it->second);
       memcpy(ptr_location, &safe_ptr, sizeof(void*));
     }
@@ -547,7 +547,7 @@ struct HnswlibAdapter {
 
   bool copy_vector_;                    // Whether vectors are copied into hnswlib.
   size_t data_size_;                    // Byte size of a single vector.
-  std::vector<float> safe_data_;        // Non-zero data for deleted nodes in borrowed mode.
+  std::vector<float> stub_vector_;      // Non-zero data for deleted nodes in borrowed mode.
   mutable base::SpinLock deferred_mu_;  // Protects deferred_ops_.
   absl::flat_hash_map<GlobalDocId, DeferredOp> deferred_ops_;  // GUARDED_BY(deferred_mu_)
 };
