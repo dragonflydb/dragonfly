@@ -195,8 +195,8 @@ class DbSlice {
   using ChangeReq = dfly::ChangeReq;
 
   // Called before deleting an element to notify the search indices.
-  using DocDeletionCallback =
-      std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
+  // pv is non-const: HNSW external vector preservation may swap sds entries.
+  using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
     bool IsDefined() const {
@@ -389,9 +389,6 @@ class DbSlice {
   }
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
-  // Holds pairs of source and destination cursors for items moved in the dash table
-  using MovedItemsVec = std::vector<std::pair<PrimeTable::Cursor, PrimeTable::Cursor>>;
-  using MovedCallback = std::function<void(DbIndex, const MovedItemsVec&)>;
 
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
@@ -585,7 +582,6 @@ class DbSlice {
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  uint64_t next_moved_id_ = 1;
 
   // Estimation of available memory dedicated to this shard.
   // Recalculated periodically by dividing free memory left among all shards equally

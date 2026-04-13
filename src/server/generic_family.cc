@@ -1705,9 +1705,12 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   // If we are about to overwrite an existing indexed document (HASH/JSON),
   // remove it from search indices first to avoid duplicate entries.
-  auto existing = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
-  if (IsValid(existing)) {
-    RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing->second, op_args.shard);
+  // Use FindMutable (not FindReadOnly) because HNSW preservation may modify the PrimeValue.
+  {
+    auto existing = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
+    if (IsValid(existing.it)) {
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing.it->second, op_args.shard);
+    }
   }
 
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
@@ -1724,6 +1727,15 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
     }
   }
   len = ql_v2->Size();
+
+  if (len == 0) {
+    CompactObj::DeleteMR<QList>(ql_v2);
+    auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
+    if (IsValid(it_res.it)) {
+      op_args.GetDbSlice().DelMutable(op_args.db_cntx, std::move(it_res));
+    }
+    return 0;
+  }
 
   PrimeValue pv;
   pv.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
@@ -2124,7 +2136,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
     return;
   }
 
-  // No sorting required, just reply with fetched raw elements (with LIMIT if any)
+  // No sorting required — either reply with raw elements or store them.
   DVLOG(1) << "Replying with unsorted " << raw_elements.size() << " elements from key " << key;
   DCHECK(!raw_elements.empty());
 
@@ -2141,6 +2153,46 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
         [&](size_t elem_idx, size_t pattern_idx, string value) {
           get_values_per_element[elem_idx][pattern_idx] = std::move(value);
         });
+  }
+
+  if (params.store_key) {
+    // STORE path: build SortEntryBase vector from raw elements (with GET pattern
+    // values when present) and reuse OpStore — same as the sorted STORE path.
+    auto [start_it, end_it] = GetSortRange(raw_elements, params.bounds);
+    size_t start_idx = start_it - raw_elements.begin();
+    size_t count = end_it - start_it;
+
+    vector<SortEntryBase> entries;
+    entries.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      SortEntryBase entry;
+      entry.key = std::move(raw_elements[start_idx + i]);
+      if (!get_values_per_element.empty()) {
+        entry.get_values = std::move(get_values_per_element[start_idx + i]);
+      }
+      entries.push_back(std::move(entry));
+    }
+
+    string_view store_key_sv = params.store_key.value();
+    ShardId dest_sid = Shard(store_key_sv, shard_set->size());
+    OpResult<uint32_t> store_len;
+    bool has_get_patterns = !params.get_patterns.empty();
+
+    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == dest_sid) {
+        store_len = OpStore(t->GetOpArgs(shard), store_key_sv, entries.begin(), entries.end(),
+                            has_get_patterns);
+      }
+      return OpStatus::OK;
+    };
+    cmd_cntx->tx()->Execute(std::move(store_cb), true);
+
+    if (store_len) {
+      cmd_cntx->SendLong(store_len.value());
+    } else {
+      cmd_cntx->SendError(store_len.status());
+    }
+    return;
   }
 
   auto replier = [raw_elements = std::move(raw_elements), params, source_type,

@@ -18,6 +18,12 @@ namespace dfly {
 bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
   std::unique_lock lk(map_mu);
   auto [it, was_insert] = tx_sync_execution.emplace(txid, shard_cnt);
+  // If CancelAllBlockingEntities() already ran, cancel the new entry immediately
+  // to prevent shard fibers from blocking on entries that will never complete.
+  if (cancelled_) {
+    it->second.barrier.Cancel();
+    it->second.block->Cancel();
+  }
   lk.unlock();
 
   VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << shard_cnt
@@ -42,6 +48,7 @@ void MultiShardExecution::Erase(TxId txid) {
 
 void MultiShardExecution::CancelAllBlockingEntities() {
   lock_guard lk{map_mu};
+  cancelled_ = true;
   for (auto& tx_data : tx_sync_execution) {
     tx_data.second.barrier.Cancel();
     tx_data.second.block->Cancel();

@@ -99,8 +99,8 @@ class PrimeEvictionPolicy {
   void RecordSplit(PrimeTable::Segment_t* segment) {
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
+
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
-    moved_items_.push_back(std::make_pair(source, dest));
   }
 
   bool CanGrow(const PrimeTable& tbl) const;
@@ -115,12 +115,8 @@ class PrimeEvictionPolicy {
   unsigned checked() const {
     return checked_;
   }
-  const DbSlice::MovedItemsVec& moved_items() {
-    return moved_items_;
-  }
 
  private:
-  DbSlice::MovedItemsVec moved_items_;
   DbSlice* db_slice_;
   ssize_t mem_offset_;
   ssize_t soft_limit_ = 0;
@@ -397,16 +393,9 @@ class DbSlice::PrimeBumpPolicy {
   bool CanBump(const CompactObj& obj) const {
     return !obj.IsSticky();
   }
+
   void OnMove(PrimeTable::Cursor source, PrimeTable::Cursor dest) {
-    moved_items_.push_back(std::make_pair(source, dest));
   }
-
-  const DbSlice::MovedItemsVec& moved_items() {
-    return moved_items_;
-  }
-
- private:
-  DbSlice::MovedItemsVec moved_items_;
 };
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
@@ -1322,7 +1311,16 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
     if (cb_version == upper_bound) {
       return;
     }
-    if (bucket_version < cb_version) {
+
+    // We can not have here bucket_version < cb_version check. Explanation:
+    // Suppose we run snapshots S1 and S2, S1 starts serializing the bucket B,
+    // now snapshot S2 is started and it reaches the B, calls FlushChangeToEarlierCallbacks.
+    // if if we have here strong inequality, then S1 callback will be skipped here, and S2
+    // will start processing B concurrently with S1. It should be fine in general, but
+    // we prefer avoiding this, so that we could DCHECK the invariant that the version bucket
+    // does not change during the serialization, therefore we allow at most one serializer
+    // reading the bucket at the same time.
+    if (bucket_version <= cb_version) {
       ccb->second(db_ind, ChangeReq{it.GetInnerIt()});
     }
     ++ccb;

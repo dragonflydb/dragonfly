@@ -978,4 +978,38 @@ TEST_F(ListNodeTieringTest, RPopStashedNodes) {
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
 }
 
+// Test MEMORY DECOMMIT COOL command flushes the cool queue
+TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_experimental_cooling, true);  // Ensure cooling is enabled
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);     // Force offloading
+  UpdateFromFlags();
+
+  const int kMin = 256;
+  const int kMax = tiering::kPageSize + 10;
+
+  // Create entries that will be cooled down
+  for (size_t i = kMin; i < kMax; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(i)});
+  }
+
+  // Wait for entries to be stashed and cooled
+  ExpectConditionWithinTimeout(
+      [this] { return GetMetrics().tiered_stats.total_stashes >= kMax - kMin - 1; });
+
+  // Get metrics before decommit
+  auto metrics_before = GetMetrics();
+  ASSERT_GT(metrics_before.tiered_stats.cold_storage_bytes, 0)
+      << "Should have cool storage data before decommit";
+
+  // Call MEMORY DECOMMIT COOL
+  auto response = Run({"MEMORY", "DECOMMIT", "COOL"});
+  ASSERT_EQ(response, "OK");
+
+  // Get metrics after decommit and verify cool queue was flushed
+  auto metrics_after = GetMetrics();
+  EXPECT_EQ(metrics_after.tiered_stats.cold_storage_bytes, 0)
+      << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
+}
+
 }  // namespace dfly
