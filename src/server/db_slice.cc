@@ -675,15 +675,17 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     return OpStatus::WRONG_TYPE;
   }
 
+  // It's a new entry.
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
-  // It's a new entry.
-  auto bucket_set = db.prime.CVCUponInsert(key);
-  CallChangeCallbacks(cntx.db_index, bucket_set);
+  if (!change_cb_.empty()) {
+    auto bucket_set = db.prime.CVCUponInsert(key);
+    CallChangeCallbacks(cntx.db_index, bucket_set);
 
-  // Set of possible insertion buckets must be the same after possibly blocking call
-  DCHECK(bucket_set == db.prime.CVCUponInsert(key));
+    // Set of possible insertion buckets must be the same after possibly blocking call
+    DCHECK(bucket_set == db.prime.CVCUponInsert(key));
+  }
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
