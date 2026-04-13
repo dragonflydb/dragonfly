@@ -22,6 +22,7 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 
+#include <bit>
 #include <cmath>
 #include <cstring>
 
@@ -1161,20 +1162,17 @@ auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
 }
 
 io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
-  union {
-    uint64_t val;
-    double d;
-  } u;
-
-  static_assert(sizeof(u) == sizeof(uint64_t));
   auto ec = EnsureRead(8);
   if (ec)
     return make_unexpected(ec);
 
   uint8_t buf[8];
   mem_buf_->ReadAndConsume(8, buf);
-  u.val = base::LE::LoadT<uint64_t>(buf);
-  return u.d;
+  uint64_t val = base::LE::LoadT<uint64_t>(buf);
+
+  // std::bit_cast is the C++20-sanctioned way to reinterpret the bits of a double.
+  // Using reinterpret_cast/union approach is an undefined behavior under strict aliasing.
+  return std::bit_cast<double>(val);
 }
 
 io::Result<double> RdbLoaderBase::FetchDouble() {
