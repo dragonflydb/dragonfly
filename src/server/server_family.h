@@ -385,7 +385,8 @@ class ServerFamily {
   // Updates LoadOptions if successful. If snapshot_id and shard_count are passed in,
   // may use them for consistency checks.
   std::error_code LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                          LoadOptions* load_opts, RdbLoadContext* load_context);
+                          LoadOptions* load_opts, RdbLoadContext* load_context,
+                          detail::SnapshotStorage* storage);
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 

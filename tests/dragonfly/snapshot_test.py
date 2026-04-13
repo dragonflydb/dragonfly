@@ -389,23 +389,19 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
     _missing_s3_test_env(),
     reason="AWS S3 snapshots bucket or credentials are not configured",
 )
-@dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
+@dfly_args({**BASIC_ARGS})
 async def test_s3_snapshot(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)
     await seeder.run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
+    s3_path = "s3://" + os.environ["DRAGONFLY_S3_BUCKET"] + str(tmp_dir)
 
     try:
-        # save + flush + load
-        await async_client.execute_command("SAVE DF snapshot")
+        # save to S3 + flush + load from S3 (with local --dir)
+        await async_client.execute_command("SAVE", "DF", s3_path, "snapshot")
         assert await async_client.flushall()
-        await async_client.execute_command(
-            "DFLY LOAD "
-            + os.environ["DRAGONFLY_S3_BUCKET"]
-            + str(tmp_dir)
-            + "/snapshot-summary.dfs"
-        )
+        await async_client.execute_command("DFLY", "LOAD", s3_path + "/snapshot-summary.dfs")
 
         assert await DebugPopulateSeeder.capture(async_client) == start_capture
 
