@@ -1169,9 +1169,6 @@ io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
   uint8_t buf[8];
   mem_buf_->ReadAndConsume(8, buf);
   uint64_t val = base::LE::LoadT<uint64_t>(buf);
-
-  // std::bit_cast is the C++20-sanctioned way to reinterpret the bits of a double.
-  // Using reinterpret_cast/union approach is an undefined behavior under strict aliasing.
   return std::bit_cast<double>(val);
 }
 

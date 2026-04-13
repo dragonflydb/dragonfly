@@ -777,9 +777,6 @@ error_code RdbSerializer::SaveLongLongAsString(int64_t value) {
  * Return -1 on error, the size of the serialized value on success. */
 error_code RdbSerializer::SaveBinaryDouble(double val) {
   static_assert(sizeof(val) == 8);
-
-  // std::bit_cast is the C++20-sanctioned way to reinterpret the bits of a double.
-  // Using reinterpret_cast/union approach is an undefined behavior under strict aliasing.
   uint64_t src = std::bit_cast<uint64_t>(val);
   uint8_t buf[8];
   absl::little_endian::Store64(buf, src);
