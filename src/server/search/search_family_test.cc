@@ -14,6 +14,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
+#include "core/search/stateless_allocator.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
@@ -5395,6 +5396,52 @@ TEST_F(SearchFamilyTest, InfoIndexDefaultStopwordsOmitted) {
 
   // Collection size is 7 (no stopwords_list field).
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "indexing", _, _, _));
+}
+
+// DocKeyIndex: empty-key documents must survive Serialize/Restore and not be
+// confused with freed slots (which also have keys_[id] == "").
+
+class DocKeyIndexTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+};
+
+TEST_F(DocKeyIndexTest, SerializeDistinguishesEmptyKeyFromFreedSlot) {
+  ShardDocIndex::DocKeyIndex index;
+  auto id0 = index.Add("doc1");
+  auto id1 = index.Add("");  // valid empty-key document
+  auto id2 = index.Add("doc2");
+  index.Remove(id0);  // freed slot, also keys_[id0] == ""
+
+  auto serialized = index.Serialize();
+  ASSERT_EQ(serialized.size(), 2u);  // id1 + id2, not the freed id0
+
+  sort(serialized.begin(), serialized.end(),
+       [](const auto& a, const auto& b) { return a.second < b.second; });
+  EXPECT_EQ(serialized[0], make_pair(string(""), id1));
+  EXPECT_EQ(serialized[1], make_pair(string("doc2"), id2));
+}
+
+TEST_F(DocKeyIndexTest, RestoreRoundTripsEmptyKey) {
+  ShardDocIndex::DocKeyIndex index;
+  auto id0 = index.Add("doc1");
+  auto id1 = index.Add("");
+  auto id2 = index.Add("doc2");
+  index.Remove(id0);
+
+  ShardDocIndex::DocKeyIndex restored;
+  restored.Restore(index.Serialize());
+
+  EXPECT_FALSE(restored.IsValid(id0));  // gap slot stays free
+  EXPECT_TRUE(restored.IsValid(id1));   // empty-key doc survives
+  EXPECT_TRUE(restored.IsValid(id2));
+  EXPECT_EQ(restored.Get(id1), "");
+  EXPECT_EQ(restored.Add("doc3"), id0);  // freed slot is reused
 }
 
 }  // namespace dfly
