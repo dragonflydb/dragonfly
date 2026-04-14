@@ -328,14 +328,14 @@ jobs:
       if: env.IS_PRERELEASE != 'true'
       uses: peter-evans/create-pull-request@v7
       with:
-        token: ${{ secrets.DRAGONFLY_TOKEN }}
+        token: ${{ secrets.GITHUB_TOKEN }}
         branch: helm-chart-update/${{ env.TAG_NAME }}
         base: main
         title: 'chore(helm-chart): update to ${{ env.TAG_NAME }}'
         body: 'Automated Helm chart version bump to ${{ env.TAG_NAME }}.'
         commit-message: 'chore(helm-chart): update to ${{ env.TAG_NAME }}'
         sign-commits: true
-        reviewers: vyavdoshenko
+        reviewers: romange,vyavdoshenko
         add-paths: |
           contrib/charts/dragonfly/Chart.yaml
           contrib/charts/dragonfly/ci
