@@ -389,9 +389,23 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
     LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
   }
 
-  // Wait until index building ends
+  // Wait until index building ends (all shards' vector data populated).
   shard_set->RunBlockingInParallel(
       [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
+
+  // All shards completed restoration — drain pending ops.
+  // DrainPendingVectorUpdates sets kBuilding which allows Add calls.
+  if (has_hnsw_restore) {
+    shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+      OpArgs op_args{es, nullptr,
+                     DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+      for (const auto& name : es->search_indices()->GetIndexNames()) {
+        if (auto* idx = es->search_indices()->GetIndex(name)) {
+          idx->DrainPendingVectorUpdates(op_args);
+        }
+      }
+    });
+  }
 #endif
 }
 

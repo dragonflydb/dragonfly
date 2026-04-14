@@ -4313,7 +4313,6 @@ async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactor
     assert peak_bytes < MAX_SBF_CHUNK_SIZE
 
 
-@pytest.mark.skip(reason="unstable")
 @pytest.mark.parametrize(
     "master_threads, replica_threads, num_dims",
     [

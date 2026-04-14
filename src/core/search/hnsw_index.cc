@@ -486,9 +486,15 @@ struct HnswlibAdapter {
       world_.cur_element_count.store(++restored_count);
 
       // Mark node as deleted until UpdateVectorData provides valid vector data.
-      // This prevents crashes from dereferencing uninitialised data pointers
-      // (especially in borrowed-vector mode).
       world_.markDeletedInternal(internal_id);
+
+      // In borrowed mode, deleted nodes are still traversed by addPoint.
+      // Point to stub_vector_ so distance computations don't dereference nullptr.
+      if (!copy_vector_) {
+        const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
+        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
+        memcpy(ptr_location, &safe_ptr, sizeof(void*));
+      }
     }
 
     // Set the metadata for the graph
