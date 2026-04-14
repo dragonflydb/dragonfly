@@ -12,6 +12,7 @@
 #include <cmath>
 
 #include "base/logging.h"
+#include "core/compact_object.h"
 
 namespace dfly {
 
@@ -197,7 +198,7 @@ SBF& SBF::operator=(SBF&& src) noexcept {
 
 void SBF::AddFilter(const std::string& blob, unsigned hash_cnt) {
   PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
-  uint8_t* ptr = (uint8_t*)mr->allocate(blob.size(), 1);
+  uint8_t* ptr = (uint8_t*)mr->allocate(blob.size());
   memcpy(ptr, blob.data(), blob.size());
   filters_.emplace_back().Init(ptr, blob.size(), hash_cnt);
 }
@@ -252,8 +253,40 @@ size_t SBF::MallocUsed() const {
   return res;
 }
 
-size_t FilterDumpSpan(const SBF& sbf, uint32_t filter_index) {
-  return kDumpFilterMetaSize + sbf.data(filter_index).size();
+struct SBFFilterMeta {
+  uint32_t hash_cnt;
+  uint64_t data_length;
+  SBF::StateUpdate state;
+
+  static SBFFilterMeta Parse(const char* ptr);
+};
+
+SBFFilterMeta SBFFilterMeta::Parse(const char* ptr) {
+  return {
+      .hash_cnt = absl::little_endian::Load32(ptr),
+      .data_length = absl::little_endian::Load64(ptr + 4),
+      .state =
+          {
+              .fp_prob = std::bit_cast<double>(absl::little_endian::Load64(ptr + 12)),
+              .max_capacity = absl::little_endian::Load64(ptr + 20),
+              .current_size = absl::little_endian::Load64(ptr + 28),
+              .prev_size = absl::little_endian::Load64(ptr + 36),
+          },
+  };
+}
+
+void SBF::ApplyStateUpdate(const StateUpdate& update) {
+  fp_prob_ = update.fp_prob;
+  max_capacity_ = update.max_capacity;
+  current_size_ = update.current_size;
+  prev_size_ = update.prev_size;
+}
+
+void SBF::AddEmptyFilter(size_t size, unsigned hash_cnt) {
+  PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
+  auto ptr = static_cast<uint8_t*>(mr->allocate(size));
+  memset(ptr, 0, size);
+  filters_.emplace_back().Init(ptr, size, hash_cnt);
 }
 
 SBFDumpIterator::SBFDumpIterator(const SBF& sbf, int64_t cursor) : sbf_{sbf}, cursor_{cursor} {
@@ -359,6 +392,72 @@ void SBFDumpIterator::ResolveCursorToPos() {
 
   filter_index_ = sbf_.num_filters();
   byte_offset_ = 0;
+}
+
+nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data,
+                                                    PMR_NS::memory_resource* mr) {
+  if (header_data.size() < kDumpHeaderSize)
+    return nonstd::make_unexpected(SBFLoadResult::kTruncatedInput);
+
+  const char* ptr = header_data.data();
+  if (const uint32_t version = absl::little_endian::Load32(ptr); version != kSbfDumpVersion)
+    return nonstd::make_unexpected(SBFLoadResult::kBadVersion);
+
+  const double grow_factor = std::bit_cast<double>(absl::little_endian::Load64(ptr + 4));
+  // Initialize everything to 0, later filters will overwrite these values
+  return CompactObj::AllocateMR<SBF>(grow_factor, 0.0, 0UL, 0UL, 0UL, mr);
+}
+
+SBFLoadResult AddNewFilterToSBF(SBF* sbf, std::string_view data) {
+  if (data.size() < kDumpFilterMetaSize)
+    return SBFLoadResult::kTruncatedInput;
+
+  auto [hash_cnt, data_length, state] = SBFFilterMeta::Parse(data.data());
+  const size_t payload = data.size() - kDumpFilterMetaSize;
+  if (payload > data_length)
+    return SBFLoadResult::kOutOfRange;
+
+  sbf->ApplyStateUpdate(state);
+
+  const uint32_t new_index = sbf->num_filters();
+  // TODO validate variables against bloom invariants (power of two etc)
+  sbf->AddEmptyFilter(data_length, hash_cnt);
+
+  if (payload > 0)
+    memcpy(sbf->filter_data(new_index), data.data() + kDumpFilterMetaSize, payload);
+
+  return SBFLoadResult::kOk;
+}
+
+SBFLoadResult LoadSBFChunk(SBF* sbf, int64_t cursor, std::string_view data) {
+  // TODO on implementing LOADCHUNK there should be closer validation of the data fed into the SBF.
+  // This current implementation is mostly a test helper and proof that the SCANDUMP algorithm is
+  // actually loadable.
+  if (!sbf)
+    return SBFLoadResult::kBadInput;
+
+  size_t global_offset = cursor - static_cast<int64_t>(data.size()) - 1;
+
+  for (uint32_t i = 0; i < sbf->num_filters(); ++i) {
+    const size_t filter_span = kDumpFilterMetaSize + sbf->data(i).size();
+    if (global_offset < filter_span) {
+      if (global_offset < kDumpFilterMetaSize)
+        return SBFLoadResult::kOutOfRange;
+
+      const size_t data_offset = global_offset - kDumpFilterMetaSize;
+      if (data_offset + data.size() > sbf->data(i).size())
+        return SBFLoadResult::kOutOfRange;
+
+      memcpy(sbf->filter_data(i) + data_offset, data.data(), data.size());
+      return SBFLoadResult::kOk;
+    }
+    global_offset -= filter_span;
+  }
+
+  if (global_offset != 0)
+    return SBFLoadResult::kOutOfRange;
+
+  return AddNewFilterToSBF(sbf, data);
 }
 
 }  // namespace dfly

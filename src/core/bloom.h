@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <nonstd/expected.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -12,6 +13,14 @@
 #include "base/pmr/memory_resource.h"
 
 namespace dfly {
+
+enum class SBFLoadResult : uint8_t {
+  kOk,
+  kBadVersion,
+  kBadInput,
+  kTruncatedInput,
+  kOutOfRange,
+};
 
 /// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
@@ -64,6 +73,10 @@ class Bloom {
 
   unsigned hash_cnt() const {
     return hash_cnt_;
+  }
+
+  uint8_t* mutable_data() {
+    return bf_;
   }
 
  private:
@@ -137,6 +150,21 @@ class SBF {
 
   size_t MallocUsed() const;
 
+  void AddEmptyFilter(size_t size, unsigned hash_cnt);
+
+  uint8_t* filter_data(size_t idx) {
+    return filters_[idx].mutable_data();
+  }
+
+  struct StateUpdate {
+    double fp_prob;
+    size_t max_capacity;
+    size_t current_size;
+    size_t prev_size;
+  };
+
+  void ApplyStateUpdate(const StateUpdate& update);
+
  private:
   // multiple filters from the smallest to the largest.
   std::vector<Bloom, PMR_NS::polymorphic_allocator<Bloom>> filters_;
@@ -192,5 +220,13 @@ class SBFDumpIterator {
   uint32_t filter_index_ = 0;
   size_t byte_offset_ = 0;
 };
+
+// Creates an SBF from a dump header chunk (the chunk returned with cursor=1).
+nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data,
+                                                    PMR_NS::memory_resource* mr);
+
+// Loads a data chunk into an existing SBF. The cursor and data are the values
+// returned by SBFDumpIterator for chunks with cursor > 1.
+SBFLoadResult LoadSBFChunk(SBF* sbf, int64_t cursor, std::string_view data);
 
 }  // namespace dfly
