@@ -664,11 +664,17 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     return OpStatus::WRONG_TYPE;
   }
 
+  // It's a new entry.
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
-  // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, ChangeReq{key});
+  if (!change_cb_.empty()) {
+    auto bucket_set = db.prime.CVCUponInsert(key);
+    CallChangeCallbacks(cntx.db_index, bucket_set);
+
+    // Set of possible insertion buckets must be the same after possibly blocking call
+    DCHECK(bucket_set == db.prime.CVCUponInsert(key));
+  }
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -837,16 +843,13 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 
   auto on_change = [&](DbIndex db_index, const ChangeReq& req) {
     FiberAtomicGuard fg;
-    PrimeTable* table = GetTables(db_index);
 
-    if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
       if (!bit->is_done() && bit->GetVersion() < next_version) {
         iterate_bucket(*bit);
       }
     } else {
-      string_view key = get<string_view>(req.change);
-      auto bucket_set = table->CVCUponInsert(key);
-      for (auto it : bucket_set.buckets()) {
+      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
         if (!it.is_done() && it.GetVersion() < next_version)
           iterate_bucket(it);
       }
