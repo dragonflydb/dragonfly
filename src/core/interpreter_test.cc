@@ -9,6 +9,8 @@ extern "C" {
 #include <lua.h>
 }
 
+#include <absl/flags/flag.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
 #include <gmock/gmock.h>
@@ -22,6 +24,8 @@ extern "C" {
 extern "C" {
 #include "redis/zmalloc.h"
 }
+
+ABSL_DECLARE_FLAG(uint64_t, lua_mem_gc_threshold);
 
 namespace dfly {
 using namespace std;
@@ -598,6 +602,40 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
 
   im.Return(interpreter);
   EXPECT_GE(used_bytes, InterpreterManager::tl_stats().used_bytes);
+}
+
+// Verifies that Return() drains used_bytes_ after RunGC().
+// Without this, freed memory is never reflected in tl_stats().used_bytes,
+// so every Return() past the threshold triggers a full LUA_GCCOLLECT.
+TEST_F(InterpreterTest, GcAccountingAfterReturn) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_lua_mem_gc_threshold, uint64_t{1});
+
+  InterpreterManager im(1);
+  auto* interpreter = im.Get();
+
+  // Generate ~100KB of garbage.
+  string script = "local s = string.rep('x', 1024 * 100) return #s";
+  char sha_buf[64];
+  Interpreter::FuncSha1(script, sha_buf);
+
+  string result;
+  ASSERT_EQ(Interpreter::ADD_OK,
+            interpreter->AddFunction({sha_buf, strlen(sha_buf)}, script, &result));
+  ASSERT_EQ(Interpreter::RUN_OK, interpreter->RunFunction({sha_buf, strlen(sha_buf)}, &error_));
+
+  auto& stats = InterpreterManager::tl_stats();
+  uint64_t gc_before = stats.force_gc_calls;
+  im.Return(interpreter);
+  ASSERT_GT(stats.force_gc_calls, gc_before);
+
+  // Re-borrow: if Return() drained used_bytes_ after GC, residual is 0.
+  // Bug: without the fix, residual is ~-300KB (stale freed bytes never drained).
+  interpreter = im.Get();
+  EXPECT_EQ(0, interpreter->TakeUsedBytes());
+
+  absl::SetFlag(&FLAGS_lua_mem_gc_threshold, uint64_t{0});
+  im.Return(interpreter);
 }
 
 }  // namespace dfly
