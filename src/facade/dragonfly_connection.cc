@@ -2425,6 +2425,8 @@ bool Connection::ExecuteBatch() {
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
 
+  // Since we are done executing a batch, and advance_head might be called which release commands,
+  // notify waiters that backpressure might be relieved.
   if (ioloop_v2_) {
     io_event_.notify();
   }
@@ -2446,6 +2448,8 @@ bool Connection::ReplyBatch() {
   if (parsed_head_ == nullptr)
     parsed_tail_ = nullptr;
 
+  // Since we are done replying a batch, and ReleaseParsedCommand might be called which release
+  // commands, notify waiters that backpressure might be relieved.
   if (ioloop_v2_) {
     io_event_.notify();
   }
