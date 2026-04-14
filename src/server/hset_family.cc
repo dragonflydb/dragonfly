@@ -1227,6 +1227,21 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   }
 }
 
+bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv) {
+  if (pv.Encoding() != kEncodingStrMap2)
+    return false;
+
+  if (auto* sm = static_cast<StringMap*>(pv.RObjPtr()); !sm->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_HASH); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    return true;
+  }
+  return false;
+}
+
 // returns vector of results for each field in values:
 // -2 if the provided key does not exist.
 // 0 if the specified NX | XX | GT | LT condition has not been met.

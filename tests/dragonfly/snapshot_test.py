@@ -592,6 +592,32 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE")
 
 
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-hsetex-save", "dir": "{DRAGONFLY_TMP}/"})
+async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
+    """
+    HSETEX creates a hash with field-level TTL.  After all fields
+    expire, the hash key remains in the DB with Size()==0.  SAVE then hits the
+    DFATAL check in SaveEntry because OBJ_HASH does not allow empty values.
+
+    Reproduction: HSETEX with short TTL -> SAVE (while field is alive) ->
+    wait for expiry -> second SAVE -> crash.
+    """
+
+    await async_client.execute_command("HSETEX", "mykey", "1", "f1", "v1")
+    await async_client.execute_command("SAVE")
+
+    await asyncio.sleep(1.5)
+
+    # Trigger lazy expiry of the field — the key remains but has 0 fields.
+    assert await async_client.execute_command("FIELDTTL", "mykey", "f1") == -3
+
+    # This SAVE crashes on unfixed code: SaveEntry sees empty hash → DFATAL.
+    await async_client.execute_command("SAVE")
+
+    # If we get here, the server survived.
+    assert await async_client.ping()
+
+
 @dfly_args({"proactor_threads": 1, "dbfilename": "test-save-del-crash", "dir": "{DRAGONFLY_TMP}/"})
 async def test_save_with_concurrent_mutations(df_server):
     """
