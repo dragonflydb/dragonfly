@@ -85,6 +85,10 @@ ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 
+#ifdef USE_ABSL_LOG
+ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
+#endif
+
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
           "It's not advised due to security implications.");
@@ -997,7 +1001,7 @@ void PrintBasicUsageInfo() {
       "                      ..                      \n"
       "* Logs will be written to the first available of the following paths:\n";
 
-  for (const auto& dir : google::GetLoggingDirectories()) {
+  for (const auto& dir : base::GetLoggingDirectories()) {
     const string_view maybe_slash = absl::EndsWith(dir, "/") ? "" : "/";
     absl::StrAppend(&output, dir, maybe_slash, "dragonfly.*\n");
   }
@@ -1062,12 +1066,23 @@ Usage: dragonfly [FLAGS]
   };
 
   absl::SetFlagsUsageConfig(config);
+
+#ifndef USE_ABSL_LOG
   google::InitGoogleLogging(argv[0]);
   google::SetLogFilenameExtension(".log");
+#endif
 
   MainInitGuard guard(&argc, &argv);
 
   ParseFlagsFromEnv();
+
+#ifdef USE_ABSL_LOG
+  // alsologtostderr: route all logs to stderr in addition to files.
+  // logtostderr is handled by FileLogSink::Init() in helio.
+  if (GetFlag(FLAGS_alsologtostderr)) {
+    absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+  }
+#endif
 
   if (!GetFlag(FLAGS_omit_basic_usage)) {
     PrintBasicUsageInfo();

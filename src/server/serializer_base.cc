@@ -179,7 +179,7 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
 
   // Assert the version is equal to a snapshot version (might be a different concurrent one),
   // to prove no concurrent modifications are possible (they would've assigned a different version)
-#if DCHECK_IS_ON()
+#if !defined(NDEBUG)
   DCHECK_GE(it.GetVersion(), snapshot_version_);
   auto current_snapshots = db_slice_->SnapshotVersions();
   DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())

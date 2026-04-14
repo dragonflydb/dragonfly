@@ -272,7 +272,11 @@ void BaseFamilyTest::ResetService() {
 
     if (!watchdog_done_.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected!!!!";
+#ifdef USE_ABSL_LOG
+      absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+#else
       absl::SetFlag(&FLAGS_alsologtostderr, true);
+#endif
       fb2::Mutex m;
       shard_set->pool()->AwaitFiberOnAll([&m, this](unsigned index, ProactorBase* base) {
         ThisFiber::SetName("Watchdog");
