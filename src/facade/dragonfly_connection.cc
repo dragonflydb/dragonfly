@@ -2294,8 +2294,7 @@ bool Connection::IsReplySizeOverLimit() const {
 
 bool Connection::ParseRedisBatch() {
   QueueBackpressure& qbp = GetQueueBackpressure();
-  if (qbp.IsPipelineBufferOverLimit(tl_facade_stats->conn_stats.pipeline_queue_bytes,
-                                    parsed_cmd_q_len_)) {
+  if (qbp.IsPipelineBufferOverLimit(GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
     // Signal ParseLoop to stop. IoLoopV2 will drain before resuming.
     DVLOG(2) << "Pipeline buffer over limit. Avoid parsing Redis batch.";
     return false;
