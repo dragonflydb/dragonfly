@@ -362,17 +362,16 @@ struct QueueBackpressure {
   // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
   util::fb2::CondVarAny pipeline_cnd;
 
-  // V2 connections parked on backpressure register their io_event_ here so that
-  // global memory relief (from other connections or CONFIG SET) can wake them.
-  // Access is thread-local (per-proactor), no synchronization needed.
-  std::vector<util::fb2::EventCount*> v2_pipeline_waiters;
+  // V2 connections subscribe to this EventCount when parked on backpressure.
+  // When global memory is freed, notifyAll() calls for each subscriber's callback,
+  // which in turn calls io_event_.notify() to wake the V2 fiber.
+  // Registration and unregistration are O(1) via intrusive linked list.
+  util::fb2::EventCount v2_pipeline_backpressure_ec;
 
-  // Notifies both V1 waiters (pipeline_cnd) and V2 waiters (io_event_).
+  // Notifies both V1 waiters (pipeline_cnd) and V2 subscribers (v2_pipeline_backpressure_ec).
   void NotifyPipelineWaiters() {
     pipeline_cnd.notify_all();
-    for (auto* ec : v2_pipeline_waiters) {
-      ec->notify();
-    }
+    v2_pipeline_backpressure_ec.notifyAll();
   }
 
   size_t publish_buffer_limit = 0;        // cached flag publish_buffer_limit
@@ -2750,17 +2749,26 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
-  // Waiter that is passed to the current async command head to be notified on completion
+  // Callback that wakes the currrent V2 fiber by bumping the io_event_ epoch.
+  // Multiple waiters (e.g command completion, backpressure relief) can use the same callback since
+  // they all wake the same fiber.
   auto ioevent_cb = [this]() { io_event_.notify(); };
-  util::fb2::detail::Waiter ioevent_waiter{ioevent_cb};  // takes callback by reference
+
+  // Waiter used to establish a mandatory subscription to the head command's blocker,
+  // ensuring the fiber wakes immediately upon async command completion.
+  util::fb2::detail::Waiter cmd_completion_waiter{ioevent_cb};
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
+
+  // Waiter used for transient, conditional subscriptions (via check_or_subscribe)
+  // to global pipeline-backpressure relief notifications.
+  util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
 
   do {
     HandleMigrateRequest();
 
     // Register completion for current head if its pending and we don't wait on current_wait_.
     if (HasDispatchedCommands() && !current_wait_.has_value()) {
-      current_wait_.emplace(parsed_head_, &ioevent_waiter);
+      current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
     }
 
     if (pending_input_) {
@@ -2818,9 +2826,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         ReplyBatch();
       }
 
-      // After draining commands, notify other V2 connections that may be
-      // parked on backpressure - but only if we actually freed global budget.
-      if ((conn_stats.pipeline_queue_bytes < mem_before) && !qbp.v2_pipeline_waiters.empty()) {
+      // After draining commands, notify all connections parked on backpressure relief
+      if (conn_stats.pipeline_queue_bytes < mem_before) {
         qbp.NotifyPipelineWaiters();
       }
 
@@ -2839,30 +2846,27 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
             << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
             << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
 
-        // Register this connection's io_event_ so that global memory relief (from other connections
-        // draining or CONFIG SET raising limits) can wake us up. Without this, we'd park
-        // indefinitely because io_event_ is per-connection but the predicate depends on
-        // thread-global state.
-        qbp.v2_pipeline_waiters.push_back(&io_event_);
-        absl::Cleanup v2_unregister = [&qbp, this] {
-          auto& w = qbp.v2_pipeline_waiters;
-          auto it = std::find(w.begin(), w.end(), &io_event_);
-          if (it != w.end()) {
-            *it = w.back();  // O(1) unordered removal
-            w.pop_back();
-          }
-        };
-
-        io_event_.await([this]() {
-          bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
-          bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
+        // Subscribe to the global backpressure EventCount so that when another connection
+        // frees memory (or CONFIG SET raises limits), our backpressure_waiter callback fires
+        // io_event_.notify(), waking this fiber. The returned SubKey auto-unlinks in O(1)
+        // when it goes out of scope.
+        auto under_limit_pred = [this]() {
+          return !GetQueueBackpressure().IsPipelineBufferOverLimit(
               GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-          // We wake up if:
-          // 1. Memory is freed (under_limit) or we can free it ourselves (cmd_ready).
-          // 2. Control-plane messages need processing (!dispatch_q_.empty()).
-          // 3. The connection is terminating (io_ec_).
-          return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_;
-        });
+        };
+        auto sub_key = qbp.v2_pipeline_backpressure_ec.check_or_subscribe(under_limit_pred,
+                                                                          &backpressure_waiter);
+
+        if (sub_key) {  // we had to subscribe, so need to wait
+          io_event_.await([this, under_limit_pred]() {
+            bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
+            // We wake up if:
+            // 1. Memory is freed (under_limit_pred()) or we can free it ourselves (cmd_ready).
+            // 2. Control-plane messages need processing (!dispatch_q_.empty()).
+            // 3. The connection is terminating (io_ec_).
+            return under_limit_pred() || cmd_ready || !dispatch_q_.empty() || io_ec_;
+          });
+        }
       }
     }
 
