@@ -285,6 +285,7 @@ class ShardDocIndex {
   // Used in FieldsValuesPerDocId to store values for each field per document
   using FieldsValues = absl::InlinedVector<search::SortableValue, 4>;
 
+ public:
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     // Hash/Eq for heterogeneous lookup on TrackedIdsMap with string_view keys.
@@ -337,8 +338,6 @@ class ShardDocIndex {
     search::StatelessVector<DocId> free_ids_;
     DocId last_id_ = 0;
   };
-
- public:
   // Index must be rebuilt at least once after intialization
   explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
 

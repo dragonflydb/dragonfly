@@ -322,7 +322,7 @@ std::vector<std::pair<std::string, search::DocId>> ShardDocIndex::DocKeyIndex::S
   std::vector<std::pair<std::string, search::DocId>> result;
   result.reserve(ids_.size());
   for (search::DocId id = 0; id < keys_.size(); ++id) {
-    if (!keys_[id].empty()) {
+    if (IsValid(id)) {
       result.emplace_back(std::string(keys_[id]), id);
     }
   }
@@ -349,9 +349,12 @@ void ShardDocIndex::DocKeyIndex::Restore(
     ids_[std::string_view(keys_[doc_id])] = doc_id;
   }
 
-  // Build free_ids_ list for any gaps in the id sequence
+  // Build free_ids_ list for any gaps in the id sequence.
+  // We cannot simply check keys_[id].empty() because a valid empty-key
+  // document has keys_[id] == "". Instead, verify via the reverse map.
   for (DocId id = 0; id <= max_id; ++id) {
-    if (keys_[id].empty()) {
+    auto it = ids_.find(keys_[id]);
+    if (it == ids_.end() || it->second != id) {
       free_ids_.push_back(id);
     }
   }
