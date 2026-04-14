@@ -2294,9 +2294,15 @@ bool Connection::IsReplySizeOverLimit() const {
 
 bool Connection::ParseRedisBatch() {
   QueueBackpressure& qbp = GetQueueBackpressure();
-  if (qbp.IsPipelineBufferOverLimit(GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
+
+  // Only throttle parsing if this connection is actively contributing to the queue.
+  // Connections with parsed_cmd_q_len_ == 0 must always be allowed to parse so that
+  // administrative commands (CONFIG SET, etc.) can execute and relieve backpressure.
+  if ((parsed_cmd_q_len_ > 0) &&
+      qbp.IsPipelineBufferOverLimit(GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
     // Signal ParseLoop to stop. IoLoopV2 will drain before resuming.
     DVLOG(2) << "Pipeline buffer over limit. Avoid parsing Redis batch.";
+    GetLocalConnStats().pipeline_throttle_count++;
     return false;
   }
   return ParseRedis(max_busy_read_cycles_cached, true) == ParserStatus::OK;
@@ -2810,10 +2816,23 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // Handle Parsed Commands Queue (Data Path)
     auto& conn_stats = GetLocalConnStats();
     QueueBackpressure& qbp = GetQueueBackpressure();
+
+    // Only parse data if we are under the memory limit (backpressure).
+    // Exception: If the queue is empty, we always parse to allow admin commands
+    // (like CONFIG SET) to run so they can fix the memory limits if needed.
     bool pre_over_limit =
+        (parsed_cmd_q_len_ > 0) &&
         qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
     if (io_buf_.InputLen() > 0 && !pre_over_limit) {  // Parse, execute and reply
+      size_t mem_before = conn_stats.pipeline_queue_bytes;
       parse_status = ParseLoop();
+
+      // Executing and replying to commands (in ParseLoop()) frees up memory. Because those internal
+      // functions only wake up this specific connection, we need to manually notify
+      // other connections on this thread that there is now room to resume.
+      if (conn_stats.pipeline_queue_bytes < mem_before) {
+        qbp.NotifyPipelineWaiters();
+      }
     } else {  // Execute and reply what we have, then wait if we are over the limit
       parse_status = NEED_MORE;
 
@@ -2833,7 +2852,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // await block (backpressure)
       // Re-check if pipeline buffer over limit after draining - ExecuteBatch/ReplyBatch may have
       // freed memory. If still over limit, sleep to prevent busy-spin.
+      // Only park if this connection is actively contributing (parsed_cmd_q_len_ > 0).
+      // Connections with an empty queue must stay in the read loop.
       bool post_over_limit =
+          (parsed_cmd_q_len_ > 0) &&
           qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_);
       if (post_over_limit) {
         conn_stats.pipeline_throttle_count++;
@@ -2845,27 +2867,25 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
             << ", Connection parsed commands queue size: " << parsed_cmd_q_len_
             << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
 
-        // Subscribe to the global backpressure EventCount so that when another connection
-        // frees memory (or CONFIG SET raises limits), our backpressure_waiter callback fires
-        // io_event_.notify(), waking this fiber. The returned SubKey auto-unlinks in O(1)
-        // when it goes out of scope.
-        auto under_limit_pred = [this]() {
-          return !GetQueueBackpressure().IsPipelineBufferOverLimit(
-              GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-        };
-        auto sub_key = qbp.v2_pipeline_backpressure_ec.check_or_subscribe(under_limit_pred,
-                                                                          &backpressure_waiter);
+        // Subscribe persistently to the global backpressure EventCount so that when another
+        // connection frees memory (or CONFIG SET raises limits), our backpressure_waiter callback
+        // fires io_event_.notify(), waking this fiber. Must be persistent because
+        // io_event_.await()'s internal loop may re-sleep if the predicate is still false after the
+        // first notification. A one-shot subscription would be consumed on the first wake, leaving
+        // us "deaf" to future memory relief.
+        auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(&backpressure_waiter);
 
-        if (sub_key) {  // we had to subscribe, so need to wait
-          io_event_.await([this, under_limit_pred]() {
-            bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
-            // We wake up if:
-            // 1. Memory is freed (under_limit_pred()) or we can free it ourselves (cmd_ready).
-            // 2. Control-plane messages need processing (!dispatch_q_.empty()).
-            // 3. The connection is terminating (io_ec_).
-            return under_limit_pred() || cmd_ready || !dispatch_q_.empty() || io_ec_;
-          });
-        }
+        io_event_.await([this]() {
+          bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
+          bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
+              GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
+
+          // We wake up and exit the backpressure wait if:
+          // 1. Memory is freed (under_limit) or we can free it ourselves (cmd_ready).
+          // 2. Control-plane messages need processing (!dispatch_q_.empty()).
+          // 3. The connection is terminating (io_ec_).
+          return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_;
+        });
       }
     }
 
