@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -144,6 +145,52 @@ class SBF {
   size_t prev_size_ = 0;
   size_t current_size_ = 0;
   size_t max_capacity_;
+};
+
+// Pair of values returned to a client.
+struct SBFChunk {
+  // The cursor can have the following values:
+  // 1: The data field is a header that should be used to reconstruct the SBF object itself.
+  // >1: Filter data. First metadata about filter and SBF, then bytes to copy to filter
+  // 0: The filter is fully consumed. The data field must be empty.
+  int64_t cursor;
+  // Bytes containing either the SBF metadata or filter data, depending on cursor value
+  // Maximum size returned is 16MiB. Will always contain data from exactly one filter, does not
+  // span multiple filters.
+  std::string data;
+};
+
+// This class allows sending the contents of an SBF to the caller in chunks, where each chunk is a
+// maximum of 16MiB in size. The first chunk sent back contains only the SBF metadata. Following
+// chunks contain filter data and a state of the SBF. The loader uses per filter data to update the
+// SBF as it encounters new filter items.
+class SBFDumpIterator {
+ public:
+  static constexpr uint64_t kMaxChunkSize = 16 * 1024 * 1024;
+
+  // The cursor is input from client, used to seek within a given SBF. 0 is used to start iteration
+  // from the beginning.
+  SBFDumpIterator(const SBF& sbf, int64_t cursor);
+
+  // Returns (next cursor, data between current and next cursor)
+  // Once the filter is fully read returns 0,""
+  SBFChunk Next();
+
+ private:
+  std::string SerializeHeader() const;
+
+  // Converts a cursor to the specific filter and the offset inside it
+  // O(n) in number of filters
+  void ResolveCursorToPos();
+
+  std::string BuildFilterHeader(std::string_view filter_data) const;
+  std::string BuildFilterContinuation(std::string_view filter_data) const;
+
+  const SBF& sbf_;
+  int64_t cursor_;
+  bool header_sent_ = false;
+  uint32_t filter_index_ = 0;
+  size_t byte_offset_ = 0;
 };
 
 }  // namespace dfly

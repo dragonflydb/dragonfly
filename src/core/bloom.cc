@@ -40,6 +40,24 @@ double BPE(double fp_prob) {
 
 }  // namespace
 
+constexpr uint32_t kSbfDumpVersion = 1;
+// version(4) + grow_factor(8)
+constexpr size_t kDumpHeaderSize = 12;
+// hash_cnt(4) + data_length(8) + fp_prob(8) + max_capacity(8) + current_size(8) + prev_size(8)
+constexpr size_t kDumpFilterMetaSize = 44;
+
+void AppendU32(std::string& out, uint32_t v) {
+  char buf[sizeof(v)];
+  absl::little_endian::Store32(buf, v);
+  out.append(buf, sizeof(buf));
+}
+
+void AppendU64(std::string& out, uint64_t v) {
+  char buf[sizeof(v)];
+  absl::little_endian::Store64(buf, v);
+  out.append(buf, sizeof(buf));
+}
+
 Bloom::~Bloom() {
   CHECK(bf_ == nullptr);
 }
@@ -232,6 +250,115 @@ size_t SBF::MallocUsed() const {
   res += sizeof(SBF);
 
   return res;
+}
+
+size_t FilterDumpSpan(const SBF& sbf, uint32_t filter_index) {
+  return kDumpFilterMetaSize + sbf.data(filter_index).size();
+}
+
+SBFDumpIterator::SBFDumpIterator(const SBF& sbf, int64_t cursor) : sbf_{sbf}, cursor_{cursor} {
+  ResolveCursorToPos();
+}
+
+// Filter metadata must always be fully contained in one chunk
+static_assert(SBFDumpIterator::kMaxChunkSize > kDumpFilterMetaSize);
+
+std::string SBFDumpIterator::BuildFilterHeader(const string_view filter_data) const {
+  const size_t data_chunk_len =
+      std::min<size_t>(kMaxChunkSize - kDumpFilterMetaSize, filter_data.size());
+  std::string chunk;
+  chunk.reserve(kDumpFilterMetaSize + data_chunk_len);
+  AppendU32(chunk, sbf_.hashfunc_cnt(filter_index_));
+  AppendU64(chunk, filter_data.size());
+
+  AppendU64(chunk, std::bit_cast<uint64_t>(sbf_.fp_probability()));
+  AppendU64(chunk, sbf_.max_capacity());
+  AppendU64(chunk, sbf_.current_size());
+  AppendU64(chunk, sbf_.prev_size());
+
+  chunk.append(filter_data.data(), data_chunk_len);
+  return chunk;
+}
+
+std::string SBFDumpIterator::BuildFilterContinuation(const string_view filter_data) const {
+  const size_t data_offset = byte_offset_ - kDumpFilterMetaSize;
+  const size_t remaining = filter_data.size() - data_offset;
+  const size_t chunk_len = std::min<size_t>(kMaxChunkSize, remaining);
+  auto chunk = string(filter_data.substr(data_offset, chunk_len));
+  return chunk;
+}
+
+SBFChunk SBFDumpIterator::Next() {
+  if (!header_sent_) {
+    header_sent_ = true;
+    cursor_ = 1;
+    return {cursor_, SerializeHeader()};
+  }
+
+  if (filter_index_ < sbf_.num_filters()) {
+    string chunk;
+    const string_view filter_data = sbf_.data(filter_index_);
+
+    if (byte_offset_ == 0) {
+      // First chunk of this filter: metadata followed by filter data
+      chunk = BuildFilterHeader(filter_data);
+      byte_offset_ = chunk.size();
+      cursor_ += byte_offset_;
+    } else {
+      if (byte_offset_ < kDumpFilterMetaSize)
+        return {0, {}};
+
+      // Continuing data for current filter
+      chunk = BuildFilterContinuation(filter_data);
+      byte_offset_ += chunk.size();
+      cursor_ += chunk.size();
+    }
+
+    // Advance to next filter if this one is complete
+    DCHECK_LE(byte_offset_, kDumpFilterMetaSize + filter_data.size());
+    if (byte_offset_ == kDumpFilterMetaSize + filter_data.size()) {
+      filter_index_++;
+      byte_offset_ = 0;
+    }
+
+    return {cursor_, std::move(chunk)};
+  }
+
+  return {0, {}};
+}
+
+std::string SBFDumpIterator::SerializeHeader() const {
+  std::string out;
+  out.reserve(kDumpHeaderSize);
+
+  AppendU32(out, kSbfDumpVersion);
+  AppendU64(out, std::bit_cast<uint64_t>(sbf_.grow_factor()));
+
+  return out;
+}
+
+void SBFDumpIterator::ResolveCursorToPos() {
+  if (cursor_ == 0) {
+    header_sent_ = false;
+    filter_index_ = 0;
+    byte_offset_ = 0;
+    return;
+  }
+
+  header_sent_ = true;
+  size_t global_offset = cursor_ - 1;
+  for (uint32_t i = 0; i < sbf_.num_filters(); ++i) {
+    const size_t filter_span = kDumpFilterMetaSize + sbf_.data(i).size();
+    if (global_offset < filter_span) {
+      filter_index_ = i;
+      byte_offset_ = global_offset;
+      return;
+    }
+    global_offset -= filter_span;
+  }
+
+  filter_index_ = sbf_.num_filters();
+  byte_offset_ = 0;
 }
 
 }  // namespace dfly
