@@ -505,80 +505,95 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
+    if (scorer_type_ && !matched_text_terms_.empty()) {
+      // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
+      auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
+      return SearchResult{
+          total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
+          std::move(profile), std::move(error_)};
+    }
+
     auto [out, total_size] = result.Take(cuttoff_limit);
-
-    // Compute text relevance scores if scorer is active
-    auto text_scores = ComputeTextScores(out);
-
-    return SearchResult{
-        total_size,         std::move(out),   std::move(knn_scores_), std::move(text_scores),
-        std::move(profile), std::move(error_)};
+    return SearchResult{total_size, std::move(out),     std::move(knn_scores_),
+                        {},         std::move(profile), std::move(error_)};
   }
 
-  // Compute text relevance scores for matched documents.
-  // Pre-builds per-term freq maps from posting lists for O(1) lookup per (doc, term).
-  vector<pair<DocId, float>> ComputeTextScores(const vector<DocId>& doc_ids) {
-    if (!scorer_type_ || matched_text_terms_.empty())
-      return {};
+ private:
+  // Cursor for sequential freq lookup in a posting list.
+  // Advances forward only - amortized O(1) per doc when docs are sorted.
+  struct TermCursor {
+    TextIndex* index;
+    size_t term_docs;
+    TextIndex::Container::BlockListIterator it;
+    TextIndex::Container::BlockListIterator end;
+  };
 
-    // Build sorted vector for binary search (faster than hash set for intersection)
-    vector<DocId> sorted_ids(doc_ids.begin(), doc_ids.end());
-    sort(sorted_ids.begin(), sorted_ids.end());
+  // Advance cursor past entries < doc. Return freq if doc found, 0 otherwise.
+  static uint32_t SeekCursor(TermCursor& c, DocId doc) {
+    while (c.it != c.end && *c.it < doc)
+      ++c.it;
+    return (c.it != c.end && *c.it == doc) ? c.it.Freq() : 0;
+  }
 
-    // Pre-build per-term data: (index, term_docs, {DocId -> freq} map)
-    struct TermData {
-      TextIndex* index = nullptr;
-      size_t term_docs = 0;
-      absl::flat_hash_map<DocId, uint32_t> doc_freqs;
-    };
+  // Score all matched docs via cursor-based posting list traversal and return top-K by score.
+  // Total work: O(sum of posting_list_sizes) for cursors + O(N log K) for partial sort.
+  std::tuple<vector<DocId>, size_t, vector<pair<DocId, float>>> TakeScoredTopK(IndexResult&& result,
+                                                                               size_t limit) {
+    auto [all_docs, total_size] = result.Take();  // all matched docs
 
-    vector<TermData> term_data(matched_text_terms_.size());
-    for (size_t t = 0; t < matched_text_terms_.size(); t++) {
-      auto& [index, term] = matched_text_terms_[t];
+    if (all_docs.empty())
+      return std::make_tuple(vector<DocId>{}, total_size, vector<pair<DocId, float>>{});
+
+    // Ensure sorted for cursor-based scoring
+    sort(all_docs.begin(), all_docs.end());
+
+    // Open cursors on posting lists for each matched term
+    vector<TermCursor> cursors;
+    cursors.reserve(matched_text_terms_.size());
+    for (auto& [index, term] : matched_text_terms_) {
       auto* container = index->Matching(term, /*strip_whitespace=*/false);
       if (!container)
         continue;
-
-      term_data[t].index = index;
-      term_data[t].term_docs = container->Size();
-
-      // Early termination: iterate posting list and use binary search in matched set
-      for (auto it = container->begin(); it != container->end(); ++it) {
-        DocId id = *it;
-        if (binary_search(sorted_ids.begin(), sorted_ids.end(), id))
-          term_data[t].doc_freqs[id] = it.Freq();
-      }
+      cursors.push_back({index, container->Size(), container->begin(), container->end()});
     }
 
-    size_t num_docs = indices_->GetAllDocs().size();
-    ScoringContext ctx;
-    ctx.num_docs = num_docs;
+    ScoringContext ctx{indices_->GetAllDocs().size()};
 
-    vector<pair<DocId, float>> scores;
-    scores.reserve(doc_ids.size());
+    // Score all docs - reuse term_infos buffer across iterations
+    vector<pair<float, DocId>> scored;
+    scored.reserve(all_docs.size());
+    vector<ScoringTermInfo> term_infos(cursors.size());
 
-    for (DocId doc : doc_ids) {
-      vector<ScoringTermInfo> term_infos;
-      term_infos.reserve(matched_text_terms_.size());
-
-      for (size_t t = 0; t < matched_text_terms_.size(); t++) {
-        ScoringTermInfo ti;
-        ti.term_docs = term_data[t].term_docs;
-        if (auto it = term_data[t].doc_freqs.find(doc); it != term_data[t].doc_freqs.end())
-          ti.term_freq = it->second;
-        // Per-field document length and average
-        if (term_data[t].index) {
-          ti.field_doc_len = term_data[t].index->GetFieldDocLength(doc);
-          ti.field_avg_doc_len = term_data[t].index->GetFieldAvgDocLen();
+    for (DocId doc : all_docs) {
+      for (size_t t = 0; t < cursors.size(); t++) {
+        term_infos[t].term_docs = cursors[t].term_docs;
+        term_infos[t].term_freq = SeekCursor(cursors[t], doc);
+        if (cursors[t].index) {
+          term_infos[t].field_doc_len = cursors[t].index->GetFieldDocLength(doc);
+          term_infos[t].field_avg_doc_len = cursors[t].index->GetFieldAvgDocLen();
         }
-        term_infos.push_back(ti);
       }
-
-      float score = static_cast<float>(ScoreDocument(*scorer_type_, ctx, term_infos));
-      scores.emplace_back(doc, score);
+      scored.emplace_back(static_cast<float>(ScoreDocument(*scorer_type_, ctx, term_infos)), doc);
     }
 
-    return scores;
+    // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
+    size_t k = min(limit, scored.size());
+    if (k < scored.size()) {
+      partial_sort(scored.begin(), scored.begin() + k, scored.end(), greater<>());
+      scored.resize(k);
+    }
+
+    // Build output: docs in score order, paired scores
+    vector<DocId> out;
+    vector<pair<DocId, float>> text_scores;
+    out.reserve(k);
+    text_scores.reserve(k);
+    for (auto& [score, doc] : scored) {
+      out.push_back(doc);
+      text_scores.emplace_back(doc, score);
+    }
+
+    return std::make_tuple(std::move(out), total_size, std::move(text_scores));
   }
 
   void AddMatchedTerm(TextIndex* index, string term) {

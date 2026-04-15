@@ -3116,5 +3116,49 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   }
 }
 
+// Verify that with a scorer active and a cutoff limit, the search returns the
+// highest-scoring documents (top-K by score), not arbitrary ones.
+TEST_F(ScoringTest, ScorerTopKCutoff) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Create 10 docs with increasing TF for "hello": doc0=TF1, doc1=TF2, ..., doc9=TF10
+  for (uint32_t i = 0; i < 10; i++) {
+    string content;
+    for (uint32_t j = 0; j <= i; j++) {
+      if (!content.empty())
+        content += " ";
+      content += "hello";
+    }
+    content += " filler";
+    index.Add(i, MockedDocument(content));
+  }
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(ScorerType::BM25STD);
+
+  // Request only top 3 - should return docs 9, 8, 7 (highest TF)
+  auto result = algo.Search(&index, 3);
+
+  ASSERT_EQ(result.ids.size(), 3u);
+  ASSERT_EQ(result.text_scores.size(), 3u);
+  EXPECT_EQ(result.total, 10u);
+
+  // Verify returned docs are the top-3 scorers (highest TF = doc9, doc8, doc7)
+  set<DocId> returned(result.ids.begin(), result.ids.end());
+  EXPECT_TRUE(returned.count(9)) << "Doc9 (TF=10) should be in top-3";
+  EXPECT_TRUE(returned.count(8)) << "Doc8 (TF=9) should be in top-3";
+  EXPECT_TRUE(returned.count(7)) << "Doc7 (TF=8) should be in top-3";
+
+  // Verify scores are in descending order
+  for (size_t i = 1; i < result.text_scores.size(); i++) {
+    EXPECT_GE(result.text_scores[i - 1].second, result.text_scores[i].second)
+        << "Scores should be in descending order";
+  }
+}
+
 }  // namespace search
 }  // namespace dfly
