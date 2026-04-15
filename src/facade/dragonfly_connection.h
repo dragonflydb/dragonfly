@@ -279,6 +279,11 @@ class Connection : public util::Connection {
 
   void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
+  // Enables io_uring multishot receives for the connection if the current thread supports it.
+  // This is required during initial setup or after migrating to a new thread/proactor,
+  // provided the buffer ring is configured and the connection is not using TLS.
+  void MaybeEnableRecvMultishot();
+
   // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
   void ReadPendingInput();
 
