@@ -31,6 +31,7 @@ extern "C" {
 #include "server/tiering/decoders.h"
 #include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 
 using namespace std;
 
@@ -1225,6 +1226,24 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
       return -3;
     return it.HasExpiry() ? it.ExpiryTime() : -1;
   }
+}
+
+bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv) {
+  if (pv.Encoding() != kEncodingStrMap2)
+    return false;
+
+  if (auto* sm = static_cast<StringMap*>(pv.RObjPtr()); !sm->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_HASH); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
+    return true;
+  }
+  return false;
 }
 
 // returns vector of results for each field in values:

@@ -897,6 +897,7 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   } else {
     DCHECK_EQ(OBJ_HASH, it->second.ObjType());
     res = HSetFamily::FieldExpireTime(db_cntx, it->second, field);
+    HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
   }
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
