@@ -31,6 +31,7 @@ extern "C" {
 #include "server/tiering/decoders.h"
 #include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 
 using namespace std;
 
@@ -1237,6 +1238,9 @@ bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std:
 
   if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_HASH); res) {
     db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
     return true;
   }
   return false;
