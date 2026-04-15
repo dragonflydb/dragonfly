@@ -490,7 +490,7 @@ io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
   auto paths = proactor->Await(
       [&, &bucket_name = bucket_name]() -> io::Result<vector<string>, GenericError> {
         vector<string> res;
-        cloud::azure::Storage azure(creds_provider_.get());
+        cloud::azure::Storage azure(static_cast<cloud::azure::Credentials*>(creds_provider_.get()));
 
         error_code ec =
             azure.List(bucket_name, prefix, false, 500, [&](const cloud::StorageListItem& item) {

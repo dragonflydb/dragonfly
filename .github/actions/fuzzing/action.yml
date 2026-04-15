@@ -134,6 +134,7 @@ runs:
         AFL_FAST_CAL: ${{ inputs.mode == 'long' && '1' || '' }}
         AFL_PERSISTENT_RECORD: 1000
         AFL_CUSTOM_MUTATOR_ONLY: 1
+        AFL_ENABLE_SAVE: ${{ inputs.mode == 'long' && '1' || '' }}
         FUZZ_FOCUS_COMMANDS: ${{ inputs.focus-commands }}
 
     - name: Analyze fuzzing results

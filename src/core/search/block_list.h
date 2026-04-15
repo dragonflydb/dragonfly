@@ -35,13 +35,15 @@ template <typename Container /* underlying container */> class BlockList {
   using ElementType = typename Container::ElementType;
 
  public:
-  BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
-      : block_size_{block_size}, blocks_(mr) {
+  // store_freq: forwarded to CompressedSortedSet blocks (ignored for other container types).
+  BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000, bool store_freq = false)
+      : block_size_{block_size}, store_freq_{store_freq}, blocks_(mr) {
   }
 
   BlockList(const BlockList& other) = default;
 
-  BlockList(BlockList&& other) noexcept {
+  BlockList(BlockList&& other) noexcept
+      : block_size_{other.block_size_}, store_freq_{other.store_freq_} {
     // Consider not to do move if block_size_ is different
     // DCHECK(block_size_ == other.block_size_);
     // It seams there is bugs in BaseStringIndex
@@ -58,8 +60,9 @@ template <typename Container /* underlying container */> class BlockList {
   ~BlockList() = default;
 
   // Insert element, returns true if inserted, false if already present.
-  bool Insert(ElementType t);
-  bool PushBack(ElementType t);
+  // freq parameter is forwarded to underlying container (used by CompressedSortedSet for TF).
+  bool Insert(ElementType t, uint32_t freq = 1);
+  bool PushBack(ElementType t, uint32_t freq = 1);
 
   // Remove element, returns true if removed, false if not found.
   bool Remove(ElementType t);
@@ -91,6 +94,16 @@ template <typename Container /* underlying container */> class BlockList {
 
     ElementType operator*() const {
       return *block_it;
+    }
+
+    // Returns the term frequency from the underlying CSS iterator.
+    // Only valid for BlockList<CompressedSortedSet>.
+    uint32_t Freq() const {
+      if constexpr (requires { block_it.Freq(); }) {
+        return block_it.Freq();
+      } else {
+        return 1;
+      }
     }
 
     BlockListIterator& operator++();
@@ -143,6 +156,7 @@ template <typename Container /* underlying container */> class BlockList {
 
  private:
   const size_t block_size_ = 1000;
+  bool store_freq_ = false;  // Forwarded to CompressedSortedSet blocks
   size_t size_ = 0;
   PMR_NS::vector<Container> blocks_;
 };
@@ -157,6 +171,10 @@ template <typename T> class SortedVector {
   }
 
   bool Insert(T t);
+  // TODO: store freq when SortedVector-based indices need TF scoring.
+  bool Insert(T t, uint32_t /*freq*/) {
+    return Insert(std::move(t));
+  }
   bool Remove(T t);
   void Merge(SortedVector<T>&& other);
   std::pair<SortedVector<T>, SortedVector<T>> Split() &&;

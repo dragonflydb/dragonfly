@@ -59,6 +59,17 @@ setup_directories() {
     mkdir -p "${OUTPUT_DIR}"
     mkdir -p "${CORPUS_DIR}"
 
+    # When AFL_ENABLE_SAVE=1, enable SAVE/BGSAVE by pointing --dbfilename and --dir
+    # to a temp directory. Used in nightly (long) fuzzing to test snapshot serialization.
+    if [[ "${AFL_ENABLE_SAVE:-}" == "1" ]]; then
+        DB_DIR=$(mktemp -d /tmp/dragonfly-fuzz-db.XXXXXX)
+        DB_FILENAME="dump"
+        print_info "Save mode enabled — database directory: ${DB_DIR}"
+    else
+        DB_DIR=""
+        DB_FILENAME=""
+    fi
+
     if [[ -z "$(ls -A "$CORPUS_DIR" 2>/dev/null)" ]]; then
         if [[ -d "${SEEDS_DIR}" ]] && [[ -n "$(ls -A "${SEEDS_DIR}" 2>/dev/null)" ]]; then
             print_info "Copying seeds to corpus..."
@@ -86,6 +97,7 @@ show_config() {
     echo "  Proactor threads: ${AFL_PROACTOR_THREADS}"
     echo "  Memory limit:     ${AFL_MEM_MB}MB"
     echo "  Loop limit:      ${AFL_LOOP_LIMIT} (= AFL_PERSISTENT_RECORD)"
+    echo "  Save mode:       ${AFL_ENABLE_SAVE:-off}"
     echo ""
     print_note "Fuzzing integrated in dragonfly (USE_AFL + persistent mode)"
     print_note "Usage: ./run_fuzzer.sh [resp|memcache]"
@@ -106,7 +118,7 @@ write_repro_env() {
         echo "MEM_LIMIT_KB=$((AFL_MEM_MB * 1024))"
         echo "--port=6379"
         echo "--proactor_threads=${AFL_PROACTOR_THREADS}"
-        echo "--dbfilename="
+        echo "--dbfilename=${DB_FILENAME}"
         echo "--omit_basic_usage"
         echo "--rename_command=SHUTDOWN="
         echo "--rename_command=DEBUG="
@@ -144,7 +156,7 @@ run_fuzzer() {
         --afl_loop_limit=${AFL_LOOP_LIMIT}
         --bind=0.0.0.0
         --bind=::
-        --dbfilename=""
+        --dbfilename="${DB_FILENAME}"
         --omit_basic_usage
         --rename_command=SHUTDOWN=
         --rename_command=DEBUG=
@@ -152,6 +164,8 @@ run_fuzzer() {
         --rename_command=FLUSHDB=
         --max_bulk_len=1048576
     )
+
+    [[ -n "$DB_DIR" ]] && AFL_CMD+=(--dir="${DB_DIR}")
 
     if [[ "$TARGET" == "memcache" ]]; then
         AFL_CMD+=(--memcached_port=11211 --afl_target_port=11211)

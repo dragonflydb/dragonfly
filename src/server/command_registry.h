@@ -272,8 +272,7 @@ class CommandRegistry {
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
-  std::pair<const CommandId*, facade::ParsedArgs> FindExtended(std::string_view cmd,
-                                                               facade::ParsedArgs tail_args) const;
+  std::pair<const CommandId*, facade::ParsedArgs> FindExtended(facade::ParsedArgs args) const;
 
   absl::flat_hash_map<std::string, hdr_histogram*> LatencyMap() const;
 

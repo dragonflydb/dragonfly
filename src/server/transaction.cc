@@ -1152,6 +1152,9 @@ pair<uint16_t, bool> Transaction::DisarmInShardWhen(ShardId sid, uint16_t releva
 }
 
 bool Transaction::IsActive(ShardId sid) const {
+  if (unique_shard_cnt_ == 0)  // Not initialized
+    return false;
+
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
   if (unique_shard_cnt_ == 1) {
@@ -1619,8 +1622,13 @@ void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status
 bool Transaction::CanRunInlined() const {
   auto* ss = ServerState::tlocal();
   auto* es = EngineShard::tlocal();
+
+  // Global transactions like SAVE can change the inlining rules, so run them non-inlined.
+  // This guarantees that their PollExecution batch executes on the shard-queue fiber
+  // when the conditions update
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks()) {
+      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks() &&
+      !IsGlobal()) {
     ss->stats.tx_inline_runs++;
     return true;
   }

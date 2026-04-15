@@ -175,6 +175,7 @@ class DbSlice {
 
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
+      CompactObjType orig_obj_type = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
@@ -195,8 +196,8 @@ class DbSlice {
   using ChangeReq = dfly::ChangeReq;
 
   // Called before deleting an element to notify the search indices.
-  using DocDeletionCallback =
-      std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
+  // pv is non-const: HNSW external vector preservation may swap sds entries.
+  using DocDeletionCallback = std::function<void(std::string_view, const Context&, PrimeValue& pv)>;
 
   struct ExpireParams {
     bool IsDefined() const {

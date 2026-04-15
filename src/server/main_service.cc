@@ -149,7 +149,11 @@ ShutdownWatchdog::ShutdownWatchdog(util::ProactorPool& pp) : pool{pp} {
   watchdog_fb = pool.GetNextProactor()->LaunchFiber("shutdown_watchdog", [&] {
     if (!watchdog_done.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected during shutdown";
+#ifdef USE_ABSL_LOG
+      absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+#else
       absl::SetFlag(&FLAGS_alsologtostderr, true);
+#endif
       util::fb2::Mutex m;
       pool.AwaitFiberOnAll([&m](unsigned index, auto*) {
         util::ThisFiber::SetName(absl::StrFormat("print_stack_fib_%u", index));
@@ -1361,13 +1365,12 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   // The following switch statement relies on the command's metadata
   // (e.g., SupportsAsync()) to evaluate execution preferences,
   // making this lookup a hard dependency for the logic below.
-  string cmd = absl::AsciiStrToUpper(args.Front());
-  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.Tail());
+  const auto [cid, args_no_cmd] = registry_.FindExtended(args);
   if (cid == nullptr) {
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
-    parsed_cmd->SendError(ReportUnknownCmd(cmd));
+    parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
     return DispatchResult::ERROR;
   }
 
@@ -1630,8 +1633,7 @@ DispatchManyResult Service::DispatchManyCommands(std::function<facade::ParsedArg
 
   for (unsigned i = 0; i < count; i++) {
     ParsedArgs args = arg_gen();
-    string cmd = absl::AsciiStrToUpper(args.Front());
-    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.Tail());
+    const auto [cid, tail_args] = registry_.FindExtended(args);
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1946,48 +1948,57 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
-void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
-  using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
-  auto* tx = cmd_cntx->tx();
-
-  DCHECK(tx);
+void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandContext* cmd_cntx,
+                                     facade::RedisReplyBuilder* replier) {
+  using CT = Interpreter::CallArgs::Type;
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& info = cntx->conn_state.script_info;
-  info->stats.num_commands++;
-
-  InterpreterReplier replier(ca.translator);
-  optional<ErrorReply> findcmd_err;
 
   bool abort_on_error = (ca.call_type & CT::PCALL) == 0;
   bool async_call = ca.call_type & CT::ACALL;
   bool tx_call = ca.call_type & (CT::LOCK | CT::UNLOCK);
 
-  if (async_call) {
-    string cmd = absl::AsciiStrToUpper(ca.args[0]);
+  optional<ErrorReply> early_async_error;
 
-    // Full command verification happens during squashed execution
-    if (auto* cid = registry_.Find(cmd); cid != nullptr) {
+  // Full command verification happens during squashed execution
+  if (async_call) {
+    if (auto [cid, tail] = registry_.FindExtended(ca.args); cid != nullptr) {
       auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(cid, ca.args.subspan(1), reply_mode);
+      auto tail_slice = ca.args.subspan(ca.args.size() - tail.size());
+
+      info->async_cmds.emplace_back(cid, tail_slice, reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
-      findcmd_err = ReportUnknownCmd(ca.args[0]);
+      early_async_error = ReportUnknownCmd(ca.args[0]);
     }
   }
 
-  bool need_flush = !async_call || findcmd_err.has_value() || tx_call;
+  bool need_flush = !async_call || early_async_error.has_value() || tx_call;
   if (auto err = FlushEvalAsyncCmds(cntx, need_flush); err) {
-    CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
+    CapturingReplyBuilder::Apply(std::move(*err), replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
   }
 
-  if (findcmd_err.has_value()) {
-    auto* prev = cmd_cntx->SwapReplier(&replier);
-    cmd_cntx->SendError(*findcmd_err);
+  if (early_async_error.has_value()) {
+    auto* prev = cmd_cntx->SwapReplier(replier);
+    cmd_cntx->SendError(*early_async_error);
     *ca.requested_abort |= abort_on_error;
     cmd_cntx->SwapReplier(prev);
   }
+}
+
+void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx) {
+  using CT = Interpreter::CallArgs::Type;  // TODO: use c++20 using enum
+  auto* tx = cmd_cntx->tx();
+  DCHECK(tx);
+
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  auto& info = cntx->conn_state.script_info;
+  info->stats.num_commands++;
+
+  InterpreterReplier replier(ca.translator);
+  TryEnqueueEvalAsyncCmd(ca, cmd_cntx, &replier);
 
   // Handle unlock/lock or default call
   switch (ca.call_type) {
