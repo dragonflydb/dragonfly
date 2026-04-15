@@ -12,6 +12,8 @@
 #include "util/cloud/aws/s3_storage.h"
 #endif
 
+#include "util/cloud/azure/creds_provider.h"
+
 #ifdef WITH_GCP
 #include "util/cloud/gcp/gcp_creds_provider.h"
 #include "util/cloud/gcp/gcs.h"
@@ -162,7 +164,7 @@ class AzureSnapshotStorage : public SnapshotStorage {
 
   std::error_code CheckPath(const std::string& path) final;
 
-  std::unique_ptr<util::cloud::CredentialsProvider> creds_provider_;
+  std::unique_ptr<util::cloud::azure::Credentials> creds_provider_;
   SSL_CTX* ctx_ = NULL;
 };
 

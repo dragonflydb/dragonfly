@@ -118,7 +118,7 @@ COMMANDS = [
     (b"CONFIG", 2, 3), (b"CLIENT", 1, 3), (b"COMMAND", 0, 2),
     (b"MEMORY", 1, 2), (b"ACL", 1, 5),
     (b"MONITOR", 0, 0), (b"RESET", 0, 0), (b"HELLO", 0, 5),
-    (b"WAIT", 2, 2), (b"BGSAVE", 0, 1),
+    (b"WAIT", 2, 2), (b"BGSAVE", 0, 1), (b"SAVE", 0, 0),
     (b"OBJECT", 2, 2), (b"LATENCY", 1, 2), (b"SLOWLOG", 1, 2),
     # Bitops
     (b"SETBIT", 3, 3), (b"GETBIT", 2, 2), (b"BITCOUNT", 1, 4),

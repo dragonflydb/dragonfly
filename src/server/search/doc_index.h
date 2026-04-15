@@ -18,6 +18,7 @@
 #include "core/search/base.h"
 #include "core/search/hnsw_index.h"
 #include "core/search/search.h"
+#include "core/search/sort_indices.h"
 #include "core/search/synonyms.h"
 #include "server/search/aggregator.h"
 #include "server/search/index_join.h"
@@ -284,8 +285,27 @@ class ShardDocIndex {
   // Used in FieldsValuesPerDocId to store values for each field per document
   using FieldsValues = absl::InlinedVector<search::SortableValue, 4>;
 
+ public:
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
+    // Hash/Eq for heterogeneous lookup on TrackedIdsMap with string_view keys.
+    struct StringViewHash {
+      using is_transparent = void;
+      size_t operator()(std::string_view sv) const {
+        return absl::HashOf(sv);
+      }
+    };
+    struct StringViewEq {
+      using is_transparent = void;
+      bool operator()(std::string_view a, std::string_view b) const {
+        return a == b;
+      }
+    };
+
+    using TrackedIdsMap = absl::flat_hash_map<
+        search::StatelessString, DocId, StringViewHash, StringViewEq,
+        StatelessSearchAllocator<std::pair<const search::StatelessString, DocId>>>;
+
     DocId Add(std::string_view key);
 
     // Like Add but always allocates a fresh DocId, never reusing free_ids_.
@@ -299,8 +319,7 @@ class ShardDocIndex {
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
 
-    // Get const reference to the internal ids map
-    const absl::flat_hash_map<std::string, DocId>& GetDocKeysMap() const {
+    const TrackedIdsMap& GetDocKeysMap() const {
       return ids_;
     }
 
@@ -314,13 +333,11 @@ class ShardDocIndex {
     void Restore(const std::vector<std::string>& keys);
 
    private:
-    absl::flat_hash_map<std::string, DocId> ids_;
-    std::vector<std::string> keys_;
-    std::vector<DocId> free_ids_;
+    TrackedIdsMap ids_;
+    search::StatelessVector<search::StatelessString> keys_;
+    search::StatelessVector<DocId> free_ids_;
     DocId last_id_ = 0;
   };
-
- public:
   // Index must be rebuilt at least once after intialization
   explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
 
@@ -433,6 +450,9 @@ class ShardDocIndex {
   void RestoreKeyIndex(const std::vector<std::string>& keys) {
     key_index_.Restore(keys);
   }
+
+  // Returns memory used by containers with default allocator, not tracked through search local_mr_
+  size_t GetNonPmrMemoryUsage() const;
 
  private:
   // Common doc-loading loop used by SearchForAggregator and LoadHnswRangeDocsForAggregator.

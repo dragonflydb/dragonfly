@@ -616,6 +616,11 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
            });
   }
 
+  bool operator==(const BucketSet& other) const {
+    return owner_ == other.owner_ && seg_id_ == other.seg_id_ && limit_ == other.limit_ &&
+           ids_[0] == other.ids_[0] && ids_[1] == other.ids_[1];
+  }
+
  private:
   friend class DashTable;
 

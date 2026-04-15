@@ -4526,3 +4526,55 @@ async def test_set_member_expiry_replication(
         f"Replica still has 'myset' after lazy expiry triggered by {trigger_cmd[0]}. "
         "DeleteSetIfEmpty must journal the deletion so the replica stays in sync."
     )
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.timeout(60)
+async def test_replica_no_deadlock_on_disconnect(df_factory: DflyInstanceFactory):
+    """Replica must not deadlock when the master dies while a global command
+    (FLUSHALL) is being replicated across shards. The bug: one shard reads
+    the FLUSHALL from its socket buffer and enters Barrier::Wait inside
+    ExecuteTx, but CancelAllBlockingEntities already ran (triggered by
+    another shard whose socket broke first), so the new entry is never
+    cancelled and the shard fiber hangs forever."""
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("DEBUG", "POPULATE", "1000")
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+    await wait_available_async(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Stream Lua-based multi-shard traffic that generates global commands,
+    # then kill the master. The seeder's Lua scripts create complex multi-shard
+    # operations that widen the race window for the barrier deadlock.
+    stream_seeder = SeederV2(key_target=1000)
+    seed_task = asyncio.create_task(stream_seeder.run(c_master, target_deviation=0.1))
+    await asyncio.sleep(0.5)
+    await c_master.execute_command("FLUSHALL")
+    master.stop(kill=True)
+    seed_task.cancel()
+    try:
+        await seed_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    # Restart master and re-point the replica.
+    master.start()
+    c_master = master.client()
+    await wait_available_async(c_master)
+    await c_master.execute_command("DEBUG", "POPULATE", "500")
+
+    # Re-point replica to the new master port. If the replica is deadlocked
+    # in an ExecuteTx barrier, even this command won't help it recover.
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+
+    await asyncio.wait_for(wait_for_replicas_state(c_replica), timeout=20)
+    await check_all_replicas_finished([c_replica], c_master, timeout=20)
+
+    assert await c_replica.dbsize() == await c_master.dbsize()
+    await c_replica.execute_command("REPLICAOF", "NO", "ONE")

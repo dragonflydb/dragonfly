@@ -1352,7 +1352,11 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return immediate(string("Replica cannot load data"));
   }
 
-  auto expand_result = snapshot_storage_->ExpandSnapshot(path);
+  // Select the right storage based on the path: cloud paths need their own storage,
+  // mirroring what DoSaveCheckAndStart does for saves.
+  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+
+  auto expand_result = storage->ExpandSnapshot(path);
   if (!expand_result) {
     LOG(ERROR) << "Failed to load snapshot: " << expand_result.error().Format();
 
@@ -1382,8 +1386,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
   auto load_context = std::make_unique<RdbLoadContext>();
   if (absl::EndsWith(path, "summary.dfs")) {
     // we read summary first to get snapshot_id and load data correctly
-    error_code load_ec = pool.GetNextProactor()->Await(
-        [&] { return LoadRdb(path, existing_keys, &load_opts, load_context.get()); });
+    error_code load_ec = pool.GetNextProactor()->Await([&] {
+      return LoadRdb(path, existing_keys, &load_opts, load_context.get(), storage.get());
+    });
     if (load_ec)
       return immediate(load_ec);
   }
@@ -1405,8 +1410,8 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     }
 
     auto load_func = [file, existing_keys, load_opts, aggregated_result,
-                      load_context = load_context.get(), this]() mutable {
-      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context);
+                      load_context = load_context.get(), storage, this]() mutable {
+      error_code load_ec = LoadRdb(file, existing_keys, &load_opts, load_context, storage.get());
       if (load_ec) {
         aggregated_result->first_error = load_ec;
       } else {
@@ -1420,7 +1425,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_func = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                         load_context = std::move(load_context), future]() mutable {
+                         load_context = std::move(load_context), storage, future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
@@ -1476,7 +1481,8 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
-                                      LoadOptions* load_opts, RdbLoadContext* load_context) {
+                                      LoadOptions* load_opts, RdbLoadContext* load_context,
+                                      detail::SnapshotStorage* storage) {
   DCHECK(load_opts);
   VLOG(1) << "Loading data from " << rdb_file;
   CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
@@ -1486,7 +1492,7 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
   ProactorBase* proactor = fb2::ProactorBase::me();
   error_code result;
   auto fb = proactor->LaunchFiber([&] {
-    io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
+    io::ReadonlyFileOrError res = storage->OpenReadFile(rdb_file);
     if (!res) {
       result = res.error();
       return;

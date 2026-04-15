@@ -473,9 +473,10 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_value_heap_size,
+  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -fields_.orig_value_heap_size,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_value_heap_size = 0;  // Reset to avoid double accounting.
+  fields_.orig_value_heap_size = 0;                      // Reset to avoid double accounting.
+  fields_.orig_obj_type = fields_.it->second.ObjType();  // Sync type after accounting.
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -490,10 +491,22 @@ void DbSlice::AutoUpdater::Run() {
 
   CHECK_NE(fields_.db_slice, nullptr);
 
-  ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
-                  static_cast<int64_t>(fields_.orig_value_heap_size);
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), delta,
-                      fields_.db_slice->GetDBTable(fields_.db_ind));
+  CompactObjType current_type = fields_.it->second.ObjType();
+  int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
+  DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
+
+  if (current_type != fields_.orig_obj_type) {
+    // Type changed: remove old size from old type, add new size to new type separately.
+    // Applying (current_size - orig_size) to the new type would incorrectly subtract
+    // from a counter that never had the original bytes added to it.
+    AccountObjectMemory(fields_.key, fields_.orig_obj_type,
+                        -static_cast<int64_t>(fields_.orig_value_heap_size), table);
+    AccountObjectMemory(fields_.key, current_type, current_size, table);
+  } else {
+    ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
+    AccountObjectMemory(fields_.key, current_type, delta, table);
+  }
+
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
   Cancel();  // Reset to not run again
 }
@@ -508,7 +521,8 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_value_heap_size = it->second.MallocUsed()} {
+              .orig_value_heap_size = it->second.MallocUsed(),
+              .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
 }
 
@@ -664,11 +678,17 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     return OpStatus::WRONG_TYPE;
   }
 
+  // It's a new entry.
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
-  // It's a new entry.
-  CallChangeCallbacks(cntx.db_index, ChangeReq{key});
+  if (!change_cb_.empty()) {
+    auto bucket_set = db.prime.CVCUponInsert(key);
+    CallChangeCallbacks(cntx.db_index, bucket_set);
+
+    // Set of possible insertion buckets must be the same after possibly blocking call
+    DCHECK(bucket_set == db.prime.CVCUponInsert(key));
+  }
 
   ssize_t memory_offset = -key.size();
   size_t reclaimed = 0;
@@ -837,16 +857,13 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 
   auto on_change = [&](DbIndex db_index, const ChangeReq& req) {
     FiberAtomicGuard fg;
-    PrimeTable* table = GetTables(db_index);
 
-    if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
       if (!bit->is_done() && bit->GetVersion() < next_version) {
         iterate_bucket(*bit);
       }
     } else {
-      string_view key = get<string_view>(req.change);
-      auto bucket_set = table->CVCUponInsert(key);
-      for (auto it : bucket_set.buckets()) {
+      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
         if (!it.is_done() && it.GetVersion() < next_version)
           iterate_bucket(it);
       }

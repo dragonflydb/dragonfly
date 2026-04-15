@@ -153,12 +153,17 @@ class FieldIndices {
 
   DefragmentResult Defragment(PageUsage* page_usage);
 
+  // Returns memory used by containers with default allocator, not tracked through search local_mr_
+  size_t GetNonPmrMemoryUsage() const;
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices();
 
   const Schema& schema_;
   const IndicesOptions& options_;
+  // These containers use default allocators — tracked manually via GetNonPmrMemoryUsage().
+  // If adding new default-allocator containers, update GetNonPmrMemoryUsage() accordingly.
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
