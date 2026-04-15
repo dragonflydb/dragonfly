@@ -581,6 +581,11 @@ struct BasicSearch {
     return scores;
   }
 
+  void AddMatchedTerm(TextIndex* index, string term) {
+    if (matched_terms_set_.emplace(index, term).second)
+      matched_text_terms_.emplace_back(index, std::move(term));
+  }
+
   const FieldIndices* indices_;
   std::optional<ScorerType> scorer_type_;
 
@@ -595,11 +600,6 @@ struct BasicSearch {
   // group_id.
   vector<pair<TextIndex*, string>> matched_text_terms_;
   absl::flat_hash_set<pair<TextIndex*, string>> matched_terms_set_;
-
-  void AddMatchedTerm(TextIndex* index, string term) {
-    if (matched_terms_set_.emplace(index, term).second)
-      matched_text_terms_.emplace_back(index, std::move(term));
-  }
 };
 
 #ifndef __clang__

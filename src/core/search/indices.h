@@ -80,6 +80,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   using Container = BlockList<C>;
   using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
+  // TextIndex (CompressedSortedSet) supports TF storage and BM25 scoring; TagIndex does not.
+  static constexpr bool kIsScored = std::is_same_v<C, CompressedSortedSet>;
+
   BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;

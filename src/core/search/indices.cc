@@ -427,8 +427,7 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
   }
 
   // Track per-field document length for BM25 scoring.
-  // Only relevant for TextIndex (CompressedSortedSet), not TagIndex (SortedVector).
-  if constexpr (std::is_same_v<C, CompressedSortedSet>) {
+  if constexpr (kIsScored) {
     uint32_t doc_tf_sum = 0;
     for (const auto& [_, freq] : tokens)
       doc_tf_sum += freq;
@@ -444,9 +443,8 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
 
   if (tokens.size() > 1)
     unique_ids_ = false;
-  constexpr bool kStoreFreq = std::is_same_v<C, CompressedSortedSet>;
   for (const auto& [token, freq] : tokens)
-    GetOrCreate(&entries_, token, kStoreFreq)->Insert(id, freq);
+    GetOrCreate(&entries_, token, kIsScored)->Insert(id, freq);
 
   if (suffix_trie_) {
     absl::flat_hash_set<std::string> token_keys;
@@ -462,7 +460,7 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
 template <typename C>
 void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   // Update per-field scoring stats before removing tokens
-  if constexpr (std::is_same_v<C, CompressedSortedSet>) {
+  if constexpr (kIsScored) {
     if (id < field_doc_lengths_.size() && field_doc_lengths_[id] > 0) {
       field_total_docs_len_ -= field_doc_lengths_[id];
       field_doc_lengths_[id] = 0;
