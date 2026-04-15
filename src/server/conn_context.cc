@@ -235,21 +235,16 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, boo
   int32_t tid = util::ProactorBase::me()->GetPoolIndex();
   DCHECK_GE(tid, 0);
 
-  ChannelStoreUpdater csu{pattern, to_add, this, uint32_t(tid)};
-
-  // Gather all the channels we need to subscribe to / remove.
   size_t i = 0;
   for (string_view channel : channels) {
     if (to_add && local_store.emplace(channel).second)
-      csu.Record(channel);
+      channel_store->Add(channel, this, uint32_t(tid), pattern);
     else if (!to_add && local_store.erase(channel) > 0)
-      csu.Record(channel);
+      channel_store->Remove(channel, this, pattern);
 
     if (to_reply)
       result[i++] = sinfo.SubscriptionCount();
   }
-
-  csu.Apply();
 
   // Important to reset conn_state.subscribe_info only after all references to it were
   // removed.

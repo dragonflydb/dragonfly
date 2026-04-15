@@ -196,6 +196,13 @@ if(WITH_SIMSIMD)
   )
 endif()
 
+add_third_party(
+  parallel_hashmap
+  URL https://github.com/greg7mdp/parallel-hashmap/archive/refs/tags/v2.0.0.zip
+  BUILD_COMMAND echo SKIP
+  INSTALL_COMMAND cp -R <SOURCE_DIR>/parallel_hashmap ${THIRD_PARTY_LIB_DIR}/parallel_hashmap/include/
+  LIB "none"
+)
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
@@ -218,3 +225,8 @@ add_library(TRDP::fast_float INTERFACE IMPORTED)
 add_dependencies(TRDP::fast_float fast_float_project)
 set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
+
+add_library(TRDP::parallel_hashmap INTERFACE IMPORTED)
+add_dependencies(TRDP::parallel_hashmap parallel_hashmap_project)
+set_target_properties(TRDP::parallel_hashmap PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${PARALLEL_HASHMAP_INCLUDE_DIR}")
