@@ -175,6 +175,7 @@ class DbSlice {
 
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
+      CompactObjType orig_obj_type = 0;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
