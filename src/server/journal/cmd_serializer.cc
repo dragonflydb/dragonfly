@@ -4,6 +4,8 @@
 
 #include "server/journal/cmd_serializer.h"
 
+#include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
@@ -84,7 +86,8 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
   // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
   size_t commands = 1;
-  switch (pv.ObjType()) {
+  auto obj_type = pv.ObjType();
+  switch (obj_type) {
     case OBJ_SET:
       commands = SerializeSet(key, pv);
       use_restore_serialization = false;
@@ -158,6 +161,11 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 }
 
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
+  // Disable lazy expiry during serialization (same as rdb_save.cc).
+  // We are called under bucket lock so DeleteIfEmpty is not possible.
+  if (pv.Encoding() == kEncodingStrMap2)
+    static_cast<StringSet*>(pv.RObjPtr())->set_time(0);
+
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
       max_serialization_buffer_size_);
@@ -188,6 +196,10 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 }
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
+  // Disable lazy expiry during serialization (same as rdb_save.cc).
+  if (pv.Encoding() == kEncodingStrMap2)
+    static_cast<StringMap*>(pv.RObjPtr())->set_time(0);
+
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
       max_serialization_buffer_size_);

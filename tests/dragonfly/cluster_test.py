@@ -1431,6 +1431,55 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_migration_serializer_expired_fields(df_factory):
+    """
+    CmdSerializer uses IterateMap/IterateSet during migration.  If time_now_
+    was set by a prior command (HGET), the iteration triggers lazy expiry.
+    After serialization the source has an empty hash — SAVE must not crash.
+    """
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # Many fields with short TTL spread across DenseSet buckets.
+    for i in range(64):
+        await nodes[0].client.execute_command("HSETEX", "hkey", "1", f"f{i}", "v")
+        await nodes[0].client.execute_command("SADDEX", "skey", "1", f"m{i}")
+    await nodes[0].client.execute_command("SET", "normal", "val")
+
+    await asyncio.sleep(1.5)
+
+    # HGET/SISMEMBER update time_now_ but only partially expire (one bucket).
+    # ExecuteRO sees UpperBoundSize > 0, doesn't clean up.
+    await nodes[0].client.execute_command("HGET", "hkey", "f0")
+    await nodes[0].client.execute_command("SISMEMBER", "skey", "m0")
+
+    # Start migration — serializer iterates all DenseSet buckets, expiring rest.
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    # Without the fix, SAVE on source crashes (DFATAL on empty hash).
+    await nodes[0].admin_client.execute_command("SAVE", "RDB", "test_zombie.rdb")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert await nodes[1].client.execute_command("GET", "normal") == "val"
+    # Server survived — no zombie crash.
+
+
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cache_mode": "true"})
 async def test_migration_with_key_ttl(df_factory):
     instances = [
