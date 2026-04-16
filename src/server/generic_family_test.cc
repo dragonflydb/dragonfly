@@ -1360,6 +1360,20 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
 }
 
+TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  Run({"ZADD", "zkey", "1", "m0"});
+
+  AdvanceTime(2000);
+
+  Run({"SISMEMBER", "skey", "m0"});
+  Run({"ZINTERSTORE", "zdest", "2", "skey", "zkey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));

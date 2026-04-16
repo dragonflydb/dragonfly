@@ -29,6 +29,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/set_family.h"
 #include "server/transaction.h"
 
 namespace rng = std::ranges;
@@ -920,6 +921,10 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
       sm = ScoreMapFromSet(it->second, weight);
+      if (it->second.Size() == 0) {
+        auto& db_slice = t->GetDbSlice(shard->shard_id());
+        SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), it.key(), it->second);
+      }
     }
     if (result.empty())
       result.swap(sm);
