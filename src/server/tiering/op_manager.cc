@@ -141,7 +141,7 @@ void OpManager::ProcessStashed(const OwnedEntryId& id, unsigned version,
     pending_stash_ver_.erase(it);
     NotifyStashed(id, segment);
   } else if (segment) {
-    // Throw away the value because it's no longer up-to-date even if no error occured
+    // Throw away the value because it's no longer up-to-date even if no error occurred
     VLOG(1) << "Releasing segment " << *segment << ", id: " << ToString(id);
     storage_.MarkAsFree(*segment);
   } else {
