@@ -170,7 +170,7 @@ class Service : public facade::ServiceInterface {
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter, bool read_only,
                CommandContext* cmd_cntx);
 
-  // Return optional payload - first received error that occured when executing commands.
+  // Return optional payload - first received error that occurred when executing commands.
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                              bool force = false);
 
