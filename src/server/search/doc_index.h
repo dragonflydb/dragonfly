@@ -253,6 +253,10 @@ class HnswShardIndex {
 
   void ClearPreservedData();
 
+  // Preserve old sds entry for borrowed-vector mode so HNSW pointers stay valid.
+  void MaybePreserveField(PrimeValue& pv, absl::Span<const std::string_view> modified_fields,
+                          FieldExtractionCache* cache);
+
   const std::string& field_ident() const {
     return field_ident_;
   }
@@ -424,6 +428,10 @@ class ShardDocIndex {
   // for nodes whose graph structure was already restored from RDB.
   void RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args);
 
+  // Drain buffered HNSW updates and set kBuilding. Called from PerformPostLoad
+  // after all shards complete restoration.
+  void DrainPendingVectorUpdates(const OpArgs& op_args);
+
   // Serialize doc and return with key name
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
   SerializedEntryWithKey SerializeDocWithKey(
@@ -493,11 +501,14 @@ class ShardDocIndex {
   // Per-shard HNSW wrappers, one per indexed vector field.
   std::vector<HnswShardIndex> hnsw_shard_indices_;
 
-  // Buffered state for journal events arriving while HNSW vector indices
-  // are being restored from serialized graph data (is_restoring_vectors_ == true).
-  // Drained by RestoreGlobalVectorIndices after the graph is fully restored.
+  // HNSW vector index lifecycle state.
+  // kProhibit: default after InitIndex during LOADING. All HNSW ops buffered.
+  // kRestoring: set by Rebuild(is_restored=true). Ops buffered until drain.
+  // kBuilding: normal operation. HNSW adds/removes execute immediately.
+  enum class HnswState : uint8_t { kProhibit, kRestoring, kBuilding };
+
   absl::flat_hash_set<std::string> pending_vector_updates_;
-  bool is_restoring_vectors_ = false;
+  HnswState hnsw_state_ = HnswState::kProhibit;
 };
 
 // Stores shard doc indices by name on a specific shard.
