@@ -814,6 +814,22 @@ TEST_F(HSetFamilyTest, HRandFieldRespFormat) {
   }
 }
 
+// Regression: OpHTtl calls FieldExpireTime (which triggers lazy field expiry via
+// StringMap::Find) but did not call DeleteIfEmpty afterward.  When all fields
+// have expired, the hash stays in the DB with Size()==0.
+TEST_F(HSetFamilyTest, HTtlDeletesEmptyHash) {
+  Run({"HSETEX", "key", "1", "f1", "v1"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "key"}));
+
+  AdvanceTime(2000);
+
+  // HTTL triggers lazy expiry of f1; without the fix the hash remains as a zombie key.
+  Run({"HTTL", "key", "FIELDS", "1", "f1"});
+
+  // The key must have been removed.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
+}
+
 // Make sure no "Zombie Key": HEXPIRE with TTL 0 must delete the key
 // if the hash becomes empty. If the key remains (zombie), saving the RDB or running
 // commands like EXISTS against it may lead to crashes or other incorrect behavior.

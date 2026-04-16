@@ -719,6 +719,10 @@ OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view ke
     }
   }
 
+  // FieldExpireTime calls StringMap::Find which triggers lazy field expiry.
+  // If all fields expired, delete the now-empty hash key.
+  HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, pv);
+
   return res;
 }
 
