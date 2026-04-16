@@ -149,7 +149,7 @@ struct CmdArgParser {
     return *this;
   }
 
-  // Expect no more arguments and return if no error has occured
+  // Expect no more arguments and return if no error has occurred
   bool Finalize() {
     if (HasNext()) {
       Report(UNPROCESSED, cur_i_);
@@ -163,7 +163,7 @@ struct CmdArgParser {
     return args_.subspan(cur_i_);
   }
 
-  // Return true if arguments are left and no errors occured
+  // Return true if arguments are left and no errors occurred
   bool HasNext() {
     return cur_i_ < args_.size() && !error_;
   }
