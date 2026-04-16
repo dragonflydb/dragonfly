@@ -5,11 +5,14 @@
 #include "server/search/serialization_utils.h"
 
 #include "base/logging.h"
+#include "server/common.h"
 #include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
 
 namespace dfly {
@@ -65,6 +68,18 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
     return;
 
   auto all_indices = GlobalHnswIndexRegistry::Instance().GetAll();
+  if (all_indices.empty())
+    return;
+
+  // Buffer all HNSW mutations at the doc_index level so they don't reach
+  // the HNSW graph while we hold the read lock for serialization.
+  shard_set->RunBriefInParallel([](EngineShard* es) {
+    for (const auto& index_name : es->search_indices()->GetIndexNames()) {
+      if (auto* shard_index = es->search_indices()->GetIndex(index_name)) {
+        shard_index->SetHnswSerializing();
+      }
+    }
+  });
 
   // Preallocate buffer for HNSW entry serialization.
   std::vector<uint8_t> tmp_buf;
@@ -72,8 +87,6 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
   for (const auto& [index_key, index] : all_indices) {
     {
       // Acquire a read lock to ensure a consistent snapshot of the graph.
-      // While held, Add/Remove calls will defer into the adapter's internal list
-      // and will be replayed automatically on the next write operation.
       auto read_lock = index->GetReadLock();
 
       // Format: [RDB_OPCODE_VECTOR_INDEX, index_name, elements_number,
@@ -107,24 +120,18 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
     push_fun_();
   }
 
-  // All read locks released — drain deferred ops so all removes complete,
-  // then clear preserved field data on all shards while still holding the
-  // write locks. Holding write locks ensures no new Remove can be deferred
-  // (MRMW allows concurrent writers, so Removes execute synchronously).
-  if (!all_indices.empty()) {
-    std::vector<search::MRMWMutexLock> write_locks;
-    write_locks.reserve(all_indices.size());
-    for (const auto& [index_key, index] : all_indices) {
-      write_locks.push_back(index->DrainPendingOps());
-    }
-    shard_set->RunBriefInParallel([](EngineShard* es) {
-      for (const auto& index_name : es->search_indices()->GetIndexNames()) {
-        if (auto* shard_index = es->search_indices()->GetIndex(index_name)) {
-          shard_index->ClearAllHnswPreservedData();
-        }
+  // Drain buffered HNSW updates on all shards and transition back to kBuilding.
+  // Uses DrainSerializationUpdates which only acts on indices in kSerializing
+  // state, so it cannot interfere with concurrent restoration.
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+    OpArgs op_args{es, nullptr,
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
+    for (const auto& index_name : es->search_indices()->GetIndexNames()) {
+      if (auto* shard_index = es->search_indices()->GetIndex(index_name)) {
+        shard_index->DrainSerializationUpdates(op_args);
       }
-    });
-  }
+    }
+  });
 }
 #endif
 

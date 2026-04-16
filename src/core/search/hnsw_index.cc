@@ -4,7 +4,6 @@
 
 #include "core/search/hnsw_index.h"
 
-#include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
 #include <hnswlib/hnswlib.h>
 #include <hnswlib/space_ip.h>
@@ -80,51 +79,17 @@ struct HnswlibAdapter {
         stub_vector_(data_size_ / sizeof(float), 1.0f) {
   }
 
-  // Adds a point to the index. If the write lock cannot be acquired (e.g.
-  // serialization holds a read lock), the operation is deferred and will be
-  // replayed by a subsequent write or TryProcessDeferred() call.
-  // When copy_vector_ is false the index stores a raw pointer to external data,
-  // so we must add the point synchronously before the caller's pointer goes out
-  // of scope — use a blocking write lock in that case.
   void Add(const void* data, GlobalDocId id) {
-    if (copy_vector_) {
-      {
-        MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
-        if (lock.locked()) {
-          ProcessDeferred();
-          DoAdd(data, id);
-          return;
-        }
-      }
-      // Could not acquire write lock — defer the operation.
-      AddDeferredOp(id, DeferredOp(true, data, data_size_, /*copy=*/true));
-      TryProcessDeferred();
-    } else {
-      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-      ProcessDeferred();
-      DoAdd(data, id);
-    }
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    DoAdd(data, id);
   }
 
-  // Removes a point from the index. If the write lock cannot be acquired, the
-  // operation is deferred. Returns true when the operation was executed
-  // synchronously (write lock acquired, deferred queue drained).
-  bool Remove(GlobalDocId id) {
-    {
-      MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
-      if (lock.locked()) {
-        ProcessDeferred();
-        DoRemove(id);
-        return true;
-      }
-    }
-    AddDeferredOp(id, DeferredOp(false, nullptr, 0, false));
-    TryProcessDeferred();
-    return false;
+  void Remove(GlobalDocId id) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    DoRemove(id);
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    TryProcessDeferred();
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnn(target, k));
@@ -137,12 +102,11 @@ struct HnswlibAdapter {
         return binary_search(allowed->begin(), allowed->end(), id);
       }
 
-      BinsearchFilter(const vector<GlobalDocId>* allowed) : allowed{allowed} {
+      explicit BinsearchFilter(const vector<GlobalDocId>* allowed) : allowed{allowed} {
       }
       const vector<GlobalDocId>* allowed;
     };
 
-    TryProcessDeferred();
     world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
@@ -161,7 +125,6 @@ struct HnswlibAdapter {
   // Uses dynamic-range exploration (searchRange) to correctly handle cases where
   // the entry point is farther than radius.
   vector<pair<float, GlobalDocId>> RangeSearch(float* target, float radius) {
-    TryProcessDeferred();
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return world_.searchRange(target, radius);
   }
@@ -240,45 +203,6 @@ struct HnswlibAdapter {
   }
 
  private:
-  // A single deferred Add or Remove operation.
-  struct DeferredOp {
-    bool is_add;
-    bool owns_data;        // If true, data_ptr was allocated by us and must be freed.
-    const void* data_ptr;  // Pointer to vector data (owned or borrowed).
-
-    DeferredOp(bool is_add, const void* data, size_t data_size, bool copy)
-        : is_add(is_add), owns_data(copy && data != nullptr) {
-      if (owns_data) {
-        void* buf = mi_malloc(data_size);
-        memcpy(buf, data, data_size);
-        data_ptr = buf;
-      } else {
-        data_ptr = data;
-      }
-    }
-
-    ~DeferredOp() {
-      if (owns_data)
-        mi_free(const_cast<void*>(data_ptr));
-    }
-
-    DeferredOp(DeferredOp&& o) noexcept
-        : is_add(o.is_add), owns_data(o.owns_data), data_ptr(o.data_ptr) {
-      o.owns_data = false;
-      o.data_ptr = nullptr;
-    }
-
-    DeferredOp& operator=(DeferredOp&& o) noexcept {
-      auto lhs = std::tie(is_add, owns_data, data_ptr);
-      auto rhs = std::tie(o.is_add, o.owns_data, o.data_ptr);
-      std::swap(lhs, rhs);
-      return *this;
-    }
-
-    DeferredOp(const DeferredOp&) = delete;
-    DeferredOp& operator=(const DeferredOp&) = delete;
-  };
-
   // Actually add the point. Must be called while holding mrmw write lock.
   void DoAdd(const void* data, GlobalDocId id) {
     while (true) {
@@ -320,42 +244,6 @@ struct HnswlibAdapter {
     }
   }
 
-  // Add a deferred operation, replacing any previous one for the same document.
-  void AddDeferredOp(GlobalDocId id, DeferredOp op) {
-    std::lock_guard g(deferred_mu_);
-    deferred_ops_.insert_or_assign(id, std::move(op));
-  }
-
-  // Take all deferred operations out of the queue.
-  absl::flat_hash_map<GlobalDocId, DeferredOp> TakeDeferredOps() {
-    std::lock_guard g(deferred_mu_);
-    absl::flat_hash_map<GlobalDocId, DeferredOp> ops;
-    ops.swap(deferred_ops_);
-    return ops;
-  }
-
-  // Drain the deferred operations queue. Must be called while holding the mrmw
-  // write lock.  Only copy_vector_=true adds and removes can be deferred, so
-  // ordering within the queue does not matter.
-  void ProcessDeferred() {
-    auto ops = TakeDeferredOps();
-    for (auto& [id, op] : ops) {
-      if (op.is_add) {
-        DoAdd(op.data_ptr, id);
-      } else {
-        DoRemove(id);
-      }
-    }
-  }
-
-  // Non-blocking attempt to drain the deferred queue.
-  void TryProcessDeferred() {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
-    if (lock.locked()) {
-      ProcessDeferred();
-    }
-  }
-
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
   void ResizeIfFull() {
@@ -392,14 +280,6 @@ struct HnswlibAdapter {
   }
 
  public:
-  // Block until the write lock is acquired and all deferred ops are drained.
-  // Returns the held write lock so the caller can keep it alive.
-  MRMWMutexLock DrainPendingOps() {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    ProcessDeferred();
-    return lock;
-  }
-
   // Restore HNSW graph structure from serialized nodes with metadata
   void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
@@ -509,7 +389,6 @@ struct HnswlibAdapter {
   // Update vector data for an existing node (used after RestoreFromNodes).
   // Returns false if the node doesn't exist in the index.
   bool UpdateVectorData(GlobalDocId id, const void* data) {
-    TryProcessDeferred();
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
 
     // Find the internal id for this label
@@ -551,11 +430,9 @@ struct HnswlibAdapter {
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
 
-  bool copy_vector_;                    // Whether vectors are copied into hnswlib.
-  size_t data_size_;                    // Byte size of a single vector.
-  std::vector<float> stub_vector_;      // Non-zero data for deleted nodes in borrowed mode.
-  mutable base::SpinLock deferred_mu_;  // Protects deferred_ops_.
-  absl::flat_hash_map<GlobalDocId, DeferredOp> deferred_ops_;  // GUARDED_BY(deferred_mu_)
+  bool copy_vector_;                // Whether vectors are copied into hnswlib.
+  size_t data_size_;                // Byte size of a single vector.
+  std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,
@@ -613,12 +490,8 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(float* ta
   return adapter_->RangeSearch(target, radius);
 }
 
-bool HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
-  return adapter_->Remove(id);
-}
-
-bool HnswVectorIndex::Remove(GlobalDocId id) {
-  return adapter_->Remove(id);
+void HnswVectorIndex::Remove(GlobalDocId id) {
+  adapter_->Remove(id);
 }
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
@@ -667,10 +540,6 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
 
 MRMWMutexLock HnswVectorIndex::GetReadLock() const {
   return adapter_->GetReadLock();
-}
-
-MRMWMutexLock HnswVectorIndex::DrainPendingOps() {
-  return adapter_->DrainPendingOps();
 }
 
 }  // namespace dfly::search
