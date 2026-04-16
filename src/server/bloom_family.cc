@@ -168,6 +168,40 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser(args);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const string_view key = parser.Next();
+  const int64_t cursor = parser.Next<int64_t>();
+  if (cursor < 0)
+    return rb->SendError(kInvalidIntErr);
+
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<SBFChunk> {
+    const auto& db_slice = t->GetDbSlice(shard->shard_id());
+    OpResult op_res = db_slice.FindReadOnly(t->GetOpArgs(shard).db_cntx, key, OBJ_SBF);
+    if (!op_res)
+      return op_res.status();
+
+    const SBF* sbf = op_res.value()->second.GetSBF();
+    SBFDumpIterator it(*sbf, cursor);
+    return it.Next();
+  };
+
+  OpResult<SBFChunk> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+  if (!res) {
+    return rb->SendError(res.status());
+  }
+
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendLong(res->cursor);
+  if (res->cursor == 0)
+    DCHECK(res->data.empty()) << " scan ended with inconsistent state";
+  rb->SendBulkString(res->data);
+}
+
 void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
@@ -200,7 +234,8 @@ void RegisterBloomFamily(CommandRegistry* registry) {
             << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(
                    MAdd)
             << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists);
+            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
+            << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump);
 };
 
 }  // namespace dfly
