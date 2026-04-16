@@ -849,10 +849,8 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {  // non-http
-      // ioloop_v2 not supported for TLS & redis connections yet.
-      ioloop_v2_ =
-          GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_ && protocol_ == Protocol::MEMCACHE;
-
+              // ioloop_v2 not supported for TLS & redis connections yet.
+      ioloop_v2_ = GetFlag(FLAGS_experimental_io_loop_v2) && !is_tls_;
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -2803,6 +2801,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // await block (no data to read)
     if (io_buf_.InputLen() == 0) {
+      // Set READ_SOCKET so ConnectionsWatcherFb can detect idle connections for timeout eviction.
+      phase_ = READ_SOCKET;
+
       io_event_.await([this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.

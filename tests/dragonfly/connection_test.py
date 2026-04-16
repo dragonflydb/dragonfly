@@ -667,15 +667,21 @@ async def test_reply_count(df_server: DflyInstance):
     for _ in range(100):
         e.incr("num-1")
 
-    # one - for MULTI-OK, one for the rest. Depends on the squashing efficiency,
-    # can be either 1 or 2 replies.
-    assert await measure(e.execute()) <= 2
+    # MULTI-OK + the EXEC array (which contains all inner replies).
+    # V1 usually does this in 1-2 flushes while V2 does it in up to 3 because of its
+    # single-fiber parse/execute/reply cycle.
+    assert await measure(e.execute()) <= 3
 
     # Just pipeline
     p = async_client.pipeline(transaction=False)
     for _ in range(100):
         p.incr("num-1")
-    assert await measure(p.execute()) <= 2
+
+    # V1: 1-2 flushes thanks to aggressive squashing across dual fibers.
+    # V2 (single-fiber loop): flush count varies (typically 6-9) depending on
+    # batching boundaries and OS scheduling. We use a safe upper bound that
+    # still proves heavy aggregation (100 commands → ≤12 packets = 88%+ reduction).
+    assert await measure(p.execute()) <= 12
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
@@ -1195,9 +1201,6 @@ async def wait_for_conn_drop(async_client):
 
 @dfly_args({"timeout": 1})
 async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
-    # TODO investigate why it fails -- client is not stuck.
-    if df_server.has_arg("experimental_io_loop_v2"):
-        pytest.skip(f"Fails in the assertion below")
 
     another_client = df_server.client()
     await another_client.ping()
@@ -1249,10 +1252,16 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
 
 # Test that the cache pipeline does not grow or shrink under constant pipeline load.
+# This test relies on SquashPipeline() memory lifecycle (V1/AsyncFiber only).
+# V2's single-fiber ExecuteBatch() releases commands incrementally, so the cache
+# is non-empty during execution. Skip when V2 is the default.
 @dfly_args({"proactor_threads": 1, "pipeline_squash": 9, "max_busy_read_usec": 50000})
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
+
+    if server.args.get("experimental_io_loop_v2") != "false":
+        pytest.skip("V2 does not use SquashPipeline; cache lifecycle differs")
 
     client = server.client()
     await client.ping()  # Make sure the connection and the protocol were established
