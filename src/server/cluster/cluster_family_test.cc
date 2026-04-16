@@ -882,9 +882,11 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
     EXPECT_EQ(db_slice.DbSize(0), 10u);
 
     // Step 1: FlushSlots creates a detached fiber. We do NOT yield, so the fiber
-    // cannot run yet.
+    // cannot run yet. Acquire the shard lock because RegisterOnChange requires it (#7153).
     cluster::SlotRanges ranges({{0, 16383}});
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
     db_slice.FlushSlots(ranges);
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     // Step 2: Insert entries WITHOUT yielding — the flush fiber still has not executed.
     // Each insert calls NextVersion(), advancing the global counter.

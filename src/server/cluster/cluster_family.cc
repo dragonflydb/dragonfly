@@ -31,6 +31,7 @@
 #include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/transaction.h"
 #include "util/fibers/synchronization.h"
 
 namespace rng = std::ranges;
@@ -490,19 +491,19 @@ void ClusterFamily::ClusterMyId(SinkReplyBuilder* builder) {
 
 namespace {
 
-void DeleteSlots(const SlotRanges& slots_ranges) {
+// FlushSlots calls RegisterOnChange which requires the shard lock to be held (see #7153).
+// Execute under a global transaction so the shard lock is acquired properly.
+void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
   if (slots_ranges.Empty()) {
     return;
   }
 
-  auto cb = [&](auto*) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr)
-      return;
-
-    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
-  };
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+  trans->Execute(
+      [&slots_ranges](Transaction* t, EngineShard* shard) {
+        namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+        return OpStatus::OK;
+      },
+      true);
 
   auto* channel_store = ServerState::tlocal()->channel_store();
   auto deleted = SlotSet(slots_ranges);
@@ -570,7 +571,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
     util::fb2::LockGuard gu(set_config_mu);
 
     outgoing_migrations = TakeOutOutgoingMigrations(new_config, ClusterConfig::Current());
-    RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(ClusterConfig::Current()));
+    auto incoming_slots_to_flush = RemoveIncomingMigrations(
+        new_config->GetFinishedIncomingMigrations(ClusterConfig::Current()));
 
     SlotRanges enable_slots, disable_slots;
 
@@ -625,7 +627,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, CommandContext* cmd_cntx)
     if (ServerState::tlocal()->is_master) {
       auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
       deleted_slots.Merge(outgoing_migrations.slot_ranges);
-      DeleteSlots(deleted_slots);
+      deleted_slots.Merge(incoming_slots_to_flush);
+      DeleteSlots(cmd_cntx->tx(), deleted_slots);
       LOG_IF(INFO, !deleted_slots.Empty())
           << "Flushing newly unowned slots: " << deleted_slots.ToString();
       WriteFlushSlotsToJournal(deleted_slots);
@@ -737,7 +740,7 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, CommandContext* cmd_c
     slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  DeleteSlots(SlotRanges(std::move(slot_ranges)));
+  DeleteSlots(cmd_cntx->tx(), SlotRanges(std::move(slot_ranges)));
 
   return cmd_cntx->SendOk();
 }
@@ -894,20 +897,21 @@ ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
 
 namespace {
 
-// returns removed incoming migration
-bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
-                                 string_view source_id) {
+// Removes an incoming migration and returns non-owned slot ranges that need flushing.
+// Flushing is done by the caller together with other slot deletions.
+SlotRanges RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
+                                       string_view source_id) {
   auto it = rng::find_if(jobs, [source_id](const auto& im) {
     // we can have only one migration per target-source pair
     return source_id == im->GetSourceID();
   });
   if (it == jobs.end()) {
-    return false;
+    return {};
   }
   DCHECK(it->get() != nullptr);
   std::shared_ptr<IncomingSlotMigration> migration = *it;
 
-  // Flush non-owned migrations
+  // Compute non-owned migration slots that need flushing.
   SlotSet migration_slots(migration->GetSlots());
   SlotSet removed = migration_slots.GetRemovedSlots(ClusterConfig::Current()->GetOwnedSlots());
 
@@ -915,25 +919,26 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   // all migration fibers has migration shared_ptr so the object can be removed later
   jobs.erase(it);
 
-  // TODO make it outside in one run with other slots that should be flushed
   if (!removed.Empty()) {
     auto removed_ranges = removed.ToSlotRanges();
     LOG_IF(WARNING, migration->GetState() == MigrationState::C_FINISHED)
         << "Flushing slots of removed FINISHED migration " << migration->GetSourceID()
         << ", slots: " << removed_ranges.ToString();
-    DeleteSlots(removed_ranges);
+    return removed_ranges;
   }
 
-  return true;
+  return {};
 }
 }  // namespace
 
-void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
+SlotRanges ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   util::fb2::LockGuard lk(migration_mu_);
+  SlotRanges removed_slots;
   for (const auto& m : migrations) {
-    RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_info.id);
+    removed_slots.Merge(RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_info.id));
     VLOG(1) << "Migration was canceled from: " << m.node_info.id;
   }
+  return removed_slots;
 }
 
 void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
@@ -977,7 +982,12 @@ void ClusterFamily::InitMigration(CmdArgList args, CommandContext* cmd_cntx) {
     auto slots = migration->GetSlots();
     LOG(INFO) << "Flushing slots during migration reinitialization " << migration->GetSourceID()
               << ", slots: " << slots.ToString();
-    DeleteSlots(slots);
+    // DFLYMIGRATE is not a global-trans command, so create a temporary transaction
+    // to hold the shard lock during FlushSlots (see #7153).
+    boost::intrusive_ptr<Transaction> flush_tx(
+        new Transaction{server_family_->service().FindCmd("DFLYCLUSTER")});
+    flush_tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+    DeleteSlots(flush_tx.get(), slots);
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {
