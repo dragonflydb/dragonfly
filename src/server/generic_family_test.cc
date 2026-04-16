@@ -1360,6 +1360,25 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
 }
 
+// Regression: OpFieldExpire for hashes calls SetFieldsExpireTime which triggers
+// lazy field expiry via StringMap::Find(), but does not call DeleteIfEmpty
+// afterward.  When all fields have expired, the hash remains in the DB with
+// Size()==0.  A subsequent SAVE hits the DFATAL in SaveEntry.
+TEST_F(GenericFamilyTest, FieldExpireHashDeletesEmptyHash) {
+  // Create a hash with a short field-level TTL.
+  Run({"HSETEX", "key", "1", "f1", "v1"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "key"}));
+
+  AdvanceTime(2000);
+
+  // FIELDEXPIRE on the already-expired field triggers lazy expiry via Find()
+  // inside UpdateTTL.  Without the fix the hash remains as a zombie key.
+  Run({"FIELDEXPIRE", "key", "5", "f1"});
+
+  // The key must have been removed.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
+}
+
 // SHRINK calls set_time() then DenseSet::Shrink() which expires entries during
 // bucket compaction.  If all entries expire, the key must be deleted.
 TEST_F(GenericFamilyTest, ShrinkDeletesEmptyContainer) {
