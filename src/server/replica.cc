@@ -101,6 +101,7 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  exec_st_.JoinErrorHandler();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -869,7 +870,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   proactor_index_ = ProactorBase::me()->GetPoolIndex();
 
   RETURN_ON_ERR_T(make_unexpected,
-                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &exec_st_));
+                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, cntx));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_ << " lsn: " << lsn.value_or(-1);
