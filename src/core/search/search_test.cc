@@ -24,7 +24,9 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_index.h"
+#include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/scoring.h"
 #include "core/search/stateless_allocator.h"
 #include "core/search/vector_utils.h"
 
@@ -2930,6 +2932,308 @@ BENCHMARK(BM_VectorDistance_Intensive)
     ->Arg(static_cast<int>(VectorSimilarity::IP))
     ->ArgNames({"similarity_type"})
     ->Unit(benchmark::kMicrosecond);
+
+// BM25STD Scoring Tests
+class ScoringTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+  }
+};
+
+TEST_F(ScoringTest, BM25StdFormula) {
+  // Single term, single doc, verify the math
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  double score = BM25Std(ctx, term);
+
+  // IDF = ln(1 + (10 - 3 + 0.5) / (3 + 0.5)) = ln(1 + 7.5/3.5) = ln(3.142857) ~ 1.1451
+  // TF = 2 * (1.2 + 1) / (2 + 1.2 * (1 - 0.75 + 0.75 * 5/5)) = 2*2.2/(2+1.2) = 4.4/3.2 = 1.375
+  // score = 1.1451 * 1.375 ~ 1.5745
+  EXPECT_NEAR(score, 1.5745, 0.01);
+}
+
+TEST_F(ScoringTest, BM25StdZeroFreq) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 0, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  EXPECT_EQ(BM25Std(ctx, term), 0.0);
+}
+
+TEST_F(ScoringTest, BM25StdDocLenNormalization) {
+  // Longer doc -> lower score for same TF
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo term_short{
+      .term_freq = 2, .term_docs = 10, .field_doc_len = 5, .field_avg_doc_len = 10.0};
+  ScoringTermInfo term_long{
+      .term_freq = 2, .term_docs = 10, .field_doc_len = 20, .field_avg_doc_len = 10.0};
+
+  double score_short = BM25Std(ctx, term_short);
+  double score_long = BM25Std(ctx, term_long);
+
+  EXPECT_GT(score_short, score_long);
+}
+
+TEST_F(ScoringTest, BM25StdRareTermHigherIDF) {
+  // Rarer term -> higher IDF -> higher score
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo rare{
+      .term_freq = 1, .term_docs = 2, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+  ScoringTermInfo common{
+      .term_freq = 1, .term_docs = 50, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+
+  EXPECT_GT(BM25Std(ctx, rare), BM25Std(ctx, common));
+}
+
+TEST_F(ScoringTest, BM25StdMultiTerm) {
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo t1{
+      .term_freq = 2, .term_docs = 5, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+  ScoringTermInfo t2{
+      .term_freq = 1, .term_docs = 20, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+
+  double multi = ScoreDocument(ScorerType::BM25STD, ctx, {t1, t2});
+  double sum = BM25Std(ctx, t1) + BM25Std(ctx, t2);
+
+  EXPECT_DOUBLE_EQ(multi, sum);
+}
+
+TEST_F(ScoringTest, SearchWithScorer) {
+  // Integration test: build index, search with scorer, verify scores are non-zero
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world hello");  // "hello" appears 2x
+  MockedDocument doc2("hello there");        // "hello" appears 1x
+  MockedDocument doc3("goodbye world");      // no "hello"
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(ScorerType::BM25STD);
+
+  auto result = algo.Search(&index);
+
+  // doc1 and doc2 should match, doc3 should not
+  ASSERT_EQ(result.ids.size(), 2u);
+  EXPECT_EQ(result.text_scores.size(), 2u);
+
+  // Both scores should be positive
+  for (auto& [doc, score] : result.text_scores) {
+    EXPECT_GT(score, 0.0f) << "DocId " << doc << " should have positive score";
+  }
+
+  // doc1 has "hello" 2x in shorter context -> should score higher
+  float score0 = 0, score1 = 0;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      score0 = score;
+    if (doc == 1)
+      score1 = score;
+  }
+  EXPECT_GT(score0, score1) << "Doc with higher TF should score higher";
+}
+
+TEST_F(ScoringTest, SearchPrefixWithScorer) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello help helm");  // 3 terms match "hel*"
+  MockedDocument doc2("hello world");      // 1 term matches "hel*"
+  MockedDocument doc3("goodbye world");    // 0 terms match "hel*"
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hel*", &params));
+  algo.SetScorer(ScorerType::BM25STD);
+
+  auto result = algo.Search(&index);
+
+  // doc1 and doc2 should match, doc3 should not
+  ASSERT_EQ(result.ids.size(), 2u);
+  EXPECT_EQ(result.text_scores.size(), 2u);
+
+  float score0 = 0, score1 = 0;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      score0 = score;
+    if (doc == 1)
+      score1 = score;
+  }
+
+  // doc1 matches 3 prefix-expanded terms, doc2 matches 1 -> doc1 should score higher
+  EXPECT_GT(score0, score1) << "Doc matching more prefix terms should score higher";
+  EXPECT_GT(score0, 0.0f);
+  EXPECT_GT(score1, 0.0f);
+}
+
+TEST_F(ScoringTest, SearchWithoutScorerNoScores) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world");
+  index.Add(0, doc1);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  // No SetScorer call
+
+  auto result = algo.Search(&index);
+
+  EXPECT_EQ(result.ids.size(), 1u);
+  EXPECT_TRUE(result.text_scores.empty()) << "No scores without scorer";
+}
+
+TEST_F(ScoringTest, IndexStats) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world foo");  // 3 tokens
+  MockedDocument doc2("hello");            // 1 token
+  MockedDocument doc3("bar baz");          // 2 tokens
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+
+  // Per-field stats via TextIndex
+  auto text_indices = index.GetAllTextIndices();
+  ASSERT_EQ(text_indices.size(), 1u);
+  auto* ti = text_indices[0];
+
+  size_t num_docs = index.GetAllDocs().size();
+  EXPECT_EQ(num_docs, 3u);
+  EXPECT_EQ(ti->GetFieldDocLength(0), 3u);
+  EXPECT_EQ(ti->GetFieldDocLength(1), 1u);
+  EXPECT_EQ(ti->GetFieldDocLength(2), 2u);
+  EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.0);  // (3+1+2)/3
+}
+
+TEST_F(ScoringTest, IndexStatsAfterRemove) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world");  // 2 tokens
+  MockedDocument doc2("foo bar baz");  // 3 tokens
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+
+  auto text_indices = index.GetAllTextIndices();
+  ASSERT_EQ(text_indices.size(), 1u);
+  auto* ti = text_indices[0];
+
+  EXPECT_EQ(index.GetAllDocs().size(), 2u);
+  EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.5);  // (2+3)/2
+
+  index.Remove(0, doc1);
+
+  EXPECT_EQ(index.GetAllDocs().size(), 1u);
+  EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 3.0);  // 3/1
+}
+
+TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
+  // Verify scoring correctness after removing a document from the index
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world hello");  // "hello" TF=2
+  MockedDocument doc2("hello there");        // "hello" TF=1
+  MockedDocument doc3("hello universe");     // "hello" TF=1
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+  index.FinalizeInitialization();
+
+  // Score before removal
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(ScorerType::BM25STD);
+
+  auto result_before = algo.Search(&index);
+  ASSERT_EQ(result_before.ids.size(), 3u);
+  EXPECT_EQ(result_before.text_scores.size(), 3u);
+
+  // Remove doc1
+  index.Remove(0, doc1);
+
+  // Re-search
+  SearchAlgorithm algo2;
+  ASSERT_TRUE(algo2.Init("hello", &params));
+  algo2.SetScorer(ScorerType::BM25STD);
+
+  auto result_after = algo2.Search(&index);
+  ASSERT_EQ(result_after.ids.size(), 2u);
+  EXPECT_EQ(result_after.text_scores.size(), 2u);
+
+  // All remaining scores should be positive
+  for (auto& [doc, score] : result_after.text_scores) {
+    EXPECT_GT(score, 0.0f) << "DocId " << doc << " should have positive score after removal";
+    EXPECT_TRUE(doc == 1 || doc == 2) << "Unexpected DocId " << doc;
+  }
+}
+
+// Verify that with a scorer active and a cutoff limit, the search returns the
+// highest-scoring documents (top-K by score), not arbitrary ones.
+TEST_F(ScoringTest, ScorerTopKCutoff) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Create 10 docs with increasing TF for "hello": doc0=TF1, doc1=TF2, ..., doc9=TF10
+  for (uint32_t i = 0; i < 10; i++) {
+    string content;
+    for (uint32_t j = 0; j <= i; j++) {
+      if (!content.empty())
+        content += " ";
+      content += "hello";
+    }
+    content += " filler";
+    index.Add(i, MockedDocument(content));
+  }
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(ScorerType::BM25STD);
+
+  // Request only top 3 - should return docs 9, 8, 7 (highest TF)
+  auto result = algo.Search(&index, 3);
+
+  ASSERT_EQ(result.ids.size(), 3u);
+  ASSERT_EQ(result.text_scores.size(), 3u);
+  EXPECT_EQ(result.total, 10u);
+
+  // Verify returned docs are the top-3 scorers (highest TF = doc9, doc8, doc7)
+  set<DocId> returned(result.ids.begin(), result.ids.end());
+  EXPECT_TRUE(returned.count(9)) << "Doc9 (TF=10) should be in top-3";
+  EXPECT_TRUE(returned.count(8)) << "Doc8 (TF=9) should be in top-3";
+  EXPECT_TRUE(returned.count(7)) << "Doc7 (TF=8) should be in top-3";
+
+  // Verify scores are in descending order
+  for (size_t i = 1; i < result.text_scores.size(); i++) {
+    EXPECT_GE(result.text_scores[i - 1].second, result.text_scores[i].second)
+        << "Scores should be in descending order";
+  }
+}
 
 }  // namespace search
 }  // namespace dfly

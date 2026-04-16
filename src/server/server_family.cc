@@ -666,8 +666,8 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     return cmd_cntx->SendError("Invalid thread id");
   }
 
-  unsigned migrated = 0;
-  auto cb_brief = [&](unsigned current_tid, ProactorBase* p) {
+  std::atomic<unsigned> migrated{0};
+  auto search_and_migrate_cb = [&](unsigned current_tid, ProactorBase* p) {
     if (current_tid == tid) {
       return;  // we should not migrate to the same thread
     }
@@ -675,7 +675,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     auto traverse_cb = [&](unsigned, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
       if (dconn->GetClientId() == id) {
-        ++migrated;
+        migrated.fetch_add(1, std::memory_order_relaxed);
         dconn->RequestAsyncMigration(shard_set->pool()->at(tid), true /* force */);
       }
     };
@@ -688,7 +688,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     }
   };
 
-  shard_set->pool()->AwaitBrief(cb_brief);
+  shard_set->pool()->AwaitFiberOnAll(search_and_migrate_cb);
 
   return cmd_cntx->rb()->SendLong(migrated);
 }

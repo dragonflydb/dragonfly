@@ -697,6 +697,7 @@ void Connection::OnPostMigrateThread() {
   }
 
   if (ioloop_v2_ && socket_ && socket_->IsOpen() && migration_allowed_to_register_) {
+    MaybeEnableRecvMultishot();
     socket_->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
       NotifyOnRecv(n);
       io_event_.notify();
@@ -1390,22 +1391,28 @@ void Connection::OnBreakCb(int32_t mask) {
 }
 
 void Connection::HandleMigrateRequest() {
-  if (cc_->conn_closing || !migration_request_)
+  if (!migration_request_)
     return;
 
-  DCHECK(!ioloop_v2_);
+  if (cc_->conn_closing) {
+    migration_request_ = nullptr;
+    return;
+  }
+
   ProactorBase* dest = migration_request_;
-  if (async_fb_.IsJoinable()) {
+
+  // V1 loop: we must coordinate with and shutdown the AsyncFiber before migration.
+  // V2 loop: is single-fiber and handles this by breaking the dispatch_q loop.
+  if (!ioloop_v2_ && async_fb_.IsJoinable()) {
     SendAsync({MigrationRequestMessage{}});
     async_fb_.Join();
   }
 
-  // We don't support migrating with subscriptions as it would require moving thread local
-  // handles. We can't check above, as the queue might have contained a subscribe request.
-
+  // We don't support migrating with subscriptions as it would require moving thread-local handles.
   if (cc_->subscriptions == 0) {
     // RegisterOnErrorCb might be called on POLLHUP and the join above is a preemption point.
     // So, it could be the case that after this fiber wakes up the connection might be closing.
+    // Re-check closing status after the potential V1 Join() or any preemption.
     if (cc_->conn_closing) {
       return;
     }
@@ -1413,15 +1420,17 @@ void Connection::HandleMigrateRequest() {
     tl_facade_stats->conn_stats.num_migrations++;
     migration_request_ = nullptr;
 
-    // We need to return early as the socket is closing and IoLoop will clean up.
-    // The reason that this is true is because of the following DCHECK
-    DCHECK(!async_fb_.IsJoinable());
+    // Verify that no background command processing is active.
+    // V1 loop: Join() ensures this.
+    // V2 loop: it is guaranteed by the single-fiber loop.
+    DCHECK(ioloop_v2_ || !async_fb_.IsJoinable());
 
-    // which can never trigger since we Joined on the async_fb_ above and we are
-    // atomic in respect to our proactor meaning that no other fiber will
-    // launch the DispatchFiber.
     std::ignore = !this->Migrate(dest);
   }
+
+  // Note: If cc_->subscriptions > 0, we skip the hop but leave migration_request_
+  // set. This defers the migration, retrying at the start of every subsequent
+  // loop iteration until all subscriptions are cleared.
 }
 
 io::Result<size_t> Connection::HandleRecvSocket() {
@@ -2178,13 +2187,18 @@ facade::ConnectionContext* Connection::cntx() {
 }
 
 void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force) {
-  if ((!force && !migration_enabled_) || cc_ == nullptr || ioloop_v2_) {
+  if ((!force && !migration_enabled_) || cc_ == nullptr) {
     return;
   }
 
   // Connections can migrate at most once.
   migration_enabled_ = false;
   migration_request_ = dest;
+
+  // Wake up the V2 loop so it can immediately process the migration request.
+  if (ioloop_v2_) {
+    io_event_.notify();
+  }
 }
 
 void Connection::StartTrafficLogging(string_view path) {
@@ -2722,9 +2736,24 @@ void Connection::CheckIoBufCapacity(bool is_iobuf_full) {
   }
 }
 
+void Connection::MaybeEnableRecvMultishot() {
+#ifdef __linux__
+  if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
+    auto* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
+    // Only enable if the buffer ring is configured and we aren't using TLS
+    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
+      static_cast<fb2::UringSocket*>(socket_.get())->EnableRecvMultishot();
+      pending_input_ = false;
+    }
+  }
+#endif
+}
+
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
+
+  auto is_ready_to_migrate = [this]() { return migration_request_ && (cc_->subscriptions == 0); };
 
   // Don't proceed with RegisterOnRecv() if socket is closed (possible cancellation)
   if (!peer->IsOpen())
@@ -2736,15 +2765,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   migration_allowed_to_register_ = true;
   pending_input_ = true;
 
-  if (fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::Kind::IOURING) {
-#ifdef __linux__
-    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(fb2::ProactorBase::me());
-    if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_) {
-      static_cast<fb2::UringSocket*>(peer)->EnableRecvMultishot();
-      pending_input_ = false;
-    }
-#endif
-  }
+  MaybeEnableRecvMultishot();
 
   peer->RegisterOnRecv([this](const FiberSocketBase::RecvNotification& n) {
     DVLOG(2) << "Calling DoReadOnRecv iobuf_len: " << io_buf_.InputLen();
@@ -2782,11 +2803,21 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // await block (no data to read)
     if (io_buf_.InputLen() == 0) {
-      io_event_.await([this]() {
+      io_event_.await([this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.
+
+        // We wake up if:
+        // 1. New data arrived or is pending (io_buf_.InputLen() > 0 || pending_input_).
+        // 2. A parsed command is ready to execute (HeadReadyToDispatch()).
+        // 3. An executed command is ready to send its reply (parsed_head_ &&
+        //    parsed_head_->CanReply()).
+        // 4. Control-plane messages arrived (!dispatch_q_.empty()).
+        // 5. The socket encountered an error/closed (io_ec_).
+        // 6. A migration to another thread was requested AND is actionable now (no subscriptions).
         return io_buf_.InputLen() > 0 || pending_input_ || HeadReadyToDispatch() ||
-               (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_;
+               (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
+               is_ready_to_migrate();
       });
     }
 
@@ -2798,9 +2829,15 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       while (!dispatch_q_.empty()) {
         auto msg = std::move(dispatch_q_.front());
         dispatch_q_.pop_front();
-        // Temporary; ProcessAdminMessage logic doesn't apply here (migrations for example)
-        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
         UpdateDispatchStats(msg, false /* subtract */);
+
+        // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
+        // and let the loop iterate back to HandleMigrateRequest() at the top.
+        if (std::holds_alternative<MigrationRequestMessage>(msg.handle)) {
+          break;
+        }
+
+        std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
       }
 
       // TODO: Possibly don't flush unconditionally - optimize it
@@ -2875,19 +2912,21 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // us "deaf" to future memory relief.
         auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(&backpressure_waiter);
 
-        io_event_.await([this]() {
+        io_event_.await([this, &is_ready_to_migrate]() {
           bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
           bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
               GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-
           // We wake up and exit the backpressure wait if:
           // 1. Memory is freed (under_limit) or we can free it ourselves (cmd_ready).
           // 2. Control-plane messages need processing (!dispatch_q_.empty()).
           // 3. The connection is terminating (io_ec_).
-          return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_;
+          // 4. A migration was requested AND is actionable now (migration_request_ with no
+          // subscriptions).
+          return under_limit || cmd_ready || !dispatch_q_.empty() || io_ec_ ||
+                 is_ready_to_migrate();
         });
       }
-    }
+    }  // else Execute and reply
 
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();
@@ -2900,11 +2939,18 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       return std::exchange(io_ec_, {});
     }
 
+    if ((parse_status != OK) && (parse_status != NEED_MORE)) {
+      break;
+    }
+
+    // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
+    if (is_ready_to_migrate()) {
+      continue;
+    }
+
     if (parse_status == NEED_MORE) {
       parse_status = OK;
       CheckIoBufCapacity(is_iobuf_full);
-    } else if (parse_status != OK) {
-      break;
     }
   } while (peer->IsOpen());
 
