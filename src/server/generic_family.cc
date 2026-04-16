@@ -1685,7 +1685,19 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
     return true;
   });
 
-  return std::make_pair(std::move(elements), it->second.ObjType());
+  auto obj_type = it->second.ObjType();
+
+  // Iterate may trigger lazy expiry.  Clean up empty containers.
+  if (it->second.Size() == 0) {
+    auto& db_slice = op_args.GetDbSlice();
+    if (obj_type == OBJ_SET) {
+      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, it->second);
+    } else if (obj_type == OBJ_HASH) {
+      HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, it->second);
+    }
+  }
+
+  return std::make_pair(std::move(elements), obj_type);
 }
 
 // Fetch a string value from a key (for BY pattern lookups)
