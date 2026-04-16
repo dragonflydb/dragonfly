@@ -1360,6 +1360,39 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
 }
 
+TEST_F(GenericFamilyTest, IterateMapSetStaleTimeZombie) {
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "hkey", "f0"});
+  Run({"SISMEMBER", "skey", "m0"});
+
+  Run({"DEBUG", "OBJHIST"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+TEST_F(GenericFamilyTest, DebugUniqStrsDeletesEmptyContainers) {
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "hkey", "f0"});
+  Run({"SISMEMBER", "skey", "m0"});
+  Run({"DEBUG", "UNIQ-STRS"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));

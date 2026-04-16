@@ -39,11 +39,13 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/hset_family.h"
 #include "server/main_service.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
+#include "server/set_family.h"
 #include "server/string_stats.h"
 #include "server/transaction.h"
 
@@ -1177,13 +1179,25 @@ void DebugCmd::TxAnalysis(CommandContext* cmd_cntx) {
 
 void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
-  auto cb = [&obj_hist_map_arr](PrimeIterator it) {
+  auto cb = [&obj_hist_map_arr, cntx = cntx_](PrimeIterator it) {
     unsigned obj_type = it->second.ObjType();
     auto& hist_ptr = obj_hist_map_arr[EngineShard::tlocal()->shard_id()][obj_type];
     if (!hist_ptr) {
       hist_ptr.reset(new struct ObjHist);
     }
     AddObjHist(it, hist_ptr.get());
+
+    // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers.
+    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+      auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
+      DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
+      string key;
+      it->first.GetString(&key);
+      if (obj_type == OBJ_SET)
+        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
+      else if (obj_type == OBJ_HASH)
+        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+    }
   };
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
 
@@ -1644,7 +1658,7 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
   using PerShardStats = std::array<std::unique_ptr<UniqueStrings>, OBJ_HASH + 1>;
 
   vector<PerShardStats> all_shards(shard_set->size());
-  auto cb = [&all_shards](PrimeIterator it) {
+  auto cb = [&all_shards, cntx = cntx_](PrimeIterator it) {
     const unsigned obj_type = it->second.ObjType();
     if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET &&
         obj_type != OBJ_ZSET) {
@@ -1664,6 +1678,18 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
       entry->AddSet(it->second);
     else if (obj_type == OBJ_ZSET)
       entry->AddZSet(it->second);
+
+    // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers.
+    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+      auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
+      DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
+      string key;
+      it->first.GetString(&key);
+      if (obj_type == OBJ_SET)
+        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
+      else if (obj_type == OBJ_HASH)
+        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+    }
   };
 
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
