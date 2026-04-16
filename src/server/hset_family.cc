@@ -26,10 +26,12 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
+#include "server/search/doc_index.h"
 #include "server/tiered_storage.h"
 #include "server/tiering/decoders.h"
 #include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 
 using namespace std;
 
@@ -218,18 +220,22 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
   return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-// Wrap write handler
-template <typename F> auto WrapW(F&& f) {
+// Wrap write handler with field-level extraction for HNSW external data preservation.
+// Note: modified_fields contains string_views into CmdArgList data, which the transaction
+// keeps alive for the duration of execution.
+template <typename F>
+auto WrapW(F&& f, absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
   using RT = std::invoke_result_t<F, HMapWrap&>;
-  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
+  return [f = std::forward<F>(f), fields = std::move(modified_fields)](Transaction* t,
+                                                                       EngineShard* es) -> RT {
     auto [key, op_args] = KeyAndArgs(t, es);
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
     auto& pv = it_res->it->second;
 
-    // Remove document before modification
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+    // Remove document before modification, preserving HNSW external vector data.
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, fields);
 
     HMapWrap hw{pv, op_args.db_cntx};
     auto res = f(hw);
@@ -305,7 +311,8 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, add_res.it->second);
+    std::string_view fields_arr[] = {field};
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, fields_arr);
 
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
@@ -452,7 +459,12 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
   } else {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
+    // Collect field names being modified for HNSW field data preservation.
+    absl::InlinedVector<std::string_view, 4> field_names;
+    for (size_t i = 0; i < values.size(); i += 2)
+      field_names.push_back(values[i]);
+
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, field_names);
   }
 
   if (pv.Encoding() == kEncodingListPack) {
@@ -626,13 +638,19 @@ struct HSetReplies {
 };
 
 void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
+  // Collect field names for HNSW data preservation.
+  auto fields_span = args.subspan(1);
+  absl::InlinedVector<std::string_view, 4> field_names;
+  for (auto f : fields_span)
+    field_names.push_back(f);
+
   auto cb = [&](HMapWrap& hw) -> OpResult<uint32_t> {
     unsigned deleted = 0;
-    for (string_view s : args.subspan(1))
+    for (string_view s : fields_span)
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb)));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb, std::move(field_names))));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -1210,6 +1228,24 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   }
 }
 
+bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv) {
+  if (pv.Encoding() != kEncodingStrMap2)
+    return false;
+
+  if (auto* sm = static_cast<StringMap*>(pv.RObjPtr()); !sm->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_HASH); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
+    return true;
+  }
+  return false;
+}
+
 // returns vector of results for each field in values:
 // -2 if the provided key does not exist.
 // 0 if the specified NX | XX | GT | LT condition has not been met.
@@ -1271,7 +1307,9 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
                                              ExpireFlags flags, string_view key, CmdArgList values,
                                              PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv);
+  // values contains field names — collect them for HNSW field data preservation.
+  absl::InlinedVector<std::string_view, 4> field_names(values.begin(), values.end());
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
 
   if (pv->Encoding() == kEncodingListPack) {
     // a valid result can never be a listpack, since it doesnt keep ttl

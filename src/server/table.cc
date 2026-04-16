@@ -26,8 +26,13 @@ void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
   DCHECK_GE(obj_memory_usage, memory_usage_by_type[type]);
 
   if (delta < 0 && memory_usage_by_type[type] < size_t(-delta)) {
-    LOG_EVERY_T(ERROR, 1) << "Encountered underflow memory usage when aggregating per-type memory: "
-                          << obj_memory_usage << " + " << delta << ", type: " << type;
+#ifdef NDEBUG
+    LOG_EVERY_T(ERROR, 1)
+#else
+    LOG_EVERY_T(FATAL, 1)
+#endif
+        << "Encountered underflow memory usage when aggregating per-type memory: "
+        << memory_usage_by_type[type] << " + " << delta << ", type: " << type;
 
     // Truncate delta to avoid underflow, but keep the memory usage consistent with the sum of
     // per-type usage.

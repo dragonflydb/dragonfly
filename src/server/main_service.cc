@@ -149,7 +149,11 @@ ShutdownWatchdog::ShutdownWatchdog(util::ProactorPool& pp) : pool{pp} {
   watchdog_fb = pool.GetNextProactor()->LaunchFiber("shutdown_watchdog", [&] {
     if (!watchdog_done.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected during shutdown";
+#ifdef USE_ABSL_LOG
+      absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+#else
       absl::SetFlag(&FLAGS_alsologtostderr, true);
+#endif
       util::fb2::Mutex m;
       pool.AwaitFiberOnAll([&m](unsigned index, auto*) {
         util::ThisFiber::SetName(absl::StrFormat("print_stack_fib_%u", index));

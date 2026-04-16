@@ -1255,13 +1255,15 @@ void InterpreterManager::Return(Interpreter* ir) {
   const uint64_t max_memory_usage = absl::GetFlag(FLAGS_lua_mem_gc_threshold);
   using namespace chrono;
   ++tl_stats().interpreter_return;
-  tl_stats().used_bytes += ir->TakeUsedBytes();
-  if (max_memory_usage != 0 && tl_stats().used_bytes > max_memory_usage) {
+  int64_t delta = ir->TakeUsedBytes();
+  if (max_memory_usage != 0 && (tl_stats().used_bytes + delta) > max_memory_usage) {
     ++tl_stats().force_gc_calls;
     auto before = steady_clock::now();
     tl_stats().gc_freed_memory += ir->RunGC();
+    // Include memory freed by GC in delta so used_bytes gets the net result.
+    delta += ir->TakeUsedBytes();
 
-    VLOG(2) << "stats_used_bytes: " << tl_stats().used_bytes
+    VLOG(2) << "stats_used_bytes: " << tl_stats().used_bytes + delta
             << " lua_mem_gc_threshold: " << max_memory_usage
             << " force_gc_calls: " << tl_stats().force_gc_calls
             << " freed_mem: " << tl_stats().gc_freed_memory;
@@ -1269,6 +1271,7 @@ void InterpreterManager::Return(Interpreter* ir) {
     auto after = steady_clock::now();
     tl_stats().gc_duration_ns += duration_cast<nanoseconds>(after - before).count();
   }
+  tl_stats().used_bytes += delta;
   if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
     available_.push_back(ir);
     waker_.notify();

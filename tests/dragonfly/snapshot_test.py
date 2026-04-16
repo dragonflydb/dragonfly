@@ -389,23 +389,19 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
     _missing_s3_test_env(),
     reason="AWS S3 snapshots bucket or credentials are not configured",
 )
-@dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
+@dfly_args({**BASIC_ARGS})
 async def test_s3_snapshot(async_client, tmp_dir):
     seeder = DebugPopulateSeeder(key_target=10_000)
     await seeder.run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
+    s3_path = "s3://" + os.environ["DRAGONFLY_S3_BUCKET"] + str(tmp_dir)
 
     try:
-        # save + flush + load
-        await async_client.execute_command("SAVE DF snapshot")
+        # save to S3 + flush + load from S3 (with local --dir)
+        await async_client.execute_command("SAVE", "DF", s3_path, "snapshot")
         assert await async_client.flushall()
-        await async_client.execute_command(
-            "DFLY LOAD "
-            + os.environ["DRAGONFLY_S3_BUCKET"]
-            + str(tmp_dir)
-            + "/snapshot-summary.dfs"
-        )
+        await async_client.execute_command("DFLY", "LOAD", s3_path + "/snapshot-summary.dfs")
 
         assert await DebugPopulateSeeder.capture(async_client) == start_capture
 
@@ -594,6 +590,90 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     while await is_saving(async_client):
         await asyncio.sleep(0.1)
     await async_client.execute_command("SAVE")
+
+
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-hsetex-save", "dir": "{DRAGONFLY_TMP}/"})
+async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
+    """
+    HSETEX creates a hash with field-level TTL.  After all fields
+    expire, the hash key remains in the DB with Size()==0.  SAVE then hits the
+    DFATAL check in SaveEntry because OBJ_HASH does not allow empty values.
+
+    Reproduction: HSETEX with short TTL -> SAVE (while field is alive) ->
+    wait for expiry -> second SAVE -> crash.
+    """
+
+    await async_client.execute_command("HSETEX", "mykey", "1", "f1", "v1")
+    await async_client.execute_command("SAVE")
+
+    await asyncio.sleep(1.5)
+
+    # Trigger lazy expiry of the field — the key remains but has 0 fields.
+    assert await async_client.execute_command("FIELDTTL", "mykey", "f1") == -3
+
+    # This SAVE crashes on unfixed code: SaveEntry sees empty hash → DFATAL.
+    await async_client.execute_command("SAVE")
+
+    # If we get here, the server survived.
+    assert await async_client.ping()
+
+
+@dfly_args({"proactor_threads": 1, "dbfilename": "test-save-del-crash", "dir": "{DRAGONFLY_TMP}/"})
+async def test_save_with_concurrent_mutations(df_server):
+    """
+    Regression test: SIGABRT in OnChangeBlocking on a non-shard fiber.
+
+    With proactor_threads=1 the single shard and all connections live on the same
+    thread.  CanRunInlined() may let a write command execute directly on a
+    connection fiber while a concurrent SAVE has already registered snapshot change
+    listeners.  The write then fires OnChangeBlocking on the wrong fiber, hitting
+    the DFATAL assertion in serializer_base.cc.
+
+    We reproduce this by running SAVE and SET/DEL concurrently from separate
+    connections until the race manifests (typically < 5 s on a debug build).
+    """
+
+    client = df_server.client()
+    for i in range(10):
+        await client.set(f"k{i}", f"val{i}")
+
+    save_done = asyncio.Event()
+
+    async def save_loop():
+        """Issue SAVE in a tight loop on a dedicated connection."""
+        c = df_server.client()
+        while not save_done.is_set():
+            try:
+                await c.execute_command("SAVE")
+            except Exception:
+                pass
+        await c.close()
+
+    async def mutate_loop(worker_id):
+        """Issue SET/DEL on a dedicated connection to race with SAVE."""
+        c = df_server.client()
+        i = 0
+        while not save_done.is_set():
+            key = f"k{i % 10}"
+            try:
+                await c.set(key, "v")
+                await c.delete(key)
+                await c.set(key, "v")
+            except Exception:
+                pass
+            i += 1
+        await c.close()
+
+    tasks = [asyncio.create_task(save_loop())]
+    tasks += [asyncio.create_task(mutate_loop(i)) for i in range(3)]
+
+    await asyncio.sleep(5)
+    save_done.set()
+    await asyncio.gather(*tasks)
+
+    # If we get here the server survived — the bug is fixed.
+    assert await client.ping()
+    await client.close()
 
 
 @pytest.mark.exclude_epoll

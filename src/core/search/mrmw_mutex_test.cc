@@ -324,4 +324,59 @@ TEST_F(MRMWMutexTest, MRMWMutexLockTryLockSemantics) {
   EXPECT_TRUE(try_read.locked());
 }
 
+TEST_F(MRMWMutexTest, MoveConstructorTransfersOwnership) {
+  MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(lock1.locked());
+  EXPECT_TRUE(mutex_.IsReadLocked());
+
+  MRMWMutexLock lock2(std::move(lock1));
+  EXPECT_TRUE(lock2.locked());
+  EXPECT_FALSE(lock1.locked());
+  EXPECT_TRUE(mutex_.IsReadLocked());
+}
+
+TEST_F(MRMWMutexTest, MoveConstructorUnlocksOnDestruction) {
+  {
+    MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kWriteLock);
+    MRMWMutexLock lock2(std::move(lock1));
+    EXPECT_TRUE(lock2.locked());
+    EXPECT_FALSE(lock1.locked());
+  }
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+}
+
+TEST_F(MRMWMutexTest, MoveAssignmentTransfersOwnership) {
+  MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kReadLock);
+
+  MRMWMutex other_mutex;
+  other_mutex.Lock(MRMWMutex::LockMode::kReadLock);
+  MRMWMutexLock lock2(&other_mutex, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
+  EXPECT_FALSE(lock2.locked());
+  other_mutex.Unlock(MRMWMutex::LockMode::kReadLock);
+
+  lock2 = std::move(lock1);
+  EXPECT_TRUE(lock2.locked());
+  EXPECT_FALSE(lock1.locked());
+  EXPECT_TRUE(mutex_.IsReadLocked());
+}
+
+TEST_F(MRMWMutexTest, MoveIntoVector) {
+  std::vector<MRMWMutexLock> locks;
+  MRMWMutex mutex2;
+
+  locks.push_back(MRMWMutexLock(&mutex_, MRMWMutex::LockMode::kWriteLock));
+  locks.push_back(MRMWMutexLock(&mutex2, MRMWMutex::LockMode::kWriteLock));
+
+  EXPECT_EQ(locks.size(), 2u);
+  EXPECT_TRUE(locks[0].locked());
+  EXPECT_TRUE(locks[1].locked());
+
+  locks.clear();
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(mutex2.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex2.Unlock(MRMWMutex::LockMode::kReadLock);
+}
+
 }  // namespace dfly::search

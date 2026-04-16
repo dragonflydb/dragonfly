@@ -660,6 +660,19 @@ const vector<DocId>& FieldIndices::GetAllDocs() const {
   return all_ids_;
 }
 
+size_t FieldIndices::GetNonPmrMemoryUsage() const {
+  // all_ids_ scales with document count — the dominant untracked cost.
+  size_t mem = all_ids_.capacity() * sizeof(DocId);
+  // Hash map bucket arrays scale with field count (typically small).
+  constexpr size_t kIndicesSlotSize =
+      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>>::value_type) + 1;
+  constexpr size_t kSortSlotSize =
+      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>>::value_type) + 1;
+  mem += indices_.bucket_count() * kIndicesSlotSize;
+  mem += sort_indices_.bucket_count() * kSortSlotSize;
+  return mem;
+}
+
 const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }

@@ -14,6 +14,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
+#include "core/search/stateless_allocator.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
@@ -349,7 +350,53 @@ TEST_F(SearchFamilyTest, Stats) {
   size_t expected_usage = 2 * (50 + 3 /* number of distinct words*/) * (24 + 48 /* kv size */) +
                           50 * 2 * 1 /* posting list entries */;
   EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
-  EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
+  // Upper bound accounts for index data + DocKeyIndex + FieldIndices overhead
+  EXPECT_LE(metrics.search_stats.used_memory, 4 * expected_usage);
+}
+
+// Verify that search memory tracking accounts for DocKeyIndex and FieldIndices allocations
+TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
+  constexpr size_t kNumDocs = 500;
+  // "doc-0000-padding-padding-pad" = 28 chars, above SSO threshold so heap-allocated
+  constexpr size_t kKeyLen = 28;
+
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TAG"}),
+            "OK");
+
+  size_t mem_before = GetMetrics().search_stats.used_memory;
+
+  for (size_t i = 0; i < kNumDocs; i++) {
+    Run({"hset", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad"),
+         "name", absl::StrCat("tag", i % 10)});
+  }
+
+  size_t mem_after = GetMetrics().search_stats.used_memory;
+  ASSERT_GE(mem_after, mem_before) << "Memory should not decrease after adding documents";
+  size_t mem_delta = mem_after - mem_before;
+
+  // Per document, tracked allocations via local_mr_:
+  //   keys_ vector:  StatelessString object (sizeof(string)=32) + heap chars (~kKeyLen)
+  //   ids_ map:      StatelessString key (32 + kKeyLen heap) + DocId + slot/control overhead
+  //   all_ids_:      one DocId (4 bytes) via GetNonPmrMemoryUsage
+  // Lower bound: just the string heap data (stored twice) + DocId.
+  // Upper bound: generous per-doc estimate covering allocator rounding and index metadata.
+  constexpr size_t kMinPerDoc = 2 * kKeyLen + sizeof(search::DocId);
+  constexpr size_t kMaxPerDoc = 2 * (sizeof(std::string) + kKeyLen + 16 /*allocator rounding*/) +
+                                sizeof(search::DocId) + 64 /*tag index + map slot overhead*/;
+  EXPECT_GE(mem_delta, kNumDocs * kMinPerDoc)
+      << "Memory tracking should account for DocKeyIndex and FieldIndices storage";
+  EXPECT_LE(mem_delta, kNumDocs * kMaxPerDoc)
+      << "Memory tracking should not over-count (possible double tracking)";
+
+  // Delete half the documents and verify memory decreases proportionally
+  for (size_t i = 0; i < kNumDocs / 2; i++) {
+    Run({"del", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad")});
+  }
+
+  size_t mem_after_delete = GetMetrics().search_stats.used_memory;
+  EXPECT_LT(mem_after_delete, mem_after) << "Memory should decrease after removing documents";
+  EXPECT_GE(mem_after_delete - mem_before, (kNumDocs / 2) * kMinPerDoc)
+      << "Remaining half should still be tracked";
 }
 
 // Test how asynchronous indexing indexes documents and reports its progress
@@ -5349,6 +5396,52 @@ TEST_F(SearchFamilyTest, InfoIndexDefaultStopwordsOmitted) {
 
   // Collection size is 7 (no stopwords_list field).
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "indexing", _, _, _));
+}
+
+// DocKeyIndex: empty-key documents must survive Serialize/Restore and not be
+// confused with freed slots (which also have keys_[id] == "").
+
+class DocKeyIndexTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+};
+
+TEST_F(DocKeyIndexTest, SerializeDistinguishesEmptyKeyFromFreedSlot) {
+  ShardDocIndex::DocKeyIndex index;
+  auto id0 = index.Add("doc1");
+  auto id1 = index.Add("");  // valid empty-key document
+  auto id2 = index.Add("doc2");
+  index.Remove(id0);  // freed slot, also keys_[id0] == ""
+
+  auto serialized = index.Serialize();
+  ASSERT_EQ(serialized.size(), 2u);  // id1 + id2, not the freed id0
+
+  sort(serialized.begin(), serialized.end(),
+       [](const auto& a, const auto& b) { return a.second < b.second; });
+  EXPECT_EQ(serialized[0], make_pair(string(""), id1));
+  EXPECT_EQ(serialized[1], make_pair(string("doc2"), id2));
+}
+
+TEST_F(DocKeyIndexTest, RestoreRoundTripsEmptyKey) {
+  ShardDocIndex::DocKeyIndex index;
+  auto id0 = index.Add("doc1");
+  auto id1 = index.Add("");
+  auto id2 = index.Add("doc2");
+  index.Remove(id0);
+
+  ShardDocIndex::DocKeyIndex restored;
+  restored.Restore(index.Serialize());
+
+  EXPECT_FALSE(restored.IsValid(id0));  // gap slot stays free
+  EXPECT_TRUE(restored.IsValid(id1));   // empty-key doc survives
+  EXPECT_TRUE(restored.IsValid(id2));
+  EXPECT_EQ(restored.Get(id1), "");
+  EXPECT_EQ(restored.Add("doc3"), id0);  // freed slot is reused
 }
 
 }  // namespace dfly

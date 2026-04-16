@@ -1207,6 +1207,81 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   }
 }
 
+// Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
+// but hnswlib still traverses it and dereferences its data pointer.  If the external
+// data is freed (as happens after DEL), the pointer dangles.  The fix in DoRemove
+// replaces it with stub_vector_.  This test catches the use-after-free under ASAN;
+// without ASAN it exercises the code path but freed memory may still be readable.
+TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
+  constexpr size_t kDim = 256;
+  constexpr size_t kN = 50;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN * 2;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  HnswVectorIndex index(params, /*copy_vector=*/false);
+
+  struct BorrowedDoc : public DocumentAccessor {
+    const char* data;
+    explicit BorrowedDoc(const char* d) : data(d) {
+    }
+    std::optional<VectorInfo> GetVector(string_view, size_t) const override {
+      return BorrowedFtVector{data};
+    }
+    std::optional<StringList> GetStrings(string_view) const override {
+      return std::nullopt;
+    }
+    std::optional<StringList> GetTags(string_view) const override {
+      return std::nullopt;
+    }
+    std::optional<NumsList> GetNumbers(string_view) const override {
+      return std::nullopt;
+    }
+  };
+
+  std::mt19937 rng(42);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+  auto MakeBuf = [&] {
+    auto buf = std::make_unique<float[]>(kDim);
+    for (size_t d = 0; d < kDim; d++)
+      buf[d] = dist(rng);
+    return buf;
+  };
+
+  // Add nodes — graph stores pointers into these buffers.
+  std::vector<std::unique_ptr<float[]>> bufs(kN);
+  for (size_t i = 0; i < kN; i++) {
+    bufs[i] = MakeBuf();
+    BorrowedDoc doc(reinterpret_cast<const char*>(bufs[i].get()));
+    index.Add(i, doc, "vec");
+  }
+
+  // Remove + free first 10 (simulates DEL freeing PrimeValue).
+  for (size_t i = 0; i < 10; i++) {
+    index.Remove(i);
+    bufs[i].reset();
+  }
+
+  // Add new nodes — addPoint traverses deleted nodes with freed data.
+  for (size_t i = kN; i < kN + 10; i++) {
+    bufs.push_back(MakeBuf());
+    BorrowedDoc doc(reinterpret_cast<const char*>(bufs.back().get()));
+    index.Add(i, doc, "vec");
+  }
+
+  vector<float> query(kDim, 0.0f);
+  auto results = index.Knn(query.data(), 5, std::nullopt);
+  EXPECT_GT(results.size(), 0u);
+}
+
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
                          testing::Values(HnswSerParam{0, 2, VectorSimilarity::L2},
                                          HnswSerParam{10, 2, VectorSimilarity::L2},
