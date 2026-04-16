@@ -946,6 +946,8 @@ void CmdHScan(CmdArgList args, CommandContext* cmd_cntx) {
 void CmdHSet(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
 
+  CHECK(key.size() <= 3);
+
   string_view cmd{cmd_cntx->cid()->name()};
   auto* rb = cmd_cntx->rb();
   if (args.size() % 2 != 1) {
