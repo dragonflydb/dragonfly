@@ -364,7 +364,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 136, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 144, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -383,6 +383,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_misses);
   ADD(huff_encode_total);
   ADD(huff_encode_success);
+  ADD(journal_omit);
   return *this;
 }
 
@@ -526,6 +527,11 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
   DCHECK(IsValid(it));
 }
 
+void DbSlice::ProvideHints(MutationHints* hints) {
+  DCHECK(!mutation_hints_);
+  mutation_hints_ = hints;
+}
+
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
   return std::move(FindMutableInternal(cntx, key, std::nullopt).value());
 }
@@ -538,12 +544,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
                                                              std::optional<unsigned> req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
-  if (!res.ok()) {
-    return res.status();
-  }
+  RETURN_ON_BAD_STATUS(res);
 
   auto it = Iterator(*res, StringOrView::FromView(key));
   PreUpdateBlocking(cntx.db_index, it);
+
   // PreUpdate() might have caused a deletion of `it`
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
@@ -666,7 +671,24 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
-    PreUpdateBlocking(cntx.db_index, it);
+
+    bool omit_update = false;
+    if (auto* mutation = std::exchange(mutation_hints_, nullptr); mutation) {
+      // We can omit the journal write if:
+      // 0. it support mutation hints and uses only a single key
+      // 1. there is a single eventually-consistent snapshot (i.e. replica full sync)
+      // 2. there are no other journal consumers
+      // 3. the snapshot did not reach the bucket yet
+      omit_update = mutation->hint.single_key && mutation->hint.support_omit &&
+                    change_cb_.size() == 1 && it.GetVersion() < change_cb_.front().first &&
+                    journal::CallbackNumber() == 1;
+
+      events_.journal_omit += unsigned(omit_update);
+      mutation->result.omit_journal = omit_update;
+    }
+
+    if (!omit_update)
+      PreUpdateBlocking(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->IsOccupied()) {
@@ -679,12 +701,28 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   }
 
   // It's a new entry.
+  mutation_hints_ = nullptr;  // for now: just take them
+
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
+  bool omit_update = false;
   if (!change_cb_.empty()) {
     auto bucket_set = db.prime.CVCUponInsert(key);
-    CallChangeCallbacks(cntx.db_index, bucket_set);
+
+    if (auto* mutation = std::exchange(mutation_hints_, nullptr); mutation) {
+      auto max_v =
+          std::ranges::max(bucket_set.buckets(), {}, [](const auto& b) { return b.GetVersion(); });
+      omit_update = mutation->hint.single_key && mutation->hint.support_omit &&
+                    change_cb_.size() == 1 && max_v.GetVersion() < change_cb_.front().first &&
+                    journal::CallbackNumber() == 1;
+
+      events_.journal_omit += unsigned(omit_update);
+      mutation->result.omit_journal = omit_update;
+    }
+
+    if (!omit_update)
+      CallChangeCallbacks(cntx.db_index, bucket_set);
 
     // Set of possible insertion buckets must be the same after possibly blocking call
     DCHECK(bucket_set == db.prime.CVCUponInsert(key));
@@ -777,7 +815,9 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
-  it.SetVersion(NextVersion());
+
+  if (!omit_update)
+    it.SetVersion(NextVersion());
 
   TouchTopKeysIfNeeded(key, db.sample_top_keys);
   TouchHllIfNeeded(key, db.sample_unique_keys);

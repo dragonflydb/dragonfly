@@ -53,11 +53,15 @@ end
 function LG_funcs.mod_string(key)
     -- APPEND and SETRANGE are the only modifying operations for strings,
     -- issue APPEND rarely to not grow data too much
-    if math.random() < 0.05 then
-        redis.apcall('APPEND', key, '+')
-    else
+    -- replace the whole string fully sometimes
+    local p = math.random()
+    if p < 0.2 then
+        redis.apcall('APPEND', key, dragonfly.randstr(2))
+    elseif p < 0.9 then
         local replacement = dragonfly.randstr(LG_funcs.dsize // 2)
         redis.apcall('SETRANGE', key, math.random(0, LG_funcs.dsize // 2), replacement)
+    else
+        redis.apcall('SET', key, dragonfly.randstr(LG_funcs.dsize))
     end
 end
 
