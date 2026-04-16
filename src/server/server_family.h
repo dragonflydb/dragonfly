@@ -12,6 +12,7 @@
 #include "core/qlist.h"
 #include "facade/facade_stats.h"
 #include "facade/facade_types.h"
+#include "server/acl/user_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/replica_types.h"
@@ -151,6 +152,8 @@ struct Metrics {
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 
   InternedStringStats interned_string_stats;
+
+  acl::UserRegistry::AclStats acl_stats;
 };
 
 // Contains the state of the last save operation.
