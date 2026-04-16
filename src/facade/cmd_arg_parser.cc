@@ -42,7 +42,7 @@ ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
 }
 
 CmdArgParser::~CmdArgParser() {
-  DCHECK(!error_) << "Parsing error occured but not checked";
+  DCHECK(!error_) << "Parsing error occurred but not checked";
   // TODO DCHECK(!HasNext()) << "Not all args were processed";
 }
 
