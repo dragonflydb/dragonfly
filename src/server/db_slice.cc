@@ -706,9 +706,23 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
+  bool omit_update = false;
   if (!change_cb_.empty()) {
     auto bucket_set = db.prime.CVCUponInsert(key);
-    CallChangeCallbacks(cntx.db_index, bucket_set);
+
+    if (auto* mutation = std::exchange(mutation_hints_, nullptr); mutation) {
+      auto max_v =
+          std::ranges::max(bucket_set.buckets(), {}, [](const auto& b) { return b.GetVersion(); });
+      omit_update = mutation->hint.single_key && mutation->hint.support_omit &&
+                    change_cb_.size() == 1 && max_v.GetVersion() < change_cb_.front().first &&
+                    journal::CallbackNumber() == 1;
+
+      events_.journal_omit += unsigned(omit_update);
+      mutation->result.omit_journal = omit_update;
+    }
+
+    if (!omit_update)
+      CallChangeCallbacks(cntx.db_index, bucket_set);
 
     // Set of possible insertion buckets must be the same after possibly blocking call
     DCHECK(bucket_set == db.prime.CVCUponInsert(key));
@@ -801,7 +815,9 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
-  it.SetVersion(NextVersion());
+
+  if (!omit_update)
+    it.SetVersion(NextVersion());
 
   TouchTopKeysIfNeeded(key, db.sample_top_keys);
   TouchHllIfNeeded(key, db.sample_unique_keys);
