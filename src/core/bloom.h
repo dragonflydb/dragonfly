@@ -22,6 +22,8 @@ enum class SBFLoadResult : uint8_t {
   kOutOfRange,
 };
 
+const char* ToString(SBFLoadResult res);
+
 /// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
  public:
@@ -102,14 +104,14 @@ class SBF {
   SBF(const SBF&) = delete;
 
   // C'tor used for loading persisted filters into SBF.
-  // Should be followed by AddFilter.
+  // Should be followed by AllocateFilter.
   SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
       size_t current_size, PMR_NS::memory_resource* mr);
   ~SBF();
 
   SBF& operator=(SBF&& src) noexcept;
 
-  void AddFilter(const std::string& blob, unsigned hash_cnt);
+  uint8_t* AllocateFilter(size_t alloc_size, unsigned hash_cnt);
 
   bool Add(std::string_view str);
   bool Exists(std::string_view str) const;
@@ -190,6 +192,34 @@ struct SBFChunk {
 // maximum of 16MiB in size. The first chunk sent back contains only the SBF metadata. Following
 // chunks contain filter data and a state of the SBF. The loader uses per filter data to update the
 // SBF as it encounters new filter items.
+
+/*
+SCANDUMP wire output format (all fields little-endian)
+
+  cursor=1 returns the SBF header (12 bytes):
+  +-------------------+--------------------+
+  | version (4B)      | grow_factor (8B)   |
+  +-------------------+--------------------+
+
+  cursor>1 chunks carry filter data. Each filter begins with
+  44 bytes of metadata, followed by the raw filter bytes.
+  A single filter may span multiple chunks.
+
+  First chunk of a filter:
+  +-----------------+----------------+------------+---------------------+
+  | hash_cnt 4B     | data_length 8B | fp_prob 8B | max_capacity 8B     |
+  +-----------------+----------------+------------+---------------------+
+  | current_size 8B | prev_size 8B   | filter bytes (up to 16MiB - 44B) |
+  +-----------------+----------------+------------ ... -----------------+
+
+  Continuation chunks (same filter, if >16MiB):
+  +------------------------ ... -------------------------+
+  | filter bytes (up to 16MiB)                           |
+  +------------------------ ... -------------------------+
+
+  cursor=0 signals end of iteration (empty data).
+*/
+
 class SBFDumpIterator {
  public:
   static constexpr uint64_t kMaxChunkSize = 16 * 1024 * 1024;
@@ -203,10 +233,6 @@ class SBFDumpIterator {
   SBFChunk Next();
 
  private:
-  // Sends the SBF wide header (little endian):
-  // +-------------------+-------------------+
-  // | version (4 bytes) | grow_factor (8B)  |
-  // +-------------------+-------------------+
   std::string SerializeHeader() const;
 
   // Converts a cursor to the specific filter and the offset inside it

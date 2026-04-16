@@ -196,11 +196,11 @@ SBF& SBF::operator=(SBF&& src) noexcept {
   return *this;
 }
 
-void SBF::AddFilter(const std::string& blob, unsigned hash_cnt) {
+uint8_t* SBF::AllocateFilter(size_t alloc_size, unsigned hash_cnt) {
   PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
-  uint8_t* ptr = (uint8_t*)mr->allocate(blob.size());
-  memcpy(ptr, blob.data(), blob.size());
-  filters_.emplace_back().Init(ptr, blob.size(), hash_cnt);
+  const auto ptr = static_cast<uint8_t*>(mr->allocate(alloc_size));
+  filters_.emplace_back().Init(ptr, alloc_size, hash_cnt);
+  return ptr;
 }
 
 bool SBF::Add(std::string_view str) {
@@ -387,51 +387,80 @@ void SBFDumpIterator::ResolveCursorToPos() {
 
 nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data,
                                                     PMR_NS::memory_resource* mr) {
+  using enum SBFLoadResult;
+  using nonstd::make_unexpected;
+
   if (header_data.size() < kDumpHeaderSize)
-    return nonstd::make_unexpected(SBFLoadResult::kTruncatedInput);
+    return make_unexpected(kTruncatedInput);
+
+  if (header_data.size() > kDumpHeaderSize)
+    return make_unexpected(kBadInput);
 
   const char* ptr = header_data.data();
   if (const uint32_t version = absl::little_endian::Load32(ptr); version != kSbfDumpVersion)
-    return nonstd::make_unexpected(SBFLoadResult::kBadVersion);
+    return make_unexpected(kBadVersion);
 
   const double grow_factor = std::bit_cast<double>(absl::little_endian::Load64(ptr + 4));
+  if (!std::isfinite(grow_factor) || grow_factor < 1.0)
+    return make_unexpected(kBadInput);
+
   // Initialize everything to 0, later filters will overwrite these values
   return CompactObj::AllocateMR<SBF>(grow_factor, 0.0, 0UL, 0UL, 0UL, mr);
 }
 
 SBFLoadResult AddNewFilterToSBF(std::string_view data, SBF* sbf) {
+  using enum SBFLoadResult;
+
   if (data.size() < kDumpFilterMetaSize)
-    return SBFLoadResult::kTruncatedInput;
+    return kTruncatedInput;
 
   auto [hash_cnt, data_length, state] = SBFFilterMeta::Parse(data.data());
+  if (hash_cnt == 0)
+    return kBadInput;
+
+  if (hash_cnt > std::numeric_limits<uint8_t>::max())
+    return kBadInput;
+
+  if (data_length == 0 || !absl::has_single_bit(data_length))
+    return kBadInput;
+
+  // probability should be 0 to 1 (probably less than 1)
+  if (!std::isfinite(state.fp_prob) || state.fp_prob <= 0.0 || state.fp_prob >= 1.0)
+    return kBadInput;
+
+  if (state.max_capacity == 0 || state.current_size >= state.max_capacity)
+    return kBadInput;
+
   const size_t payload = data.size() - kDumpFilterMetaSize;
   if (payload > data_length)
-    return SBFLoadResult::kOutOfRange;
+    return kOutOfRange;
 
   sbf->ApplyStateUpdate(state);
 
   const uint32_t new_index = sbf->num_filters();
   // TODO validate variables against bloom invariants (power of two etc)
-  sbf->AddFilter(std::string(data_length, '\0'), hash_cnt);
+  auto* ptr = sbf->AllocateFilter(data_length, hash_cnt);
+  memset(ptr, 0, data_length);
 
   if (payload > 0)
     memcpy(sbf->filter_data(new_index), data.data() + kDumpFilterMetaSize, payload);
 
-  return SBFLoadResult::kOk;
+  return kOk;
 }
 
 SBFLoadResult LoadSBFChunk(int64_t cursor, std::string_view data, SBF* sbf) {
   DCHECK_NE(sbf, nullptr) << "Input ptr must be valid SBF";
 
-  // TODO on implementing LOADCHUNK there should be closer validation of the data fed into the SBF.
-  // This current implementation is mostly a test helper and proof that the SCANDUMP algorithm is
-  // actually loadable.
+  const int64_t write_pos = cursor - static_cast<int64_t>(data.size());
+  if (write_pos < 1)
+    return SBFLoadResult::kOutOfRange;
 
-  size_t global_offset = cursor - static_cast<int64_t>(data.size()) - 1;
-
+  size_t global_offset = write_pos - 1;
   for (uint32_t i = 0; i < sbf->num_filters(); ++i) {
     const size_t filter_span = kDumpFilterMetaSize + sbf->data(i).size();
     if (global_offset < filter_span) {
+      // we should never have a write position inside the header. The header is always fully
+      // written.
       if (global_offset < kDumpFilterMetaSize)
         return SBFLoadResult::kOutOfRange;
 
@@ -448,7 +477,24 @@ SBFLoadResult LoadSBFChunk(int64_t cursor, std::string_view data, SBF* sbf) {
   if (global_offset != 0)
     return SBFLoadResult::kOutOfRange;
 
+  // global offset is 0, ie ended exactly at the end of the filter. data goes into a new filter.
   return AddNewFilterToSBF(data, sbf);
+}
+
+const char* ToString(SBFLoadResult res) {
+  switch (res) {
+    case SBFLoadResult::kOk:
+      return "ok";
+    case SBFLoadResult::kBadInput:
+      return "bad_input";
+    case SBFLoadResult::kOutOfRange:
+      return "out_of_range";
+    case SBFLoadResult::kTruncatedInput:
+      return "truncated_input";
+    case SBFLoadResult::kBadVersion:
+      return "bad_version";
+  }
+  return "unknown";
 }
 
 }  // namespace dfly
