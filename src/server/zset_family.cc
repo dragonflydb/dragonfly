@@ -29,6 +29,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/set_family.h"
 #include "server/transaction.h"
 
 namespace rng = std::ranges;
@@ -803,7 +804,8 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
 
 using KeyIterWeightVec = vector<pair<DbSlice::ConstIterator, double>>;
 
-ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
+ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type,
+                                  DbSlice& db_slice, const DbContext& db_cntx) {
   ScoredMap result;
   for (const auto& [it, weight] : key_iter_weight_vec) {
     if (it.is_done()) {
@@ -816,6 +818,10 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
     else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
       sm = ScoreMapFromSet(it->second, weight);
+      // IterateSet may trigger lazy expiry.  Clean up empty set.
+      if (it->second.Size() == 0) {
+        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, it.key(), it->second);
+      }
     }
     if (result.empty()) {
       result.swap(sm);
@@ -895,7 +901,8 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   if (key_vec_res->empty())
     return OpStatus::OK;
 
-  return UnionShardKeysWithScore(*key_vec_res, agg_type);
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  return UnionShardKeysWithScore(*key_vec_res, agg_type, db_slice, t->GetDbContext());
 }
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
