@@ -853,4 +853,45 @@ TEST_F(HSetFamilyTest, HIncrByFloatNaNDoesNotCreateKey) {
   EXPECT_THAT(Run({"HRANDFIELD", "key"}), ArgType(RespExpr::NIL));
 }
 
+// SHRINK uses FindReadOnly but mutates the DenseSet (bucket array + links).
+// When ShrinkBucket consolidates live items into fewer buckets, the number of
+// internal links can increase, raising MallocUsed() above the tracked
+// obj_memory_usage.  The next FindMutable then hits
+//   DCHECK_GE(obj_memory_usage, MallocUsed())
+// because obj_memory_usage was never updated by SHRINK.
+TEST_F(HSetFamilyTest, ShrinkMemoryAccountingHash) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Phase 1: Grow the DenseSet to a large bucket count by adding many fields.
+  // Growth at 87.5% load: 8→16 at 7, 16→32 at 14, 32→64 at 28, 64→128 at 56.
+  for (int i = 0; i < 60; i++) {
+    Run({"HSETEX", "h1", "1000", absl::StrCat("temp", i), absl::StrCat("v", i)});
+  }
+  // bucket_count = 128 (grown at 56th item).
+
+  // Phase 2: Remove most fields to keep a large bucket_count with few live items.
+  for (int i = 0; i < 50; i++) {
+    Run({"HDEL", "h1", absl::StrCat("temp", i)});
+  }
+  // 10 live fields (temp50-temp59), bucket_count = 128.
+
+  // Phase 3: Add fields with short TTL that will expire.
+  for (int i = 0; i < 10; i++) {
+    Run({"HSETEX", "h1", "1", absl::StrCat("exp", i), absl::StrCat("v", i)});
+  }
+  // 20 total (10 long + 10 short), bucket_count = 128.
+
+  // Phase 4: Expire the short-TTL fields.
+  AdvanceTime(2000);
+
+  // UpperBoundSize = 20, optimal = max(8, 32) = 32 < 128 → Shrink.
+  // ShrinkBucket removes 10 expired, consolidates 10 live into 32 buckets.
+  int64_t shrink_result = CheckedInt({"SHRINK", "h1"});
+  EXPECT_GT(shrink_result, 0) << "SHRINK must actually shrink the hash";
+
+  // The write triggers FindMutable → DCHECK.  Must not crash.
+  Run({"HDEL", "h1", "temp50"});
+  EXPECT_EQ(9, CheckedInt({"HLEN", "h1"}));
+}
+
 }  // namespace dfly
