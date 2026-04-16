@@ -61,7 +61,7 @@ runs:
         # Build cmake command array
         CMAKE_CMD=(cmake
           -B "${GITHUB_WORKSPACE}/${{ inputs.build-dir }}"
-          -DCMAKE_BUILD_TYPE="${{ inputs.build-type }}"
+          -DCMAKE_BUILD_TYPE="${{ inputs.build-type }}" -DLEGACY_GLOG=OFF
           -GNinja
         )
 
