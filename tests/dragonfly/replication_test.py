@@ -4577,3 +4577,40 @@ async def test_replica_no_deadlock_on_disconnect(df_factory: DflyInstanceFactory
 
     assert await c_replica.dbsize() == await c_master.dbsize()
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_hnsw_external_vector_replication_crash(df_factory: DflyInstanceFactory):
+    """
+    Minimal reproducer for SIGSEGV during HNSW replication with external vectors.
+
+    The HNSW graph is global (shared across shards) but is_restoring_vectors_ is per-shard.
+    When one shard finishes RestoreGlobalVectorIndices and starts accepting new HSETs,
+    addPoint() traverses the global graph and may dereference nullptr data pointers
+    from nodes belonging to shards that haven't finished restoration yet.
+    """
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # dim=256 forces external vectors (copy_vector=false).
+    # 500 docs creates a larger HNSW graph, widening the restoration window.
+    seeder = HnswSearchSeeder(num_initial_docs=500, num_dims=256)
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    # Start heavy traffic on master BEFORE replication begins.
+    # This ensures journal events (HSETs) arrive on the replica while HNSW graph
+    # is being restored, triggering addPoint() with nullptr data pointers.
+    traffic_task = asyncio.create_task(seeder.run_traffic(c_master, sleep_interval=0.001))
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    seeder.stop()
+    await traffic_task
+
+    await check_all_replicas_finished([c_replica], c_master, timeout=60)

@@ -624,13 +624,18 @@ bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
 }
 
 void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
+  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
+  if (it == all_ids_.end() || *it != doc) {
+    // During index restoration CursorLoop may not have indexed this document
+    // yet, so it is absent from all_ids_. Nothing to remove.
+    return;
+  }
+
   for (auto& [field, index] : indices_)
     index->Remove(doc, access, field);
   for (auto& [field, sort_index] : sort_indices_)
     sort_index->Remove(doc, access, field);
 
-  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
-  DCHECK(it != all_ids_.end() && *it == doc);
   all_ids_.erase(it);
 }
 
