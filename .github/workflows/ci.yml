@@ -179,6 +179,8 @@ jobs:
           # Non-release build will not run tests marked as opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
+          azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 
       - name: Upload regression logs on failure
         if: failure()
@@ -319,6 +321,8 @@ jobs:
           run-only-on-ubuntu-latest: true
           filter: large
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
+          azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 
       - name: Upload logs on failure
         if: failure()

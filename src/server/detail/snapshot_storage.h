@@ -28,6 +28,7 @@
 
 #include "io/io.h"
 #include "server/execution_state.h"
+#include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/utils.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"

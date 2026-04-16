@@ -8,6 +8,7 @@ import redis
 from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
+from azure.storage.blob import BlobServiceClient
 from .instance import DflyInstanceFactory, RedisServer
 from random import randint as rand
 import string
@@ -474,6 +475,51 @@ async def test_s3_save_local_dir(async_client, tmp_dir):
         delete_s3_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:] + "/s3_dump",
+        )
+
+
+def _missing_azure_test_env():
+    return (
+        "DRAGONFLY_AZURE_CONTAINER" not in os.environ
+        or os.environ["DRAGONFLY_AZURE_CONTAINER"] == ""
+        or "AZURE_STORAGE_CONNECTION_STRING" not in os.environ
+        or os.environ["AZURE_STORAGE_CONNECTION_STRING"] == ""
+    )
+
+
+def delete_azure_objects(container, prefix):
+    conn_str = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    blob_service = BlobServiceClient.from_connection_string(conn_str)
+    container_client = blob_service.get_container_client(container)
+    blobs = container_client.list_blobs(name_starts_with=prefix)
+    for blob in blobs:
+        container_client.delete_blob(blob.name)
+
+
+@pytest.mark.skipif(
+    _missing_azure_test_env(),
+    reason="Azure storage container or credentials are not configured",
+)
+@dfly_args({**BASIC_ARGS})
+async def test_azure_snapshot(async_client, tmp_dir):
+    seeder = DebugPopulateSeeder(key_target=10_000)
+    await seeder.run(async_client)
+
+    start_capture = await DebugPopulateSeeder.capture(async_client)
+    az_path = "az://" + os.environ["DRAGONFLY_AZURE_CONTAINER"] + str(tmp_dir)
+
+    try:
+        # save to Azure + flush + load from Azure
+        await async_client.execute_command("SAVE", "DF", az_path, "snapshot")
+        assert await async_client.flushall()
+        await async_client.execute_command("DFLY", "LOAD", az_path + "/snapshot-summary.dfs")
+
+        assert await DebugPopulateSeeder.capture(async_client) == start_capture
+
+    finally:
+        delete_azure_objects(
+            os.environ["DRAGONFLY_AZURE_CONTAINER"],
+            str(tmp_dir)[1:],
         )
 
 

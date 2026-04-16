@@ -328,8 +328,17 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     LOG(ERROR) << "Compiled without GCP support";
     exit(1);
 #endif
+  } else if (detail::IsAzurePath(uri)) {
+    auto azure = std::make_shared<detail::AzureSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await(
+        [&] { return azure->Init(detail::kBucketConnectMs); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return azure;
   } else {
-    LOG(ERROR) << "Uknown cloud storage " << uri;
+    LOG(ERROR) << "Unknown cloud storage " << uri;
     exit(1);
   }
 }
@@ -2872,7 +2881,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
       LOG(ERROR) << "Compiled without AWS support";
       exit(1);
 #endif
-    } else if (detail::IsGCSPath(ArgS(args, 1))) {
+    } else if (detail::IsGCSPath(ArgS(args, 1)) || detail::IsAzurePath(ArgS(args, 1))) {
       save_cmd_opts.cloud_uri = ArgS(args, 1);
     } else {
       // no cloud_uri get basename and return
