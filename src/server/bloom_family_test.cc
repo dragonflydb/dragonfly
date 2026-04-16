@@ -85,6 +85,47 @@ TEST_F(BloomFamilyTest, ScanDump) {
   EXPECT_GE(chunk_count, 1);
 }
 
+TEST_F(BloomFamilyTest, ChunkRoundTrip) {
+  constexpr int total_items = 100;
+
+  Run({"bf.reserve", "b1", "0.01", "1000"});
+  for (int i = 0; i < total_items; ++i)
+    Run({"bf.add", "b1", absl::StrCat("item", i)});
+
+  struct Chunk {
+    int64_t cursor;
+    std::string data;
+  };
+  std::vector<Chunk> chunks;
+
+  int64_t cursor = 0;
+  do {
+    auto resp = Run({"bf.scandump", "b1", std::to_string(cursor)});
+    const auto& vec = resp.GetVec();
+    ASSERT_EQ(vec.size(), 2u);
+
+    const int64_t next_cursor = *vec[0].GetInt();
+    ASSERT_TRUE(next_cursor > cursor || next_cursor == 0);
+
+    if (next_cursor != 0) {
+      EXPECT_EQ(vec[1].type, RespExpr::STRING);
+      EXPECT_FALSE(vec[1].GetBuf().empty());
+      chunks.push_back({next_cursor, vec[1].GetString()});
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  ASSERT_GE(chunks.size(), 2);
+
+  // Load all chunks into new key
+  for (const auto& [crs, data] : chunks)
+    EXPECT_EQ(Run({"bf.loadchunk", "b2", std::to_string(crs), data}), "OK");
+
+  // Verify all items exist in the loaded copy
+  for (int i = 0; i < total_items; ++i)
+    EXPECT_THAT(Run({"bf.exists", "b2", absl::StrCat("item", i)}), IntArg(1));
+}
+
 TEST_F(BloomFamilyTest, ScanDumpPastEnd) {
   Run({"bf.reserve", "b1", "0.01", "100"});
   Run({"bf.add", "b1", "x"});
@@ -97,6 +138,11 @@ TEST_F(BloomFamilyTest, ScanDumpPastEnd) {
   EXPECT_EQ(*vec[0].GetInt(), 0);
   EXPECT_EQ(vec[1].type, RespExpr::STRING);
   EXPECT_TRUE(vec[1].GetBuf().empty());
+}
+
+TEST_F(BloomFamilyTest, LoadChunkErrors) {
+  EXPECT_THAT(Run({"bf.loadchunk", "b1", "0", "data"}), ErrArg("not an integer"));
+  EXPECT_THAT(Run({"bf.loadchunk", "b1", "-1", "data"}), ErrArg("not an integer"));
 }
 
 }  // namespace dfly

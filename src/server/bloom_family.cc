@@ -12,6 +12,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -202,6 +203,76 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
   rb->SendBulkString(res->data);
 }
 
+void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser(args);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const std::string_view key = parser.Next();
+
+  const int64_t cursor = parser.Next<int64_t>();
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  if (cursor <= 0)
+    return rb->SendError(kInvalidIntErr);
+
+  const std::string_view blob = parser.Next();
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+    auto op_args = t->GetOpArgs(shard);
+    auto& db_slice = op_args.GetDbSlice();
+
+    if (cursor == 1) {
+      auto load_result = LoadSBFHeader(blob, CompactObj::memory_resource());
+      if (!load_result.has_value()) {
+        LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid header"
+                                 << " key=" << key << " cursor=" << cursor
+                                 << " blob_size=" << blob.size()
+                                 << " load_res=" << ToString(load_result.error());
+        return OpStatus::INVALID_VALUE;
+      }
+
+      // type set to nullopt to find any type key and overwrite it, not just SBF
+      auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
+      if (!op_res) {
+        CompactObj::DeleteMR<SBF>(load_result.value());
+        return op_res.status();
+      }
+
+      // LOADCHUNK overwrites existing key
+      if (!op_res->is_new) {
+        // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
+        RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
+        db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
+      }
+
+      op_res->it->second.SetSBF(load_result.value());
+      return OpStatus::OK;
+    }
+
+    auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SBF);
+    if (!op_res)
+      return op_res.status();
+
+    SBF* sbf = op_res->it->second.GetSBF();
+    if (auto load_res = LoadSBFChunk(cursor, blob, sbf); load_res != SBFLoadResult::kOk) {
+      LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid chunk"
+                               << " key=" << key << " cursor=" << cursor
+                               << " blob_size=" << blob.size()
+                               << " load_res=" << ToString(load_res);
+      return OpStatus::OUT_OF_RANGE;
+    }
+
+    return OpStatus::OK;
+  };
+
+  const OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (res == OpStatus::OK)
+    return rb->SendOk();
+  if (res == OpStatus::INVALID_VALUE)
+    return rb->SendError("INVALIDOBJ invalid bloom dump payload");
+  return rb->SendError(res);
+}
+
 void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
@@ -228,14 +299,15 @@ using CI = CommandId;
 void RegisterBloomFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
-  *registry << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
-                   Reserve)
-            << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
-            << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(
-                   MAdd)
-            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
-            << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump);
+  *registry
+      << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
+             Reserve)
+      << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
+      << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MAdd)
+      << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
+      << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
+      << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
+      << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk);
 };
 
 }  // namespace dfly
