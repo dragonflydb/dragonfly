@@ -141,14 +141,6 @@ void SerializerBase::UnregisterChangeListener() {
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) {
-  std::lock_guard guard(big_value_mu_);
-  return ProcessBucketInternal(db_index, it, on_update);
-}
-
-bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                           bool on_update) {
-  DCHECK(big_value_mu_.is_locked());
-
   // Check if this bucket is stale
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
@@ -157,12 +149,11 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
       return false;
 
     // Force flush all delayed entries in the touched bucket
-    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update && !it.is_done())
+    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
 
-    // Expected to be fully serialized due to big_value_mu_ guarding all paths
-    // Otherwise, this needs to be changed to a wait
-    DCHECK(!BucketDependencies::DEBUG_IsBusy(it.bucket_address()));
+    // Wait for all dependencies to be resolved
+    BucketDependencies::Wait(it.bucket_address());
     return false;
   }
 
@@ -177,6 +168,10 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
     db_guard.emplace(*db_slice_->GetLatch());
   }
 
+  // The block above with updating earlier callbacks is not exlusive - check version again
+  if (it.GetVersion() >= snapshot_version_)
+    return ProcessBucket(db_index, it, on_update);  // for the false path
+
   // We call it before SerializeBucketLocked because it dchecks on bucket version.
   it.SetVersion(snapshot_version_);
   BucketDependencies::Increment(it.bucket_address());
@@ -186,15 +181,6 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   stats_.buckets_on_change += unsigned(on_update);
 
   BucketDependencies::Decrement(it.bucket_address());
-
-  // Assert the version is equal to a snapshot version (might be a different concurrent one),
-  // to prove no concurrent modifications are possible (they would've assigned a different version)
-#if !defined(NDEBUG)
-  DCHECK_GE(it.GetVersion(), snapshot_version_);
-  auto current_snapshots = db_slice_->SnapshotVersions();
-  DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())
-      << absl::StrJoin(current_snapshots, " ") << " does not contain " << it.GetVersion();
-#endif
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
@@ -215,15 +201,10 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   ProcessBucket(db_index, it, true);
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set) {
-  // We must acquire the mutex ahead and process all buckets under the same lock.
-  // This ensures that bucket processing and the table insertion that invoked this callback
-  // will be operating on the same state as all writes are linarly ordered by this mutex.
-  std::unique_lock lk{big_value_mu_};
-
+void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& bucket_set) {
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : set.buckets())
-    ProcessBucketInternal(db_index, it, true);
+  for (auto it : bucket_set.buckets())
+    ProcessBucket(db_index, it, true);
 }
 
 }  // namespace dfly

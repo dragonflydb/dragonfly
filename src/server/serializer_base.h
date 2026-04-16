@@ -125,8 +125,11 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   DbTableArray db_array_;
 
   uint64_t snapshot_version_ = 0;
-  ThreadLocalMutex big_value_mu_;
   Stats stats_;
+
+  // Guards output stream (serializer) to not be used from multiple fibers
+  // as buffered changes can be flushed amid writing a value (logical stream)
+  ThreadLocalMutex stream_mu_;
 
  private:
   // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
