@@ -407,8 +407,9 @@ class ShardDocIndex {
   void AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                  PrimeValue* pv);
 
-  // Remove doc from all HNSW indices. When a Remove is deferred (read lock held),
-  // preserves the old sds entries internally so deferred ops remain safe.
+  // Remove doc from all HNSW indices. When hnsw_state_ != kBuilding, the remove
+  // is buffered in pending_vector_updates_ and old sds entries are preserved so
+  // HNSW pointers remain valid until the buffer is drained.
   // modified_fields: when non-empty, only preserve fields being mutated.
   // cache: shared across search indices so each sds field is extracted at most once.
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
@@ -417,7 +418,7 @@ class ShardDocIndex {
                                       FieldExtractionCache* cache);
 
   // Clear preserved field data on all per-shard HNSW indices.
-  // Called after serialization drains deferred ops under held write locks.
+  // Called after DrainPendingVectorUpdates completes buffered operations.
   void ClearAllHnswPreservedData();
 
   // Rebuild global vector indices from restored key index, updating vector data
@@ -547,9 +548,9 @@ class ShardDocIndices {
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
 
-  // Remove doc from all matching indices. When the HNSW write lock can't be
-  // acquired (e.g., serialization holds a read lock), external vector data is
-  // preserved so deferred HNSW ops can still dereference vector pointers.
+  // Remove doc from all matching indices. When HNSW ops are buffered
+  // (serializing/restoring), external vector data is preserved so HNSW
+  // pointers remain valid until the buffer is drained.
   // pv is non-const because preservation swaps sds entries in StringMap.
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, PrimeValue& pv,
                  absl::Span<const std::string_view> modified_fields = {});

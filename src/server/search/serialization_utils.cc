@@ -123,6 +123,7 @@ void SearchSerializer::SerializeGlobalHnswIndices() const {
   // Drain buffered HNSW updates on all shards and transition back to kBuilding.
   // Uses DrainSerializationUpdates which only acts on indices in kSerializing
   // state, so it cannot interfere with concurrent restoration.
+  // Search indices are restricted to db 0 in the default namespace (enforced by FT.CREATE).
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     OpArgs op_args{es, nullptr,
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
