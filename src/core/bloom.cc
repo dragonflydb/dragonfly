@@ -282,14 +282,8 @@ void SBF::ApplyStateUpdate(const StateUpdate& update) {
   prev_size_ = update.prev_size;
 }
 
-void SBF::AddEmptyFilter(size_t size, unsigned hash_cnt) {
-  PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
-  auto ptr = static_cast<uint8_t*>(mr->allocate(size));
-  memset(ptr, 0, size);
-  filters_.emplace_back().Init(ptr, size, hash_cnt);
-}
-
 SBFDumpIterator::SBFDumpIterator(const SBF& sbf, int64_t cursor) : sbf_{sbf}, cursor_{cursor} {
+  DCHECK_GT(sbf_.num_filters(), 0u) << "Cannot serialize SBF with no filters";
   ResolveCursorToPos();
 }
 
@@ -322,8 +316,7 @@ std::string SBFDumpIterator::BuildFilterContinuation(const string_view filter_da
 }
 
 SBFChunk SBFDumpIterator::Next() {
-  if (!header_sent_) {
-    header_sent_ = true;
+  if (cursor_ == 0) {
     cursor_ = 1;
     return {cursor_, SerializeHeader()};
   }
@@ -372,13 +365,11 @@ std::string SBFDumpIterator::SerializeHeader() const {
 
 void SBFDumpIterator::ResolveCursorToPos() {
   if (cursor_ == 0) {
-    header_sent_ = false;
     filter_index_ = 0;
     byte_offset_ = 0;
     return;
   }
 
-  header_sent_ = true;
   size_t global_offset = cursor_ - 1;
   for (uint32_t i = 0; i < sbf_.num_filters(); ++i) {
     const size_t filter_span = kDumpFilterMetaSize + sbf_.data(i).size();
@@ -408,7 +399,7 @@ nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data
   return CompactObj::AllocateMR<SBF>(grow_factor, 0.0, 0UL, 0UL, 0UL, mr);
 }
 
-SBFLoadResult AddNewFilterToSBF(SBF* sbf, std::string_view data) {
+SBFLoadResult AddNewFilterToSBF(std::string_view data, SBF* sbf) {
   if (data.size() < kDumpFilterMetaSize)
     return SBFLoadResult::kTruncatedInput;
 
@@ -421,7 +412,7 @@ SBFLoadResult AddNewFilterToSBF(SBF* sbf, std::string_view data) {
 
   const uint32_t new_index = sbf->num_filters();
   // TODO validate variables against bloom invariants (power of two etc)
-  sbf->AddEmptyFilter(data_length, hash_cnt);
+  sbf->AddFilter(std::string(data_length, '\0'), hash_cnt);
 
   if (payload > 0)
     memcpy(sbf->filter_data(new_index), data.data() + kDumpFilterMetaSize, payload);
@@ -429,12 +420,12 @@ SBFLoadResult AddNewFilterToSBF(SBF* sbf, std::string_view data) {
   return SBFLoadResult::kOk;
 }
 
-SBFLoadResult LoadSBFChunk(SBF* sbf, int64_t cursor, std::string_view data) {
+SBFLoadResult LoadSBFChunk(int64_t cursor, std::string_view data, SBF* sbf) {
+  DCHECK_NE(sbf, nullptr) << "Input ptr must be valid SBF";
+
   // TODO on implementing LOADCHUNK there should be closer validation of the data fed into the SBF.
   // This current implementation is mostly a test helper and proof that the SCANDUMP algorithm is
   // actually loadable.
-  if (!sbf)
-    return SBFLoadResult::kBadInput;
 
   size_t global_offset = cursor - static_cast<int64_t>(data.size()) - 1;
 
@@ -457,7 +448,7 @@ SBFLoadResult LoadSBFChunk(SBF* sbf, int64_t cursor, std::string_view data) {
   if (global_offset != 0)
     return SBFLoadResult::kOutOfRange;
 
-  return AddNewFilterToSBF(sbf, data);
+  return AddNewFilterToSBF(data, sbf);
 }
 
 }  // namespace dfly

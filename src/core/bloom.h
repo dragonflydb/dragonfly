@@ -150,8 +150,6 @@ class SBF {
 
   size_t MallocUsed() const;
 
-  void AddEmptyFilter(size_t size, unsigned hash_cnt);
-
   uint8_t* filter_data(size_t idx) {
     return filters_[idx].mutable_data();
   }
@@ -205,6 +203,10 @@ class SBFDumpIterator {
   SBFChunk Next();
 
  private:
+  // Sends the SBF wide header (little endian):
+  // +-------------------+-------------------+
+  // | version (4 bytes) | grow_factor (8B)  |
+  // +-------------------+-------------------+
   std::string SerializeHeader() const;
 
   // Converts a cursor to the specific filter and the offset inside it
@@ -216,7 +218,6 @@ class SBFDumpIterator {
 
   const SBF& sbf_;
   int64_t cursor_;
-  bool header_sent_ = false;
   uint32_t filter_index_ = 0;
   size_t byte_offset_ = 0;
 };
@@ -227,6 +228,6 @@ nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data
 
 // Loads a data chunk into an existing SBF. The cursor and data are the values
 // returned by SBFDumpIterator for chunks with cursor > 1.
-SBFLoadResult LoadSBFChunk(SBF* sbf, int64_t cursor, std::string_view data);
+SBFLoadResult LoadSBFChunk(int64_t cursor, std::string_view data, SBF* sbf);
 
 }  // namespace dfly
