@@ -934,20 +934,23 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::SKIPPED;
 
   ScoredMap result;
+  // Collect keys of sets that got emptied by lazy expiry during iteration.
+  // Deleting them inside the loop would invalidate other PrimeTable iterators
+  // held in key_vec_res.
+  absl::InlinedVector<std::string, 2> emptied_set_keys;
   for (const auto& [it, weight] : *key_vec_res) {
     if (it.is_done()) {
       return ScoredMap{};
     }
 
     ScoredMap sm;
-    if (it->second.ObjType() == OBJ_ZSET)
+    if (it->second.ObjType() == OBJ_ZSET) {
       sm = FromObject(it->second, weight);
-    else {
+    } else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
       sm = ScoreMapFromSet(it->second, weight, t->GetDbContext());
       if (it->second.Size() == 0) {
-        auto& db_slice = t->GetDbSlice(shard->shard_id());
-        SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), it.key(), it->second);
+        emptied_set_keys.emplace_back(it.key());
       }
     }
     if (result.empty())
@@ -956,7 +959,15 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
       InterScoredMap(&result, &sm, agg_type);
 
     if (result.empty())
-      return result;
+      break;
+  }
+
+  // Safe to delete now — the loop above no longer references iterators.
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  for (const auto& key : emptied_set_keys) {
+    if (auto res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET); res) {
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, (*res)->second);
+    }
   }
 
   return result;

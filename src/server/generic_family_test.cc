@@ -1364,12 +1364,15 @@ TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
   }
+  // ZINTERSTORE needs at least one non-empty input to reach ScoreMapFromSet.
   Run({"ZADD", "zkey", "1", "m0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
 
   AdvanceTime(2000);
 
-  Run({"SISMEMBER", "skey", "m0"});
-  Expand commentComment on line R1371 Run({"ZINTERSTORE", "zdest", "2", "skey", "zkey"});
+  // ZINTERSTORE iterates skey via IterateSet (inside ScoreMapFromSet),
+  // triggering lazy expiry.  The empty set must be cleaned up.
+  Run({"ZINTERSTORE", "zdest", "2", "skey", "zkey"});
 
   EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
 }
