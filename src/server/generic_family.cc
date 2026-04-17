@@ -21,6 +21,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "core/qlist.h"
+#include "core/string_set.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
@@ -1691,21 +1692,24 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
   vector<string> elements;
   elements.reserve(it->second.Size());
 
+  auto obj_type = it->second.ObjType();
+
+  // Enable lazy per-member expiry before iterating dense sets.  Without this,
+  // IterateSet would skip expiry entirely and empty-set cleanup below would
+  // depend on a prior command having set time_now_.
+  if (obj_type == OBJ_SET && it->second.Encoding() == kEncodingStrMap2) {
+    static_cast<StringSet*>(it->second.RObjPtr())
+        ->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
+  }
+
   Iterate(it->second, [&elements](const ContainerEntry& entry) {
     elements.emplace_back(entry.ToString());
     return true;
   });
 
-  auto obj_type = it->second.ObjType();
-
-  // Iterate may trigger lazy expiry.  Clean up empty containers.
-  if (it->second.Size() == 0) {
-    auto& db_slice = op_args.GetDbSlice();
-    if (obj_type == OBJ_SET) {
-      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, it->second);
-    } else if (obj_type == OBJ_HASH) {
-      HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, it->second);
-    }
+  // IterateSet may trigger lazy member expiry.  Clean up empty set.
+  if (obj_type == OBJ_SET && it->second.Size() == 0) {
+    SetFamily::DeleteSetIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
   }
 
   return std::make_pair(std::move(elements), obj_type);

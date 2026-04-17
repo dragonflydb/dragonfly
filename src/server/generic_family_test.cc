@@ -1364,10 +1364,13 @@ TEST_F(GenericFamilyTest, SortByPatternDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
   }
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
 
   AdvanceTime(2000);
 
-  Run({"SISMEMBER", "skey", "m0"});
+  // SORT BY nosort iterates the set, triggering lazy member expiry.
+  // The empty set must be cleaned up on its own — no prior command touching
+  // the set is needed.
   Run({"SORT", "skey", "BY", "nosort"});
 
   EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
