@@ -73,12 +73,32 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
-  auto serialize_entry = [&](decltype(delayed_entries_)::iterator it) {
-    auto& entry = it->second;
+  // Extract ahead because of possible iterator invalidation during suspension (Get/Serialize)
+  // if multiple fibers progress on delayed entries
+  std::vector<decltype(delayed_entries_)::node_type> targets;
+
+  // Flush all entries of bucket if provided
+  if (flush_bucket) {
+    auto [it, end] = delayed_entries_.equal_range(flush_bucket);
+    while (it != end)
+      targets.push_back(delayed_entries_.extract(it++));
+  }
+
+  // Serialize the delayed entries that are resolved, or all if force it true
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved())
+      it++;
+    else
+      targets.push_back(delayed_entries_.extract(it++));
+  }
+
+  // Serialize all targets
+  for (auto& target : targets) {
+    auto& entry = target.mapped();
     auto value = entry->value.Get();
 
     if (!value.has_value()) {
-      deps_.Decrement(it->first);
+      deps_.Decrement(target.key());
       cntx->ReportError(make_error_code(std::errc::io_error),
                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
@@ -87,25 +107,8 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
     PrimeValue pv{*value};
     SerializeFetchedEntry(*entry, pv);
 
-    deps_.Decrement(it->first);
-    delayed_entries_.erase(it++);
+    deps_.Decrement(target.key());
   };
-
-  // Flush all entries of bucket
-  if (flush_bucket) {
-    auto range = delayed_entries_.equal_range(flush_bucket);
-    for (auto it = range.first; it != range.second;) {
-      serialize_entry(it++);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved())
-      it++;
-    else
-      serialize_entry(it++);
-  }
 }
 
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
