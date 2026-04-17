@@ -16,6 +16,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/sorted_map.h"
+#include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
@@ -29,6 +30,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/set_family.h"
 #include "server/transaction.h"
 
 namespace rng = std::ranges;
@@ -735,7 +737,13 @@ ScoredMap FromObject(const PrimeValue& co, double weight) {
   return res;
 }
 
-ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight) {
+ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight, const DbContext& db_cntx) {
+  // Enable lazy member expiry before iterating dense sets so expired members
+  // do not pollute the result (and so the caller can detect an emptied set).
+  if (pv.Encoding() == kEncodingStrMap2) {
+    static_cast<StringSet*>(pv.RObjPtr())->set_time(MemberTimeSeconds(db_cntx.time_now_ms));
+  }
+
   ScoredMap result;
   container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
     result.emplace(ce.ToString(), weight);
@@ -803,19 +811,27 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
 
 using KeyIterWeightVec = vector<pair<DbSlice::ConstIterator, double>>;
 
-ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
+ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type,
+                                  DbSlice& db_slice, const DbContext& db_cntx) {
   ScoredMap result;
+  // Collect keys of sets that got emptied by lazy expiry during iteration.
+  // Deleting them inside the loop would invalidate other PrimeTable iterators
+  // held in key_iter_weight_vec.
+  absl::InlinedVector<std::string, 2> emptied_set_keys;
   for (const auto& [it, weight] : key_iter_weight_vec) {
     if (it.is_done()) {
       continue;
     }
 
     ScoredMap sm;
-    if (it->second.ObjType() == OBJ_ZSET)
+    if (it->second.ObjType() == OBJ_ZSET) {
       sm = FromObject(it->second, weight);
-    else {
+    } else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
-      sm = ScoreMapFromSet(it->second, weight);
+      sm = ScoreMapFromSet(it->second, weight, db_cntx);
+      if (it->second.Size() == 0) {
+        emptied_set_keys.emplace_back(it.key());
+      }
     }
     if (result.empty()) {
       result.swap(sm);
@@ -823,6 +839,14 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
       UnionScoredMap(&result, &sm, agg_type);
     }
   }
+
+  // Safe to delete now — the loop above no longer references iterators.
+  for (const auto& key : emptied_set_keys) {
+    if (auto res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET); res) {
+      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, (*res)->second);
+    }
+  }
+
   return result;
 }
 
@@ -895,7 +919,8 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   if (key_vec_res->empty())
     return OpStatus::OK;
 
-  return UnionShardKeysWithScore(*key_vec_res, agg_type);
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  return UnionShardKeysWithScore(*key_vec_res, agg_type, db_slice, t->GetDbContext());
 }
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -919,7 +944,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
       sm = FromObject(it->second, weight);
     else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
-      sm = ScoreMapFromSet(it->second, weight);
+      sm = ScoreMapFromSet(it->second, weight, t->GetDbContext());
     }
     if (result.empty())
       result.swap(sm);
