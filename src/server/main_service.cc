@@ -1068,10 +1068,11 @@ void Service::Shutdown() {
 
   engine_varz.reset();
 
+  shard_set->PreShutdown();
+
   delete channel_store;
   channel_store = nullptr;
 
-  shard_set->PreShutdown();
   shard_set->Shutdown();
 
   Transaction::Shutdown();

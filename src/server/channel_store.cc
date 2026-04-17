@@ -170,21 +170,12 @@ void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& 
     return;
   }
 
-  // channels_.for_each holds one channels_ submap lock at a time.
-  // patterns_.for_each inside acquires patterns_ submap locks while a channels_
-  // lock is held — safe because no other code path holds a patterns_ lock while
-  // acquiring a channels_ lock (see locking-order invariant in channel_store.h).
   ChannelsSubMap channel_subs_map;
   channels_.for_each([&](const auto& kv) {
     if (!deleted_slots.Contains(KeySlot(kv.first)))
       return;
     vector<Subscriber> subs;
     Fill(kv.second, string{}, &subs);
-    patterns_.for_each([&](const auto& pkv) {
-      GlobMatcher matcher{pkv.first, true};
-      if (matcher.Matches(kv.first))
-        Fill(pkv.second, pkv.first, &subs);
-    });
     if (!subs.empty()) {
       sort(subs.begin(), subs.end(), Subscriber::ByThread);
       channel_subs_map.emplace(kv.first, std::move(subs));

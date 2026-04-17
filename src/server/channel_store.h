@@ -28,9 +28,6 @@ class SlotSet;
 // (e.g. PUBLISH) hold individual submap locks only while accessing that
 // submap; writers (SUBSCRIBE/UNSUBSCRIBE) hold the relevant submap lock
 // for the duration of the insert/erase.
-//
-// Locking order: channels_ submaps are always locked before patterns_
-// submaps, never the reverse.
 class ChannelStore {
  public:
   struct Subscriber : public facade::ConnectionRef {
