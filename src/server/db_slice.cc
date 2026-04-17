@@ -4,6 +4,8 @@
 
 #include "server/db_slice.h"
 
+#include <ranges>
+
 #include "core/dense_set.h"
 
 extern "C" {
@@ -701,7 +703,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   }
 
   // It's a new entry.
-  mutation_hints_ = nullptr;  // for now: just take them
 
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
@@ -711,10 +712,16 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
     auto bucket_set = db.prime.CVCUponInsert(key);
 
     if (auto* mutation = std::exchange(mutation_hints_, nullptr); mutation) {
-      auto max_v =
-          std::ranges::max(bucket_set.buckets(), {}, [](const auto& b) { return b.GetVersion(); });
+      uint64_t maxv = 0;
+      if (!std::ranges::empty(bucket_set.buckets())) {
+        auto maxb = std::ranges::max(bucket_set.buckets(), {}, [](const auto& b) {
+          return b.is_done() ? 0 : b.GetVersion();
+        });
+        maxv = maxb.is_done() ? 0 : maxb.GetVersion();
+      }
+
       omit_update = mutation->hint.single_key && mutation->hint.support_omit &&
-                    change_cb_.size() == 1 && max_v.GetVersion() < change_cb_.front().first &&
+                    change_cb_.size() == 1 && maxv < change_cb_.front().first &&
                     journal::CallbackNumber() == 1;
 
       events_.journal_omit += unsigned(omit_update);
