@@ -108,7 +108,6 @@ jobs:
           cxx-compiler: ${{matrix.compiler.cxx}}
           cxx-flags: ${{matrix.cxx_flags}}
           sanitizers: ${{matrix.sanitizers}}
-          with-aws: 'OFF'
 
       - name: PostFail
         if: failure()

@@ -312,7 +312,7 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     }
     return aws;
 #else
-    LOG(ERROR) << "Compiled without AWS support";
+    LOG(ERROR) << "Compiled without AWS S3 support";
     exit(1);
 #endif
   } else if (detail::IsGCSPath(uri)) {
@@ -2899,10 +2899,10 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
 
   if (args.size() >= 2) {
     if (detail::IsS3Path(ArgS(args, 1))) {
-#ifdef WITH_AWS
+#if defined(WITH_AWS) || defined(WITH_AWS_CLOUD)
       save_cmd_opts.cloud_uri = ArgS(args, 1);
 #else
-      LOG(ERROR) << "Compiled without AWS support";
+      LOG(ERROR) << "Compiled without AWS S3 support";
       exit(1);
 #endif
     } else if (detail::IsGCSPath(ArgS(args, 1)) || detail::IsAzurePath(ArgS(args, 1))) {

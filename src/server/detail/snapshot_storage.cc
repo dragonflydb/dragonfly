@@ -19,6 +19,10 @@
 #include "util/aws/s3_write_file.h"
 #endif
 
+#ifdef WITH_AWS_CLOUD
+#include "util/cloud/aws/s3_storage.h"
+#endif
+
 #ifdef WITH_GCP
 #include "util/cloud/gcp/gcs_file.h"
 #endif
@@ -568,12 +572,27 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
         std::make_shared<aws::S3EndpointProvider>(endpoint, https);
     s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
   });
+#elif defined(WITH_AWS_CLOUD)
+  https_ = https;
+  if (!ec2_metadata) {
+    setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
+  }
+  // AwsCredsProvider reads AWS_S3_ENDPOINT at ServiceEndpoint() time; setting it here lets
+  // callers override the default S3 endpoint (e.g. for MinIO tests).
+  if (!endpoint.empty()) {
+    string endpoint_url = absl::StrCat(https ? "https://" : "http://", endpoint);
+    setenv("AWS_S3_ENDPOINT", endpoint_url.c_str(), 1);
+  }
+  (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
+  LOG(INFO) << "Creating AWS S3 client (cloud); https=" << std::boolalpha << https
+            << "; endpoint=" << endpoint;
 #endif
 }
 
 AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
 #if defined(WITH_AWS_CLOUD) && !defined(WITH_AWS)
-  util::http::TlsClient::FreeContext(ctx_);
+  if (ctx_)
+    util::http::TlsClient::FreeContext(ctx_);
 #endif
 }
 
@@ -583,9 +602,11 @@ error_code AwsS3SnapshotStorage::Init(unsigned connect_ms) {
   if (ec)
     return ec;
 
-  ctx_ = util::http::TlsClient::CreateSslContext();
-  if (!ctx_) {
-    return make_error_code(std::errc::operation_not_permitted);
+  if (https_) {
+    ctx_ = util::http::TlsClient::CreateSslContext();
+    if (!ctx_) {
+      return make_error_code(std::errc::operation_not_permitted);
+    }
   }
 #endif
   return {};
@@ -618,6 +639,18 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
   fb.Join();
 
   return result;
+#elif defined(WITH_AWS_CLOUD)
+  auto [bucket, key] = GetBucketPath(path);
+  cloud::aws::WriteFileOptions opts;
+  opts.creds_provider = &creds_provider_;
+  opts.ssl_cntx = ctx_;
+
+  io::Result<io::WriteFile*> dest_res = cloud::aws::OpenWriteFile(bucket, key, opts);
+  if (!dest_res) {
+    return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
+  }
+
+  return std::pair<io::Sink*, uint8_t>(*dest_res, FileType::CLOUD);
 #else
   return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
 #endif
@@ -633,6 +666,17 @@ io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(
   }
   auto [bucket, key] = *bucket_path;
   return new aws::S3ReadFile(bucket, key, s3_);
+#elif defined(WITH_AWS_CLOUD)
+  VLOG(1) << "Opening S3 read file: " << path;
+  if (!IsS3Path(path))
+    return nonstd::make_unexpected(GenericError("Invalid S3 path"));
+
+  auto [bucket, key] = GetBucketPath(path);
+  cloud::aws::ReadFileOptions opts;
+  opts.creds_provider = &creds_provider_;
+  opts.ssl_cntx = ctx_;
+
+  return cloud::aws::OpenReadFile(bucket, key, opts);
 #else
   return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
 #endif
