@@ -3088,6 +3088,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   }
 
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
+  result.acl_stats = service_.user_registry().GetAclStats();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -3623,6 +3624,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
       append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
     }
+  }
+
+  if (should_enter("ACL", true)) {
+    const auto& acl = m.acl_stats;
+    append("acl_num_users", acl.num_users);
+    append("acl_num_passwords", acl.num_passwords);
+    append("acl_num_cat_changes", acl.num_cat_changes);
+    append("acl_num_cmd_changes", acl.num_cmd_changes);
+    append("acl_num_key_globs", acl.num_key_globs);
+    append("acl_key_globs_bytes", acl.key_globs_bytes);
+    append("acl_num_pubsub_globs", acl.num_pubsub_globs);
+    append("acl_pubsub_globs_bytes", acl.pubsub_globs_bytes);
+    append("acl_total_bytes", acl.TotalBytes());
   }
 
   return info;
