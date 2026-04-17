@@ -64,6 +64,9 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList ite
   }
 
   SBF* sbf = pv.GetSBF();
+  if (IsBeingLoaded(sbf))
+    return OpStatus::INVALID_VALUE;
+
   AddResult result(items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     result[i] = sbf->Add(ToSV(items[i]));
@@ -79,6 +82,9 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
   auto it = (*op_res);
 
   const SBF* sbf = it->second.GetSBF();
+  if (IsBeingLoaded(sbf))
+    return OpStatus::INVALID_VALUE;
+
   ExistsResult result(items.size());
 
   for (size_t i = 0; i < items.size(); ++i) {
@@ -129,6 +135,9 @@ void CmdAdd(CmdArgList args, CommandContext* cmd_cntx) {
       status = res->front().status();
   }
 
+  if (status == OpStatus::INVALID_VALUE)
+    return cmd_cntx->SendError("ERR bloom filter load is incomplete");
+
   return cmd_cntx->SendError(status);
 }
 
@@ -140,6 +149,10 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  if (!res && res.status() == OpStatus::INVALID_VALUE)
+    return cmd_cntx->SendError("ERR bloom filter load is incomplete");
+
   return cmd_cntx->SendLong(res ? res->front() : 0);
 }
 
@@ -154,6 +167,8 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
+    if (res.status() == OpStatus::INVALID_VALUE)
+      return rb->SendError("ERR bloom filter load is incomplete");
     return rb->SendError(res.status());
   }
   const AddResult& add_res = *res;
@@ -186,12 +201,17 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
       return op_res.status();
 
     const SBF* sbf = op_res.value()->second.GetSBF();
+    if (IsBeingLoaded(sbf))
+      return OpStatus::INVALID_VALUE;
+
     SBFDumpIterator it(*sbf, cursor);
     return it.Next();
   };
 
   OpResult<SBFChunk> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res) {
+    if (res.status() == OpStatus::INVALID_VALUE)
+      return rb->SendError("ERR bloom filter load is incomplete");
     return rb->SendError(res.status());
   }
 
@@ -271,8 +291,11 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (!res && res.status() == OpStatus::INVALID_VALUE)
+    return rb->SendError("ERR bloom filter load is incomplete");
+
   RedisReplyBuilder::ArrayScope scope{rb, args.size()};
   for (size_t i = 0; i < args.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);

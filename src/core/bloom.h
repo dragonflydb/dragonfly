@@ -256,4 +256,8 @@ nonstd::expected<SBF*, SBFLoadResult> LoadSBFHeader(std::string_view header_data
 // returned by SBFDumpIterator for chunks with cursor > 1.
 SBFLoadResult LoadSBFChunk(int64_t cursor, std::string_view data, SBF* sbf);
 
+inline bool IsBeingLoaded(const SBF* sbf) {
+  return sbf->num_filters() == 0;
+}
+
 }  // namespace dfly
