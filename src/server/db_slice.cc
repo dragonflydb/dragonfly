@@ -1333,7 +1333,7 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  // DCHECK(!owner_->shard_lock()->IsFree());
+  DCHECK(!owner_->shard_lock()->IsFree());
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
