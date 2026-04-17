@@ -1006,12 +1006,13 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // see dfly_main RunEngine. In unit tests, listeners are empty.
   facade::Listener* main_listener = listeners.empty() ? nullptr : listeners.front();
 
-  ChannelStore* cs = new ChannelStore{};
+  // Create Global ChannelStore
+  channel_store = new ChannelStore{};
+
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, main_listener, &user_registry_);
-    ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
@@ -1067,9 +1068,11 @@ void Service::Shutdown() {
 
   engine_varz.reset();
 
-  ChannelStore::Destroy();
-
   shard_set->PreShutdown();
+
+  delete channel_store;
+  channel_store = nullptr;
+
   shard_set->Shutdown();
 
   Transaction::Shutdown();
@@ -2517,8 +2520,7 @@ void Service::Publish(CmdArgList args, CommandContext* cmd_cntx) {
   string_view channel = ArgS(args, 0);
   string_view messages[] = {ArgS(args, 1)};
 
-  auto* cs = ServerState::tlocal()->channel_store();
-  cmd_cntx->SendLong(cs->SendMessages(channel, messages, sharded));
+  cmd_cntx->SendLong(channel_store->SendMessages(channel, messages, sharded));
 }
 
 void Service::Subscribe(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2582,11 +2584,11 @@ void Service::Function(CmdArgList args, CommandContext* cmd_cntx) {
 
 void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendBulkStrArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
+  rb->SendBulkStrArr(channel_store->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(SinkReplyBuilder* builder) {
-  size_t pattern_count = ServerState::tlocal()->channel_store()->PatternCount();
+  size_t pattern_count = channel_store->PatternCount();
   builder->SendLong(pattern_count);
 }
 
@@ -2595,7 +2597,7 @@ void Service::PubsubNumSub(CmdArgList args, SinkReplyBuilder* builder) {
   rb->StartArray(args.size() * 2);
   for (string_view channel : args) {
     rb->SendBulkString(channel);
-    rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+    rb->SendLong(channel_store->FetchSubscribers(channel).size());
   }
 }
 

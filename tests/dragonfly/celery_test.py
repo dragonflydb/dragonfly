@@ -1,9 +1,11 @@
 import logging
+import time
 import threading
 from redis import asyncio as aioredis
 
 import pytest
-from celery import Celery
+from celery import Celery, group
+from celery.result import allow_join_result
 from celery.contrib.testing.worker import (
     setup_app_for_worker,
     TestWorkController,
@@ -102,3 +104,88 @@ def test_celery_inspect(celery_app, celery_worker):
     stats = inspector.stats()
     logging.info(f"Stats response: {stats}")
     assert worker_name in stats
+
+
+# Reproducer for #7056: PUBLISH lost under concurrent Celery group().get().
+
+
+def _noop_task(i):
+    time.sleep(0.02)
+    return i
+
+
+def _group_get_task(batch_size, get_timeout=5):
+    """Dispatch a group of subtasks and call .get() — the pattern that triggers the bug."""
+    from celery import current_app
+
+    with allow_join_result():
+        g = group(current_app.tasks["noop"].s(i) for i in range(batch_size))()
+        try:
+            g.get(timeout=get_timeout)
+            return 0
+        except Exception:
+            import redis
+
+            conn = redis.Redis.from_url(current_app.conf.result_backend)
+            keys = [f"celery-task-meta-{r.id}" for r in g.results]
+            stored = sum(1 for v in conn.mget(keys) if v is not None)
+            conn.close()
+            return stored  # tasks completed but PUBLISH was lost
+        finally:
+            g.revoke()
+            g.forget()
+
+
+@pytest.fixture
+def pubsub_celery_app(df_server):
+    broker = f"redis://localhost:{df_server.port}/0"
+    backend = f"redis://localhost:{df_server.port}/1"
+    app = Celery("pubsub_test", broker=broker, backend=backend)
+    app.conf.update(task_serializer="json", result_serializer="json", accept_content=["json"])
+    app.task(name="noop")(_noop_task)
+    app.task(name="group_get", bind=False)(_group_get_task)
+    yield app
+
+    if hasattr(app, "backend"):
+        app.backend.remove_pending_result = lambda *args, **kwargs: None
+    app.close()
+
+
+@pytest.fixture
+def pubsub_worker(pubsub_celery_app):
+    setup_app_for_worker(pubsub_celery_app, loglevel="WARNING", logfile=None)
+    w = TestWorkController(
+        app=pubsub_celery_app,
+        concurrency=32,
+        pool="prefork",
+        loglevel="WARNING",
+        without_heartbeat=True,
+        without_mingle=True,
+        without_gossip=True,
+    )
+    t = threading.Thread(target=w.start, daemon=True)
+    t.start()
+    w.ensure_started()
+    _set_task_join_will_block(False)
+    yield w
+
+    pubsub_celery_app.control.purge()
+    w.stop()
+    t.join(timeout=10)
+
+
+def test_pubsub_publish_not_lost(pubsub_celery_app, pubsub_worker):
+    """#7056: PUBLISH notifications must not be silently lost under Celery group().get()."""
+    dispatch = pubsub_celery_app.tasks["group_get"]
+    BATCH, CONCURRENT, ROUNDS, TIMEOUT = 50, 16, 5, 5
+
+    total_lost = 0
+    for rnd in range(1, ROUNDS + 1):
+        results = [dispatch.delay(BATCH, get_timeout=TIMEOUT) for _ in range(CONCURRENT)]
+        round_lost = 0
+        for ar in results:
+            try:
+                round_lost += ar.get(timeout=TIMEOUT + 10)
+            except Exception:
+                round_lost += BATCH
+        assert round_lost == 0, f"Round {rnd}/{ROUNDS}: {round_lost} PUBLISH messages lost"

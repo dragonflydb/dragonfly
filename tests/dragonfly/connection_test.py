@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import multiprocessing
 import random
 import socket
 import ssl
@@ -2110,3 +2111,98 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await flood_task
         writer.close()
         await writer.wait_closed()
+
+
+# Reproducer for #7056: PUBLISH lost under rapid SUBSCRIBE/UNSUBSCRIBE churn.
+
+
+def _pubsub_churn_sub(port, task_ids, result_queue, barrier):
+    """Subscribe upfront, on 'S' (started) do unsub/resub, collect 'D' (done)."""
+    import redis
+
+    conn = redis.Redis(host="localhost", port=port, db=1, decode_responses=True)
+    ps = conn.pubsub()
+    try:
+        channels = {f"ch-{tid}": tid for tid in task_ids}
+        got_done = set()
+
+        ps.subscribe(*channels.keys())
+        barrier.wait(timeout=30)
+
+        deadline = time.monotonic() + 5.0
+        while len(got_done) < len(task_ids) and time.monotonic() < deadline:
+            msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.01)
+            if not msg or msg["type"] != "message" or msg["channel"] not in channels:
+                continue
+            if msg["data"] == "S":
+                # Unsub/resub churn — the pattern that triggers the race
+                ps.unsubscribe(msg["channel"])
+                ps.get_message(timeout=0.1)
+                ps.subscribe(msg["channel"])
+            elif msg["data"] == "D":
+                got_done.add(channels[msg["channel"]])
+
+        lost = sum(1 for tid in task_ids if tid not in got_done and conn.get(f"ch-{tid}") == "D")
+        result_queue.put(lost)
+    finally:
+        ps.close()
+        conn.close()
+
+
+def _pubsub_churn_pub(port, task_ids, barrier):
+    """MULTI { SET + PUBLISH 'S' }, brief pause, MULTI { SET + PUBLISH 'D' }."""
+    import redis
+
+    conn = redis.Redis(host="localhost", port=port, db=1, decode_responses=True)
+    try:
+        barrier.wait(timeout=30)
+        for tid in task_ids:
+            ch = f"ch-{tid}"
+            pipe = conn.pipeline(transaction=True)
+            pipe.set(ch, "S")
+            pipe.publish(ch, "S")
+            pipe.execute()
+
+            time.sleep(random.uniform(0.001, 0.010))
+
+            pipe = conn.pipeline(transaction=True)
+            pipe.set(ch, "D")
+            pipe.publish(ch, "D")
+            pipe.execute()
+    finally:
+        conn.close()
+
+
+async def test_pubsub_subscribe_churn_publish_lost(df_server: DflyInstance):
+    """#7056: PUBLISH lost under rapid SUBSCRIBE/UNSUBSCRIBE/re-SUBSCRIBE churn."""
+    N = 8  # parallel worker pairs (subscriber + publisher)
+    BATCH = 50  # channels per worker
+    ROUNDS = 2
+    port = df_server.port
+
+    total_lost = 0
+    for rnd in range(ROUNDS):
+        result_queue = multiprocessing.Queue()
+        barrier = multiprocessing.Barrier(N * 2)
+        all_ids = [f"r{rnd}-{i}" for i in range(N * BATCH)]
+        chunks = [all_ids[i::N] for i in range(N)]
+
+        procs = []
+        for chunk in chunks:
+            p = multiprocessing.Process(
+                target=_pubsub_churn_sub, args=(port, chunk, result_queue, barrier)
+            )
+            p.start()
+            procs.append(p)
+        for chunk in chunks:
+            p = multiprocessing.Process(target=_pubsub_churn_pub, args=(port, chunk, barrier))
+            p.start()
+            procs.append(p)
+
+        for p in procs:
+            p.join(timeout=30)
+            if p.is_alive():
+                p.kill()
+
+        round_lost = sum(result_queue.get(timeout=5) for _ in range(N))
+        assert round_lost == 0, f"Round {rnd + 1}/{ROUNDS}: {round_lost} PUBLISH messages lost"

@@ -1432,8 +1432,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   // Send and clear accumulated expired key events
   if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
-    ChannelStore* store = ServerState::tlocal()->channel_store();
-    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events, false);
+    channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events,
+                                false);
     events.clear();
   }
 

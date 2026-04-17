@@ -40,7 +40,7 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc
             acl/acl_log.cc slowlog.cc channel_store.cc)
-cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
+cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram TRDP::parallel_hashmap)
 
 # Include search module
 add_subdirectory(search)
