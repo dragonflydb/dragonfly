@@ -52,10 +52,7 @@ class HnswVectorIndex {
 
   bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
 
-  // Remove a point. Returns true when the operation was executed synchronously
-  // (write lock acquired, deferred queue drained). False means it was deferred.
-  bool Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
-  bool Remove(search::GlobalDocId id);
+  void Remove(search::GlobalDocId id);
 
   bool IsVectorCopied() const {
     return copy_vector_;
@@ -100,10 +97,6 @@ class HnswVectorIndex {
   // Acquire a read lock on the internal MRMW mutex.
   // Use this during serialization to block concurrent Add/Remove (write) operations.
   MRMWMutexLock GetReadLock() const;
-
-  // Block until the write lock is acquired and all deferred ops are executed.
-  // Returns the held write lock so the caller can keep it alive until safe.
-  MRMWMutexLock DrainPendingOps();
 
  private:
   bool copy_vector_;
