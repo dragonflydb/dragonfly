@@ -185,9 +185,9 @@ void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
   aux = LpGetInteger(p);
 
   if (aux == 1) {
-    if (lp != node.Ptr()) {
-      zfree(lp);
-    } else {
+    zfree(lp);
+    if (node.IsCompressed()) {
+      node.InvalidateDecompressionState();
       node.Free();
     }
     checkedRaxRemove(si->stream->rax, si->ri.key, si->ri.key_len, NULL);
@@ -196,11 +196,15 @@ void StreamIteratorRemoveEntry(streamIterator* si, streamID* current) {
     p = lpNext(lp, p);
     aux = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, aux + 1);
+    bool update_rax_lp = false;
     if (node.IsCompressed()) {
       lp = StreamNodeObj::MaterializeListpack(lp);
       node.Free();
+      update_rax_lp = true;
+    } else if (lp != node.Ptr()) {
+      update_rax_lp = true;
     }
-    if (lp != node.Ptr()) {
+    if (update_rax_lp) {
       raxInsert(si->stream->rax, si->ri.key, si->ri.key_len, lp, nullptr);
       si->ri.data = lp;
     }
@@ -483,11 +487,15 @@ int64_t StreamTrim(stream* s, streamAddTrimArgs* args) {
     p = lpNext(lp, p);
     int64_t marked_deleted = LpGetInteger(p);
     lp = lpReplaceInteger(lp, &p, marked_deleted + deleted_from_lp);
+    bool update_rax_lp = false;
     if (node.IsCompressed()) {
       lp = StreamNodeObj::MaterializeListpack(lp);
       node.Free();
+      update_rax_lp = true;
+    } else if (lp != node.Ptr()) {
+      update_rax_lp = true;
     }
-    if (lp != node.Ptr()) {
+    if (update_rax_lp) {
       raxInsert(s->rax, ri.key, ri.key_len, lp, nullptr);
     }
     CHECK_GT(lpBytes(lp), 0u);

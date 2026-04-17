@@ -216,7 +216,10 @@ StreamNodeObj StreamNodeObj::TryCompress() const {
   buf = static_cast<uint8_t*>(zrealloc(buf, sizeof(uint32_t) * 2 + csz));
   zfree(lp);
 
-  return StreamNodeObj::Compressed(buf);
+  // Create new node object and tag it as compressed
+  StreamNodeObj compressed_node_obj;
+  compressed_node_obj.ptr_ = reinterpret_cast<uintptr_t>(buf) | kCompressedBit;
+  return compressed_node_obj;
 }
 
 uint8_t* StreamNodeObj::MaterializeListpack(uint8_t* lp) {
@@ -236,6 +239,14 @@ uint8_t* StreamNodeObj::MaterializeListpack(uint8_t* lp) {
 
 void StreamNodeObj::Free() const {
   zfree(Ptr());
+}
+
+void StreamNodeObj::InvalidateDecompressionState() {
+  DCHECK(tl_zstd_ctx && tl_zstd_ctx->IsDictReady());
+  if (tl_zstd_ctx && tl_zstd_ctx->IsDictReady()) {
+    tl_zstd_ctx->decompressed_data = nullptr;
+    tl_zstd_ctx->decompressed_capacity = 0;
+  }
 }
 
 size_t StreamNodeObj::MallocSize() const {

@@ -30,8 +30,6 @@ namespace dfly {
 //   - Ownership of the underlying memory depends on the representation:
 //       * Raw: listpack memory
 //       * Compressed: allocated compression buffer
-//   - Callers must ensure proper materialization when crossing thread-local
-//     decompression boundaries.
 class StreamNodeObj {
  public:
   static constexpr uintptr_t kCompressedBit = 1ULL << 52;
@@ -50,12 +48,6 @@ class StreamNodeObj {
   static StreamNodeObj Raw(const uint8_t* lp) {
     StreamNodeObj r;
     r.ptr_ = reinterpret_cast<uintptr_t>(lp);
-    return r;
-  }
-
-  static StreamNodeObj Compressed(const uint8_t* buf) {
-    StreamNodeObj r;
-    r.ptr_ = reinterpret_cast<uintptr_t>(buf) | kCompressedBit;
     return r;
   }
 
@@ -93,8 +85,11 @@ class StreamNodeObj {
   // Returns Compressed StreamNodeObj if compression is applied, otherwise *this.
   StreamNodeObj TryCompress() const;
 
-  // Frees the node's underlying pointer
+  // Frees the node's underlying pointer.
   void Free() const;
+
+  // Nullifies the thread-local decompression buffer pointer and resets its capacity.
+  void InvalidateDecompressionState();
 
   // Materializes a decompressed listpack into stable, heap-owned memory.
   // Must only be called on compressed nodes (tl_zstd_ctx must be ready).
