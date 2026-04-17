@@ -788,4 +788,37 @@ TEST_F(SetFamilyTest, FieldTtlDeletesEmptySet) {
   EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
 }
 
+// Regression test for github.com/dragonflydb/dragonfly/issues/7171
+// Same bug as ShrinkMemoryAccountingHash but for sets with SADDEX/SREM.
+TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // Phase 1: Grow bucket_count to 128 by adding 60 members.
+  for (int i = 0; i < 60; i++) {
+    Run({"SADDEX", "s1", "1000", absl::StrCat("temp", i)});
+  }
+
+  // Phase 2: Remove 50, keep 10, bucket_count stays 128.
+  for (int i = 0; i < 50; i++) {
+    Run({"SREM", "s1", absl::StrCat("temp", i)});
+  }
+
+  // Phase 3: Add 10 members with short TTL.
+  for (int i = 0; i < 10; i++) {
+    Run({"SADDEX", "s1", "1", absl::StrCat("exp", i)});
+  }
+  // 20 total (10 long + 10 short), bucket_count = 128.
+
+  // Phase 4: Expire the short-TTL members.
+  AdvanceTime(2000);
+
+  // UpperBoundSize = 20, optimal = 32 < 128 → Shrink.
+  int64_t shrink_result = CheckedInt({"SHRINK", "s1"});
+  EXPECT_GT(shrink_result, 0) << "SHRINK must actually shrink the set";
+
+  // Must not crash in FindMutable → DCHECK.
+  Run({"SREM", "s1", "temp50"});
+  EXPECT_THAT(Run({"SCARD", "s1"}), IntArg(9));
+}
+
 }  // namespace dfly
