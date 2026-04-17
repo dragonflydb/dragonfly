@@ -6,9 +6,11 @@
 
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "server/common.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 #include "server/tiered_storage.h"
@@ -163,8 +165,11 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
   // We are called under bucket lock so DeleteIfEmpty is not possible.
-  if (pv.Encoding() == kEncodingStrMap2)
-    static_cast<StringSet*>(pv.RObjPtr())->set_time(0);
+  StringSet* ss = nullptr;
+  if (pv.Encoding() == kEncodingStrMap2) {
+    ss = static_cast<StringSet*>(pv.RObjPtr());
+    ss->set_time(0);
+  }
 
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
@@ -175,6 +180,11 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
     commands += aggregator.AddArg(ce.ToString());
     return true;
   });
+
+  // Restore time so subsequent operations can trigger lazy expiry again.
+  if (ss)
+    ss->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+
   return commands;
 }
 
@@ -197,8 +207,11 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
-  if (pv.Encoding() == kEncodingStrMap2)
-    static_cast<StringMap*>(pv.RObjPtr())->set_time(0);
+  StringMap* sm = nullptr;
+  if (pv.Encoding() == kEncodingStrMap2) {
+    sm = static_cast<StringMap*>(pv.RObjPtr());
+    sm->set_time(0);
+  }
 
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
@@ -211,6 +224,11 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
         commands += aggregator.AddArg(v.ToString());
         return true;
       });
+
+  // Restore time so subsequent operations can trigger lazy expiry again.
+  if (sm)
+    sm->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+
   return commands;
 }
 

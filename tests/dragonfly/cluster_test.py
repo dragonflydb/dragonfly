@@ -1454,7 +1454,8 @@ async def test_migration_serializer_expired_fields(df_factory):
         await nodes[0].client.execute_command("SADDEX", "skey", "1", f"m{i}")
     await nodes[0].client.execute_command("SET", "normal", "val")
 
-    await asyncio.sleep(1.5)
+    # TTL is 1s; wait generously to tolerate slow/loaded CI runners.
+    await asyncio.sleep(2.0)
 
     # HGET/SISMEMBER update time_now_ but only partially expire (one bucket).
     # ExecuteRO sees UpperBoundSize > 0, doesn't clean up.
@@ -1469,7 +1470,7 @@ async def test_migration_serializer_expired_fields(df_factory):
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
     # Without the fix, SAVE on source crashes (DFATAL on empty hash).
-    await nodes[0].admin_client.execute_command("SAVE", "RDB", "test_zombie.rdb")
+    assert await nodes[0].admin_client.execute_command("SAVE", "RDB", "test_zombie.rdb")
 
     nodes[0].migrations = []
     nodes[0].slots = []
