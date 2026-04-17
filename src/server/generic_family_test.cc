@@ -1360,6 +1360,51 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
 }
 
+// Regression: OpFieldExpire for hashes calls SetFieldsExpireTime which triggers
+// lazy field expiry via StringMap::Find(), but does not call DeleteIfEmpty
+// afterward.  When all fields have expired, the hash remains in the DB with
+// Size()==0.  A subsequent SAVE hits the DFATAL in SaveEntry.
+TEST_F(GenericFamilyTest, FieldExpireHashDeletesEmptyHash) {
+  // Create a hash with a short field-level TTL.
+  Run({"HSETEX", "key", "1", "f1", "v1"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "key"}));
+
+  AdvanceTime(2000);
+
+  // FIELDEXPIRE on the already-expired field triggers lazy expiry via Find()
+  // inside UpdateTTL.  Without the fix the hash remains as a zombie key.
+  Run({"FIELDEXPIRE", "key", "5", "f1"});
+
+  // The key must have been removed.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
+}
+
+// SHRINK calls set_time() then DenseSet::Shrink() which expires entries during
+// bucket compaction.  If all entries expire, the key must be deleted.
+TEST_F(GenericFamilyTest, ShrinkDeletesEmptyContainer) {
+  for (int i = 0; i < 128; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+  }
+  for (int i = 4; i < 128; ++i) {
+    Run({"HDEL", "hkey", absl::StrCat("f", i)});
+  }
+
+  for (int i = 0; i < 128; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  for (int i = 4; i < 128; ++i) {
+    Run({"SREM", "skey", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"SHRINK", "hkey"});
+  Run({"SHRINK", "skey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));
