@@ -531,23 +531,8 @@ bool HnswShardIndex::Add(search::GlobalDocId id, const BaseAccessor& doc) {
   return global_index_->Add(id, doc, field_ident_);
 }
 
-void HnswShardIndex::Remove(search::GlobalDocId id, const BaseAccessor& doc, PrimeValue& pv,
-                            absl::Span<const std::string_view> modified_fields,
-                            FieldExtractionCache* cache) {
-  bool sync = global_index_->Remove(id, doc, field_ident_);
-  if (sync) {
-    // Write lock acquired, ProcessDeferred drained all pending ops for this field.
-    ClearPreservedData();
-    return;
-  }
-
-  // Remove was deferred — preserve old sds so hnswlib's stored pointer stays valid.
-  MaybePreserveField(pv, modified_fields, cache);
-}
-
-void HnswShardIndex::RemoveById(search::GlobalDocId id) {
-  [[maybe_unused]] bool sync = global_index_->Remove(id);
-  DCHECK(sync) << "RemoveById should only be called when no read lock is held";
+void HnswShardIndex::Remove(search::GlobalDocId id) {
+  global_index_->Remove(id);
 }
 
 bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc) {
@@ -627,18 +612,17 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
     return;
   }
 
-  auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
   for (auto& hnsw : hnsw_shard_indices_) {
-    hnsw.Remove(global_id, *accessor, pv, modified_fields, cache);
+    hnsw.Remove(global_id);
   }
 }
 
 void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
   for (auto& hnsw : hnsw_shard_indices_) {
-    hnsw.RemoveById(global_id);
+    hnsw.Remove(global_id);
   }
 }
 
@@ -718,7 +702,7 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   // Re-validate each entry: concurrent fibers may have freed and reused the DocId.
   for (const auto& [key, local_id, global_id] : missing_doc_ids) {
     for (auto& hnsw : hnsw_shard_indices_) {
-      hnsw.RemoveById(global_id);
+      hnsw.Remove(global_id);
     }
     // Only remove from key_index_ if the mapping still matches the snapshot.
     if (key_index_.Find(key) == local_id) {
@@ -742,8 +726,22 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   // after BlockUntilConstructionEnd ensures ALL shards completed.
 }
 
+void ShardDocIndex::SetHnswSerializing() {
+  // Only transition from kBuilding. If already in another non-building state
+  // (e.g. kRestoring during load), ops are already being buffered — no change needed.
+  if (hnsw_state_ == HnswState::kBuilding) {
+    hnsw_state_ = HnswState::kSerializing;
+  }
+}
+
+void ShardDocIndex::DrainSerializationUpdates(const OpArgs& op_args) {
+  if (hnsw_state_ != HnswState::kSerializing)
+    return;
+  DrainPendingVectorUpdates(op_args);
+}
+
 void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
-  // All shards have valid vector data now — allow normal HNSW operations.
+  // Allow normal HNSW operations (used after restoration or serialization).
   hnsw_state_ = HnswState::kBuilding;
 
   if (pending_vector_updates_.empty())
