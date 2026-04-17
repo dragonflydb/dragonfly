@@ -1083,3 +1083,129 @@ async def test_vector_search_with_geo_and_tags(async_client: aioredis.Redis):
         ), f"Expected {expected_count} {cat}s, got {result.total}"
 
     await idx.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_ft_search_scorer_bm25std(async_client: aioredis.Redis):
+    """Test FT.SEARCH with SCORER BM25STD and WITHSCORES."""
+    idx = async_client.ft("scorer_idx")
+
+    await idx.create_index(
+        [TextField("content")],
+        definition=IndexDefinition(index_type=IndexType.HASH),
+    )
+
+    # Doc with "hello" appearing multiple times should score higher
+    await async_client.hset("doc:1", mapping={"content": "hello world hello hello"})
+    await async_client.hset("doc:2", mapping={"content": "hello there"})
+    await async_client.hset("doc:3", mapping={"content": "goodbye world"})
+
+    # Raw command: FT.SEARCH scorer_idx "hello" WITHSCORES SCORER BM25STD
+    res = await async_client.execute_command(
+        "FT.SEARCH", "scorer_idx", "hello", "WITHSCORES", "SCORER", "BM25STD"
+    )
+
+    # Response format: [total, key1, score1, fields1, key2, score2, fields2, ...]
+    total = res[0]
+    assert total == 2, f"Expected 2 matches, got {total}"
+
+    # Parse results: each doc is (key, score, fields)
+    docs = {}
+    i = 1
+    while i < len(res):
+        key = str(res[i]) if isinstance(res[i], bytes) else res[i]
+        score = float(res[i + 1])
+        i += 3  # skip key, score, fields
+        docs[key] = score
+
+    assert "doc:1" in docs, f"doc:1 should match, got {docs}"
+    assert "doc:2" in docs, f"doc:2 should match, got {docs}"
+    assert "doc:3" not in docs, f"doc:3 should not match, got {docs}"
+
+    # doc:1 has higher TF for "hello" -> higher score
+    assert docs["doc:1"] > docs["doc:2"], (
+        f"doc:1 (TF=3) should score higher than doc:2 (TF=1), "
+        f"got {docs['doc:1']} vs {docs['doc:2']}"
+    )
+
+    # Scores should be positive
+    assert docs["doc:1"] > 0
+    assert docs["doc:2"] > 0
+
+    await idx.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_ft_search_scorer_invalid(async_client: aioredis.Redis):
+    """Test that invalid scorer name returns error."""
+    idx = async_client.ft("scorer_err_idx")
+
+    await idx.create_index(
+        [TextField("content")],
+        definition=IndexDefinition(index_type=IndexType.HASH),
+    )
+
+    await async_client.hset("doc:1", mapping={"content": "hello"})
+
+    try:
+        await async_client.execute_command(
+            "FT.SEARCH", "scorer_err_idx", "hello", "SCORER", "INVALID_SCORER"
+        )
+        assert False, "Should have raised error for invalid scorer"
+    except Exception as e:
+        assert "scorer" in str(e).lower() or "syntax" in str(e).lower()
+
+    await idx.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_ft_aggregate_addscores(async_client: aioredis.Redis):
+    """Test FT.AGGREGATE with SCORER BM25STD and ADDSCORES."""
+    await async_client.execute_command(
+        "FT.CREATE", "agg_score_idx", "ON", "HASH", "SCHEMA", "content", "TEXT"
+    )
+
+    await async_client.hset("doc:1", mapping={"content": "science science science"})
+    await async_client.hset("doc:2", mapping={"content": "science fiction"})
+    await async_client.hset("doc:3", mapping={"content": "hello world"})
+
+    # FT.AGGREGATE with LOAD first, then SCORER + ADDSCORES + SORTBY @__score DESC
+    res = await async_client.execute_command(
+        "FT.AGGREGATE",
+        "agg_score_idx",
+        "@content:(science)",
+        "LOAD",
+        "1",
+        "@content",
+        "SCORER",
+        "BM25STD",
+        "ADDSCORES",
+        "SORTBY",
+        "2",
+        "@__score",
+        "DESC",
+    )
+
+    total = res[0]
+    assert total == 2, f"Expected 2 matches, got {total}"
+
+    # Parse aggregate results -- each result is a list of field-value pairs
+    results = []
+    for row in res[1:]:
+        entry = {}
+        for j in range(0, len(row), 2):
+            entry[row[j].decode() if isinstance(row[j], bytes) else row[j]] = (
+                row[j + 1].decode() if isinstance(row[j + 1], bytes) else row[j + 1]
+            )
+        results.append(entry)
+
+    # Both results should have __score field
+    for r in results:
+        assert "__score" in r, f"Expected __score field in result: {r}"
+        assert float(r["__score"]) > 0, f"Expected positive score, got {r['__score']}"
+
+    # First result (sorted DESC) should have higher score
+    if len(results) >= 2:
+        assert float(results[0]["__score"]) >= float(results[1]["__score"])
+
+    await async_client.execute_command("FT.DROPINDEX", "agg_score_idx")
