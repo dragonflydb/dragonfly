@@ -2826,6 +2826,14 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
     ds->Shrink(optimal_size);
     size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
 
+    // Shrink expires entries during bucket compaction.  If all entries expired,
+    // delete the now-empty key to prevent zombie keys that crash SAVE.
+    if (ds->Empty()) {
+      if (auto res = db_slice.FindMutable(t->GetDbContext(), key, obj_type); res) {
+        db_slice.DelMutable(t->GetDbContext(), std::move(*res));
+      }
+    }
+
     return bucket_bytes_before - bucket_bytes_after;
   };
 

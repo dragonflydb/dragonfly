@@ -1379,6 +1379,32 @@ TEST_F(GenericFamilyTest, FieldExpireHashDeletesEmptyHash) {
   EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
 }
 
+// SHRINK calls set_time() then DenseSet::Shrink() which expires entries during
+// bucket compaction.  If all entries expire, the key must be deleted.
+TEST_F(GenericFamilyTest, ShrinkDeletesEmptyContainer) {
+  for (int i = 0; i < 128; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+  }
+  for (int i = 4; i < 128; ++i) {
+    Run({"HDEL", "hkey", absl::StrCat("f", i)});
+  }
+
+  for (int i = 0; i < 128; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  for (int i = 4; i < 128; ++i) {
+    Run({"SREM", "skey", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"SHRINK", "hkey"});
+  Run({"SHRINK", "skey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));
