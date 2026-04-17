@@ -1420,6 +1420,22 @@ TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(expire_time_in_ms, CheckedInt({"PEXPIRETIME", "foo"}));
 }
 
+TEST_F(GenericFamilyTest, SortDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"SISMEMBER", "skey", "m0"});
+  // SISMEMBER must not delete the key by itself — SORT is the one that should clean up.
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  Run({"SORT", "skey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, RestoreOOM) {
   max_memory_limit = 20000000;
   Run({"set", "src", string(5000, 'x')});
