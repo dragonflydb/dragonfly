@@ -613,7 +613,8 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
     return std::views::iota(0u, limit_) | std::views::transform([*this, is_all](uint8_t i) {
              uint8_t index = is_all ? i : ids_[i];
              return bucket_iterator{owner_, seg_id_, index};
-           });
+           }) |
+           std::views::filter([](const bucket_iterator& it) { return !it.is_done(); });
   }
 
   bool operator==(const BucketSet& other) const {

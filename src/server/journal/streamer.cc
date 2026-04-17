@@ -432,7 +432,7 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest) {
     return;
 
   VLOG(1) << "RestoreStreamer start";
-  SerializerBase::RegisterChangeListener();
+  SerializerBase::RegisterChangeListener(true);
   JournalStreamer::Start(dest);
 }
 

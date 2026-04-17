@@ -417,7 +417,7 @@ class DbSlice {
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
-  uint64_t RegisterOnChange(ChangeCallback cb);
+  uint64_t RegisterOnChange(bool replica, ChangeCallback cb);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
@@ -571,6 +571,9 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
+  // Returns true if this write could be ignored during replication without losing consistency
+  bool IsOmittableWrite(ChangeReq req);
+
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
     kMutableStats,
@@ -636,7 +639,7 @@ class DbSlice {
   mutable absl::flat_hash_set<uint64_t, FpHasher> uniq_fps_;
 
   // ordered from the smallest to largest version.
-  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::list<std::tuple<uint64_t, bool /* replica */, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of

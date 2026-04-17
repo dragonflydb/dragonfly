@@ -20,9 +20,9 @@ std::error_code Close();
 
 //******* The following functions must be called in the context of the owning shard *********//
 
-unsigned CallbackNumber();
+unsigned GetCallbackCount();
 inline bool HasRegisteredCallbacks() {
-  return CallbackNumber() > 0;
+  return GetCallbackCount() > 0;
 }
 
 bool IsLSNInBuffer(LSN lsn);

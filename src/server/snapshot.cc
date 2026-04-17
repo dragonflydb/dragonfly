@@ -77,7 +77,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
-  SerializerBase::RegisterChangeListener();
+  SerializerBase::RegisterChangeListener(stream_journal);
 
   if (stream_journal) {
     journal_cb_id_ = journal::RegisterConsumer(this);

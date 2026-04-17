@@ -47,7 +47,7 @@ error_code Close() {
   return {};
 }
 
-unsigned CallbackNumber() {
+unsigned GetCallbackCount() {
   return journal_slice.OnChangeCbCount();
 }
 

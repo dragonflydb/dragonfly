@@ -703,7 +703,7 @@ TEST_F(DflyEngineTest, Bug496) {
 
     int cb_hits = 0;
     uint32_t cb_id =
-        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+        db.RegisterOnChange(false, [&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
 
     {
       auto res = *db.AddOrFind({}, "key-1", std::nullopt);
