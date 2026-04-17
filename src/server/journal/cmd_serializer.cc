@@ -88,8 +88,7 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
   // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
   size_t commands = 1;
-  auto obj_type = pv.ObjType();
-  switch (obj_type) {
+  switch (pv.ObjType()) {
     case OBJ_SET:
       commands = SerializeSet(key, pv);
       use_restore_serialization = false;
