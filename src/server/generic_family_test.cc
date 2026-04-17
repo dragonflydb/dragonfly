@@ -1364,13 +1364,33 @@ TEST_F(GenericFamilyTest, ZUnionStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
   }
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
 
   AdvanceTime(2000);
 
-  Run({"SISMEMBER", "skey", "m0"});
+  // ZUNIONSTORE iterates skey via IterateSet (inside ScoreMapFromSet),
+  // triggering lazy expiry.  The empty set must be cleaned up.
   Run({"ZUNIONSTORE", "zdest", "1", "skey"});
 
   EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+// Iterator invalidation: deleting one input set must not break iteration over
+// the remaining ones in UnionShardKeysWithScore.
+TEST_F(GenericFamilyTest, ZUnionStoreMultipleEmptySets) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "s1", "1", absl::StrCat("a", i)});
+    Run({"SADDEX", "s2", "1", absl::StrCat("b", i)});
+    Run({"SADDEX", "s3", "1", absl::StrCat("c", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"ZUNIONSTORE", "zdest", "3", "s1", "s2", "s3"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "s1"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "s2"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "s3"}));
 }
 
 TEST_F(GenericFamilyTest, SortByPatternDeletesEmptySet) {
