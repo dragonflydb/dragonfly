@@ -2794,37 +2794,61 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
-    auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
-    if (!IsValid(it)) {
-      return OpStatus::KEY_NOTFOUND;
+
+    // First, do a read-only check: validate type/encoding and decide whether
+    // shrink is needed.  This avoids bumping the key version, firing WATCH
+    // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+    {
+      auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
+      if (!IsValid(it)) {
+        return OpStatus::KEY_NOTFOUND;
+      }
+
+      const PrimeValue& pv = it->second;
+      unsigned encoding = pv.Encoding();
+      unsigned obj_type = pv.ObjType();
+
+      if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+        return OpStatus::WRONG_TYPE;
+      }
+
+      DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+      size_t current_size = ds->UpperBoundSize();
+      size_t bucket_count = ds->BucketCount();
+
+      if (current_size == 0 || bucket_count == 0) {
+        return 0;
+      }
+
+      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+      if (optimal_size >= bucket_count) {
+        return 0;
+      }
     }
 
-    const PrimeValue& pv = it->second;
-    unsigned encoding = pv.Encoding();
-    unsigned obj_type = pv.ObjType();
-
-    // Only DenseSet-based structures (set or hash with kEncodingStrMap2)
-    if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
-      return OpStatus::WRONG_TYPE;
+    // Shrink is needed — use FindMutable so the AutoUpdater tracks the
+    // MallocUsed() delta (bucket array resize, link changes, expired-entry
+    // deletions) and keeps obj_memory_usage in sync.
+    auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
+    if (!IsValid(it_res.it)) {
+      return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
     }
 
+    PrimeValue& pv = it_res.it->second;
     DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
     ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-    size_t current_size = ds->UpperBoundSize();
-    size_t bucket_count = ds->BucketCount();
 
-    if (current_size == 0 || bucket_count == 0) {
-      return 0;
-    }
-
-    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
-    if (optimal_size >= bucket_count) {
-      return 0;
-    }
-
-    size_t bucket_bytes_before = bucket_count * sizeof(void*);
+    size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
+    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
     ds->Shrink(optimal_size);
     size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+
+    // Shrink expires entries during bucket compaction.  If all entries expired,
+    // delete the now-empty key to prevent zombie keys that crash SAVE.
+    if (ds->Empty()) {
+      db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+    }
 
     return bucket_bytes_before - bucket_bytes_after;
   };

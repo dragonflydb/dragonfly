@@ -873,8 +873,11 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
     SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
     return result;
   } else {
-    return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
-                                           values, pv);
+    auto result = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
+                                                  values, pv);
+    auto_updater.Run();
+    HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, *pv);
+    return result;
   }
 }
 
@@ -1661,7 +1664,15 @@ OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_v
   if (!success)
     return OpStatus::INVALID_NUMERIC_RESULT;
 
-  return it->second.ObjType();
+  auto obj_type = it->second.ObjType();
+
+  // IterateSet may trigger lazy member expiry on sets with member-level TTL.
+  // If all members expired, delete the now-empty key.
+  if (obj_type == OBJ_SET && it->second.Size() == 0) {
+    SetFamily::DeleteSetIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
+  }
+
+  return obj_type;
 }
 
 // Fetch container elements as strings (for BY pattern support)
