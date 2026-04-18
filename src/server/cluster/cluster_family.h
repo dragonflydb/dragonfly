@@ -111,7 +111,8 @@ class ClusterFamily {
   [[nodiscard]] PreparedToRemoveOutgoingMigrations TakeOutOutgoingMigrations(
       std::shared_ptr<ClusterConfig> new_config, std::shared_ptr<ClusterConfig> old_config)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
-  void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations)
+  // Returns non-owned slot ranges from removed migrations for the caller to flush.
+  SlotRanges RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations

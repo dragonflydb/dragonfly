@@ -533,7 +533,7 @@ class DbSlice {
                                              PrimeValue obj, uint64_t expire_at_ms,
                                              bool force_update);
 
-  void FlushSlotsFb(const cluster::SlotSet& slot_ids);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version, uint64_t cb_id);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.

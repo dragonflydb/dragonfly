@@ -80,6 +80,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   using Container = BlockList<C>;
   using VecOrPtr = std::variant<std::vector<DocId>, const Container*>;
 
+  // TextIndex (CompressedSortedSet) supports TF storage and BM25 scoring; TagIndex does not.
+  static constexpr bool kIsScored = std::is_same_v<C, CompressedSortedSet>;
+
   BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
@@ -97,10 +100,38 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Iterate over all nodes matching infix query. Faster if suffix trie is built.
   void MatchInfix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
 
+  // Same as above but also pass the matched term string to the callback (for scoring).
+  void MatchPrefixWithTerm(
+      std::string_view prefix,
+      absl::FunctionRef<void(std::string_view term, const Container*)> cb) const;
+  void MatchSuffixWithTerm(
+      std::string_view suffix,
+      absl::FunctionRef<void(std::string_view term, const Container*)> cb) const;
+  void MatchInfixWithTerm(
+      std::string_view infix,
+      absl::FunctionRef<void(std::string_view term, const Container*)> cb) const;
+
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;
 
   std::vector<DocId> GetAllDocsWithNonNullValues() const override;
+
+  // Per-field BM25 scoring support: document length in this specific field.
+  uint32_t GetFieldDocLength(DocId doc) const {
+    return doc < field_doc_lengths_.size() ? field_doc_lengths_[doc] : 0;
+  }
+
+  // Average document length for this field.
+  // Denominator is field_num_docs_ (docs with non-empty content in this field),
+  // not the total index doc count, so sparse fields get correct BM25 normalization.
+  double GetFieldAvgDocLen() const {
+    return field_num_docs_ > 0 ? static_cast<double>(field_total_docs_len_) / field_num_docs_ : 0.0;
+  }
+
+  // Number of documents that have content in this field.
+  size_t GetFieldNumDocs() const {
+    return field_num_docs_;
+  }
 
  protected:
   using StringList = DocumentAccessor::StringList;
@@ -109,17 +140,26 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   virtual std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                                std::string_view field) const = 0;
 
-  // Used by Add & Remove to tokenize text value
-  virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
+  // Used by Add & Remove to tokenize text value. Returns token -> frequency map.
+  virtual absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const = 0;
 
   cmn::StringOrView NormalizeQueryWord(std::string_view word) const;
-  static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word);
+  static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word,
+                                bool store_freq = false);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
   bool case_sensitive_ = false;
   bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
   search::RaxTreeMap<Container> entries_;
   std::optional<search::RaxTreeMap<Container>> suffix_trie_;
+
+  // Per-field BM25 scoring data (only meaningful for TextIndex / CompressedSortedSet).
+  // Note: field_doc_lengths_ only grows (like FlatVectorIndex::entries_). Slots are zeroed
+  // on Remove but the vector is not shrunk. DocIds are recycled via free_ids_, so slots
+  // get reused over time.
+  std::vector<uint32_t> field_doc_lengths_;  // DocId -> sum of TF in this field
+  size_t field_total_docs_len_ = 0;
+  size_t field_num_docs_ = 0;  // Number of docs with non-empty content in this field
 };
 
 // Index for text fields.
@@ -133,7 +173,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
-  absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
+  absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const override;
 
  private:
   const StopWords* stopwords_;
@@ -153,7 +193,7 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,
                                        std::string_view field) const override;
-  absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
+  absl::flat_hash_map<std::string, uint32_t> Tokenize(std::string_view value) const override;
 
  private:
   char separator_;

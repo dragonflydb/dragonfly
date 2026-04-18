@@ -1378,6 +1378,18 @@ async def test_replication_info(df_factory: DflyInstanceFactory, df_seeder_facto
     await wait_available_async(c_replica)
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
+    # Replica should expose replication metrics
+    replica_metrics = await replica.metrics()
+    assert replica_metrics["dragonfly_master_link_status"].samples[0].value == 1
+    assert replica_metrics["dragonfly_master_sync_in_progress"].samples[0].value == 0
+    assert replica_metrics["dragonfly_master_last_io_seconds_ago"].samples[0].value >= 0
+    assert "dragonfly_slave_repl_offset" in replica_metrics
+
+    # Master should not expose replica-side metrics
+    master_metrics = await master.metrics()
+    assert "dragonfly_master_link_status" not in master_metrics
+    assert "dragonfly_slave_repl_offset" not in master_metrics
+
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
 
@@ -4320,7 +4332,6 @@ async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactor
     assert peak_bytes < MAX_SBF_CHUNK_SIZE
 
 
-@pytest.mark.skip(reason="unstable")
 @pytest.mark.parametrize(
     "master_threads, replica_threads, num_dims",
     [
@@ -4585,3 +4596,40 @@ async def test_replica_no_deadlock_on_disconnect(df_factory: DflyInstanceFactory
 
     assert await c_replica.dbsize() == await c_master.dbsize()
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_hnsw_external_vector_replication_crash(df_factory: DflyInstanceFactory):
+    """
+    Minimal reproducer for SIGSEGV during HNSW replication with external vectors.
+
+    The HNSW graph is global (shared across shards) but is_restoring_vectors_ is per-shard.
+    When one shard finishes RestoreGlobalVectorIndices and starts accepting new HSETs,
+    addPoint() traverses the global graph and may dereference nullptr data pointers
+    from nodes belonging to shards that haven't finished restoration yet.
+    """
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # dim=256 forces external vectors (copy_vector=false).
+    # 500 docs creates a larger HNSW graph, widening the restoration window.
+    seeder = HnswSearchSeeder(num_initial_docs=500, num_dims=256)
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    # Start heavy traffic on master BEFORE replication begins.
+    # This ensures journal events (HSETs) arrive on the replica while HNSW graph
+    # is being restored, triggering addPoint() with nullptr data pointers.
+    traffic_task = asyncio.create_task(seeder.run_traffic(c_master, sleep_interval=0.001))
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    seeder.stop()
+    await traffic_task
+
+    await check_all_replicas_finished([c_replica], c_master, timeout=60)

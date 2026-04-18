@@ -702,8 +702,11 @@ TEST_F(DflyEngineTest, Bug496) {
     auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
+    // RegisterOnChange requires the shard lock to be held (see #7153).
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
     uint32_t cb_id =
         db.RegisterOnChange(false, [&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     {
       auto res = *db.AddOrFind({}, "key-1", std::nullopt);

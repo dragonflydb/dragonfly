@@ -45,7 +45,12 @@ constexpr string_view kSummarySuffix = "summary.dfs"sv;
 
 pair<string, string> GetBucketPath(string_view path) {
   string_view clean = path;
-  auto prefix = absl::StartsWith(clean, kS3Prefix) ? kS3Prefix : kGCSPrefix;
+  string_view prefix = kGCSPrefix;
+  if (absl::StartsWith(clean, kS3Prefix)) {
+    prefix = kS3Prefix;
+  } else if (absl::StartsWith(clean, kAzurePrefix)) {
+    prefix = kAzurePrefix;
+  }
   clean = absl::StripPrefix(clean, prefix);
 
   size_t pos = clean.find('/');
@@ -407,29 +412,44 @@ AzureSnapshotStorage::AzureSnapshotStorage() {
 }
 
 AzureSnapshotStorage::~AzureSnapshotStorage() {
-  util::http::TlsClient::FreeContext(ctx_);
+  if (ctx_)
+    util::http::TlsClient::FreeContext(ctx_);
 }
 
 error_code AzureSnapshotStorage::Init(unsigned connect_ms) {
-  error_code ec = creds_provider_->Init(connect_ms);
-  if (!ec) {
+  RETURN_ERROR(creds_provider_->Init(connect_ms));
+  if (creds_provider_->IsHttps()) {
     ctx_ = util::http::TlsClient::CreateSslContext();
   }
-  return ec;
+
+  return {};
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AzureSnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  return nonstd::make_unexpected(GenericError("Not implemented"));
+  auto [container, key] = GetBucketPath(path);
+  cloud::azure::WriteFileOptions opts;
+  opts.creds_provider = creds_provider_.get();
+  opts.ssl_cntx = ctx_;
+
+  io::Result<io::WriteFile*> dest_res = cloud::azure::OpenWriteFile(container, key, opts);
+  if (!dest_res) {
+    return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
+  }
+
+  return std::pair(*dest_res, FileType::CLOUD);
 }
 
 io::ReadonlyFileOrError AzureSnapshotStorage::OpenReadFile(const std::string& path) {
   if (!IsAzurePath(path))
     return nonstd::make_unexpected(GenericError("Invalid azure path"));
 
-  auto [bucket, key] = GetBucketPath(path);
+  auto [container, key] = GetBucketPath(path);
+  cloud::azure::ReadFileOptions opts;
+  opts.creds_provider = creds_provider_.get();
+  opts.ssl_cntx = ctx_;
 
-  return nonstd::make_unexpected(GenericError("Not implemented"));
+  return cloud::azure::OpenReadFile(container, key, opts);
 }
 
 io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view dir,
@@ -449,7 +469,7 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
   io::Result<vector<SnapStat>, GenericError> keys =
       proactor->Await([this, bucket_name = bucket_name,
                        prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
-        cloud::azure::Storage azure((cloud::azure::Credentials*)creds_provider_.get());
+        cloud::azure::Storage azure(creds_provider_.get());
         vector<SnapStat> res;
         error_code ec =
             azure.List(bucket_name, prefix, false, 500, [&res](const cloud::StorageListItem& item) {
@@ -466,7 +486,7 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
 
   auto match_key = FindMatchingFile(prefix, dbfilename, *keys);
   if (!match_key.empty()) {
-    return absl::StrCat(kGCSPrefix, bucket_name, "/", match_key);
+    return absl::StrCat(kAzurePrefix, bucket_name, "/", match_key);
   }
   return nonstd::make_unexpected(GenericError(
       std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));

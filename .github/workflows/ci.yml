@@ -179,6 +179,8 @@ jobs:
           # Non-release build will not run tests marked as opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
+          azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 
       - name: Upload regression logs on failure
         if: failure()
@@ -215,11 +217,16 @@ jobs:
           # Verify the binary's runtime dependencies and install them in a local image.
           # The binary is built in ubuntu-dev:24 and links dynamically against Boost,
           # which is not present in the minimal ubuntu:24.04 image.
+          #
+          # Note: GitHub Actions runners are hosted on Azure. We rewrite the apt sources
+          # to use Azure's internal Ubuntu mirror to prevent CI failures caused by
+          # rate-limited or corrupted public Canonical mirrors.
           echo "Runtime deps of dragonfly binary:"
           ldd build/dragonfly
           docker build -t df-cgroup-test - <<'EOF'
           FROM ubuntu:24.04
-          RUN apt-get update -qq && \
+          RUN sed -i -E 's@http://(archive|security)\.ubuntu\.com@http://azure.archive.ubuntu.com@g' /etc/apt/sources.list.d/ubuntu.sources && \
+              apt-get update -qq && \
               apt-get install -y --no-install-recommends libboost-context1.83.0 libssl3 && \
               rm -rf /var/lib/apt/lists/*
           EOF
@@ -319,6 +326,8 @@ jobs:
           run-only-on-ubuntu-latest: true
           filter: large
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
+          azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
 
       - name: Upload logs on failure
         if: failure()
