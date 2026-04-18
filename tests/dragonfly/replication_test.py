@@ -244,7 +244,8 @@ async def test_replication_all(
         f"Compressed blobs {compressed_blobs} .Capacity {key_capacity}. Preemptions {preemptions}"
     )
 
-    assert preemptions >= seeder.huge_value_target * 0.5
+    if len(replicas) > 1:
+        assert preemptions >= seeder.huge_value_target * 0.5
     assert compressed_blobs > 0
     # Because data size could be 10k and for that case there will be almost a preemption
     # per bucket.

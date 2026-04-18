@@ -226,24 +226,6 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
-  // Hints for the current operation.
-  struct MutationHints {
-    // Inputs
-    struct {
-      // Operation contains only a single key
-      bool single_key = false;
-
-      // Support omitting journal writes
-      bool support_omit = false;
-    } const hint;
-
-    // Outputs
-    struct {
-      // The journal write is safe to be omitted
-      bool omit_journal = false;
-    } result = {};
-  };
-
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
@@ -270,9 +252,11 @@ class DbSlice {
     Iterator it;
     AutoUpdater post_updater;
     bool is_new = false;
-  };
 
-  void ProvideHints(MutationHints* hints);
+    // Set if DbContext::is_omittable_operation was set and the conditions were met.
+    // Means that the journal write should NOT be performed.
+    bool omitted_journal = false;
+  };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
@@ -572,7 +556,7 @@ class DbSlice {
   void CreateDb(DbIndex index);
 
   // Returns true if this write could be ignored during replication without losing consistency
-  bool IsOmittableWrite(ChangeReq req);
+  bool IsOmittableWrite(const Context& cntx, ChangeReq req);
 
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
@@ -656,9 +640,6 @@ class DbSlice {
 
   // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
   bool expired_keys_events_recording_ = true;
-
-  // Provided for the next FindMutableInternal operation
-  MutationHints* mutation_hints_ = nullptr;
 
   struct Hash {
     size_t operator()(const facade::ConnectionRef& c) const {

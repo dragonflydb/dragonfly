@@ -530,11 +530,6 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
   DCHECK(IsValid(it));
 }
 
-void DbSlice::ProvideHints(MutationHints* hints) {
-  DCHECK(!mutation_hints_);
-  mutation_hints_ = hints;
-}
-
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
   return std::move(FindMutableInternal(cntx, key, std::nullopt).value());
 }
@@ -675,12 +670,16 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
 
-    if (!IsOmittableWrite(it.GetInnerIt()))
+    bool omitted_journal = IsOmittableWrite(cntx, it.GetInnerIt());
+    if (!omitted_journal)
       PreUpdateBlocking(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
     if (res->IsOccupied()) {
-      return ItAndUpdater{.it = it, .post_updater{cntx.db_index, key, it, this}, .is_new = false};
+      return ItAndUpdater{.it = it,
+                          .post_updater{cntx.db_index, key, it, this},
+                          .is_new = false,
+                          .omitted_journal = omitted_journal};
     } else {
       res = OpStatus::KEY_NOTFOUND;
     }
@@ -689,16 +688,15 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   }
 
   // It's a new entry.
-
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
-  bool omit_update = false;
+  bool omit_journal = false;
   if (!change_cb_.empty()) {
     auto bucket_set = db.prime.CVCUponInsert(key);
 
-    omit_update = IsOmittableWrite({bucket_set});
-    if (!omit_update)
+    omit_journal = IsOmittableWrite(cntx, {bucket_set});
+    if (!omit_journal)
       CallChangeCallbacks(cntx.db_index, bucket_set);
 
     // Set of possible insertion buckets must be the same after possibly blocking call
@@ -793,7 +791,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
 
-  if (!omit_update)
+  if (!omit_journal)
     it.SetVersion(NextVersion());
 
   TouchTopKeysIfNeeded(key, db.sample_top_keys);
@@ -812,7 +810,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   return ItAndUpdater{
       .it = Iterator(it, StringOrView::FromView(key)),
       .post_updater{cntx.db_index, key, Iterator(it, StringOrView::FromView(key)), this},
-      .is_new = true};
+      .is_new = true,
+      .omitted_journal = omit_journal};
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -1910,7 +1909,7 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 // 2. there is a single eventually-consistent snapshot (i.e. replica full sync)
 // 3. there are no other journal consumers
 // 4. the snapshot did not reach the bucket yet
-bool DbSlice::IsOmittableWrite(ChangeReq req) {
+bool DbSlice::IsOmittableWrite(const Context& cntx, ChangeReq req) {
   auto cb1 = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
   auto cb2 = [cb1](const PrimeTable::BucketSet& bs) -> uint64_t {
     if (std::ranges::empty(bs.buckets()))
@@ -1919,15 +1918,12 @@ bool DbSlice::IsOmittableWrite(ChangeReq req) {
   };
 
   bool omit_update = false;
-  if (auto* mutation = std::exchange(mutation_hints_, nullptr); mutation) {
+  if (cntx.is_omittable_operation) {
     uint64_t max_v = std::visit(Overloaded{cb1, cb2}, req);
-    bool allowed_op = mutation->hint.single_key && mutation->hint.support_omit;
     bool allowed_snapshot = change_cb_.size() == 1 && std::get<1>(change_cb_.front()) &&
                             max_v < std::get<0>(change_cb_.front());
-    omit_update = allowed_op && allowed_snapshot && journal::GetCallbackCount() == 1;
-
+    omit_update = allowed_snapshot && journal::GetCallbackCount() == 1;
     events_.journal_omit += unsigned(omit_update);
-    mutation->result.omit_journal = omit_update;
   }
   return omit_update;
 }
