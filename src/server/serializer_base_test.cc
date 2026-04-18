@@ -7,12 +7,16 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/random/distributions.h>
 #include <absl/random/random.h>
+#include <gtest/gtest.h>
 
 #include <atomic>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <chrono>
+#include <queue>
 
-#include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/facade_test.h"
+#include "facade/resp_expr.h"
 #include "io/io.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -23,22 +27,93 @@
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
+#include "server/table.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
+
+using namespace std::chrono_literals;
 
 namespace dfly {
 
+// Driver for "artificially" resolving delayed entries with some delay
+// driven by a fiber in the background
+struct TestDelayDriver {
+  using Fut = util::fb2::Future<io::Result<std::string>>;
+  using OrdEntry = std::pair<std::chrono::steady_clock::time_point, Fut>;
+
+  struct Comp {
+    bool operator()(const OrdEntry& e1, const OrdEntry& e2) const {
+      return e1.first > e2.first;
+    }
+  };
+
+  Fut Enqeue(unsigned delay_us) {
+    auto tp = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
+    Fut future{};
+    q_.emplace(tp, future);
+    return future;
+  }
+
+  void Loop() {
+    while (!done) {
+      util::fb2::NoOpLock lock;
+      var_.wait(lock, [this]() { return done || (!paused && !q_.empty()); });
+
+      while (!paused && !done && !q_.empty()) {
+        auto entry = q_.top();
+        q_.pop();
+
+        util::ThisFiber::SleepUntil(entry.first);
+        entry.second.Resolve(std::string{});
+      }
+    }
+  }
+
+  void Pause() {
+    paused = true;
+    var_.notify_all();
+  }
+
+  void Resume() {
+    paused = false;
+    var_.notify_all();
+  }
+
+  void Start() {
+    resolver_fb_ = {std::bind_front(&TestDelayDriver::Loop, this)};
+  }
+
+  void Stop() {
+    done = true;
+    var_.notify_all();
+    resolver_fb_.JoinIfNeeded();
+  }
+
+  bool done = false;
+  bool paused = false;
+  util::fb2::CondVarAny var_;
+
+  std::priority_queue<OrdEntry, std::vector<OrdEntry>, Comp> q_;
+  util::fb2::Fiber resolver_fb_;
+};
+
 struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
-  TestDriver(DbSlice* slice, ExecutionState* cntx, CommandRegistry* reg)
-      : SerializerBase(slice, cntx), reg_{reg} {
+  struct Params {
+    float delay_prob = 0.0;
+    std::pair<unsigned, unsigned> delay_lat_us = {0, 100};
+  };
+
+  TestDriver(Params params, DbSlice* slice, ExecutionState* cntx, CommandRegistry* reg)
+      : SerializerBase(slice, cntx), params_{params}, reg_{reg} {
   }
 
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
   void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
-    Serialize(tde.key.ToString());
+    RecordSerialized(tde.key.ToString());
   }
 
   void ConsumeJournalChange(const journal::JournalChangeItem& item) override;
@@ -49,7 +124,20 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   // TODO: possibly replace with unified loop if we decide on this?
   void Loop();
 
-  void Serialize(std::string key) {
+  void Serialize(BucketIdentity bucket, std::string key) {
+    if (absl::Bernoulli(bg_, params_.delay_prob)) {
+      DelayedEntryHandler::deps_.Increment(bucket);
+      unsigned delay = absl::Uniform(bg_, params_.delay_lat_us.first, params_.delay_lat_us.second);
+      auto de = std::make_unique<TieredDelayedEntry>(0, CompactKey{key},
+                                                     delay_driver_.Enqeue(delay), 0, 0);
+      DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
+    } else {
+      RecordSerialized(std::move(key));
+    }
+  }
+
+  void RecordSerialized(std::string key) {
+    EXPECT_FALSE(emitted_baselines_.contains(key));
     EXPECT_FALSE(seen_journal_keys_.contains(key));  // No journal entries must exist for this key
     emitted_baselines_.emplace(std::move(key));
   }
@@ -64,13 +152,17 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
       journal::UnregisterConsumer(journal_id_);
       UnregisterChangeListener();
     }};
+
+    delay_driver_.Start();
   }
 
   auto Finish() {
+    delay_driver_.Stop();
     snapshot_fb_.JoinIfNeeded();
     return std::make_pair(GetStats(), std::move(emitted_baselines_));
   }
 
+  Params params_;
   CommandRegistry* reg_;
 
   absl::InsecureBitGen bg_;
@@ -78,6 +170,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   util::fb2::Fiber snapshot_fb_;
   PrimeTable::Cursor snapshot_cursor_;
   uint32_t journal_id_;
+
+  // subdriver for delayed entries
+  TestDelayDriver delay_driver_;
 
   absl::flat_hash_set<std::string> emitted_baselines_;
   absl::flat_hash_set<std::string> seen_journal_keys_;
@@ -146,7 +241,7 @@ unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
-    Serialize(it->first.ToString());
+    Serialize(it.bucket_address(), it->first.ToString());
     ++serialized;
 
     while (absl::Bernoulli(bg_, 0.3)) {
@@ -179,6 +274,12 @@ class SerializerBaseTest : public BaseFamilyTest {
     return res;
   }
 
+  void Change(auto cb) {
+    pp_->at(0)->Await([this, cb] { cb(*driver_); });
+  }
+
+  TestDriver::Params driver_params;
+
  private:
   void StartOnThread() {
     auto* reg = service_->mutable_registry();
@@ -187,7 +288,7 @@ class SerializerBaseTest : public BaseFamilyTest {
     tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
 
     tx->ScheduleSingleHop([this, reg](Transaction* t, EngineShard* es) {
-      driver_.emplace(&t->GetDbSlice(es->shard_id()), &cntx_, reg);
+      driver_.emplace(driver_params, &t->GetDbSlice(es->shard_id()), &cntx_, reg);
       driver_->Start();
       return OpStatus::OK;
     });
@@ -261,4 +362,38 @@ TEST_F(SerializerBaseTest, NewValues) {
     w.Join();
 }
 
+// During delayed read of a tiered value, it can be come expired.
+// Mass expity of items can cause previously occupied buckets to become empty.
+// Serialization code has many paths that omit empty bucket checks at all -
+// assert those "lost" delayed reads are correctly flushed before new changes
+TEST_F(SerializerBaseTest, DelayedAllDeleted) {
+  // 1-2 ms
+  driver_params = {.delay_prob = 0.9, .delay_lat_us = {1000, 2000}};
+
+  // Fill database with some keys
+  const size_t kKeys = 10000;
+  Run({"DEBUG", "POPULATE", std::to_string(kKeys)});
+
+  // Set short expiry (10ms)
+  for (unsigned i = 0; i < kKeys; i++)
+    Run({"PEXPIRE", absl::StrCat("key:", i), "10"});
+
+  // Start and pause reolution of delayed entries
+  Start();
+  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
+
+  // Let all values to be expire deleted
+  TEST_current_time_ms = TEST_current_time_ms + 100;
+  for (unsigned i = 0; i < kKeys; i++)
+    EXPECT_THAT(Run({"GET", absl::StrCat("key:", i)}), ArgType(RespExpr::NIL));
+
+  // Reallow resolution
+  Change([](TestDriver& d) { d.delay_driver_.Resume(); });
+
+  // Trigger changes with dels
+  for (unsigned i = 0; i < kKeys; i++)
+    Run({"SET", absl::StrCat("key:", i), "V"});
+
+  Finish();
+}
 }  // namespace dfly
