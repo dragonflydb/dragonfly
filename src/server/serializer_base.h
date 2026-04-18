@@ -132,9 +132,6 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   ThreadLocalMutex stream_mu_;
 
  private:
-  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
-  bool ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
-
   uint64_t change_cb_id_ = 0;
 };
 
