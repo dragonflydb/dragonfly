@@ -1,3 +1,4 @@
+{{- include "dragonfly.validateMemcached" . }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -22,8 +23,14 @@ spec:
   {{- end }}
   ports:
     - port: {{ .Values.service.port }}
-      targetPort: dragonfly
+      targetPort: {{ .Values.service.targetPort }}
       protocol: TCP
       name: dragonfly
+    {{- if and .Values.memcached .Values.memcached.enabled }}
+    - port: {{ .Values.memcached.port }}
+      targetPort: memcached
+      protocol: TCP
+      name: memcached
+    {{- end }}
   selector:
     {{- include "dragonfly.selectorLabels" . | nindent 4 }}
