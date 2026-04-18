@@ -202,9 +202,10 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
 #ifdef WITH_AWS
   std::shared_ptr<Aws::S3::S3Client> s3_;
-#elif WITH_AWS_CLOUD
+#elif defined(WITH_AWS_CLOUD)
   util::cloud::aws::AwsCredsProvider creds_provider_;
   SSL_CTX* ctx_ = nullptr;
+  bool https_ = true;
 #endif
 };
 

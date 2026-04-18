@@ -33,9 +33,9 @@ inputs:
     default: 'NoSanitizers'
     type: string
   with-aws:
-    description: "Build with AWS support"
+    description: "Build with AWS SDK support (legacy aws-sdk-cpp). Defaults to OFF; S3 is served via WITH_AWS_CLOUD."
     required: false
-    default: 'ON'
+    default: 'OFF'
     type: string
   targets:
     description: "Build targets to compile"
@@ -80,6 +80,7 @@ runs:
         CMAKE_CMD+=(
           -DPRINT_STACKTRACES_ON_SIGNAL=ON
           -DWITH_AWS="${{ inputs.with-aws }}"
+          -DWITH_AWS_CLOUD=ON
           -DWITH_GCP=OFF
           -DWITH_UNWIND=OFF
           -DWITH_GPERF=OFF
