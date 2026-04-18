@@ -20,7 +20,6 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/family_utils.h"
-#include "server/hset_family.h"
 #include "server/search/doc_accessors.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/search/index_builder.h"
@@ -810,7 +809,8 @@ optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
   if (!it || !IsValid(*it))
     return std::nullopt;
 
-  return {{key, GetAccessor(op_args.db_cntx, (*it)->second)}};
+  // Pass key so StringMapAccessor can clean up if lazy expiry empties the hash.
+  return {{key, GetAccessor(op_args.db_cntx, (*it)->second, key)}};
 }
 
 vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
@@ -948,18 +948,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto more_fields = accessor->Serialize(base_->schema, return_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
     out.push_back({result.ids[i], string{key}, std::move(fields), knn_score, sort_score});
-
-    // Serialize iterates StringMap, triggering lazy field expiry.
-    // If all fields expired, delete the now-empty hash.
-    if (base_->GetObjCode() == OBJ_HASH) {
-      auto chk = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
-      if (chk && IsValid(*chk) && (*chk)->second.Size() == 0) {
-        // Copy key: DelMutable inside DeleteIfEmpty may trigger a doc-deletion
-        // callback that mutates key_index_ and invalidates our string_view.
-        string owned_key{key};
-        HSetFamily::DeleteIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, owned_key, (*chk)->second);
-      }
-    }
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
