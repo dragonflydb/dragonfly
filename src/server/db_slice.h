@@ -8,7 +8,6 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <atomic>
-#include <ranges>
 
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
@@ -398,10 +397,6 @@ class DbSlice {
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
-  }
-
-  auto SnapshotVersions() const {
-    return change_cb_ | std::views::keys;
   }
 
   // Call registered callbacks with version less than upper_bound.
