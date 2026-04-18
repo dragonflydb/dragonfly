@@ -1360,6 +1360,23 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
 }
 
+TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  // ZINTERSTORE needs at least one non-empty input to reach ScoreMapFromSet.
+  Run({"ZADD", "zkey", "1", "m0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  AdvanceTime(2000);
+
+  // ZINTERSTORE iterates skey via IterateSet (inside ScoreMapFromSet),
+  // triggering lazy expiry.  The empty set must be cleaned up.
+  Run({"ZINTERSTORE", "zdest", "2", "skey", "zkey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, ZUnionStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
