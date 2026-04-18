@@ -1371,6 +1371,18 @@ async def test_replication_info(df_factory: DflyInstanceFactory, df_seeder_facto
     await wait_available_async(c_replica)
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
+    # Replica should expose replication metrics
+    replica_metrics = await replica.metrics()
+    assert replica_metrics["dragonfly_master_link_status"].samples[0].value == 1
+    assert replica_metrics["dragonfly_master_sync_in_progress"].samples[0].value == 0
+    assert replica_metrics["dragonfly_master_last_io_seconds_ago"].samples[0].value >= 0
+    assert "dragonfly_slave_repl_offset" in replica_metrics
+
+    # Master should not expose replica-side metrics
+    master_metrics = await master.metrics()
+    assert "dragonfly_master_link_status" not in master_metrics
+    assert "dragonfly_slave_repl_offset" not in master_metrics
+
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
 

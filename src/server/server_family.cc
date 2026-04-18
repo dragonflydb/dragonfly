@@ -2150,6 +2150,24 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
 
+  // Replication Info
+  if (m.replica_side_info) {
+    const ReplicaSummary& rsummary = m.replica_side_info->summary;
+    AppendMetricWithoutLabels("master_link_status", "1 if up 0 if down",
+                              rsummary.master_link_established ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    AppendMetricWithoutLabels("master_last_io_seconds_ago", "Last Master IO Seconds Ago",
+                              rsummary.master_last_io_sec, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("master_sync_in_progress", "1 if true 0 if false",
+                              rsummary.full_sync_in_progress ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    // Print last known offset either during stable sync (online) or during disconnects when
+    // the full sync phase did not start yet.
+    if (rsummary.full_sync_done || (rsummary.passed_full_sync && !rsummary.master_link_established))
+      AppendMetricWithoutLabels("slave_repl_offset", "Slave Replication Offset",
+                                rsummary.repl_offset_sum, MetricType::GAUGE, &resp->body());
+  }
+
   // Stream access pattern metrics
   if (m.shard_stats.stream_sequential_accesses || m.shard_stats.stream_random_accesses ||
       m.shard_stats.stream_fetch_all_accesses) {
