@@ -1393,6 +1393,33 @@ TEST_F(GenericFamilyTest, DebugUniqStrsDeletesEmptyContainers) {
   EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
 }
 
+// Regression: TraverseAllEntries walks every DB but the callback used the
+// connection-selected DB for deletion.  A zombie in DB 1 could cause a
+// same-named non-empty key in DB 0 to be deleted incorrectly.
+TEST_F(GenericFamilyTest, DebugObjHistMultiDbCorrectDb) {
+  // Live hash in DB 0 under the same key name as the zombie in DB 1.
+  Run({"SELECT", "0"});
+  Run({"HSET", "shared", "alive", "value"});
+
+  Run({"SELECT", "1"});
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "shared", "1", absl::StrCat("f", i), "v"});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "shared", "f0"});  // enable lazy expiry on DB 1's hash
+  Run({"DEBUG", "OBJHIST"});
+
+  // Zombie in DB 1 must be deleted.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "shared"}));
+
+  // Live hash in DB 0 must survive.
+  Run({"SELECT", "0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "shared"}));
+  EXPECT_EQ("value", Run({"HGET", "shared", "alive"}));
+}
+
 TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
