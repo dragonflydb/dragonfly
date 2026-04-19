@@ -110,7 +110,7 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
 
   // Non-restored path: rebuilding HNSW from scratch. Clear the restoring flag and discard
   // any pending updates — the full table traversal below will pick up all current documents.
-  index_->is_restoring_vectors_ = false;
+  index_->hnsw_state_ = ShardDocIndex::HnswState::kBuilding;
   index_->pending_vector_updates_.clear();
 
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {

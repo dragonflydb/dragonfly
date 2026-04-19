@@ -2665,6 +2665,7 @@ void Connection::NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n) 
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
     UpdateIoBufCapacity(io_buf_, &tl_facade_stats->conn_stats,
                         [&]() { io_buf_.WriteAndCommit(buf.data(), buf.size()); });
+    last_interaction_ = time(nullptr);
   } else {
     LOG(FATAL) << "Should not reach here";
   }
@@ -2693,6 +2694,7 @@ void Connection::ReadPendingInput() {
       break;
     }
 
+    last_interaction_ = time(nullptr);
     io_buf_.CommitWrite(*res);
     buf = io_buf_.AppendBuffer();
   }
@@ -2803,6 +2805,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // await block (no data to read)
     if (io_buf_.InputLen() == 0) {
+      phase_ = READ_SOCKET;
+
       io_event_.await([this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.

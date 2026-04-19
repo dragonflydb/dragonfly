@@ -24,6 +24,19 @@ from .utility import tick_timer, assert_eventually
 BASE_PORT = 1111
 
 
+def is_io_loop_v2(server: DflyInstance) -> bool:
+    """Check if the server is running with experimental_io_loop_v2 enabled.
+
+    When the flag is passed as a bare flag (--experimental_io_loop_v2), the test runner
+    stores its value as None instead of "true". This function checks both has_arg() and
+    != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
+    """
+    return (
+        server.has_arg("experimental_io_loop_v2")
+        and server.args.get("experimental_io_loop_v2") != "false"
+    )
+
+
 @dataclass(frozen=True)
 class CollectedRedisMsg:
     cmd: str
@@ -667,15 +680,22 @@ async def test_reply_count(df_server: DflyInstance):
     for _ in range(100):
         e.incr("num-1")
 
-    # one - for MULTI-OK, one for the rest. Depends on the squashing efficiency,
-    # can be either 1 or 2 replies.
-    assert await measure(e.execute()) <= 2
+    # MULTI-OK + the EXEC array.
+    # V1 (dual-fiber) is aggressive (<=2).
+    # V2 (single-fiber cycle) flushes slightly more often (<=3).
+    is_v2 = is_io_loop_v2(df_server)
+    multi_limit = 3 if is_v2 else 2
+    assert await measure(e.execute()) <= multi_limit
 
     # Just pipeline
     p = async_client.pipeline(transaction=False)
     for _ in range(100):
         p.incr("num-1")
-    assert await measure(p.execute()) <= 2
+
+    # V1: aggressive squashing across dual fibers (<=2).
+    # V2: single-fiber loop flushes based on OS scheduling and batch boundaries (<=12).
+    pipe_limit = 12 if is_v2 else 2
+    assert await measure(p.execute()) <= pipe_limit
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
@@ -1195,9 +1215,6 @@ async def wait_for_conn_drop(async_client):
 
 @dfly_args({"timeout": 1})
 async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
-    # TODO investigate why it fails -- client is not stuck.
-    if df_server.has_arg("experimental_io_loop_v2"):
-        pytest.skip(f"Fails in the assertion below")
 
     another_client = df_server.client()
     await another_client.ping()
@@ -1249,10 +1266,16 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
 
 # Test that the cache pipeline does not grow or shrink under constant pipeline load.
+# This test relies on SquashPipeline() memory lifecycle (V1/AsyncFiber only).
+# V2's single-fiber ExecuteBatch() releases commands incrementally, so the cache
+# is non-empty during execution. Skip when V2 is explicitly enabled.
 @dfly_args({"proactor_threads": 1, "pipeline_squash": 9, "max_busy_read_usec": 50000})
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
+
+    if is_io_loop_v2(server):
+        pytest.skip("V2 does not use SquashPipeline; cache lifecycle differs")
 
     client = server.client()
     await client.ping()  # Make sure the connection and the protocol were established

@@ -5444,4 +5444,26 @@ TEST_F(DocKeyIndexTest, RestoreRoundTripsEmptyKey) {
   EXPECT_EQ(restored.Add("doc3"), id0);  // freed slot is reused
 }
 
+// FT.SEARCH loads documents via GetAccessor → GetStringMap (set_time) → Serialize
+// which iterates the StringMap triggering lazy field expiry.  If all fields expired,
+// the hash must be cleaned up — not left as a zombie that crashes SAVE.
+TEST_F(SearchFamilyTest, SearchDeletesEmptyHash) {
+  Run({"ft.create", "idx", "PREFIX", "1", "d:", "SCHEMA", "foo", "TEXT"});
+
+  // Create documents with field-level TTL.
+  for (int i = 0; i < 10; ++i) {
+    Run({"HSETEX", absl::StrCat("d:", i), "1", "foo", absl::StrCat("bar", i)});
+  }
+
+  AdvanceTime(2000);
+
+  // FT.SEARCH triggers GetStringMap(set_time) + Serialize which iterates all fields.
+  // Lazy expiry deletes them.  Without fix, empty hashes remain as zombies.
+  Run({"ft.search", "idx", "*"});
+
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_EQ(0, CheckedInt({"EXISTS", absl::StrCat("d:", i)}));
+  }
+}
+
 }  // namespace dfly

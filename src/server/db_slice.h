@@ -8,7 +8,6 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <atomic>
-#include <ranges>
 
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
@@ -400,10 +399,6 @@ class DbSlice {
     return !change_cb_.empty();
   }
 
-  auto SnapshotVersions() const {
-    return change_cb_ | std::views::keys;
-  }
-
   // Call registered callbacks with version less than upper_bound.
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
@@ -526,7 +521,7 @@ class DbSlice {
                                              PrimeValue obj, uint64_t expire_at_ms,
                                              bool force_update);
 
-  void FlushSlotsFb(const cluster::SlotSet& slot_ids);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version, uint64_t cb_id);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
