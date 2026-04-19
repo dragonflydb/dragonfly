@@ -807,7 +807,8 @@ optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
   if (!it || !IsValid(*it))
     return std::nullopt;
 
-  return {{key, GetAccessor(op_args.db_cntx, (*it)->second)}};
+  // Pass key so StringMapAccessor can clean up if lazy expiry empties the hash.
+  return {{key, GetAccessor(op_args.db_cntx, (*it)->second, key)}};
 }
 
 vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
