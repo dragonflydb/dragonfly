@@ -366,7 +366,7 @@ class ShardDocIndex {
   std::vector<SearchDocData> LoadHnswRangeDocsForAggregator(
       const OpArgs& op_args, const AggregateParams& params,
       absl::Span<const std::pair<search::DocId, float>> doc_distances, std::string_view score_alias,
-      const absl::flat_hash_map<search::DocId, float>& text_score_map = {}) const;
+      const absl::flat_hash_map<search::DocId, float>& text_score_map) const;
 
   // Methods needed for join operation
   join::Vector<join::OwnedEntry> PreagregateDataForJoin(
@@ -481,7 +481,7 @@ class ShardDocIndex {
   std::vector<SearchDocData> LoadDocEntriesWithScores(
       const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
       std::string_view score_alias, const absl::flat_hash_map<search::DocId, float>& score_map,
-      const absl::flat_hash_map<search::DocId, float>& text_score_map = {}) const;
+      const absl::flat_hash_map<search::DocId, float>& text_score_map) const;
 
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
