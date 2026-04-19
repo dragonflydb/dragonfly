@@ -153,11 +153,12 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
 
-    if (it.is_done())
-      return false;
+    // Update versions for empty buckets
+    if (it.GetVersion() < snapshot_version_)
+      it.SetVersion(snapshot_version_);
 
     // Force flush all delayed entries in the touched bucket
-    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update && !it.is_done())
+    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
 
     // Expected to be fully serialized due to big_value_mu_ guarding all paths
