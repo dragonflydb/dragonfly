@@ -3,6 +3,8 @@
 
 #include "server/detail/snapshot_storage.h"
 
+#include <absl/base/optimization.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 
@@ -19,6 +21,8 @@
 #include "util/aws/s3_write_file.h"
 #endif
 
+#include "util/cloud/aws/s3_storage.h"
+
 #ifdef WITH_GCP
 #include "util/cloud/gcp/gcs_file.h"
 #endif
@@ -31,6 +35,11 @@
 #include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/azure/storage.h"
 #include "util/fibers/fiber_file.h"
+
+// Selects between the helio-native S3 client (util::cloud::aws) and aws-sdk-cpp.
+// Only meaningful when WITH_AWS is compiled in; otherwise the helio client is used.
+ABSL_FLAG(bool, s3_use_helio_client, true,
+          "If true, use helio's native S3 client; if false, use aws-sdk-cpp");
 
 namespace rng = std::ranges;
 namespace dfly {
@@ -541,12 +550,34 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
   return {};
 }
 
-#if defined(WITH_AWS_CLOUD) || defined(WITH_AWS)
-
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
                                            bool ec2_metadata, bool sign_payload) {
 #ifdef WITH_AWS
+  use_helio_ = absl::GetFlag(FLAGS_s3_use_helio_client);
+#else
+  use_helio_ = true;
+#endif
+
+  if (use_helio_) {
+    https_ = https;
+    if (!ec2_metadata) {
+      setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
+    }
+    // AwsCredsProvider reads AWS_S3_ENDPOINT at ServiceEndpoint() time; setting it here lets
+    // callers override the default S3 endpoint (e.g. for MinIO tests).
+    if (!endpoint.empty()) {
+      string endpoint_url = absl::StrCat(https ? "https://" : "http://", endpoint);
+      setenv("AWS_S3_ENDPOINT", endpoint_url.c_str(), 1);
+    }
+    (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
+    LOG(INFO) << "Creating AWS S3 client (helio); https=" << std::boolalpha << https
+              << "; endpoint=" << endpoint;
+    return;
+  }
+
+#ifdef WITH_AWS
   shard_set->pool()->GetNextProactor()->Await([&] {
+    util::aws::Init();
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
     }
@@ -556,8 +587,8 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
     s3_conf.checksumConfig.responseChecksumValidation =
         Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
 
-    LOG(INFO) << "Creating AWS S3 client; region=" << s3_conf.region << "; https=" << std::boolalpha
-              << https << "; endpoint=" << endpoint;
+    LOG(INFO) << "Creating AWS S3 client (sdk); region=" << s3_conf.region
+              << "; https=" << std::boolalpha << https << "; endpoint=" << endpoint;
     if (!sign_payload) {
       s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
     }
@@ -572,34 +603,45 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
 }
 
 AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
-#if defined(WITH_AWS_CLOUD) && !defined(WITH_AWS)
-  util::http::TlsClient::FreeContext(ctx_);
-#endif
+  if (ctx_) {
+    util::http::TlsClient::FreeContext(ctx_);
+  }
 }
 
 error_code AwsS3SnapshotStorage::Init(unsigned connect_ms) {
-#if defined(WITH_AWS_CLOUD) && !defined(WITH_AWS)
-  error_code ec = creds_provider_.Init(connect_ms);
-  if (ec)
-    return ec;
-
-  ctx_ = util::http::TlsClient::CreateSslContext();
-  if (!ctx_) {
-    return make_error_code(std::errc::operation_not_permitted);
+  if (!use_helio_) {
+    return {};
   }
-#endif
+
+  RETURN_ERROR(creds_provider_.Init(connect_ms));
+
+  if (https_) {
+    ctx_ = util::http::TlsClient::CreateSslContext();
+    if (!ctx_) {
+      return make_error_code(std::errc::operation_not_permitted);
+    }
+  }
   return {};
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
-#ifdef WITH_AWS
-  optional<pair<string, string>> bucket_path = GetBucketPath(path);
-  if (!bucket_path) {
-    return nonstd::make_unexpected(GenericError("Invalid S3 path"));
-  }
-  auto [bucket, key] = *bucket_path;
+  if (use_helio_) {
+    auto [bucket, key] = GetBucketPath(path);
+    cloud::aws::WriteFileOptions opts;
+    opts.creds_provider = &creds_provider_;
+    opts.ssl_cntx = ctx_;
 
+    io::Result<io::WriteFile*> dest_res = cloud::aws::OpenWriteFile(bucket, key, opts);
+    if (!dest_res) {
+      return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
+    }
+
+    return std::pair<io::Sink*, uint8_t>(*dest_res, FileType::CLOUD);
+  }
+
+#ifdef WITH_AWS
+  auto [bucket, key] = GetBucketPath(path);
   fb2::ProactorBase* proactor = ProactorBase::me();
 
   // We run S3 operations via a temporary fiber to avoid agressive stack consumption.
@@ -619,22 +661,27 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
 
   return result;
 #else
-  return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
+  ABSL_UNREACHABLE();
 #endif
 }
 
-io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(
-    [[maybe_unused]] const std::string& path) {
-#ifdef WITH_AWS
+io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
   VLOG(1) << "Opening S3 read file: " << path;
-  std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
-  if (!bucket_path) {
+  if (!IsS3Path(path))
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
+
+  auto [bucket, key] = GetBucketPath(path);
+  if (use_helio_) {
+    cloud::aws::ReadFileOptions opts;
+    opts.creds_provider = &creds_provider_;
+    opts.ssl_cntx = ctx_;
+    return cloud::aws::OpenReadFile(bucket, key, opts);
   }
-  auto [bucket, key] = *bucket_path;
+
+#ifdef WITH_AWS
   return new aws::S3ReadFile(bucket, key, s3_);
 #else
-  return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
+  ABSL_UNREACHABLE();
 #endif
 }
 
@@ -719,7 +766,28 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   // We use a random proactor because this function might be called from the main thread.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
 
-#if defined(WITH_AWS)
+  if (use_helio_) {
+    // TODO: use continuation_token.
+    string adjusted_prefix(prefix);
+    if (!prefix.empty() && prefix.back() != '/') {
+      adjusted_prefix.push_back('/');
+    }
+
+    error_code ec = proactor->Await([&]() -> error_code {
+      cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
+      return s3.List(bucket_name, adjusted_prefix, false, 1000,
+                     [&keys](const cloud::StorageListItem& item) {
+                       keys.emplace_back(string(item.key), item.mtime_ns);
+                     });
+    });
+
+    if (ec) {
+      return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
+    }
+    return keys;
+  }
+
+#ifdef WITH_AWS
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
@@ -775,30 +843,11 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
                                                   outcome.GetError().GetExceptionName()});
     }
   } while (!continuation_token.empty());
-#elif defined(WITH_AWS_CLOUD)
-  string adjusted_prefix;
-  if (!prefix.empty()) {
-    adjusted_prefix = prefix.back() == '/' ? prefix : absl::StrCat(prefix, "/");
-  }
-
-  error_code ec = proactor->Await([&]() -> error_code {
-    cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
-    return s3.List(bucket_name, adjusted_prefix, false, 1000,
-                   [&keys](const cloud::StorageListItem& item) {
-                     keys.emplace_back(string(item.key), item.mtime_ns);
-                   });
-  });
-
-  if (ec) {
-    return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
-  }
-#else
-  return nonstd::make_unexpected(GenericError("AWS support not compiled in"));
-#endif
   return keys;
+#else
+  ABSL_UNREACHABLE();
+#endif
 }
-
-#endif  // WITH_AWS_CLOUD || WITH_AWS
 
 #ifdef __linux__
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
