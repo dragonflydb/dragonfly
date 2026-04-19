@@ -4,6 +4,8 @@
 
 #include "server/journal/cmd_serializer.h"
 
+#include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
@@ -158,6 +160,16 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 }
 
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
+  // Disable lazy expiry during serialization (same as rdb_save.cc).
+  // We are called under bucket lock so DeleteIfEmpty is not possible.
+  StringSet* ss = nullptr;
+  uint32_t prev_time = 0;
+  if (pv.Encoding() == kEncodingStrMap2) {
+    ss = static_cast<StringSet*>(pv.RObjPtr());
+    prev_time = ss->time_now();
+    ss->set_time(0);
+  }
+
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
       max_serialization_buffer_size_);
@@ -167,6 +179,11 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
     commands += aggregator.AddArg(ce.ToString());
     return true;
   });
+
+  // Restore previous time so subsequent operations can trigger lazy expiry.
+  if (ss)
+    ss->set_time(prev_time);
+
   return commands;
 }
 
@@ -188,6 +205,15 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 }
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
+  // Disable lazy expiry during serialization (same as rdb_save.cc).
+  StringMap* sm = nullptr;
+  uint32_t prev_time = 0;
+  if (pv.Encoding() == kEncodingStrMap2) {
+    sm = static_cast<StringMap*>(pv.RObjPtr());
+    prev_time = sm->time_now();
+    sm->set_time(0);
+  }
+
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
       max_serialization_buffer_size_);
@@ -199,6 +225,11 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
         commands += aggregator.AddArg(v.ToString());
         return true;
       });
+
+  // Restore previous time so subsequent operations can trigger lazy expiry.
+  if (sm)
+    sm->set_time(prev_time);
+
   return commands;
 }
 
