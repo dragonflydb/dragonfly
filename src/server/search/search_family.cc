@@ -2217,6 +2217,11 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
 
+    // Per-shard text scores from prefilter for __score injection in ADDSCORES mode.
+    // Indexed by shard_id because local DocIds are not unique across shards.
+    // Always allocated to shard_set->size() so the callback can index unconditionally.
+    std::vector<absl::flat_hash_map<search::DocId, float>> prefilter_text_scores(shard_set->size());
+
     // Build a shard-load callback for HNSW results (KNN or VECTOR_RANGE).
     // The returned lambda captures shard_docs and text_scores by const-reference —
     // the caller must ensure they outlive the ScheduleSingleHop / Execute call.
@@ -2229,19 +2234,13 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
             auto* index = es->search_indices()->GetIndex(params->index);
             if (!index || shard_docs[es->shard_id()].empty())
               return OpStatus::OK;
-            static const absl::flat_hash_map<search::DocId, float> kEmptyScores;
-            const auto& shard_text_scores =
-                text_scores.empty() ? kEmptyScores : text_scores[es->shard_id()];
+            DCHECK_LT(es->shard_id(), text_scores.size());
             query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
                 t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], score_alias,
-                shard_text_scores);
+                text_scores[es->shard_id()]);
             return OpStatus::OK;
           };
         };
-
-    // Per-shard text scores from prefilter for __score injection in ADDSCORES mode.
-    // Indexed by shard_id because local DocIds are not unique across shards.
-    std::vector<absl::flat_hash_map<search::DocId, float>> prefilter_text_scores(shard_set->size());
 
     if (knn) {
       auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(params->index, knn->field);
@@ -2306,7 +2305,8 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
       auto shard_docs = GroupByShardId(range_results, shard_set->size());
 
-      cmd_cntx->tx()->ScheduleSingleHop(make_load_cb(shard_docs, hnsw_range->score_alias, {}));
+      cmd_cntx->tx()->ScheduleSingleHop(
+          make_load_cb(shard_docs, hnsw_range->score_alias, prefilter_text_scores));
     } else {
       cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
         if (auto* index = es->search_indices()->GetIndex(params->index); index) {
