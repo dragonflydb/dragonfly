@@ -1366,12 +1366,6 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, unsigned ma
   return ERROR;
 }
 
-void Connection::ParseFromBuffer(base::IoBuf& buf) {
-  auto parse_func =
-      protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
-  (this->*parse_func)(buf);
-}
-
 auto Connection::ParseLoop() -> ParserStatus {
   auto parse_func =
       protocol_ == Protocol::MEMCACHE ? &Connection::ParseMCBatch : &Connection::ParseRedisBatch;
@@ -1495,7 +1489,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
     }
 
     phase_ = PROCESS;
-    bool is_iobuf_full = io_buf_.AppendLen() == 0;
+    bool reached_capacity = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
       parse_status = ParseRedis(io_buf_, max_busy_read_cycles_cached);
@@ -1529,7 +1523,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
 
         // If we got a partial request because iobuf was full, grow it up to
         // a reasonable limit to save on Recv() calls.
-        if (is_iobuf_full && capacity < max_iobfuf_len / 2) {
+        if (reached_capacity && capacity < max_iobfuf_len / 2) {
           // Last io used most of the io_buf to the end.
           ReadBufTracker tracker(io_buf_);
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
@@ -2842,7 +2836,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     }
 
     phase_ = PROCESS;
-    bool is_iobuf_full = io_buf_.AppendLen() == 0;
+    bool reached_capacity = io_buf_.AppendLen() == 0;
 
     // Temporary: Handle dispatch queue items (Control Path) one by one blocking command execution
     if (!dispatch_q_.empty()) {
@@ -2970,7 +2964,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     if (parse_status == NEED_MORE) {
       parse_status = OK;
-      CheckIoBufCapacity(is_iobuf_full, &io_buf_);
+      CheckIoBufCapacity(reached_capacity, &io_buf_);
     }
   } while (peer->IsOpen());
 
