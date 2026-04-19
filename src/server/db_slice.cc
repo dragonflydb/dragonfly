@@ -1944,8 +1944,7 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 bool DbSlice::IsOmittableWrite(const Context& cntx, ChangeReq req) {
   auto cb1 = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
   auto cb2 = [cb1](const PrimeTable::BucketSet& bs) -> uint64_t {
-    if (std::ranges::empty(bs.buckets()))
-      return 0u;
+    DCHECK(!std::ranges::empty(bs.buckets()));
     return std::ranges::max(bs.buckets(), {}, cb1).GetVersion();
   };
 
@@ -1953,7 +1952,7 @@ bool DbSlice::IsOmittableWrite(const Context& cntx, ChangeReq req) {
   if (cntx.is_omittable_operation) {
     uint64_t max_v = std::visit(Overloaded{cb1, cb2}, req);
     bool allowed_snapshot = change_cb_.size() == 1 && std::get<1>(change_cb_.front()) &&
-                            max_v < std::get<0>(change_cb_.front());
+                            max_v == 0 && max_v < std::get<0>(change_cb_.front());
     omit_update = allowed_snapshot && journal::GetCallbackCount() == 1;
     events_.journal_omit += unsigned(omit_update);
   }

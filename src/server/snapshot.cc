@@ -179,9 +179,9 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
         return;
       }
 
-      snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
-        ProcessBucket(snapshot_db_indx, it, false);
-      });
+      snapshot_cursor_ = pt->TraverseBuckets(
+          snapshot_cursor_,
+          [this, snapshot_db_indx](auto it) { ProcessBucket(snapshot_db_indx, it, false); }, true);
 
       if (use_background_mode_) {
         // Yielding for background fibers has low overhead if the time slice isn't used up.

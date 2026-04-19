@@ -150,19 +150,22 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   DCHECK(big_value_mu_.is_locked());
 
   // Check if this bucket is stale
-  if (it.is_done() || it.GetVersion() >= snapshot_version_) {
+  if (it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
 
-    if (it.is_done())
-      return false;
-
     // Force flush all delayed entries in the touched bucket
-    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update && !it.is_done())
+    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
 
     // Expected to be fully serialized due to big_value_mu_ guarding all paths
     // Otherwise, this needs to be changed to a wait
     DCHECK(!BucketDependencies::DEBUG_IsBusy(it.bucket_address()));
+    return false;
+  }
+
+  // TODO: Flushing to earlier callbacks
+  if (it.is_done()) {
+    it.SetVersion(snapshot_version_);
     return false;
   }
 

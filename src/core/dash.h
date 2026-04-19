@@ -348,7 +348,7 @@ class DashTable : public detail::DashTableBase {
   // Unlike Traverse, TraverseBuckets calls cb once on bucket iterator and not on each entry in
   // bucket. TraverseBuckets is stable during table mutations. It guarantees traversing all buckets
   // that existed at the beginning of traversal.
-  template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb);
+  template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb, bool keep_empty = false);
 
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
   // segment by segment over physical backets.
@@ -460,6 +460,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   uint32_t seg_id_;
   detail::PhysicalBid bucket_id_;
   uint8_t slot_id_;
+  bool done_ = false;
 
   friend class DashTable;
 
@@ -495,14 +496,15 @@ class DashTable<_Key, _Value, Policy>::Iterator {
       : owner_(other.owner_),
         seg_id_(other.seg_id_),
         bucket_id_(other.bucket_id_),
-        slot_id_(IsSingleBucket ? 0 : other.slot_id_) {
+        slot_id_(IsSingleBucket ? 0 : other.slot_id_),
+        done_(other.done_) {
     // if this - is a bucket_iterator - we reset slot_id to the first occupied space.
     if constexpr (IsSingleBucket) {
       Seek2Occupied();
     }
   }
 
-  Iterator() : owner_(nullptr), seg_id_(0), bucket_id_(0), slot_id_(0) {
+  Iterator() : owner_(nullptr), seg_id_(0), bucket_id_(0), slot_id_(0), done_(true) {
   }
 
   Iterator(const Iterator& other) = default;
@@ -539,7 +541,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 
   // Make it self-contained. Does not need container::end().
   bool is_done() const {
-    return owner_ == nullptr;
+    return done_;
   }
 
   bool IsOccupied() const {
@@ -613,8 +615,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
     return std::views::iota(0u, limit_) | std::views::transform([*this, is_all](uint8_t i) {
              uint8_t index = is_all ? i : ids_[i];
              return bucket_iterator{owner_, seg_id_, index};
-           }) |
-           std::views::filter([](const bucket_iterator& it) { return !it.is_done(); });
+           });
   }
 
   bool operator==(const BucketSet& other) const {
@@ -650,7 +651,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
 template <typename _Key, typename _Value, typename Policy>
 template <bool IsConst, bool IsSingleBucket>
 void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Occupied() {
-  if (owner_ == nullptr)
+  if (done_)
     return;
   assert(seg_id_ < owner_->segment_.size());
 
@@ -674,7 +675,7 @@ void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Oc
       bucket_id_ = slot_id_ = 0;
     }
   }
-  owner_ = nullptr;
+  done_ = true;
 }
 
 template <typename _Key, typename _Value, typename Policy>
@@ -1165,7 +1166,8 @@ auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) ->
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
+auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb, bool keep_empty)
+    -> Cursor {
   if (SegmentType::OutOfRange(cursor.bucket_id()))  // sanity.
     return Cursor::end();
 
@@ -1179,7 +1181,7 @@ auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) ->
     assert(s);
     if (bid < s->num_buckets()) {
       const auto& bucket = s->GetBucket(bid);
-      if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
+      if (keep_empty || bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
         cb(BucketIt(sid, bid));
         invoked = true;
       }
