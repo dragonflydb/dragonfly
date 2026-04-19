@@ -2,9 +2,9 @@
 
 This document describes how Dragonfly implements the Publish-Subscribe (Pub/Sub) messaging
 paradigm within its shared-nothing, multi-threaded architecture. It covers the global
-subscription registry, the Read-Copy-Update (RCU) mechanism used to prevent lock contention
-on the publish path, the asynchronous message delivery pipeline, and the backpressure system
-that protects the server from slow-subscriber OOM.
+subscription registry, the thread-safe concurrent hashmap that provides fine-grained locking,
+the asynchronous message delivery pipeline, and the backpressure system that protects the
+server from slow-subscriber OOM.
 
 ## Overview
 
@@ -13,19 +13,22 @@ unique challenge: subscriptions must be globally addressable across all threads,
 global lock on every `PUBLISH` would create a severe bottleneck. A single popular channel
 with thousands of subscribers could serialize all publish operations onto one shard thread.
 
-Dragonfly solves this by using a **centralized `ChannelStore` updated via RCU
-(Read-Copy-Update)**:
+Dragonfly solves this with a **single global `ChannelStore`** backed by
+`phmap::parallel_flat_hash_map` (from the
+[parallel-hashmap](https://github.com/greg7mdp/parallel-hashmap) library):
 
-- **Reads (`PUBLISH` / `SPUBLISH`)** are lock-free and use a thread-local pointer to the
-  most recent `ChannelStore` snapshot.
-- **Writes (`SUBSCRIBE` / `UNSUBSCRIBE` / `PSUBSCRIBE` / `PUNSUBSCRIBE`)** are serialized
-  by a single mutex, performed by copying the necessary routing maps, applying the mutation,
-  and atomically swapping the global pointer.
+- The parallel hashmap **shards the map into N submaps**, each protected by its own
+  `std::mutex`. Concurrent readers (e.g. `PUBLISH`) and writers (e.g. `SUBSCRIBE`) only
+  contend if they happen to hash to the same submap.
+- **Reads (`PUBLISH` / `SPUBLISH`)** acquire only the per-submap lock for the channel being
+  looked up, so publishes to different channels proceed fully in parallel.
+- **Writes (`SUBSCRIBE` / `UNSUBSCRIBE` / `PSUBSCRIBE` / `PUNSUBSCRIBE`)** hold the
+  relevant submap lock for the duration of the insert or erase.
 
 This design avoids contention on a single shard thread for heavy throughput on a single
 channel and seamlessly scales across multiple threads even with a small number of channels.
 Publish latency is lower than a shard-routed design because no inter-thread hop is required
-to look up subscribers — the caller reads its local copy directly.
+to look up subscribers — the caller accesses the global store directly.
 
 Dragonfly supports three flavors of Pub/Sub:
 
@@ -39,13 +42,11 @@ Dragonfly supports three flavors of Pub/Sub:
 
 | Type | Location | Role |
 |------|----------|------|
-| `ChannelStore` | `src/server/channel_store.h` | Centralized registry mapping channels/patterns to subscribers. Updated via RCU. |
-| `ChannelStoreUpdater` | `src/server/channel_store.h` | Orchestrates RCU mutations (add/remove) to the `ChannelStore`. |
+| `ChannelStore` | `src/server/channel_store.h` | Single global registry mapping channels/patterns to subscribers. Backed by `phmap::parallel_flat_hash_map`. |
 | `ChannelStore::Subscriber` | `src/server/channel_store.h` | Represents a subscribed client. Wraps `facade::ConnectionRef` plus a pattern string. |
-| `ChannelStore::ControlBlock` | `src/server/channel_store.h` | Holds the `most_recent` atomic pointer and `update_mu` mutex. Prevents overlapping structural updates. |
-| `ChannelStore::ChannelMap` | `src/server/channel_store.h` | `flat_hash_map<string, UpdatablePointer>` — maps channel/pattern names to subscriber lists. |
-| `ChannelStore::SubscribeMap` | `src/server/channel_store.h` | `flat_hash_map<ConnectionContext*, ThreadId>` — maps subscriber contexts to their owning thread. |
-| `ChannelStore::UpdatablePointer` | `src/server/channel_store.h` | Atomic wrapper around `SubscribeMap*`. Supports lock-free reads (`acquire`) and RCU-style swaps (`release`). |
+| `ChannelStore::ChannelMap` | `src/server/channel_store.h` | `phmap::parallel_flat_hash_map_m<string, SubscribeMap>` — maps channel/pattern names to subscriber maps. Internally sharded into N submaps, each with its own `std::mutex`. |
+| `ChannelStore::SubscribeMap` | `src/server/channel_store.h` | `phmap::flat_hash_map<ConnectionContext*, ThreadId>` — maps subscriber contexts to their owning thread. |
+| `channel_store` (global) | `src/server/channel_store.h` | `extern ChannelStore*` — the single global instance, created during `Service::Init` and destroyed during `Service::Shutdown`. |
 | `ConnectionState::SubscribeInfo` | `src/server/conn_context.h` | Per-connection set of subscribed channels and patterns. Created lazily on first subscription. |
 | `Connection::PubMessage` | `src/facade/dragonfly_connection.h` | Carries a formatted pub/sub message through the async dispatch queue. |
 | `Connection::MessageHandle` | `src/facade/dragonfly_connection.h` | Variant wrapper (`PubMessage`, `MonitorMessage`, `MigrationRequest`, etc.) for the control-path dispatch queue. |
@@ -58,89 +59,64 @@ Dragonfly supports three flavors of Pub/Sub:
   <img src="pubsub/pubsub_data_flow_overview.svg" alt="Pub/Sub Data Flow" width="1000"/>
 </div>
 
-## Subscription Management (RCU)
+## Subscription Management
 
 ### Data Structure Layout
 
-Each `ChannelStore` instance holds two `ChannelMap` pointers:
+The single global `ChannelStore` holds two `ChannelMap` instances (one for exact channels,
+one for glob patterns):
 
 <div align="center">
   <img src="pubsub/pubsub_data_structure_layout.svg" alt="Data Structure Layout" width="700"/>
 </div>
 
-`UpdatablePointer` wraps a `std::atomic<SubscribeMap*>` with `memory_order_acquire` on read
-and `memory_order_release` on write. This ensures that when a thread reads the pointer, it
-also sees the fully constructed `SubscribeMap` that the writer published.
+Each `ChannelMap` is a `phmap::parallel_flat_hash_map_m` that internally splits its keyspace
+into N submaps. Each submap has its own `std::mutex`, so concurrent operations on different
+channels (or patterns) that hash to different submaps proceed without contention.
 
-### Two Levels of RCU
+### Add() — Subscribing to a Channel
 
-The `ChannelStoreUpdater` implements two granularities of copy-on-write:
-
-1. **ChannelMap-level copy** — triggered when a channel slot must be added (first subscriber)
-   or removed (last subscriber leaves). The entire `ChannelMap` is shallow-copied, the slot is
-   added/removed on the copy, a new `ChannelStore` is allocated pointing to the new map, and
-   the global `control_block.most_recent` is swapped.
-
-2. **SubscribeMap-level RCU** — triggered when adding/removing a subscriber to an existing
-   channel (the map slot already exists). Only the `SubscribeMap` for that channel is copied,
-   the mutation is applied, and the `UpdatablePointer` is atomically swapped. No new
-   `ChannelStore` or `ChannelMap` is needed.
-
-This two-level scheme is implemented in `ChannelStoreUpdater::GetTargetMap()`:
+When a client issues `SUBSCRIBE channel` (or `PSUBSCRIBE pattern`), the connection handler
+calls `channel_store->Add(channel, cntx, thread_id, pattern)`:
 
 ```cpp
-pair<ChannelStore::ChannelMap*, bool> ChannelStoreUpdater::GetTargetMap(ChannelStore* store) {
-  auto* target = pattern_ ? store->patterns_ : store->channels_;
-
-  for (auto key : ops_) {
-    auto it = target->find(key);
-    DCHECK(it != target->end() || to_add_);
-    // We need to make a copy, if we are going to add or delete a new map slot.
-    if ((to_add_ && it == target->end()) || (!to_add_ && it->second->size() == 1))
-      return {new ChannelStore::ChannelMap{*target}, true};
-  }
-
-  return {target, false};
+void ChannelStore::Add(string_view channel, ConnectionContext* cntx,
+                       uint32_t thread_id, bool pattern) {
+  auto& map = pattern ? patterns_ : channels_;
+  // try_emplace_l holds the write lock for the duration of the lambda ensuring atomicity
+  map.try_emplace_l(
+      channel, [&](auto& kv) { kv.second.emplace(cntx, thread_id); },
+      SubscribeMap{{cntx, thread_id}});
 }
 ```
 
-### Apply() Flow
+`try_emplace_l` is a `parallel_flat_hash_map` method that atomically either:
+- Calls the lambda on an existing entry (adds the subscriber to the existing `SubscribeMap`), or
+- Inserts a new entry with the provided default value (a new `SubscribeMap` containing the subscriber).
 
-<div align="center">
-  <img src="pubsub/pubsub_apply.svg" alt="Apply Flow" width="1000"/>
-</div>
+The per-submap write lock is held for the duration of the operation, ensuring atomicity.
 
-Step 8 uses `AwaitBrief` (non-preempting dispatch) to update each thread's local pointer.
-The `seq_cst` load in the callback ensures the thread reads the latest pointer value _and_
-the memory published behind it.
+### Remove() — Unsubscribing from a Channel
 
-### Modify() — Per-Key Mutation
+When a client issues `UNSUBSCRIBE channel` (or `PUNSUBSCRIBE pattern`), the connection
+handler calls `channel_store->Remove(channel, cntx, pattern)`:
 
-For each key in the pending operations:
-
-```
-Modify(target, key)
-  it = target->find(key)
-
-  Case 1: Adding, key not in map (new channel)
-    → target->emplace(key, new SubscribeMap{{cntx_, thread_id_}})
-
-  Case 2: Removing, last subscriber (channel disappears)
-    → freelist_.push_back(it->second.Get())  // defer deletion
-    → target->erase(it)
-
-  Case 3: Existing channel, add/remove subscriber (RCU on SubscribeMap)
-    → replacement = new SubscribeMap{*it->second}
-    → if to_add_: replacement->emplace(cntx_, thread_id_)
-      else:       replacement->erase(cntx_)
-    → freelist_.push_back(it->second.Get())  // old map, defer deletion
-    → it->second.Set(replacement)            // atomic release-store
+```cpp
+void ChannelStore::Remove(string_view channel, ConnectionContext* cntx, bool pattern) {
+  auto& map = pattern ? patterns_ : channels_;
+  // erase_if holds the write lock for its duration, removing cntx from the SubscribeMap
+  // and erasing the channel entry atomically if no subscribers remain.
+  map.erase_if(string{channel}, [&](auto& kv) {
+    kv.second.erase(cntx);
+    return kv.second.empty();
+  });
+}
 ```
 
-Old `SubscribeMap` pointers are not immediately deleted because concurrent `PUBLISH`
-operations on other threads may still be reading them. They are placed in a `freelist_` and
-deleted only after `AwaitBrief` completes — at which point every thread has acknowledged the
-new state and no reader can hold a reference to the old maps.
+`erase_if` holds the per-submap write lock while executing the lambda. The lambda removes
+the subscriber from the `SubscribeMap` and returns `true` if the map is now empty, which
+causes the channel entry itself to be erased. This ensures that channel creation/deletion and
+subscriber management are atomic with respect to concurrent readers.
 
 ### Connection-Level Subscription State
 
@@ -176,9 +152,9 @@ When a client issues `PUBLISH channel message` (or `SPUBLISH`):
 ```
 SendMessages(channel, messages, sharded)
   1. subscribers = FetchSubscribers(channel)
-     → exact match: channels_->find(channel)
-     → pattern match: for each (pat, subs) in *patterns_:
-         if GlobMatcher{pat}.Matches(channel): Fill(subs, pat, &result)
+     → exact match: channels_.if_contains(channel, ...)
+     → pattern match: patterns_.for_each(...)
+        if GlobMatcher{pat}.Matches(channel): Fill(subs, pat, &result)
      → sort result by thread_id  (enables efficient per-thread dispatch)
 
   2. If subscribers empty → return 0
@@ -221,20 +197,21 @@ string allocations.
 
 ```
 FetchSubscribers(channel)
-  1. Exact match: channels_->find(channel)
+  1. Exact match: channels_.if_contains(channel, ...)
      → if found, Fill() creates Subscriber entries from the SubscribeMap
+     → holds the per-submap read lock only for the duration of the lambda
 
-  2. Pattern match: iterate ALL patterns
+  2. Pattern match: patterns_.for_each(...)
      → for each (pat, subs): GlobMatcher{pat, case_sensitive=true}.Matches(channel)
      → matching subscribers are added with their pattern string
+     → each per-submap lock is held only while iterating that submap
 
   3. Sort by Subscriber::ByThread (thread_id ordering)
      → enables O(log n) per-thread lookup during dispatch
 ```
 
-The `Fill` helper reads the `SubscribeMap` (via `UpdatablePointer::Get()` — acquire load)
-and creates `Subscriber` structs that hold a `ConnectionRef` (weak reference) obtained via
-`conn->Borrow()`.
+The `Fill` helper reads the `SubscribeMap` and creates `Subscriber` structs that hold a
+`ConnectionRef` (weak reference) obtained via `conn->Borrow()`.
 
 ## Delivery: I/O Loop and Dispatch
 
@@ -411,20 +388,21 @@ is called:
 
 ```
 UnsubscribeAfterClusterSlotMigration(deleted_slots)
-  for each (channel, _) in *channels_:
-    if deleted_slots.Contains(KeySlot(channel)):
-      csu.Record(channel)
-  csu.ApplyAndUnsubscribe()
+  channels_.for_each(...)
+    for each (channel, subs):
+      if deleted_slots.Contains(KeySlot(channel)):
+        Fill(subs, "", &subscribers)
+        channel_subs_map[channel] = subscribers
+
+  pool->AwaitFiberOnAll(idx):
+    channel_store->UnsubscribeConnectionsFromDeletedSlots(channel_subs_map, idx)
 ```
 
-`ApplyAndUnsubscribe()` differs from `Apply()`:
-1. It deep-copies the `ChannelMap` and removes the migrated channels.
-2. It calls `FetchSubscribers` for each removed channel _before_ updating the store
-   (since `FetchSubscribers` reads from the current active store).
-3. It uses `AwaitFiberOnAll` (fiber-based, may preempt) instead of `AwaitBrief` to dispatch
-   both the store update and unsubscription messages.
-4. On each thread, `UnsubscribeConnectionsFromDeletedSlots` sends `PubMessage`s with
-   `force_unsubscribe=true`, which triggers `sunsubscribe` push messages to affected clients.
+The migration flow collects subscribers for affected channels in a single pass (under
+per-submap locks), then dispatches `AwaitFiberOnAll` to send forced-unsubscribe messages
+on each thread. The `erase_if` calls that actually remove the channel entries happen
+within `UnsubscribeConnectionsFromDeletedSlots`, which sends `PubMessage`s with
+`force_unsubscribe=true` to trigger `sunsubscribe` push messages to affected clients.
 
 ## Keyspace Event Notifications
 
@@ -439,8 +417,7 @@ When enabled:
 3. At the end of `DeleteExpiredStep`, batched events are published:
 
 ```cpp
-ChannelStore* store = ServerState::tlocal()->channel_store();
-store->SendMessages(
+channel_store->SendMessages(
     absl::StrCat("__keyevent@", cntx.db_index, "__:expired"),
     events, false);
 events.clear();
@@ -466,7 +443,7 @@ All Pub/Sub commands are registered in `Service::Register` (`src/server/main_ser
 | `PUBSUB` | -1 | `CO::LOADING \| CO::FAST` | `SLOW` |
 
 Notable flags:
-- `CO::FAST` on `PUBLISH`/`SPUBLISH` — these are non-transactional, lock-free reads.
+- `CO::FAST` on `PUBLISH`/`SPUBLISH` — these are non-transactional and only acquire fine-grained per-submap locks.
 - `CO::NOSCRIPT` on all subscribe/unsubscribe — cannot be called from Lua scripts.
 - `CO::LOADING` — permitted during database loading.
 - None of the Pub/Sub commands are transactional (`IsTransactional() == false`).
@@ -475,12 +452,11 @@ Notable flags:
 
 | Purpose | File Path |
 |---------|-----------|
-| ChannelStore & ChannelStoreUpdater | `src/server/channel_store.h`, `src/server/channel_store.cc` |
+| ChannelStore (global instance & API) | `src/server/channel_store.h`, `src/server/channel_store.cc` |
 | Pub/Sub command handlers | `src/server/main_service.cc` (`Publish`, `Subscribe`, `Unsubscribe`, `PSubscribe`, `PUnsubscribe`, `Pubsub`) |
 | Connection-level subscription state | `src/server/conn_context.h`, `src/server/conn_context.cc` (`ChangeSubscriptions`, `UnsubscribeAll`, `PUnsubscribeAll`) |
 | PubMessage, AsyncFiber, backpressure | `src/facade/dragonfly_connection.h`, `src/facade/dragonfly_connection.cc` |
 | ConnectionRef (weak subscriber refs) | `src/facade/connection_ref.h` |
-| ServerState channel_store_ pointer | `src/server/server_state.h`, `src/server/server_state.cc` |
 | Keyspace event integration | `src/server/db_slice.cc` (`DeleteExpiredStep`) |
-| Cluster slot migration unsub | `src/server/channel_store.cc` (`UnsubscribeAfterClusterSlotMigration`, `ApplyAndUnsubscribe`) |
+| Cluster slot migration unsub | `src/server/channel_store.cc` (`UnsubscribeAfterClusterSlotMigration`) |
 | GlobMatcher for pattern matching | `src/core/glob_matcher.h` |
