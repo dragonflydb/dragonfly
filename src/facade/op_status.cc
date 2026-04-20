@@ -1,8 +1,18 @@
 #include "facade/op_status.h"
 
+#include <ostream>
+
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/resp_expr.h"
+
+namespace std {
+
+std::ostream& operator<<(std::ostream& os, facade::OpStatus op) {
+  return os << static_cast<int>(op);
+}
+
+}  // namespace std
 
 namespace facade {
 

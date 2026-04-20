@@ -2285,7 +2285,7 @@ void Connection::BreakOnce(uint32_t ev_mask) {
   if (breaker_cb_) {
     DVLOG(1) << "[" << id_ << "] Connection::breaker_cb_ " << ev_mask;
     auto fun = std::move(breaker_cb_);
-    DCHECK(!breaker_cb_);
+    breaker_cb_ = nullptr;
     fun(ev_mask);
   }
 }

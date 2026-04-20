@@ -60,7 +60,7 @@ string GetString(const PrimeValue& pv);
 bool SetBitValue(uint32_t offset, bool bit_value, string* entry);
 std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits);
-std::size_t CountBitSetByBitIndices(string_view at, std::size_t start, std::size_t end);
+std::size_t CountBitSetByBitIndices(string_view at, std::size_t front, std::size_t back);
 string RunBitOperationOnValues(string_view op, const BitsStrVec& values);
 
 // ------------------------------------------------------------------------- //
@@ -169,24 +169,21 @@ std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::siz
   return count;
 }
 
-// Count the number of bits that are on, on bits boundaries: i.e. Start and end are the indices for
-// bits locations inside str
-std::size_t CountBitSetByBitIndices(string_view at, std::size_t start, std::size_t end) {
-  auto first_byte_index = GetByteIndex(start);
-  auto last_byte_index = GetByteIndex(end);
-  if (start % OFFSET_FACTOR == 0 && end % OFFSET_FACTOR == 0) {
-    return CountBitSetByByteIndices(at, first_byte_index, last_byte_index);
+// Count the number of bits that are on, in the inclusive bit range [front, back].
+// Caller must guarantee 0 <= front <= back < at.size() * OFFSET_FACTOR.
+std::size_t CountBitSetByBitIndices(string_view at, std::size_t front, std::size_t back) {
+  const size_t front_byte = front / OFFSET_FACTOR;
+  const size_t back_byte = back / OFFSET_FACTOR;
+  const uint8_t front_bit = front % OFFSET_FACTOR;
+  const uint8_t back_bit_end = back % OFFSET_FACTOR + 1;  // exclusive upper
+
+  if (front_byte == back_byte) {
+    return CountBitsRange(static_cast<uint8_t>(at[front_byte]), front_bit, back_bit_end);
   }
-  const auto last_bit_first_byte =
-      first_byte_index != last_byte_index ? OFFSET_FACTOR : GetBitIndex(end);
-  const auto first_byte = GetByteValue(at, start);
-  std::uint32_t count = CountBitsRange(first_byte, GetBitIndex(start), last_bit_first_byte);
-  if (first_byte_index < last_byte_index) {
-    first_byte_index++;
-    const auto last_byte = GetByteValue(at, end);
-    count += CountBitsRange(last_byte, 0, GetBitIndex(end));
-    count += CountBitSetByByteIndices(at, first_byte_index, last_byte_index);
-  }
+  std::size_t count =
+      CountBitsRange(static_cast<uint8_t>(at[front_byte]), front_bit, OFFSET_FACTOR);
+  count += CountBitSetByByteIndices(at, front_byte + 1, back_byte);
+  count += CountBitsRange(static_cast<uint8_t>(at[back_byte]), 0, back_bit_end);
   return count;
 }
 
@@ -206,23 +203,23 @@ int64_t NormalizedOffset(int64_t size, int64_t offset) {
 // Note that when bits is false, it means that we are looking on byte boundaries.
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits) {
   const int64_t strlen = bits ? str.size() * OFFSET_FACTOR : str.size();
+  if (strlen == 0)
+    return 0;
 
   if (start < 0)
     start = strlen + start;
   if (end < 0)
     end = strlen + end;
 
-  end = min(end, strlen);
+  start = max(start, int64_t(0));
+  end = min(end, strlen - 1);  // inclusive: clamp to last valid index
 
-  if (strlen == 0 || start > end)
+  if (start > end)
     return 0;
 
-  start = max(start, int64_t(0));
-  end = max(end, int64_t(0));
-
-  ++end;
+  // `end` is passed inclusive to the bit helper, exclusive (end + 1) to the byte helper.
   return bits ? CountBitSetByBitIndices(str, start, end)
-              : CountBitSetByByteIndices(str, start, end);
+              : CountBitSetByByteIndices(str, start, end + 1);
 }
 
 // return true if bit is on

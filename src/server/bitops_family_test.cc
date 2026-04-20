@@ -335,6 +335,36 @@ TEST_F(BitOpsFamilyTest, BitCountByteBitSubRange) {
   EXPECT_EQ(0, CheckedInt({"bitcount", "foo", "-1", "-2", "bit"}));  // illegal range
 }
 
+TEST_F(BitOpsFamilyTest, BitCountBitLastBitRegression) {
+  // Regression: `BITCOUNT key s e BIT` used to read one byte past the end of
+  // the value whenever `e` (after converting inclusive->exclusive via ++e) fell
+  // on a byte boundary AND `s` was in an earlier byte. The read was latent UB:
+  // the bogus byte was multiplied by zero inside CountBitsRange, so the
+  // numeric result was correct, but libc++ hardening / ASan trapped on the
+  // out-of-bounds string_view::operator[].
+  // Known trigger: any 1-bit-exclusive range that ends exactly at 8*N-1.
+
+  // Single-byte value: bit 0 = 1, bit 7 = 1, all others 0 → popcount 2.
+  auto resp = Run({"set", "k1", std::string(1, '\x81')});
+  EXPECT_EQ(resp, "OK");
+  EXPECT_EQ(2, CheckedInt({"bitcount", "k1", "0", "7", "BIT"}));    // full-byte, end@byte-boundary
+  EXPECT_EQ(1, CheckedInt({"bitcount", "k1", "1", "7", "BIT"}));    // partial start, end@boundary
+  EXPECT_EQ(2, CheckedInt({"bitcount", "k1", "-8", "-1", "BIT"}));  // negative form of 0..7
+  EXPECT_EQ(2, CheckedInt({"bitcount", "k1", "0", "-1", "BIT"}));
+  EXPECT_EQ(0, CheckedInt({"bitcount", "k1", "8", "8", "BIT"}));  // start past last bit → 0
+
+  // Multi-byte value: "abcdef" has 48 bits; bits 0-47 valid. These ranges all
+  // end at or past the last valid bit — each previously tripped the OOB.
+  resp = Run({"set", "k2", "abcdef"});
+  EXPECT_EQ(resp, "OK");
+  EXPECT_EQ(CheckedInt({"bitcount", "k2", "0", "-1"}),          // reference (byte form)
+            CheckedInt({"bitcount", "k2", "0", "47", "BIT"}));  // end@last bit
+  EXPECT_EQ(CheckedInt({"bitcount", "k2", "5", "5"}),           // last byte only (byte form)
+            CheckedInt({"bitcount", "k2", "40", "47", "BIT"}));
+  EXPECT_EQ(0, CheckedInt({"bitcount", "k2", "48", "48", "BIT"}));    // past the end
+  EXPECT_EQ(0, CheckedInt({"bitcount", "k2", "100", "200", "BIT"}));  // way past
+}
+
 // ------------------------- BITOP tests
 
 const auto EXPECTED_LEN_BITOP =
