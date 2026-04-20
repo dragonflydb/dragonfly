@@ -53,6 +53,7 @@ struct TestDelayDriver {
     auto tp = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
     Fut future{};
     q_.emplace(tp, future);
+    var_.notify_one();
     return future;
   }
 
@@ -204,7 +205,7 @@ void TestDriver::Loop() {
     } while (snapshot_cursor_);
 
     {
-      std::lock_guard guard(big_value_mu_);
+      std::lock_guard guard(stream_mu_);
       ProcessDelayedEntries(true, 0, base_cntx_);
     }
 
@@ -245,6 +246,7 @@ unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
 
+    std::lock_guard lk{stream_mu_};
     Serialize(it.bucket_address(), it->first.ToString());
     ++serialized;
 
