@@ -848,6 +848,9 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
     return {};
 
   pcre2_match_data* match_data = pcre2_match_data_create_from_pattern(kRe, nullptr);
+  if (!match_data)
+    return {};
+
   PCRE2_SIZE offset = 0;
   PCRE2_SPTR subject = reinterpret_cast<PCRE2_SPTR>(body.data());
   PCRE2_SIZE subject_len = body.size();
