@@ -13,8 +13,10 @@ import (
 	"github.com/pterm/pterm"
 )
 
-var fHost = flag.String("host", "127.0.0.1:6379", "Redis host")
-var fCompareHost = flag.String("compare-host", "", "Redis host to compare with")
+var fHost = flag.String("host", "127.0.0.1:6379", "RESP host for main-listener replay")
+var fAdminHost = flag.String("admin-host", "", "RESP host for admin-listener replay; defaults to -host if empty")
+var fMCHost = flag.String("mc-host", "127.0.0.1:11211", "Memcached host for memcache-listener replay")
+var fCompareHost = flag.String("compare-host", "", "RESP host to compare with")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
 var fSkip = flag.Uint("skip", 0, "skip N records")
@@ -194,7 +196,7 @@ func Analyze(files []string) {
 
 		parseRecords(file, func(r Record) bool {
 			total += 1
-			if r.HasMore > 0 {
+			if r.HasMore() {
 				chained += 1
 			}
 

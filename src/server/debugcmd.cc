@@ -668,10 +668,12 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC <path>/<file_prefix> | [STOP]",
-        "    Use <path>/<file_prefix> to start traffic logging to the specified path.",
-        "    All recorded files will have the specified prefix.",
-        "    Use 'STOP' or do not specify any arguments to stop traffic logging.",
+        "TRAFFIC START <path>/<file_prefix> [LISTENER <resp|memcache|admin|all> ...]",
+        "    Start traffic logging to files with the given path/prefix.",
+        "    Optional LISTENER clause restricts recording to one or more listener kinds.",
+        "    Without LISTENER, every listener is recorded.",
+        "TRAFFIC STOP",
+        "    Stop traffic logging started by a previous TRAFFIC START.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
         "COMPRESSION [IMPORT <bintable> | EXPORT | SET <bintable>] [type]",
@@ -1051,25 +1053,110 @@ void DebugCmd::Exec(CommandContext* cmd_cntx) {
 }
 
 void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
-  optional<string> path;
+  using facade::Connection;
+
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (ProactorBase::me()->GetKind() != ProactorBase::IOURING) {
     return cmd_cntx->SendError("Traffic recording supported only on iouring");
   }
 
-  if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
-    path = ArgS(args, 0);
-    LOG(INFO) << "Logging to traffic to " << *path << "*.bin";
-  } else {
-    LOG(INFO) << "Traffic logging stopped";
+  // Syntax:
+  //   DEBUG TRAFFIC STOP
+  //   DEBUG TRAFFIC START <path> [LISTENER <resp|memcache|admin|all> ...]
+  if (args.empty()) {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
   }
 
-  shard_set->pool()->AwaitFiberOnAll([path](auto*) {
-    if (path)
-      facade::Connection::StartTrafficLogging(*path);
-    else
-      facade::Connection::StopTrafficLogging();
-  });
+  string first = absl::AsciiStrToUpper(ArgS(args, 0));
+
+  if (first == "STOP" && args.size() == 1) {
+    LOG(INFO) << "Traffic logging stopped";
+    shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
+    return rb->SendOk();
+  }
+
+  if (first != "START" || args.size() < 2) {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
+  }
+
+  string path(ArgS(args, 1));
+  uint32_t mask = 0;
+
+  if (args.size() == 2) {
+    // No LISTENER clause => record all listener types.
+    mask = Connection::kAllListenersMask;
+  } else {
+    string keyword = absl::AsciiStrToUpper(ArgS(args, 2));
+    if (keyword != "LISTENER" || args.size() < 4) {
+      return cmd_cntx->SendError(facade::kSyntaxErr);
+    }
+    for (size_t i = 3; i < args.size(); ++i) {
+      string name = absl::AsciiStrToLower(ArgS(args, i));
+      if (name == "all") {
+        mask = Connection::kAllListenersMask;
+      } else if (name == "resp") {
+        mask |= 1u << static_cast<uint8_t>(Connection::ListenerType::RESP);
+      } else if (name == "memcache") {
+        mask |= 1u << static_cast<uint8_t>(Connection::ListenerType::MEMCACHE);
+      } else if (name == "admin") {
+        mask |= 1u << static_cast<uint8_t>(Connection::ListenerType::ADMIN);
+      } else {
+        return cmd_cntx->SendError(absl::StrCat("Unknown listener name '", name,
+                                                "'. Expected one of: resp, memcache, admin, all"));
+      }
+    }
+  }
+
+  LOG(INFO) << "Logging traffic to " << path << "*.bin, listener_mask=0x" << std::hex << mask;
+
+  std::atomic<unsigned> started_new{0};
+  std::atomic<unsigned> already_logging{0};
+  std::atomic<unsigned> open_failed{0};
+  shard_set->pool()->AwaitFiberOnAll(
+      [path, mask, &started_new, &already_logging, &open_failed](auto*) {
+        switch (Connection::StartTrafficLogging(path, mask)) {
+          case Connection::StartTrafficResult::kStarted:
+            started_new.fetch_add(1, std::memory_order_relaxed);
+            break;
+          case Connection::StartTrafficResult::kAlreadyLogging:
+            already_logging.fetch_add(1, std::memory_order_relaxed);
+            break;
+          case Connection::StartTrafficResult::kOpenFailed:
+            open_failed.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+      });
+
+  unsigned started = started_new.load(std::memory_order_relaxed);
+  unsigned refused = already_logging.load(std::memory_order_relaxed);
+  unsigned failed = open_failed.load(std::memory_order_relaxed);
+
+  // Failures are always terminal: if any thread failed to open its file the recording
+  // would be incomplete. Roll back any thread that did start so we end up fully stopped.
+  if (failed > 0) {
+    if (started > 0)
+      shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
+    return cmd_cntx->SendError(
+        "Failed to open traffic log file on one or more threads; "
+        "no recording is active. Check server logs for details.");
+  }
+
+  if (refused > 0 && started > 0) {
+    // Partial state: some threads started a new recording, others refused because they
+    // were already logging. The previously-active recording is already corrupt (half its
+    // threads are now writing to the new file) and cannot be restored, so stop everything
+    // to reach a clean non-logging state before reporting the error.
+    shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
+    return cmd_cntx->SendError(
+        "Traffic logging was in an inconsistent state; all recording has been stopped. "
+        "Retry DEBUG TRAFFIC START.");
+  }
+  if (refused > 0) {
+    // Every thread was already logging - leave that recording alone and just report the
+    // conflict to the caller.
+    return cmd_cntx->SendError(
+        "Traffic logging is already in progress. Call DEBUG TRAFFIC STOP first.");
+  }
   rb->SendOk();
 }
 

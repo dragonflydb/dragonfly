@@ -177,6 +177,8 @@ struct TrafficLogger {
   // Also, makes sure that LogTraffic are executed atomically.
   fb2::Mutex mutex;
   unique_ptr<io::WriteFile> log_file;
+  // Bit mask over Connection::ListenerType values, only matching listeners are logged.
+  uint32_t listener_mask = 0;
 
   void ResetLocked();
   // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -189,6 +191,7 @@ void TrafficLogger::ResetLocked() {
     std::ignore = log_file->Close();
     log_file.reset();
   }
+  listener_mask = 0;
 }
 
 // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -218,10 +221,15 @@ thread_local base::Histogram* io_req_size_hist = nullptr;
 thread_local const size_t reply_size_limit = absl::GetFlag(FLAGS_squashed_reply_size_limit);
 thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait_batch_usec);
 
-void OpenTrafficLogger(string_view base_path) {
+// Opens the per-thread traffic log file. Distinguishes three outcomes so the caller
+// can report an accurate error to the user (was the logger already running, or did
+// we fail to open a file). `listener_mask` is only committed after the file is
+// successfully opened so the logger's state stays consistent on failure.
+Connection::StartTrafficResult OpenTrafficLogger(string_view base_path, uint32_t listener_mask) {
+  using Res = Connection::StartTrafficResult;
   unique_lock lk{tl_traffic_logger.mutex};
   if (tl_traffic_logger.log_file)
-    return;
+    return Res::kAlreadyLogging;
 
 #ifdef __linux__
   // Open file with append mode, without it concurrent fiber writes seem to conflict
@@ -230,21 +238,31 @@ void OpenTrafficLogger(string_view base_path) {
   auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ false});
   if (!file) {
     LOG(ERROR) << "Error opening a file " << path << " for traffic logging: " << file.error();
-    return;
+    return Res::kOpenFailed;
   }
   tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
+  tl_traffic_logger.listener_mask = listener_mask;
 #else
   LOG(WARNING) << "Traffic logger is only supported on Linux";
+  return Res::kOpenFailed;
 #endif
 
-  // Write version, incremental numbering :)
-  uint8_t version[1] = {2};
+  // File header: version byte.
+  // v3 added per-record listener type packed into the upper bits (8..15) of the former
+  // `has_more` (now `flags`) field. v2 files are forwards-compatible for v3 readers:
+  // the upper bits are zero and get mapped to RESP. v2 readers cannot parse v3 files.
+  uint8_t version[1] = {3};
   std::ignore = tl_traffic_logger.log_file->Write(version);
+  return Res::kStarted;
 }
 
-void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
-                ServiceInterface::ContextInfo ci) {
-  string_view cmd = args.Front();
+// Writes a single record. `parts[0]` is the command name, following entries are its arguments.
+void LogTrafficParts(uint32_t id, bool has_more, uint32_t db_index,
+                     Connection::ListenerType listener_type, absl::Span<const string_view> parts) {
+  if (parts.empty())
+    return;
+
+  string_view cmd = parts.front();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
 
@@ -253,7 +271,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
   char stack_buf[1024];
   char* next = stack_buf;
 
-  // We write id, timestamp, db_index, has_more, num_parts, part_len, part_len, part_len, ...
+  // We write id, timestamp, db_index, flags, num_parts, part_len, part_len, part_len, ...
   // And then all the part blobs concatenated together.
   auto write_u32 = [&next](uint32_t i) {
     absl::little_endian::Store32(next, i);
@@ -268,11 +286,12 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
   next += 8;
 
   // db_index
-  write_u32(ci.db_index);
+  write_u32(db_index);
 
-  // has_more, num_parts
-  write_u32(has_more ? 1 : 0);
-  write_u32(uint32_t(args.size()));
+  // flags: bit 0 = has_more; bits 8..15 = listener_type (v3 file format).
+  uint32_t flags = (has_more ? 1u : 0u) | (static_cast<uint32_t>(listener_type) << 8);
+  write_u32(flags);
+  write_u32(uint32_t(parts.size()));
 
   // Grab the lock and check if the file is still open.
   lock_guard lk{tl_traffic_logger.mutex};
@@ -280,7 +299,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     return;
 
   // part_len, ...
-  for (auto part : args.view()) {
+  for (string_view part : parts) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
@@ -297,7 +316,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
   }
 
-  for (auto part : args.view()) {
+  for (string_view part : parts) {
     if (auto blob_len = part.size(); blob_len > 0) {
       blobs[index++] = iovec{.iov_base = const_cast<char*>(part.data()), .iov_len = blob_len};
 
@@ -313,6 +332,90 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
   if (index) {
     tl_traffic_logger.Write(blobs.data(), index);
   }
+}
+
+void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
+                ServiceInterface::ContextInfo ci, Connection::ListenerType listener_type) {
+  absl::InlinedVector<string_view, 16> parts;
+  parts.reserve(args.size());
+  for (auto v : args.view())
+    parts.push_back(v);
+  LogTrafficParts(id, has_more, ci.db_index, listener_type, absl::MakeSpan(parts));
+}
+
+// Variant used by the Memcache protocol path.
+//
+// The memcache parser keeps fields that are NOT arguments in scalar Command members
+// (flags, expire_ts, delta, cas_unique) rather than in `backed_args`. We serialize
+// them into the record so that tools/replay has enough context to reproduce the
+// command faithfully. Record layout per command type:
+//
+//   SET/ADD/REPLACE/APPEND/PREPEND : [cmd, key, value, flags, expire_ts]
+//   CAS                            : [cas, key, value, flags, expire_ts, cas_unique]
+//   INCR/DECR                      : [cmd, key, delta]
+//   GAT/GATS                       : [cmd, expire_ts, key+]  (expire BEFORE keys, matches wire)
+//   all others (GET/GETS/DELETE/
+//               FLUSHALL/STATS/
+//               QUIT/VERSION)      : [cmd, *backed_args]
+void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Command& mc,
+                        ServiceInterface::ContextInfo ci, Connection::ListenerType listener_type) {
+  using MP = MemcacheParser;
+  string_view cmd_name = MP::CmdName(mc.type);
+  if (cmd_name.empty())
+    return;
+
+  // owned backs stringified numeric fields. We use a fixed-size std::array
+  // rather than a resizable vector so that string_views inserted into `parts`
+  // remain stable even if more fields are appended in the future: std::array
+  // never reallocates. kMaxOwned must be >= the largest per-type push count
+  // (currently 3, for CAS: flags + expire_ts + cas_unique).
+  constexpr size_t kMaxOwned = 4;
+  std::array<string, kMaxOwned> owned;
+  size_t owned_n = 0;
+
+  absl::InlinedVector<string_view, 16> parts;
+  parts.reserve(mc.backed_args->size() + kMaxOwned + 1);
+  parts.push_back(cmd_name);
+
+  auto push_num = [&](uint64_t n) {
+    DCHECK_LT(owned_n, kMaxOwned);
+    owned[owned_n] = absl::StrCat(n);
+    parts.push_back(owned[owned_n]);
+    ++owned_n;
+  };
+
+  // For GAT/GATS we want expire_ts to precede the key list because the parser can
+  // push multiple keys into backed_args; placing expire at the end would make the
+  // expire index depend on the number of keys.
+  if (mc.type == MP::GAT || mc.type == MP::GATS)
+    push_num(mc.raw_expire_ts);
+
+  for (string_view a : mc.backed_args->view())
+    parts.push_back(a);
+
+  switch (mc.type) {
+    case MP::SET:
+    case MP::ADD:
+    case MP::REPLACE:
+    case MP::APPEND:
+    case MP::PREPEND:
+      push_num(mc.flags);
+      push_num(mc.raw_expire_ts);
+      break;
+    case MP::CAS:
+      push_num(mc.flags);
+      push_num(mc.raw_expire_ts);
+      push_num(mc.cas_unique);
+      break;
+    case MP::INCR:
+    case MP::DECR:
+      push_num(mc.delta);
+      break;
+    default:
+      break;
+  }
+
+  LogTrafficParts(id, has_more, ci.db_index, listener_type, absl::MakeSpan(parts));
 }
 
 constexpr size_t kMinReadSize = 256;
@@ -722,6 +825,14 @@ void Connection::OnConnectionStart() {
   // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
     is_main_ = lsnr->IsMainInterface();
+    if (lsnr->IsPrivilegedInterface()) {
+      listener_type_ = ListenerType::ADMIN;
+    } else if (protocol_ == Protocol::MEMCACHE) {
+      listener_type_ = ListenerType::MEMCACHE;
+    } else {
+      // RESP covers TCP main listener as well as unix-socket RESP listeners.
+      listener_type_ = ListenerType::RESP;
+    }
   }
 
   if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
@@ -1302,8 +1413,10 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
       request_consumed_bytes_ = 0;
       bool has_more = consumed < read_buffer.size();
 
-      if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
-        LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
+      if (tl_traffic_logger.log_file &&
+          (tl_traffic_logger.listener_mask & (1u << static_cast<uint8_t>(listener_type_)))) {
+        LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()),
+                   listener_type_);
       }
 
       if (enqueue_only) {
@@ -2201,8 +2314,9 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force
   }
 }
 
-void Connection::StartTrafficLogging(string_view path) {
-  OpenTrafficLogger(path);
+Connection::StartTrafficResult Connection::StartTrafficLogging(string_view path,
+                                                               uint32_t listener_mask) {
+  return OpenTrafficLogger(path, listener_mask);
 }
 
 void Connection::StopTrafficLogging() {
@@ -2341,6 +2455,13 @@ bool Connection::ParseMCBatch() {
              << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING)
       return false;
+
+    if (result == MemcacheParser::OK && tl_traffic_logger.log_file &&
+        (tl_traffic_logger.listener_mask & (1u << static_cast<uint8_t>(listener_type_)))) {
+      bool has_more = io_buf_.InputLen() > 0;
+      LogMemcacheTraffic(id_, has_more, *parsed_cmd_->mc_command(),
+                         service_->GetContextInfo(cc_.get()), listener_type_);
+    }
 
     // We push the command to the parsed queue even in case of parse errors,
     // so that we can reply in order.

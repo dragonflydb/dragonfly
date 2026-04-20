@@ -191,6 +191,19 @@ class Connection : public util::Connection {
   // This method returns true for customer facing listeners.
   bool IsMainOrMemcache() const;
 
+  // Classification of the listener this connection belongs to, used as a filter for the
+  // traffic logger (DEBUG TRAFFIC) and persisted in the recorded file format.
+  // The numeric values are part of the on-disk format, do not change them.
+  enum class ListenerType : uint8_t {
+    RESP = 1,      // main RESP listener (TCP and unix-socket)
+    MEMCACHE = 2,  // memcached protocol listener
+    ADMIN = 3,     // privileged / admin listener
+  };
+
+  ListenerType GetListenerType() const {
+    return listener_type_;
+  }
+
   void SetName(std::string name);
 
   void SetLibName(std::string name);
@@ -218,10 +231,26 @@ class Connection : public util::Connection {
   // and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
+  // Bit mask over ListenerType values indicating which listeners are being recorded.
+  // Bit N (1 << static_cast<uint8_t>(ListenerType::X)) is set if listener X is logged.
+  static constexpr uint32_t kAllListenersMask =
+      (1u << static_cast<uint8_t>(ListenerType::RESP)) |
+      (1u << static_cast<uint8_t>(ListenerType::MEMCACHE)) |
+      (1u << static_cast<uint8_t>(ListenerType::ADMIN));
+
+  // Outcome of a StartTrafficLogging call on a single thread.
+  enum class StartTrafficResult : uint8_t {
+    kStarted,         // new recording started successfully on this thread
+    kAlreadyLogging,  // this thread already had an active recording (noop)
+    kOpenFailed,      // failed to open the log file (or unsupported platform)
+  };
+
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in
-  // that thread. A noop if the thread is already logging.
-  static void StartTrafficLogging(std::string_view base_path);
+  // that thread whose listener matches `listener_mask`. See StartTrafficResult for the
+  // possible outcomes; callers must distinguish AlreadyLogging (expected when the user
+  // forgot to STOP) from OpenFailed (unrelated I/O error).
+  static StartTrafficResult StartTrafficLogging(std::string_view base_path, uint32_t listener_mask);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
@@ -531,6 +560,8 @@ class Connection : public util::Connection {
       bool pending_input_ : 1;
     };
   };
+
+  ListenerType listener_type_ = ListenerType::RESP;
 
   bool request_shutdown_ = false;
 };

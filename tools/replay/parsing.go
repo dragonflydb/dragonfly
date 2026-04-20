@@ -51,8 +51,11 @@ func parseRecords(filename string, cb func(Record) bool, ignoreErrors bool) erro
 
 	var version uint8
 	binary.Read(reader, binary.LittleEndian, &version)
-	if version != 2 {
-		panic("Requires version two replayer, roll back in commits!")
+	// v2: legacy main-listener-only recordings.
+	// v3: per-record listener type packed into the upper bits of the Flags field
+	//     (bits 8..15). Layout is otherwise identical to v2.
+	if version != 2 && version != 3 {
+		log.Fatalf("Unsupported traffic log version %d (supported: 2, 3)", version)
 	}
 
 	recordNum := 0

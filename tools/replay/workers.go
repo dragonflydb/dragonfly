@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,11 +15,35 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Listener type identifiers as stored in traffic log v3 (must match
+// facade::Connection::ListenerType in the C++ code).
+const (
+	ListenerRESP     uint8 = 1
+	ListenerMemcache uint8 = 2
+	ListenerAdmin    uint8 = 3
+)
+
+// Flags field layout:
+//
+//	bit 0        : 1 if the next record belongs to the same batch as this one (HasMore)
+//	bits 8..15   : listener type (v3 only; 0 in v2 files -> treat as RESP)
 type RecordHeader struct {
 	Client  uint32
 	Time    uint64
 	DbIndex uint32
-	HasMore uint32
+	Flags   uint32
+}
+
+func (h RecordHeader) HasMore() bool {
+	return h.Flags&1 != 0
+}
+
+func (h RecordHeader) ListenerType() uint8 {
+	lt := uint8(h.Flags >> 8)
+	if lt == 0 {
+		return ListenerRESP
+	}
+	return lt
 }
 
 type Record struct {
@@ -42,12 +67,18 @@ func DetermineBaseTime(files []string) time.Time {
 
 // Handles a single connection/client
 type ClientWorker struct {
-	redis     *redis.Client
+	// RESP path (used for resp and admin listeners).
+	redis       *redis.Client
 	compare     *redis.Client
+	pipe        redis.Pipeliner
+	comparePipe redis.Pipeliner
+
+	// Memcache path (used for memcache listener).
+	mc           *mcClient
+	listenerType uint8
+
 	incoming  chan Record
 	processed uint
-	pipe      redis.Pipeliner
-	comparePipe redis.Pipeliner
 }
 
 // Pipeline length ranges for summary
@@ -63,13 +94,13 @@ var pipelineRanges = []struct {
 }
 
 var compareIgnoreCmds = []string{
-    "HELLO",
-    "AUTH",
-    "SELECT",
-    "INFO",
-    "TIME",
-    "CLIENT",
-    "CONFIG",
+	"HELLO",
+	"AUTH",
+	"SELECT",
+	"INFO",
+	"TIME",
+	"CLIENT",
+	"CONFIG",
 }
 
 // Handles a single file and distributes messages to clients
@@ -113,81 +144,90 @@ func trackLatency(worker *FileWorker, batchLatency float64, size int) {
 }
 
 func ignoreCompareCmd(c redis.Cmder) bool {
-    args := c.Args()
-    if len(args) == 0 {
-        return true
-    }
-    name := strings.ToUpper(fmt.Sprint(args[0]))
-    for _, ign := range compareIgnoreCmds {
-        if name == ign {
-            return true
-        }
-    }
-    return false
+	args := c.Args()
+	if len(args) == 0 {
+		return true
+	}
+	name := strings.ToUpper(fmt.Sprint(args[0]))
+	for _, ign := range compareIgnoreCmds {
+		if name == ign {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdAsString(c redis.Cmder) string {
-    args := c.Args()
-    if len(args) == 0 {
-        return "<no-args>"
-    }
+	args := c.Args()
+	if len(args) == 0 {
+		return "<no-args>"
+	}
 
-    name := strings.ToUpper(fmt.Sprint(args[0]))
-    if len(args) == 1 {
-        return name
-    }
+	name := strings.ToUpper(fmt.Sprint(args[0]))
+	if len(args) == 1 {
+		return name
+	}
 
-    parts := make([]string, 0, len(args) - 1)
-    for _, a := range args[1:] {
-        s := fmt.Sprint(a)
-        parts = append(parts, s)
-    }
-    return name + " " + strings.Join(parts, " ")
+	parts := make([]string, 0, len(args)-1)
+	for _, a := range args[1:] {
+		s := fmt.Sprint(a)
+		parts = append(parts, s)
+	}
+	return name + " " + strings.Join(parts, " ")
 }
 
 func cmdResultString(cm redis.Cmder) string {
-    if err := cm.Err(); err != nil {
-        if err == redis.Nil {
-            return "(nil)"
-        }
-        return "ERR: " + err.Error()
-    }
+	if err := cm.Err(); err != nil {
+		if err == redis.Nil {
+			return "(nil)"
+		}
+		return "ERR: " + err.Error()
+	}
 
-    if cmd, ok := cm.(*redis.Cmd); ok {
-        v := cmd.Val()
-        s := fmt.Sprintf("%v", v)
-        return s
-    }
+	if cmd, ok := cm.(*redis.Cmd); ok {
+		v := cmd.Val()
+		s := fmt.Sprintf("%v", v)
+		return s
+	}
 
-    return fmt.Sprintf("<unknown Cmder %T>", cm)
+	return fmt.Sprintf("<unknown Cmder %T>", cm)
 }
 
 func compareCmdResults(a, b []redis.Cmder, lastMsg Record) {
-    if len(a) != len(b) {
-        log.Fatalf("[COMPARE] mismatch count: primary=%d compare=%d (last client=%d time=%d)", len(a), len(b), lastMsg.Client, lastMsg.Time)
-        return
-    }
+	if len(a) != len(b) {
+		log.Fatalf("[COMPARE] mismatch count: primary=%d compare=%d (last client=%d time=%d)", len(a), len(b), lastMsg.Client, lastMsg.Time)
+		return
+	}
 
-    for i := range a {
-		if (ignoreCompareCmd(a[i])) {
+	for i := range a {
+		if ignoreCompareCmd(a[i]) {
 			continue
 		}
 		pa := cmdResultString(a[i])
-        pb := cmdResultString(b[i])
-        if pa != pb {
+		pb := cmdResultString(b[i])
+		if pa != pb {
 			log.Fatalf("[COMPARE] mismatch at idx %d cmd=%s\n  primary=%s\n  compare=%s\n  (client=%d time=%d)", i, cmdAsString(a[i]), pa, pb, lastMsg.Client, lastMsg.Time)
 		}
-    }
+	}
 }
 
 func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
+	if c.listenerType == ListenerMemcache {
+		c.runMC(pace, worker)
+	} else {
+		c.runRedis(pace, worker)
+	}
+	worker.clientGroup.Done()
+}
+
+func (c *ClientWorker) runRedis(pace bool, worker *FileWorker) {
 	for msg := range c.incoming {
 		if c.processed == 0 && msg.DbIndex != 0 {
 			// There is no easy way to switch, we rely on connection pool consisting only of one connection
 			c.redis.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
 			if c.compare != nil {
-        		c.compare.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
-    		}
+				c.compare.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
+			}
 		}
 
 		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
@@ -201,12 +241,12 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 
 		c.pipe.Do(context.Background(), msg.values...).Result()
 		if c.comparePipe != nil {
-    		c.comparePipe.Do(context.Background(), msg.values...).Result()
+			c.comparePipe.Do(context.Background(), msg.values...).Result()
 		}
 
 		atomic.AddUint64(&worker.processed, 1)
 
-		if msg.HasMore == 0 {
+		if !msg.HasMore() {
 			size := c.pipe.Len()
 			start := time.Now()
 			cmds, _ := c.pipe.Exec(context.Background())
@@ -214,35 +254,167 @@ func (c *ClientWorker) Run(pace bool, worker *FileWorker) {
 			trackLatency(worker, batchLatency, size)
 			c.processed += uint(size)
 
-    		if c.comparePipe != nil {
-        		ccmds, _ := c.comparePipe.Exec(context.Background())
-        		compareCmdResults(cmds, ccmds, msg)
-    		}
+			if c.comparePipe != nil {
+				ccmds, _ := c.comparePipe.Exec(context.Background())
+				compareCmdResults(cmds, ccmds, msg)
+			}
 		}
 	}
 
-	if size := c.pipe.Len(); size >= 0 {
+	// Final flush: only run Exec if there is something pending (the input channel
+	// closed mid-batch). Also drain the compare pipeline so its connection does not
+	// keep commands buffered; we don't have a last-message context to attribute a
+	// mismatch to, so we only compare when both pipelines have the same length.
+	if size := c.pipe.Len(); size > 0 {
 		start := time.Now()
-		c.pipe.Exec(context.Background())
+		cmds, _ := c.pipe.Exec(context.Background())
 		batchLatency := float64(time.Since(start).Microseconds())
 		trackLatency(worker, batchLatency, size)
 		c.processed += uint(size)
-	}
 
-	worker.clientGroup.Done()
+		if c.comparePipe != nil && c.comparePipe.Len() == size {
+			ccmds, _ := c.comparePipe.Exec(context.Background())
+			compareCmdResults(cmds, ccmds, Record{})
+		} else if c.comparePipe != nil {
+			// Lengths diverged — still drain so the comparePipe doesn't leak commands.
+			c.comparePipe.Exec(context.Background())
+		}
+	}
 }
 
-func NewClient(w *FileWorker, pace bool) *ClientWorker {
-	client := &ClientWorker{
-		redis:    redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true}),
-		incoming: make(chan Record, *fClientBuffer),
-	}
-	client.pipe = client.redis.Pipeline()
+// runMC replays memcache-listener records via the memcache text protocol.
+// gomemcache has no pipelining, so each command is issued synchronously and the
+// pipeline-range latency digest uses batch size = 1.
+func (c *ClientWorker) runMC(pace bool, worker *FileWorker) {
+	for msg := range c.incoming {
+		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
+		if lag < 0 {
+			atomic.AddUint64(&worker.delayed, 1)
+		}
+		if pace {
+			time.Sleep(lag)
+		}
 
-	if *fCompareHost != "" {
-        client.compare = redis.NewClient(&redis.Options{Addr: *fCompareHost, PoolSize: 1, DisableIndentity: true})
-        client.comparePipe = client.compare.Pipeline()
-    }
+		start := time.Now()
+		dispatchMC(c.mc, msg.values)
+		trackLatency(worker, float64(time.Since(start).Microseconds()), 1)
+		atomic.AddUint64(&worker.processed, 1)
+		c.processed++
+	}
+}
+
+// dispatchMC maps a recorded memcache command to the raw wire commands sent
+// by the original client. See memcache.go for the underlying TCP client.
+//
+// Record layout written by facade::LogMemcacheTraffic:
+//
+//	SET/ADD/REPLACE/APPEND/PREPEND : [cmd, key, value, flags, expire_ts]
+//	CAS                            : [cas, key, value, flags, expire_ts, cas_unique]
+//	INCR/DECR                      : [cmd, key, delta]
+//	GAT/GATS                       : [cmd, expire_ts, key+]
+//	GET/GETS/DELETE/FLUSHALL/...   : [cmd, *args]
+//
+// Unknown commands are dropped silently.
+func dispatchMC(mc *mcClient, values []interface{}) {
+	if len(values) == 0 {
+		return
+	}
+	name, ok := values[0].(string)
+	if !ok {
+		return
+	}
+	arg := func(i int) string {
+		if i >= len(values) {
+			return ""
+		}
+		s, _ := values[i].(string)
+		return s
+	}
+	argU64 := func(i int) uint64 {
+		v, _ := strconv.ParseUint(arg(i), 10, 64)
+		return v
+	}
+	argI64 := func(i int) int64 {
+		v, _ := strconv.ParseInt(arg(i), 10, 64)
+		return v
+	}
+	argU32 := func(i int) uint32 {
+		return uint32(argU64(i))
+	}
+
+	lc := strings.ToLower(name)
+	switch lc {
+	case "set", "add", "replace", "append", "prepend":
+		mc.Store(lc, arg(1), argU32(3), argI64(4), []byte(arg(2)))
+	case "cas":
+		mc.Cas(arg(1), argU32(3), argI64(4), argU64(5), []byte(arg(2)))
+	case "get", "gets":
+		keys := stringArgs(values, 1)
+		if len(keys) > 0 {
+			mc.Retrieve(lc, keys)
+		}
+	case "gat", "gats":
+		keys := stringArgs(values, 2)
+		if len(keys) > 0 {
+			mc.RetrieveGat(lc, argI64(1), keys)
+		}
+	case "delete":
+		if k := arg(1); k != "" {
+			mc.Delete(k, stringArgs(values, 2))
+		}
+	case "incr", "decr":
+		mc.IncrDecr(lc, arg(1), argU64(2))
+	case "flush_all":
+		mc.FlushAll()
+	case "quit", "version", "stats", "mn":
+		// No-op: control / meta-NOOP commands, not useful for replay.
+	default:
+		// Defensive: parser normalises meta commands (ms/md/ma/mg/me) to their
+		// regular counterparts before logging, so only unknown/corrupted records
+		// can land here. Surface them so replay isn't silently skipping data.
+		log.Printf("replay: unknown memcache command %q skipped", name)
+	}
+}
+
+// stringArgs returns values[start:] coerced to []string (non-string entries
+// are skipped).
+func stringArgs(values []interface{}, start int) []string {
+	out := make([]string, 0, len(values)-start)
+	for i := start; i < len(values); i++ {
+		if s, ok := values[i].(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func NewClient(w *FileWorker, pace bool, listenerType uint8) *ClientWorker {
+	client := &ClientWorker{
+		listenerType: listenerType,
+		incoming:     make(chan Record, *fClientBuffer),
+	}
+
+	switch listenerType {
+	case ListenerMemcache:
+		client.mc = newMCClient(*fMCHost)
+	case ListenerAdmin:
+		// Route admin-listener records to the admin host. Fall back to -host if
+		// -admin-host was not explicitly set (useful when the user replays against
+		// a server that exposes only a single RESP port).
+		addr := *fAdminHost
+		if addr == "" {
+			addr = *fHost
+		}
+		client.redis = redis.NewClient(&redis.Options{Addr: addr, PoolSize: 1, DisableIndentity: true})
+		client.pipe = client.redis.Pipeline()
+	default: // ListenerRESP or unknown
+		client.redis = redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true})
+		client.pipe = client.redis.Pipeline()
+		if *fCompareHost != "" {
+			client.compare = redis.NewClient(&redis.Options{Addr: *fCompareHost, PoolSize: 1, DisableIndentity: true})
+			client.comparePipe = client.compare.Pipeline()
+		}
+	}
 
 	atomic.AddUint64(&w.clients, 1)
 	w.clientGroup.Add(1)
@@ -261,7 +433,7 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	err := parseRecords(file, func(r Record) bool {
 		client, ok := clients[r.Client]
 		if !ok {
-			client = NewClient(w, *fPace)
+			client = NewClient(w, *fPace, r.ListenerType())
 			clients[r.Client] = client
 		}
 		cmdName := strings.ToLower(r.values[0].(string))
