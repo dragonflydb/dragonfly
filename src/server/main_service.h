@@ -118,6 +118,10 @@ class Service : public facade::ServiceInterface {
     return cluster_family_;
   }
 
+  acl::UserRegistry& user_registry() {
+    return user_registry_;
+  }
+
   // Utility function used in unit tests
   // Do not use in production, only meant to be used by unit tests
   const acl::AclFamily* TestInit();
