@@ -315,6 +315,16 @@ TEST_F(BitOpsFamilyTest, BitCountByteSubRange) {
   EXPECT_EQ(13, CheckedInt({"bitcount", "foo", "-5", "-2"}));
   EXPECT_EQ(0, CheckedInt({"bitcount", "foo", "-1", "-2"}));  // illegal range
   EXPECT_EQ(0, CheckedInt({"bitcount", "foo", "1", "0"}));    // illegal range
+
+  // Negative `end` that resolves to < 0 must be clamped to 0 (Redis semantics);
+  EXPECT_EQ(4, CheckedInt({"bitcount", "foo", "0", "-6"}));    // end resolves to 0
+  EXPECT_EQ(4, CheckedInt({"bitcount", "foo", "0", "-100"}));  // end resolves far below 0
+  EXPECT_EQ(4, CheckedInt({"bitcount", "foo", "-100", "-100"}));
+  EXPECT_EQ(4, CheckedInt({"bitcount", "foo", "-100", "-99"}));
+
+  auto a_resp = Run({"set", "A", "A"});
+  EXPECT_EQ(a_resp, "OK");
+  EXPECT_EQ(2, CheckedInt({"bitcount", "A", "0", "-2"}));
 }
 
 TEST_F(BitOpsFamilyTest, BitCountByteBitSubRange) {

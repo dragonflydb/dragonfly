@@ -212,7 +212,7 @@ std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits) 
     end = strlen + end;
 
   start = max(start, int64_t(0));
-  end = min(end, strlen - 1);  // inclusive: clamp to last valid index
+  end = max(int64_t(0), min(end, strlen - 1));  // inclusive, clamped to [0, strlen - 1]
 
   if (start > end)
     return 0;
