@@ -332,9 +332,13 @@ flowchart LR
 flowchart LR
   A[ProcessDelayedEntries] --> B["SerializeFetchedEntry<br/><b>lock stream_mu_</b>"]
   B --> C[SaveEntry]
+  C -->|"if buffer > threshold"| D["consume_fun_()<br/>= HandleFlushData"]
+  D --> E["seq_cond_.wait<br/>consumer_->ConsumeData<br/><b>BLOCKS</b>"]
 
   classDef lock fill:#FFF3E0,stroke:#EF6C00;
+  classDef block fill:#FFEBEE,stroke:#C62828;
   class B lock;
+  class E block;
 ```
 
 ### Path 3: `ConsumeJournalChange` (journal callback)
@@ -357,7 +361,9 @@ This path does **not** reach `HandleFlushData`. It only appends to the serialize
 flowchart TD
   subgraph HAZARD["Under stream_mu_ (HAZARD)"]
     A2["SerializeEntry — under SerializeBucketLocked<br/>lock stream_mu_"] --> SB2["SaveEntry"]
+    A3["SerializeFetchedEntry — from ProcessDelayedEntries<br/>lock stream_mu_"] --> SB3["SaveEntry"]
     SB2 --> CF["PushToConsumerIfNeeded<br/>consume_fun_()"]
+    SB3 --> CF
     CF --> HFD1[HandleFlushData]
   end
 
@@ -381,7 +387,7 @@ flowchart TD
   classDef hazard fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C;
   classDef safe fill:#E8F5E9,stroke:#2E7D32,color:#1B5E20;
   classDef block fill:#FFF3E0,stroke:#EF6C00;
-  class A2,CF,HFD1 hazard;
+  class A2,A3,CF,HFD1 hazard;
   class B1,B2,B3,B4,B5,PS1,PS2,PS3,PS4,PS5,FS,HFD2 safe;
   class BLOCK block;
 ```
