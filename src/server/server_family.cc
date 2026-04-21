@@ -328,8 +328,17 @@ std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_
     LOG(ERROR) << "Compiled without GCP support";
     exit(1);
 #endif
+  } else if (detail::IsAzurePath(uri)) {
+    auto azure = std::make_shared<detail::AzureSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await(
+        [&] { return azure->Init(detail::kBucketConnectMs); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
+      exit(1);
+    }
+    return azure;
   } else {
-    LOG(ERROR) << "Uknown cloud storage " << uri;
+    LOG(ERROR) << "Unknown cloud storage " << uri;
     exit(1);
   }
 }
@@ -666,8 +675,8 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     return cmd_cntx->SendError("Invalid thread id");
   }
 
-  unsigned migrated = 0;
-  auto cb_brief = [&](unsigned current_tid, ProactorBase* p) {
+  std::atomic<unsigned> migrated{0};
+  auto search_and_migrate_cb = [&](unsigned current_tid, ProactorBase* p) {
     if (current_tid == tid) {
       return;  // we should not migrate to the same thread
     }
@@ -675,7 +684,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     auto traverse_cb = [&](unsigned, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
       if (dconn->GetClientId() == id) {
-        ++migrated;
+        migrated.fetch_add(1, std::memory_order_relaxed);
         dconn->RequestAsyncMigration(shard_set->pool()->at(tid), true /* force */);
       }
     };
@@ -688,7 +697,7 @@ void ClientMigrate(CmdArgList args, absl::Span<facade::Listener*> listeners,
     }
   };
 
-  shard_set->pool()->AwaitBrief(cb_brief);
+  shard_set->pool()->AwaitFiberOnAll(search_and_migrate_cb);
 
   return cmd_cntx->rb()->SendLong(migrated);
 }
@@ -2141,6 +2150,24 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
 
+  // Replication Info
+  if (m.replica_side_info) {
+    const ReplicaSummary& rsummary = m.replica_side_info->summary;
+    AppendMetricWithoutLabels("master_link_status", "1 if up 0 if down",
+                              rsummary.master_link_established ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    AppendMetricWithoutLabels("master_last_io_seconds_ago", "Last Master IO Seconds Ago",
+                              rsummary.master_last_io_sec, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("master_sync_in_progress", "1 if true 0 if false",
+                              rsummary.full_sync_in_progress ? 1 : 0, MetricType::GAUGE,
+                              &resp->body());
+    // Print last known offset either during stable sync (online) or during disconnects when
+    // the full sync phase did not start yet.
+    if (rsummary.full_sync_done || (rsummary.passed_full_sync && !rsummary.master_link_established))
+      AppendMetricWithoutLabels("slave_repl_offset", "Slave Replication Offset",
+                                rsummary.repl_offset_sum, MetricType::GAUGE, &resp->body());
+  }
+
   // Stream access pattern metrics
   if (m.shard_stats.stream_sequential_accesses || m.shard_stats.stream_random_accesses ||
       m.shard_stats.stream_fetch_all_accesses) {
@@ -2785,37 +2812,61 @@ void ServerFamily::Shrink(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [key](Transaction* t, EngineShard* shard) -> OpResult<int64_t> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
-    auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
-    if (!IsValid(it)) {
-      return OpStatus::KEY_NOTFOUND;
+
+    // First, do a read-only check: validate type/encoding and decide whether
+    // shrink is needed.  This avoids bumping the key version, firing WATCH
+    // invalidations, or running PostUpdate for no-op / WRONGTYPE paths.
+    {
+      auto it = db_slice.FindReadOnly(t->GetDbContext(), key);
+      if (!IsValid(it)) {
+        return OpStatus::KEY_NOTFOUND;
+      }
+
+      const PrimeValue& pv = it->second;
+      unsigned encoding = pv.Encoding();
+      unsigned obj_type = pv.ObjType();
+
+      if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
+        return OpStatus::WRONG_TYPE;
+      }
+
+      DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
+      ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+      size_t current_size = ds->UpperBoundSize();
+      size_t bucket_count = ds->BucketCount();
+
+      if (current_size == 0 || bucket_count == 0) {
+        return 0;
+      }
+
+      size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
+      if (optimal_size >= bucket_count) {
+        return 0;
+      }
     }
 
-    const PrimeValue& pv = it->second;
-    unsigned encoding = pv.Encoding();
-    unsigned obj_type = pv.ObjType();
-
-    // Only DenseSet-based structures (set or hash with kEncodingStrMap2)
-    if (encoding != kEncodingStrMap2 || (obj_type != OBJ_SET && obj_type != OBJ_HASH)) {
-      return OpStatus::WRONG_TYPE;
+    // Shrink is needed — use FindMutable so the AutoUpdater tracks the
+    // MallocUsed() delta (bucket array resize, link changes, expired-entry
+    // deletions) and keeps obj_memory_usage in sync.
+    auto it_res = db_slice.FindMutable(t->GetDbContext(), key);
+    if (!IsValid(it_res.it)) {
+      return OpStatus::KEY_NOTFOUND;  // raced away between the two lookups
     }
 
+    PrimeValue& pv = it_res.it->second;
     DenseSet* ds = static_cast<DenseSet*>(pv.RObjPtr());
     ds->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
-    size_t current_size = ds->UpperBoundSize();
-    size_t bucket_count = ds->BucketCount();
 
-    if (current_size == 0 || bucket_count == 0) {
-      return 0;
-    }
-
-    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(current_size));
-    if (optimal_size >= bucket_count) {
-      return 0;
-    }
-
-    size_t bucket_bytes_before = bucket_count * sizeof(void*);
+    size_t bucket_bytes_before = ds->BucketCount() * sizeof(void*);
+    size_t optimal_size = std::max(size_t(8), absl::bit_ceil(ds->UpperBoundSize()));
     ds->Shrink(optimal_size);
     size_t bucket_bytes_after = ds->BucketCount() * sizeof(void*);
+
+    // Shrink expires entries during bucket compaction.  If all entries expired,
+    // delete the now-empty key to prevent zombie keys that crash SAVE.
+    if (ds->Empty()) {
+      db_slice.DelMutable(t->GetDbContext(), std::move(it_res));
+    }
 
     return bucket_bytes_before - bucket_bytes_after;
   };
@@ -2872,7 +2923,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(CmdArgList args,
       LOG(ERROR) << "Compiled without AWS support";
       exit(1);
 #endif
-    } else if (detail::IsGCSPath(ArgS(args, 1))) {
+    } else if (detail::IsGCSPath(ArgS(args, 1)) || detail::IsAzurePath(ArgS(args, 1))) {
       save_cmd_opts.cloud_uri = ArgS(args, 1);
     } else {
       // no cloud_uri get basename and return
@@ -3055,6 +3106,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   }
 
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
+  result.acl_stats = service_.user_registry().GetAclStats();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -3590,6 +3642,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
       append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
     }
+  }
+
+  if (should_enter("ACL", true)) {
+    const auto& acl = m.acl_stats;
+    append("acl_num_users", acl.num_users);
+    append("acl_num_passwords", acl.num_passwords);
+    append("acl_num_cat_changes", acl.num_cat_changes);
+    append("acl_num_cmd_changes", acl.num_cmd_changes);
+    append("acl_num_key_globs", acl.num_key_globs);
+    append("acl_key_globs_bytes", acl.key_globs_bytes);
+    append("acl_num_pubsub_globs", acl.num_pubsub_globs);
+    append("acl_pubsub_globs_bytes", acl.pubsub_globs_bytes);
+    append("acl_total_bytes", acl.TotalBytes());
   }
 
   return info;

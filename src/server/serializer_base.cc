@@ -22,7 +22,34 @@
 
 namespace dfly {
 
-using namespace std;
+void BucketDependencies::Increment(BucketIdentity bucket) {
+  auto& counter = deps_[bucket];
+  if (!counter)
+    counter = std::make_shared<LocalLatch>();
+  counter->lock();
+}
+
+void BucketDependencies::Decrement(BucketIdentity bucket) {
+  auto it = deps_.find(bucket);
+  CHECK(it != deps_.end());
+
+  it->second->unlock();
+  if (!it->second->IsBlocked())
+    deps_.erase(it);
+}
+
+void BucketDependencies::Wait(BucketIdentity bucket) const {
+  auto it = deps_.find(bucket);
+  if (it == deps_.end())
+    return;
+
+  auto counter = it->second;  // copy value for address stability
+  counter->Wait();
+}
+
+bool BucketDependencies::DEBUG_IsBusy(BucketIdentity bucket) const {
+  return deps_.contains(bucket);
+}
 
 void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_index, PrimeKey pk,
                                            const PrimeValue& pv, time_t expire_time,
@@ -35,6 +62,8 @@ void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_ind
   auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
                                                     expire_time, mc_flags);
+
+  deps_.Increment(bucket);
   delayed_entries_.emplace(bucket, std::move(entry));
 }
 
@@ -69,6 +98,7 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
     auto value = entry->value.Get();
 
     if (!value.has_value()) {
+      deps_.Decrement(target.key());
       cntx->ReportError(make_error_code(std::errc::io_error),
                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
@@ -76,12 +106,15 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
 
     PrimeValue pv{*value};
     SerializeFetchedEntry(*entry, pv);
-  }
+
+    deps_.Decrement(target.key());
+  };
 }
 
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
-    : db_slice_(slice), base_cntx_(cntx) {
-  DCHECK(db_slice_);
+    : DelayedEntryHandler(static_cast<BucketDependencies&>(*this)),
+      db_slice_(slice),
+      base_cntx_(cntx) {
   DCHECK(base_cntx_);
 }
 
@@ -109,51 +142,21 @@ void SerializerBase::UnregisterChangeListener() {
     db_slice_->UnregisterOnChange(version);
 }
 
-void SerializerBase::MarkBucketSerializing(BucketIdentity bid) {
-  DCHECK(!bucket_states_.contains(bid)) << "Bucket already in transient state";
-  bucket_states_[bid] = BucketPhase::kSerializing;
-}
-
-void SerializerBase::FinishBucketIteration(BucketIdentity bid) {
-  auto it = bucket_states_.find(bid);
-  DCHECK(it != bucket_states_.end());
-  DCHECK(it->second == BucketPhase::kSerializing);
-
-  bucket_states_.erase(it);
-  ++stats_.buckets_serialized;
-}
-
-bool SerializerBase::ShouldProcessBucket(PrimeTable::bucket_iterator it) {
-  // Check if bucket is invalid or was already serialized
-  if (it.is_done() || it.GetVersion() >= snapshot_version_) {
-    ++stats_.buckets_skipped;
-    return false;
-  }
-
-  // Check if this bucket is currently being serialized
-  if (bucket_states_.contains(it.bucket_address())) {
-    ++stats_.change_during_serialization;
-    return false;
-  }
-
-  return true;
-}
-
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) {
-  std::lock_guard guard(big_value_mu_);
-  return ProcessBucketInternal(db_index, it, on_update);
-}
+  // Check if this bucket is stale
+  if (it.is_done() || it.GetVersion() >= snapshot_version_) {
+    stats_.buckets_skipped++;
 
-bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                           bool on_update) {
-  DCHECK(big_value_mu_.is_locked());
+    if (it.is_done())
+      return false;
 
-  // Check if this bucket should be serialized
-  if (!ShouldProcessBucket(it)) {
     // Force flush all delayed entries in the touched bucket
-    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update && !it.is_done())
+    if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
+
+    // Wait for all dependencies to be resolved
+    BucketDependencies::Wait(it.bucket_address());
     return false;
   }
 
@@ -168,23 +171,19 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
     db_guard.emplace(*db_slice_->GetLatch());
   }
 
+  // The block above with updating earlier callbacks is not exlusive - check version again
+  if (it.GetVersion() >= snapshot_version_)
+    return ProcessBucket(db_index, it, on_update);  // for the false path
+
   // We call it before SerializeBucketLocked because it dchecks on bucket version.
   it.SetVersion(snapshot_version_);
-  MarkBucketSerializing(it.bucket_address());
+  BucketDependencies::Increment(it.bucket_address());
 
   stats_.keys_serialized += SerializeBucketLocked(db_index, it, on_update);
+  stats_.buckets_serialized++;
   stats_.buckets_on_change += unsigned(on_update);
 
-  FinishBucketIteration(it.bucket_address());
-
-  // Assert the version is equal to a snapshot version (might be a different concurrent one),
-  // to prove no concurrent modifications are possible (they would've assigned a different version)
-#if !defined(NDEBUG)
-  DCHECK_GE(it.GetVersion(), snapshot_version_);
-  auto current_snapshots = db_slice_->SnapshotVersions();
-  DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())
-      << absl::StrJoin(current_snapshots, " ") << " does not contain " << it.GetVersion();
-#endif
+  BucketDependencies::Decrement(it.bucket_address());
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
@@ -193,28 +192,22 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
 }
 
 void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  auto* active = util::fb2::detail::FiberActive();
-  string_view active_name = active->name();
+  std::string_view active_name = util::fb2::detail::FiberActive()->name();
   if (!absl::StartsWith(active_name, "shard_queue") &&  //
       !absl::StartsWith(active_name, "l2_queue") &&     // pipelining
       !absl::StartsWith(active_name, "SliceSnapshot") &&
       active_name != "Dispatched"  // Comes from OnAllShards(... { migration->RunSync(); });
   ) {
-    LOG(DFATAL) << "Unexpected fiber: " << active->name() << " on " << util::fb2::GetStacktrace();
+    LOG(DFATAL) << "Unexpected fiber: " << active_name << " on " << util::fb2::GetStacktrace();
   }
 
   ProcessBucket(db_index, it, true);
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set) {
-  // We must acquire the mutex ahead and process all buckets under the same lock.
-  // This ensures that bucket processing and the table insertion that invoked this callback
-  // will be operating on the same state as all writes are linarly ordered by this mutex.
-  std::unique_lock lk{big_value_mu_};
-
+void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& bucket_set) {
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : set.buckets())
-    ProcessBucketInternal(db_index, it, true);
+  for (auto it : bucket_set.buckets())
+    ProcessBucket(db_index, it, true);
 }
 
 }  // namespace dfly

@@ -124,6 +124,9 @@ struct IndicesOptions {
   bool custom_stopwords = false;  // true when STOPWORDS was explicitly set in FT.CREATE
 };
 
+// BM25 scoring statistics are now tracked per-field inside each TextIndex.
+// See BaseStringIndex::GetFieldDocLength() and GetFieldAvgDocLen().
+
 // Collection of indices for all fields in schema
 class FieldIndices {
  public:
@@ -191,6 +194,9 @@ struct SearchResult {
   // Contains final scores if an aggregation was present
   std::vector<std::pair<DocId, float>> knn_scores;
 
+  // Text relevance scores (DocId -> score). Populated when a scorer is active.
+  std::vector<std::pair<DocId, float>> text_scores;
+
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
 
@@ -202,6 +208,8 @@ struct KnnScoreSortOption {
   std::string_view score_field_alias;
   size_t limit = std::numeric_limits<size_t>::max();
 };
+
+enum class ScorerType : int;
 
 // SearchAlgorithm allows searching field indices with a query
 class SearchAlgorithm {
@@ -229,8 +237,11 @@ class SearchAlgorithm {
 
   void EnableProfiling();
 
+  void SetScorer(ScorerType type);
+
  private:
   bool profiling_enabled_ = false;
+  std::optional<ScorerType> scorer_type_;
   std::unique_ptr<AstNode> query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };

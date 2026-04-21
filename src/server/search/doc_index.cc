@@ -406,12 +406,12 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
   if (!is_restored) {
     key_index_ = DocKeyIndex{};
     // Full rebuild handles all documents — discard any buffered state from LOADING.
-    is_restoring_vectors_ = false;
+    hnsw_state_ = HnswState::kBuilding;
     pending_vector_updates_.clear();
   } else {
-    // Restored path: VectorLoop will call RestoreGlobalVectorIndices which drains
-    // the buffers. Until then, buffer any journal-driven mutations.
-    is_restoring_vectors_ = true;
+    // Restored path: buffer journal-driven mutations until PerformPostLoad drains
+    // them after all shards complete vector restoration.
+    hnsw_state_ = HnswState::kRestoring;
   }
 
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
@@ -531,41 +531,8 @@ bool HnswShardIndex::Add(search::GlobalDocId id, const BaseAccessor& doc) {
   return global_index_->Add(id, doc, field_ident_);
 }
 
-void HnswShardIndex::Remove(search::GlobalDocId id, const BaseAccessor& doc, PrimeValue& pv,
-                            absl::Span<const std::string_view> modified_fields,
-                            FieldExtractionCache* cache) {
-  bool sync = global_index_->Remove(id, doc, field_ident_);
-  if (sync) {
-    // Write lock acquired, ProcessDeferred drained all pending ops for this field.
-    ClearPreservedData();
-    return;
-  }
-
-  if (global_index_->IsVectorCopied())
-    return;
-
-  // Remove was deferred and this index uses external vectors — preserve the old sds
-  // so the deferred Remove can still dereference hnswlib's stored pointer.
-  if (!modified_fields.empty() &&
-      rng::find(modified_fields, field_ident_) == modified_fields.end()) {
-    return;
-  }
-
-  // Use the cache to extract each field at most once per document.
-  // When multiple search indices reference the same hash field, they share
-  // ownership of the original sds via shared_ptr.
-  auto [it, inserted] = cache->emplace(field_ident_, nullptr);
-  if (inserted) {
-    it->second = ExtractField(pv, field_ident_);
-  }
-  if (it->second) {
-    preserved_field_data_.push_back(it->second);
-  }
-}
-
-void HnswShardIndex::RemoveById(search::GlobalDocId id) {
-  [[maybe_unused]] bool sync = global_index_->Remove(id);
-  DCHECK(sync) << "RemoveById should only be called when no read lock is held";
+void HnswShardIndex::Remove(search::GlobalDocId id) {
+  global_index_->Remove(id);
 }
 
 bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc) {
@@ -578,6 +545,22 @@ bool HnswShardIndex::IsVectorCopied() const {
 
 void HnswShardIndex::ClearPreservedData() {
   preserved_field_data_.clear();
+}
+
+void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
+                                        absl::Span<const std::string_view> modified_fields,
+                                        FieldExtractionCache* cache) {
+  if (global_index_->IsVectorCopied())
+    return;
+  if (!modified_fields.empty() && rng::find(modified_fields, field_ident_) == modified_fields.end())
+    return;
+  auto [it, inserted] = cache->emplace(field_ident_, nullptr);
+  if (inserted) {
+    it->second = ExtractField(pv, field_ident_);
+  }
+  if (it->second) {
+    preserved_field_data_.push_back(it->second);
+  }
 }
 
 // --- ShardDocIndex HNSW methods ---
@@ -600,7 +583,7 @@ void ShardDocIndex::InitHnswShardIndices() {
 
 void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
-  if (is_restoring_vectors_) {
+  if (hnsw_state_ != HnswState::kBuilding) {
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
     return;
@@ -619,24 +602,27 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
 void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
     ShardDocIndex::DocId doc_id, const DbContext& db_cntx, PrimeValue& pv,
     absl::Span<const std::string_view> modified_fields, FieldExtractionCache* cache) {
-  if (is_restoring_vectors_) {
+  if (hnsw_state_ != HnswState::kBuilding) {
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
+
+    // Preserve old sds so HNSW pointers set by UpdateVectorData stay valid.
+    for (auto& hnsw : hnsw_shard_indices_)
+      hnsw.MaybePreserveField(pv, modified_fields, cache);
     return;
   }
 
-  auto accessor = GetAccessor(db_cntx, pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
   for (auto& hnsw : hnsw_shard_indices_) {
-    hnsw.Remove(global_id, *accessor, pv, modified_fields, cache);
+    hnsw.Remove(global_id);
   }
 }
 
 void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
   for (auto& hnsw : hnsw_shard_indices_) {
-    hnsw.RemoveById(global_id);
+    hnsw.Remove(global_id);
   }
 }
 
@@ -652,7 +638,7 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
 
   size_t processed = 0;
   size_t successful_updates = 0;
-  size_t failed_updates = 0;
+  size_t deferred_updates = 0;
   size_t missing_documents = 0;
 
   // Collect missing document IDs to remove after the loop (can't modify key_index_ during
@@ -684,6 +670,7 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
     auto doc = GetAccessor(op_args.db_cntx, pv);
     GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
 
+    bool any_deferred = false;
     for (auto& hnsw : hnsw_shard_indices_) {
       bool success = hnsw.UpdateVectorData(global_id, *doc);
       if (success) {
@@ -692,18 +679,15 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
           pv.SetOmitDefrag(true);
         }
       } else {
-        // Node not in restored HNSW graph (new doc added during full sync via journal
-        // events before index was created). Fall back to Add.
-        bool added = hnsw.Add(global_id, *doc);
-        if (added) {
-          ++successful_updates;
-          if (!hnsw.IsVectorCopied()) {
-            pv.SetOmitDefrag(true);
-          }
-        } else {
-          ++failed_updates;
-        }
+        // Node not in restored graph — defer to pending_vector_updates_ so
+        // addPoint (which traverses the graph) only runs after every restored
+        // node has valid vector data.
+        any_deferred = true;
       }
+    }
+    if (any_deferred) {
+      pending_vector_updates_.emplace(key);
+      ++deferred_updates;
     }
 
     // Yield periodically to avoid blocking the fiber
@@ -718,7 +702,7 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   // Re-validate each entry: concurrent fibers may have freed and reused the DocId.
   for (const auto& [key, local_id, global_id] : missing_doc_ids) {
     for (auto& hnsw : hnsw_shard_indices_) {
-      hnsw.RemoveById(global_id);
+      hnsw.Remove(global_id);
     }
     // Only remove from key_index_ if the mapping still matches the snapshot.
     if (key_index_.Find(key) == local_id) {
@@ -728,52 +712,69 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
 
   // Log summary of vector restoration
   size_t total_docs = doc_keys_snapshot.size();
-  if (failed_updates > 0 || missing_documents > 0) {
+  if (deferred_updates > 0 || missing_documents > 0) {
     LOG(WARNING) << "Restored vectors for index " << index_name << ": " << successful_updates
-                 << " successful, " << failed_updates << " failed (missing vector field), "
-                 << missing_documents << " missing documents out of " << total_docs << " total";
+                 << " successful, " << deferred_updates << " deferred, " << missing_documents
+                 << " missing documents out of " << total_docs << " total";
   } else {
     VLOG(1) << "Restored vectors for index " << index_name << ": " << successful_updates << "/"
             << total_docs << " documents";
   }
 
-  // Drain pending vector updates that arrived via journal during the LOADING window.
-  // Clear the flag BEFORE draining so that AddDoc/AddDocToGlobalVectorIndex work normally.
-  is_restoring_vectors_ = false;
+  // Stay in kRestoring — other shards may not have populated their vector data
+  // yet (the HNSW graph is global). PerformPostLoad calls DrainPendingVectorUpdates
+  // after BlockUntilConstructionEnd ensures ALL shards completed.
+}
 
-  if (!pending_vector_updates_.empty()) {
-    LOG(INFO) << "Draining " << pending_vector_updates_.size()
-              << " pending vector updates for index '" << index_name << "' on shard "
-              << EngineShard::tlocal()->shard_id();
-
-    for (const auto& key : pending_vector_updates_) {
-      auto local_id = key_index_.Find(key);
-      auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
-
-      if (it && IsValid(it->it)) {
-        // Key exists in DB — ensure it's properly indexed with current data.
-        PrimeValue& pv = it->it->second;
-
-        if (local_id) {
-          // Already in key_index_ (from snapshot). Remove old HNSW node and re-add
-          // with current vector data to match master state.
-          RemoveFromAllHnswIndices(*local_id);
-          AddDocToGlobalVectorIndex(*local_id, op_args.db_cntx, &pv);
-        } else {
-          // New document not in key_index_ (added during full sync).
-          auto doc_id = AddDoc(key, op_args.db_cntx, pv);
-          if (doc_id) {
-            AddDocToGlobalVectorIndex(*doc_id, op_args.db_cntx, &pv);
-          }
-        }
-      } else if (local_id) {
-        // Key absent from DB — remove stale HNSW node and key_index_ entry.
-        RemoveFromAllHnswIndices(*local_id);
-        key_index_.Remove(*local_id);
-      }
-    }
-    pending_vector_updates_.clear();
+void ShardDocIndex::SetHnswSerializing() {
+  // Only transition from kBuilding. If already in another non-building state
+  // (e.g. kRestoring during load), ops are already being buffered — no change needed.
+  if (hnsw_state_ == HnswState::kBuilding) {
+    hnsw_state_ = HnswState::kSerializing;
   }
+}
+
+void ShardDocIndex::DrainSerializationUpdates(const OpArgs& op_args) {
+  if (hnsw_state_ != HnswState::kSerializing)
+    return;
+  DrainPendingVectorUpdates(op_args);
+}
+
+void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
+  // Allow normal HNSW operations (used after restoration or serialization).
+  hnsw_state_ = HnswState::kBuilding;
+
+  if (pending_vector_updates_.empty())
+    return;
+
+  auto& db_slice = op_args.GetDbSlice();
+
+  LOG(INFO) << "Draining " << pending_vector_updates_.size() << " pending vector updates on shard "
+            << EngineShard::tlocal()->shard_id();
+
+  for (const auto& key : pending_vector_updates_) {
+    auto local_id = key_index_.Find(key);
+    auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
+
+    if (it && IsValid(it->it)) {
+      PrimeValue& pv = it->it->second;
+
+      if (local_id) {
+        RemoveFromAllHnswIndices(*local_id);
+        AddDocToGlobalVectorIndex(*local_id, op_args.db_cntx, &pv);
+      } else {
+        auto doc_id = AddDoc(key, op_args.db_cntx, pv);
+        if (doc_id) {
+          AddDocToGlobalVectorIndex(*doc_id, op_args.db_cntx, &pv);
+        }
+      }
+    } else if (local_id) {
+      RemoveFromAllHnswIndices(*local_id);
+      key_index_.Remove(*local_id);
+    }
+  }
+  pending_vector_updates_.clear();
+  ClearAllHnswPreservedData();
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
@@ -806,7 +807,8 @@ optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
   if (!it || !IsValid(*it))
     return std::nullopt;
 
-  return {{key, GetAccessor(op_args.db_cntx, (*it)->second)}};
+  // Pass key so StringMapAccessor can clean up if lazy expiry empties the hash.
+  return {{key, GetAccessor(op_args.db_cntx, (*it)->second, key)}};
 }
 
 vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
@@ -903,7 +905,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     // If we sorted with knn_scores present, rearrange them
     if (!sort_scores.empty() && !result.knn_scores.empty()) {
-      unordered_map<DocId, size_t> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
+      unordered_map<DocId, float> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
       for (size_t i = 0; i < min(limit, result.ids.size()); i++)
         result.knn_scores[i] = {result.ids[i], score_lookup[result.ids[i]]};
     }
@@ -912,6 +914,11 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   // Cut off unnecessary items
   result.ids.resize(min(result.ids.size(), limit));
 
+  // Build text score lookup (DocId -> score) if available
+  absl::flat_hash_map<search::DocId, float> text_score_map;
+  for (const auto& [doc, score] : result.text_scores)
+    text_score_map[doc] = score;
+
   // Serialize documents
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
@@ -919,12 +926,15 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
     float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    float text_score = 0;
+    if (auto it = text_score_map.find(result.ids[i]); it != text_score_map.end())
+      text_score = it->second;
     auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
       string_view key = key_index_.Get(result.ids[i]);
-      out.push_back({result.ids[i], string{key}, {}, knn_score, sort_score});
+      out.push_back({result.ids[i], string{key}, {}, knn_score, text_score, sort_score});
       continue;
     }
 
@@ -943,7 +953,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     auto more_fields = accessor->Serialize(base_->schema, return_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
-    out.push_back({result.ids[i], string{key}, std::move(fields), knn_score, sort_score});
+    out.push_back(
+        {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
@@ -968,13 +979,22 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
       knn_score_map[doc_id] = dist;
   }
 
-  return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map);
+  // Build text score lookup for ADDSCORES injection (keyed by DocId, safe across expired docs)
+  absl::flat_hash_map<DocId, float> text_score_map;
+  if (params.add_scores && !search_results.text_scores.empty()) {
+    text_score_map.reserve(search_results.text_scores.size());
+    for (auto& [doc_id, score] : search_results.text_scores)
+      text_score_map[doc_id] = score;
+  }
+
+  return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map,
+                                  text_score_map);
 }
 
 vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
-    absl::Span<const std::pair<search::DocId, float>> doc_distances,
-    std::string_view score_alias) const {
+    absl::Span<const std::pair<search::DocId, float>> doc_distances, std::string_view score_alias,
+    const absl::flat_hash_map<search::DocId, float>& text_score_map) const {
   vector<DocId> ids;
   absl::flat_hash_map<DocId, float> score_map;
   ids.reserve(doc_distances.size());
@@ -983,13 +1003,13 @@ vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
     ids.push_back(doc_id);
     score_map[doc_id] = dist;
   }
-  return LoadDocEntriesWithScores(op_args, params, ids, score_alias, score_map);
+  return LoadDocEntriesWithScores(op_args, params, ids, score_alias, score_map, text_score_map);
 }
 
 vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
-    std::string_view score_alias,
-    const absl::flat_hash_map<search::DocId, float>& score_map) const {
+    std::string_view score_alias, const absl::flat_hash_map<search::DocId, float>& score_map,
+    const absl::flat_hash_map<search::DocId, float>& text_score_map) const {
   auto [fields_to_load, sort_indicies] =
       PreprocessAggregateFields(base_->schema, params, params.load_fields);
 
@@ -1015,6 +1035,11 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
       auto it = score_map.find(doc);
       if (it != score_map.end())
         out.back()[string{score_alias}] = static_cast<double>(it->second);
+    }
+
+    if (!text_score_map.empty()) {
+      if (auto it = text_score_map.find(doc); it != text_score_map.end())
+        out.back()["__score"] = static_cast<double>(it->second);
     }
   }
   return out;

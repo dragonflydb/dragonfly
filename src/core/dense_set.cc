@@ -406,6 +406,9 @@ void DenseSet::ShrinkBucket(size_t bucket_idx) {
     }
 
     if (has_ttl && ObjExpireTime(obj) <= time_now_) {
+      size_t obj_size = ObjectAllocSize(obj);
+      DCHECK_GE(obj_malloc_used_, obj_size);
+      obj_malloc_used_ -= obj_size;
       ObjDelete(obj);
       --size_;
       continue;

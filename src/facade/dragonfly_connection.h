@@ -279,10 +279,15 @@ class Connection : public util::Connection {
 
   void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
 
+  // Enables io_uring multishot receives for the connection if the current thread supports it.
+  // This is required during initial setup or after migrating to a new thread/proactor,
+  // provided the buffer ring is configured and the connection is not using TLS.
+  void MaybeEnableRecvMultishot();
+
   // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
   void ReadPendingInput();
 
-  void CheckIoBufCapacity(bool is_iobuf_full);
+  void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -314,7 +319,7 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(unsigned max_busy_cycles, bool enqueue_only = false);
+  ParserStatus ParseRedis(base::IoBuf& buf, unsigned max_busy_cycles, bool enqueue_only = false);
 
   void OnBreakCb(int32_t mask);
 
@@ -361,9 +366,13 @@ class Connection : public util::Connection {
   // Returns true if one or more commands were parsed from the read buffer,
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
-  bool ParseMCBatch();
+  bool ParseMCBatch(base::IoBuf& buf);
 
-  bool ParseRedisBatch();
+  bool ParseRedisBatch(base::IoBuf& buf);
+
+  // Call the appropriate ParseMCBatch or ParseRedisBatch based on the protocol.
+  // Only CPU-bound work; must not perform I/O or fiber suspension.
+  void ParseFromBuffer(base::IoBuf& buf);
 
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
   ParserStatus ParseLoop();
@@ -448,13 +457,13 @@ class Connection : public util::Connection {
   size_t parsed_cmd_q_bytes_ = 0;
 
   // Returns true if there are dispatched commands that haven't been replied yet.
-  bool HasDispatchedCommands() const {
+  bool HasInFlightCommands() const {
     return parsed_head_ != parsed_to_execute_;
   }
 
-  // Returns true if the head command is ready to dispatch (nothing in-flight ahead of it).
-  bool HeadReadyToDispatch() const {
-    return parsed_head_ && !HasDispatchedCommands();
+  // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
+  bool HasCommandToExecute() const {
+    return parsed_head_ && !HasInFlightCommands();
   }
 
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.

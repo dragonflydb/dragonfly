@@ -473,9 +473,10 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), -fields_.orig_value_heap_size,
+  AccountObjectMemory(fields_.key, fields_.orig_obj_type, -fields_.orig_value_heap_size,
                       fields_.db_slice->GetDBTable(fields_.db_ind));
-  fields_.orig_value_heap_size = 0;  // Reset to avoid double accounting.
+  fields_.orig_value_heap_size = 0;                      // Reset to avoid double accounting.
+  fields_.orig_obj_type = fields_.it->second.ObjType();  // Sync type after accounting.
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -490,10 +491,22 @@ void DbSlice::AutoUpdater::Run() {
 
   CHECK_NE(fields_.db_slice, nullptr);
 
-  ssize_t delta = static_cast<int64_t>(fields_.it->second.MallocUsed()) -
-                  static_cast<int64_t>(fields_.orig_value_heap_size);
-  AccountObjectMemory(fields_.key, fields_.it->second.ObjType(), delta,
-                      fields_.db_slice->GetDBTable(fields_.db_ind));
+  CompactObjType current_type = fields_.it->second.ObjType();
+  int64_t current_size = static_cast<int64_t>(fields_.it->second.MallocUsed());
+  DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
+
+  if (current_type != fields_.orig_obj_type) {
+    // Type changed: remove old size from old type, add new size to new type separately.
+    // Applying (current_size - orig_size) to the new type would incorrectly subtract
+    // from a counter that never had the original bytes added to it.
+    AccountObjectMemory(fields_.key, fields_.orig_obj_type,
+                        -static_cast<int64_t>(fields_.orig_value_heap_size), table);
+    AccountObjectMemory(fields_.key, current_type, current_size, table);
+  } else {
+    ssize_t delta = current_size - static_cast<int64_t>(fields_.orig_value_heap_size);
+    AccountObjectMemory(fields_.key, current_type, delta, table);
+  }
+
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
   Cancel();  // Reset to not run again
 }
@@ -508,7 +521,8 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .db_ind = db_ind,
               .it = it,
               .key = key,
-              .orig_value_heap_size = it->second.MallocUsed()} {
+              .orig_value_heap_size = it->second.MallocUsed(),
+              .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
 }
 
@@ -810,12 +824,15 @@ void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
   Del(cntx, it_updater.it);
 }
 
-void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
+void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
+                           uint64_t cb_id) {
   VLOG(1) << "Start FlushSlotsFb";
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
-  // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
-  // was made. Therefore we delete slots entries with version < next_version
-  uint64_t next_version = 0;
+  // We want to flush all the data of a slot that was added till the time the call to FlushSlots
+  // was made. Therefore we delete slots entries with version < next_version.
+  // next_version and the on_change callback are registered synchronously in FlushSlots
+  // so that entries inserted after the flush was initiated (e.g. by concurrent RDB loading)
+  // get version >= next_version and survive.
   uint64_t del_count = 0;
 
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
@@ -841,22 +858,6 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     }
   };
 
-  auto on_change = [&](DbIndex db_index, const ChangeReq& req) {
-    FiberAtomicGuard fg;
-
-    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
-      if (!bit->is_done() && bit->GetVersion() < next_version) {
-        iterate_bucket(*bit);
-      }
-    } else {
-      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
-        if (!it.is_done() && it.GetVersion() < next_version)
-          iterate_bucket(it);
-      }
-    }
-  };
-  next_version = RegisterOnChange(std::move(on_change));
-
   ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
@@ -868,7 +869,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
-  UnregisterOnChange(next_version);
+  UnregisterOnChange(cb_id);
 
   if (absl::GetFlag(FLAGS_cluster_flush_decommit_memory)) {
     int64_t start = absl::GetCurrentTimeNanos();
@@ -884,8 +885,53 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
 void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   cluster::SlotSet slot_set(slot_ranges);
   InvalidateSlotWatches(slot_set);
-  fb2::Fiber("flush_slots", [this, slot_set = std::move(slot_set)]() mutable {
-    FlushSlotsFb(slot_set);
+
+  // Capture the version threshold synchronously, before launching the fiber.
+  // Entries inserted after this point get version >= next_version and survive the flush.
+  uint64_t next_version = NextVersion();
+
+  auto shared_slots = std::make_shared<cluster::SlotSet>(std::move(slot_set));
+  boost::intrusive_ptr<DbTable> table = db_arr_.front();
+
+  // Register the on_change callback synchronously so that bucket modifications between
+  // FlushSlots returning and the fiber starting are caught (the callback deletes old entries
+  // before the bucket version is bumped, preventing the traversal from skipping them).
+  auto on_change = [this, shared_slots, next_version, table](DbIndex db_index,
+                                                             const ChangeReq& req) {
+    FiberAtomicGuard fg;
+
+    auto process_bucket = [&](PrimeTable::bucket_iterator it) {
+      std::string tmp;
+      it.AdvanceIfNotOccupied();
+      while (!it.is_done()) {
+        std::string_view key = it->first.GetSlice(&tmp);
+        SlotId sid = KeySlot(key);
+        if (shared_slots->Contains(sid) && it.GetVersion() < next_version) {
+          DbContext cntx;
+          cntx.time_now_ms = GetCurrentTimeMs();
+          cntx.db_index = db_index;
+          Del(cntx, Iterator::FromPrime(it), table.get());
+        }
+        ++it;
+      }
+    };
+
+    if (const auto* bit = std::get_if<PrimeTable::bucket_iterator>(&req)) {
+      if (!bit->is_done() && bit->GetVersion() < next_version) {
+        process_bucket(*bit);
+      }
+    } else {
+      for (auto it : std::get<PrimeTable::BucketSet>(req).buckets()) {
+        if (!it.is_done() && it.GetVersion() < next_version)
+          process_bucket(it);
+      }
+    }
+  };
+
+  uint64_t cb_id = RegisterOnChange(std::move(on_change));
+
+  fb2::Fiber("flush_slots", [this, shared_slots, next_version, cb_id]() {
+    FlushSlotsFb(*shared_slots, next_version, cb_id);
   }).Detach();
 }
 
@@ -1287,7 +1333,7 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  // DCHECK(!owner_->shard_lock()->IsFree());
+  DCHECK(!owner_->shard_lock()->IsFree());
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 

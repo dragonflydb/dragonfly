@@ -30,6 +30,14 @@ inputs:
   s3-bucket:
     required: true
     type: string
+  azure-container:
+    required: false
+    type: string
+    description: "Azure Blob Storage container name for snapshot tests"
+  azure-storage-connection-string:
+    required: false
+    type: string
+    description: "Azure Storage connection string"
   epoll:
     required: false
     type: string
@@ -127,6 +135,9 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key || env.AWS_SECRET_ACCESS_KEY }}
         AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         AWS_REGION: ${{ env.AWS_REGION || 'us-east-1' }}
+        # Azure credentials for snapshot tests (optional)
+        DRAGONFLY_AZURE_CONTAINER: ${{ inputs.azure-container }}
+        AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'

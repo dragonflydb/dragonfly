@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.15 FATAL_ERROR)
 set(PROJECT_CONTACT romange@gmail.com)
 
 include(CheckCXXCompilerFlag)
+include(CheckCCompilerFlag)
 
 enable_testing()
 
@@ -93,6 +94,17 @@ option(WITH_USAN "Enable -fsanitize=undefined" OFF)
 if (SUPPORT_USAN AND WITH_USAN)
   message(STATUS "ub sanitizer enabled")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
+endif()
+
+# Split debug info into .dwo files so the linker handles much less data.
+# Both GCC and Clang support this. GDB resolves .dwo references transparently.
+CHECK_CXX_COMPILER_FLAG("-gsplit-dwarf" HAS_SPLIT_DWARF_CXX)
+CHECK_C_COMPILER_FLAG("-gsplit-dwarf" HAS_SPLIT_DWARF_C)
+if (HAS_SPLIT_DWARF_CXX)
+  add_compile_options($<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-gsplit-dwarf>)
+endif()
+if (HAS_SPLIT_DWARF_C)
+  add_compile_options($<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:C>>:-gsplit-dwarf>)
 endif()
 
 include(third_party)

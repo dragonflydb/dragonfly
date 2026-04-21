@@ -24,6 +24,19 @@ from .utility import tick_timer, assert_eventually
 BASE_PORT = 1111
 
 
+def is_io_loop_v2(server: DflyInstance) -> bool:
+    """Check if the server is running with experimental_io_loop_v2 enabled.
+
+    When the flag is passed as a bare flag (--experimental_io_loop_v2), the test runner
+    stores its value as None instead of "true". This function checks both has_arg() and
+    != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
+    """
+    return (
+        server.has_arg("experimental_io_loop_v2")
+        and server.args.get("experimental_io_loop_v2") != "false"
+    )
+
+
 @dataclass(frozen=True)
 class CollectedRedisMsg:
     cmd: str
@@ -667,15 +680,22 @@ async def test_reply_count(df_server: DflyInstance):
     for _ in range(100):
         e.incr("num-1")
 
-    # one - for MULTI-OK, one for the rest. Depends on the squashing efficiency,
-    # can be either 1 or 2 replies.
-    assert await measure(e.execute()) <= 2
+    # MULTI-OK + the EXEC array.
+    # V1 (dual-fiber) is aggressive (<=2).
+    # V2 (single-fiber cycle) flushes slightly more often (<=3).
+    is_v2 = is_io_loop_v2(df_server)
+    multi_limit = 3 if is_v2 else 2
+    assert await measure(e.execute()) <= multi_limit
 
     # Just pipeline
     p = async_client.pipeline(transaction=False)
     for _ in range(100):
         p.incr("num-1")
-    assert await measure(p.execute()) <= 2
+
+    # V1: aggressive squashing across dual fibers (<=2).
+    # V2: single-fiber loop flushes based on OS scheduling and batch boundaries (<=12).
+    pipe_limit = 12 if is_v2 else 2
+    assert await measure(p.execute()) <= pipe_limit
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
@@ -818,7 +838,10 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
 """
 
 
-@dfly_args({"proactor_threads": "4", "pipeline_squash": 0})
+@dfly_multi_test_args(
+    {"proactor_threads": "4", "pipeline_squash": 0, "experimental_io_loop_v2": "false"},
+    {"proactor_threads": "4", "pipeline_squash": 0, "experimental_io_loop_v2": "true"},
+)
 async def test_pipeline_batching_while_migrating(
     async_client: aioredis.Redis, df_server: DflyInstance
 ):
@@ -1192,9 +1215,6 @@ async def wait_for_conn_drop(async_client):
 
 @dfly_args({"timeout": 1})
 async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
-    # TODO investigate why it fails -- client is not stuck.
-    if df_server.has_arg("experimental_io_loop_v2"):
-        pytest.skip(f"Fails in the assertion below")
 
     another_client = df_server.client()
     await another_client.ping()
@@ -1246,10 +1266,16 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
 
 # Test that the cache pipeline does not grow or shrink under constant pipeline load.
+# This test relies on SquashPipeline() memory lifecycle (V1/AsyncFiber only).
+# V2's single-fiber ExecuteBatch() releases commands incrementally, so the cache
+# is non-empty during execution. Skip when V2 is explicitly enabled.
 @dfly_args({"proactor_threads": 1, "pipeline_squash": 9, "max_busy_read_usec": 50000})
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
+
+    if is_io_loop_v2(server):
+        pytest.skip("V2 does not use SquashPipeline; cache lifecycle differs")
 
     client = server.client()
     await client.ping()  # Make sure the connection and the protocol were established
@@ -1367,6 +1393,7 @@ async def test_pipeline_overlimit(df_factory: DflyInstanceFactory):
         assert all(
             r == "a" * 1024 * 5 for r in res
         ), "Pipeline returned corrupted data after backpressure"
+        await c.aclose()
 
     pipeline_tasks = [asyncio.create_task(pipe_overlimit()) for _ in range(20)]
 
@@ -1410,7 +1437,9 @@ async def test_pipeline_backpressure_v2_correctness(df_server: DflyInstance):
         pipe = c.pipeline()
         for i in range(num_keys):
             pipe.get(f"bp:{i}")
-        return await pipe.execute()
+        res = await pipe.execute()
+        await c.aclose()
+        return res
 
     tasks = [asyncio.create_task(run_pipeline()) for _ in range(20)]
     results = await asyncio.gather(*tasks)
@@ -1463,6 +1492,7 @@ async def test_pipeline_backpressure_disconnect(df_factory: DflyInstanceFactory)
             pipe.get("x")
         res = await pipe.execute()
         assert len(res) == 1000
+        await c.aclose()
 
     flood_tasks = [asyncio.create_task(pipe_flood()) for _ in range(20)]
     await asyncio.sleep(2)
@@ -1594,7 +1624,10 @@ async def test_tls_client_kill_preemption(
     assert len(lines) == 0
 
 
-@dfly_args({"proactor_threads": 4})
+@dfly_multi_test_args(
+    {"proactor_threads": 4, "experimental_io_loop_v2": "false"},
+    {"proactor_threads": 4, "experimental_io_loop_v2": "true"},
+)
 async def test_client_migrate(df_server: DflyInstance):
     """
     Test that we can migrate a client with "CLIENT MIGRATE" command.
@@ -1615,6 +1648,10 @@ async def test_client_migrate(df_server: DflyInstance):
     assert resp == 1  # migrated successfully
 
 
+@dfly_multi_test_args(
+    {"proactor_threads": 4, "experimental_io_loop_v2": "false"},
+    {"proactor_threads": 4, "experimental_io_loop_v2": "true"},
+)
 async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
     admin = df_server.client()
     resp = await admin.execute_command("DFLY THREAD")
@@ -1655,6 +1692,169 @@ async def test_client_migrate_no_conn_leak(df_server: DflyInstance):
     for c in clients:
         await c.aclose()
     await admin.aclose()
+
+
+@dfly_multi_test_args(
+    {
+        "proactor_threads": 4,
+        "pipeline_queue_limit": 10,
+        "pipeline_buffer_limit": "1024",
+        "experimental_io_loop_v2": "false",
+    },
+    {
+        "proactor_threads": 4,
+        "pipeline_queue_limit": 10,
+        "pipeline_buffer_limit": "1024",
+        "experimental_io_loop_v2": "true",
+    },
+)
+@pytest.mark.timeout(30)
+async def test_migration_during_backpressure(df_server: DflyInstance):
+    """Verify that a connection parked on pipeline backpressure can be migrated
+    to another thread without crashing or corrupting data.
+
+    Uses a raw TCP connection for the migrant so we can delay reading responses,
+    causing TCP send-buffer saturation and pipeline queue buildup past the limit.
+    Concurrent flood clients ensure global memory pressure (proven pattern from
+    test_pipeline_overlimit / test_pipeline_backpressure_disconnect).
+    """
+    admin = df_server.client()
+    await admin.set("x", "a" * 1024 * 5)
+
+    num_threads = (await admin.execute_command("DFLY THREAD"))[1]
+
+    # Raw TCP migrant — not reading responses forces TCP buffer saturation.
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    writer.write(b"CLIENT SETNAME migrant\r\n")
+    await writer.drain()
+    await reader.readline()  # +OK
+
+    clients = await admin.client_list()
+    migrant_info = next(c for c in clients if c["name"] == "migrant")
+    migrant_id = int(migrant_info["id"])
+
+    # Flood without reading to saturate TCP send buffer -> queue exceeds limit.
+    writer.write(b"GET x\r\n" * 1000)
+    await writer.drain()
+
+    # Concurrent flood clients for global memory pressure.
+    async def pipe_flood():
+        c = df_server.client()
+        pipe = c.pipeline()
+        for _ in range(1000):
+            pipe.get("x")
+        res = await pipe.execute()
+        assert len(res) == 1000
+        assert all(
+            r == "a" * 1024 * 5 for r in res
+        ), "Pipeline returned corrupted data after backpressure"
+        await c.aclose()
+
+    flood_tasks = [asyncio.create_task(pipe_flood()) for _ in range(20)]
+    await asyncio.sleep(2)
+
+    # Verify backpressure was hit.
+    # V1 increments pipeline_throttle_total reliably because DispatchSingle parks the fiber.
+    # V2's self-regulating ParseLoop drains the queue each iteration, so the counter may not fire.
+    info = await admin.info("stats")
+    is_v2 = df_server.args.get("experimental_io_loop_v2") == "true"
+    if not is_v2:
+        assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
+
+    # Migrate the parked connection to a different thread.
+    migrated = False
+    for dest_tid in range(num_threads):
+        resp = await admin.execute_command("CLIENT", "MIGRATE", migrant_id, dest_tid)
+        if resp == 1:
+            migrated = True
+            break
+    assert migrated, "CLIENT MIGRATE should succeed for at least one destination thread"
+
+    # Lift BOTH limits so parked fibers can resume.
+    # Raise byte limit FIRST: if queue-limit is raised first, connections wake and
+    # immediately re-hit the byte ceiling, causing a needless thundering-herd wakeup.
+    await admin.config_set("pipeline_buffer_limit", 1024 * 1024 * 50)  # 50 MB
+    await admin.config_set("pipeline_queue_limit", 10000)
+
+    # Drain the raw socket so the Dragonfly connection can flush its send buffer.
+    expected_resp = b"$" + str(1024 * 5).encode() + b"\r\n" + (b"a" * 1024 * 5) + b"\r\n"
+    for i in range(1000):
+        res = await asyncio.wait_for(reader.readexactly(len(expected_resp)), timeout=15.0)
+        assert res == expected_resp
+
+    await asyncio.wait_for(asyncio.gather(*flood_tasks), timeout=15.0)
+
+    # Verify server is still healthy after migration + backpressure.
+    assert await admin.ping() is True
+
+    writer.close()
+    await writer.wait_closed()
+    await admin.aclose()
+
+
+@dfly_multi_test_args(
+    {
+        "proactor_threads": 4,
+        "pipeline_buffer_limit": "1024",
+        "pipeline_queue_limit": 10,
+        "experimental_io_loop_v2": "false",
+    },
+    {
+        "proactor_threads": 4,
+        "pipeline_buffer_limit": "1024",
+        "pipeline_queue_limit": 10,
+        "experimental_io_loop_v2": "true",
+    },
+)
+@pytest.mark.timeout(30)
+async def test_pipeline_global_memory_relief(df_server: DflyInstance):
+    """Verify that raising pipeline_buffer_limit via CONFIG SET wakes parked
+    connections through NotifyPipelineWaiters (V2) / pipeline_cnd (V1).
+
+    Uses 4 proactor threads with both limits set low to reliably trigger
+    backpressure.  20 concurrent pipeline clients flood the server.  We then
+    raise pipeline_buffer_limit (exercising NotifyPipelineWaiters for V2)
+    followed by pipeline_queue_limit to fully unblock all connections.
+
+    Crucial for V2's v2_pipeline_waiters broadcast mechanism that notifies
+    all parked io_event_ waiters when the global memory budget changes.
+    """
+    client = df_server.client()
+
+    await client.set("x", "a" * 1024 * 5)  # 5 KB value
+
+    async def pipe_flood():
+        c = df_server.client()
+        pipe = c.pipeline()
+        for _ in range(1000):
+            pipe.get("x")
+        res = await pipe.execute()
+        assert len(res) == 1000
+        assert all(
+            r == "a" * 1024 * 5 for r in res
+        ), "Pipeline returned corrupted data after backpressure"
+        await c.aclose()
+
+    tasks = [asyncio.create_task(pipe_flood()) for _ in range(20)]
+    await asyncio.sleep(2)
+
+    # Verify backpressure was hit.
+    # V1 increments pipeline_throttle_total reliably because DispatchSingle parks the fiber.
+    # V2's self-regulating ParseLoop drains the queue each iteration, so the counter may not fire.
+    info = await client.info("stats")
+    is_v2 = df_server.args.get("experimental_io_loop_v2") == "true"
+    if not is_v2:
+        assert int(info["pipeline_throttle_total"]) > 0, "Expected pipeline_throttle_total > 0"
+
+    # Raise buffer limit first — triggers NotifyPipelineWaiters for V2.
+    # Connections wake, re-evaluate, but queue_limit (10) still holds them.
+    await client.config_set("pipeline_buffer_limit", str(1024 * 1024))
+
+    # Raise queue limit to fully unblock all parked connections.
+    await client.config_set("pipeline_queue_limit", 10000)
+
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=15.0)
+    assert await client.ping() is True
 
 
 async def test_issue_5931_malformed_protocol_crash(df_server: DflyInstance):
