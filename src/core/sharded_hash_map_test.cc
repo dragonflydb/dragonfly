@@ -1,0 +1,258 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
+#include "core/sharded_hash_map.h"
+
+#include <gtest/gtest.h>
+
+#include <string>
+#include <vector>
+
+#include "base/gtest.h"
+#include "base/logging.h"
+#include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
+
+namespace dfly {
+
+using namespace std;
+
+class ShardedHashMapTest : public testing::Test {
+ protected:
+  ShardedHashMap<string, int> map_;
+};
+
+TEST_F(ShardedHashMapTest, EmptyMap) {
+  EXPECT_EQ(map_.SizeApproximate(), 0u);
+
+  bool found = map_.FindIf(string("missing"), [](const int&) {});
+  EXPECT_FALSE(found);
+}
+
+TEST_F(ShardedHashMapTest, MutateInsertAndFind) {
+  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m["key1"] = 42;
+  });
+
+  EXPECT_EQ(map_.SizeApproximate(), 1u);
+
+  bool found = map_.FindIf(string("key1"), [](const int& v) { EXPECT_EQ(v, 42); });
+  EXPECT_TRUE(found);
+}
+
+TEST_F(ShardedHashMapTest, MutateOverwrite) {
+  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m["key1"] = 10;
+  });
+
+  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m["key1"] = 20;
+  });
+
+  map_.FindIf(string("key1"), [](const int& v) { EXPECT_EQ(v, 20); });
+  EXPECT_EQ(map_.SizeApproximate(), 1u);
+}
+
+TEST_F(ShardedHashMapTest, MutateErase) {
+  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m["key1"] = 1;
+  });
+  EXPECT_EQ(map_.SizeApproximate(), 1u);
+
+  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m.erase("key1");
+  });
+  EXPECT_EQ(map_.SizeApproximate(), 0u);
+
+  EXPECT_FALSE(map_.FindIf(string("key1"), [](const int&) {}));
+}
+
+TEST_F(ShardedHashMapTest, FindIfReturnsFalseForMissing) {
+  map_.Mutate(string("a"), [](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m["a"] = 1;
+  });
+
+  EXPECT_FALSE(map_.FindIf(string("b"), [](const int&) {}));
+}
+
+TEST_F(ShardedHashMapTest, MultipleKeys) {
+  for (int i = 0; i < 100; ++i) {
+    string key = "key" + to_string(i);
+    map_.Mutate(key, [&key, i](auto& m, auto lock_readers) {
+      auto rl = lock_readers();
+      m[key] = i;
+    });
+  }
+
+  EXPECT_EQ(map_.SizeApproximate(), 100u);
+
+  for (int i = 0; i < 100; ++i) {
+    string key = "key" + to_string(i);
+    bool found = map_.FindIf(key, [i](const int& v) { EXPECT_EQ(v, i); });
+    EXPECT_TRUE(found);
+  }
+}
+
+TEST_F(ShardedHashMapTest, ShardOf) {
+  // ShardOf should be deterministic and within range.
+  string key = "test_key";
+  size_t shard = map_.ShardOf(key);
+  EXPECT_LT(shard, map_.kNumShards);
+  // Same key always maps to same shard.
+  EXPECT_EQ(shard, map_.ShardOf(key));
+}
+
+TEST_F(ShardedHashMapTest, MutateByShard) {
+  string key = "key1";
+  size_t sid = map_.ShardOf(key);
+
+  map_.Mutate(sid, [&key](auto& m, auto lock_readers) {
+    auto rl = lock_readers();
+    m[key] = 99;
+  });
+
+  bool found = map_.FindIf(key, [](const int& v) { EXPECT_EQ(v, 99); });
+  EXPECT_TRUE(found);
+}
+
+TEST_F(ShardedHashMapTest, ForEachShared) {
+  map_.Mutate(string("a"), [](auto& m, auto lr) {
+    auto rl = lr();
+    m["a"] = 1;
+  });
+  map_.Mutate(string("b"), [](auto& m, auto lr) {
+    auto rl = lr();
+    m["b"] = 2;
+  });
+
+  int sum = 0;
+  map_.ForEachShared([&sum](const string&, const int& v) { sum += v; });
+  EXPECT_EQ(sum, 3);
+}
+
+TEST_F(ShardedHashMapTest, ForEachExclusive) {
+  map_.Mutate(string("x"), [](auto& m, auto lr) {
+    auto rl = lr();
+    m["x"] = 10;
+  });
+  map_.Mutate(string("y"), [](auto& m, auto lr) {
+    auto rl = lr();
+    m["y"] = 20;
+  });
+
+  // Double all values via exclusive iteration.
+  map_.ForEachExclusive([](const string&, int& v) { v *= 2; });
+
+  map_.FindIf(string("x"), [](const int& v) { EXPECT_EQ(v, 20); });
+  map_.FindIf(string("y"), [](const int& v) { EXPECT_EQ(v, 40); });
+}
+
+TEST_F(ShardedHashMapTest, WithReadExclusiveLockByKey) {
+  map_.Mutate(string("k"), [](auto& m, auto lr) {
+    auto rl = lr();
+    m["k"] = 5;
+  });
+
+  bool executed = false;
+  map_.WithReadExclusiveLock(string("k"), [&executed]() { executed = true; });
+  EXPECT_TRUE(executed);
+}
+
+TEST_F(ShardedHashMapTest, WithReadExclusiveLockByShard) {
+  bool executed = false;
+  map_.WithReadExclusiveLock(size_t{0}, [&executed]() { executed = true; });
+  EXPECT_TRUE(executed);
+}
+
+TEST_F(ShardedHashMapTest, ConcurrentReadersAndWriter) {
+  // Insert initial data.
+  for (int i = 0; i < 50; ++i) {
+    string key = "key" + to_string(i);
+    map_.Mutate(key, [&key, i](auto& m, auto lr) {
+      auto rl = lr();
+      m[key] = i;
+    });
+  }
+
+  constexpr int kReaders = 4;
+  constexpr int kReadsPerFiber = 200;
+
+  util::fb2::Barrier barrier(kReaders + 1);  // +1 for writer fiber
+  vector<util::fb2::Fiber> fibers;
+
+  // Launch reader fibers.
+  for (int r = 0; r < kReaders; ++r) {
+    fibers.emplace_back("reader", [&] {
+      barrier.Wait();
+      for (int j = 0; j < kReadsPerFiber; ++j) {
+        string key = "key" + to_string(j % 50);
+        map_.FindIf(key, [](const int&) {});
+      }
+    });
+  }
+
+  // Launch writer fiber.
+  fibers.emplace_back("writer", [&] {
+    barrier.Wait();
+    for (int i = 50; i < 100; ++i) {
+      string key = "key" + to_string(i);
+      map_.Mutate(key, [&key, i](auto& m, auto lr) {
+        auto rl = lr();
+        m[key] = i;
+      });
+    }
+  });
+
+  for (auto& fb : fibers) {
+    fb.Join();
+  }
+
+  EXPECT_EQ(map_.SizeApproximate(), 100u);
+}
+
+TEST_F(ShardedHashMapTest, ConcurrentWriters) {
+  constexpr int kWriters = 4;
+  constexpr int kKeysPerWriter = 50;
+
+  vector<util::fb2::Fiber> fibers;
+  util::fb2::Barrier barrier(kWriters);
+
+  for (int w = 0; w < kWriters; ++w) {
+    fibers.emplace_back("writer", [&, w] {
+      barrier.Wait();
+      for (int i = 0; i < kKeysPerWriter; ++i) {
+        // Each writer writes to its own key space to avoid contention on values.
+        string key = "w" + to_string(w) + "_k" + to_string(i);
+        map_.Mutate(key, [&key, val = w * 1000 + i](auto& m, auto lr) {
+          auto rl = lr();
+          m[key] = val;
+        });
+      }
+    });
+  }
+
+  for (auto& fb : fibers) {
+    fb.Join();
+  }
+
+  EXPECT_EQ(map_.SizeApproximate(), kWriters * kKeysPerWriter);
+
+  // Verify all values.
+  for (int w = 0; w < kWriters; ++w) {
+    for (int i = 0; i < kKeysPerWriter; ++i) {
+      string key = "w" + to_string(w) + "_k" + to_string(i);
+      int expected = w * 1000 + i;
+      bool found = map_.FindIf(key, [expected](const int& v) { EXPECT_EQ(v, expected); });
+      EXPECT_TRUE(found) << "missing key: " << key;
+    }
+  }
+}
+
+}  // namespace dfly
