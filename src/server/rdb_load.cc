@@ -5,8 +5,10 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/common.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -2155,7 +2157,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
-      VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
+      LOG(INFO) << "Read RDB_OPCODE_FULLSYNC_END rss="
+                << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
       RETURN_ON_ERR(EnsureRead(8));
       mem_buf_->ConsumeInput(8);  // ignore 8 bytes
 
