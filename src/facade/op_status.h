@@ -5,7 +5,9 @@
 #pragma once
 
 #include <cstdint>
-#include <ostream>
+#include <iosfwd>
+#include <string_view>
+#include <utility>
 
 namespace facade {
 
@@ -127,14 +129,10 @@ std::string_view StatusToMsg(OpStatus status);
 
 namespace std {
 
-template <typename T> std::ostream& operator<<(std::ostream& os, const facade::OpResult<T>& res) {
-  os << res.status();
-  return os;
-}
+std::ostream& operator<<(std::ostream& os, facade::OpStatus op);
 
-inline std::ostream& operator<<(std::ostream& os, const facade::OpStatus op) {
-  os << int(op);
-  return os;
+template <typename T> std::ostream& operator<<(std::ostream& os, const facade::OpResult<T>& res) {
+  return os << res.status();
 }
 
 }  // namespace std
