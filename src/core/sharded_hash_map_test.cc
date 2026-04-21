@@ -31,9 +31,9 @@ TEST_F(ShardedHashMapTest, EmptyMap) {
 }
 
 TEST_F(ShardedHashMapTest, MutateInsertAndFind) {
-  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m["key1"] = 42;
+  map_.Mutate(string("key1"), [](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map["key1"] = 42;
   });
 
   EXPECT_EQ(map_.SizeApproximate(), 1u);
@@ -43,30 +43,30 @@ TEST_F(ShardedHashMapTest, MutateInsertAndFind) {
 }
 
 TEST_F(ShardedHashMapTest, MutateOverwrite) {
-  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m["key1"] = 10;
+  map_.Mutate(string("key1"), [](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map["key1"] = 10;
   });
 
-  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m["key1"] = 20;
+  map_.Mutate(string("key1"), [](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map["key1"] = 20;
   });
 
-  map_.FindIf(string("key1"), [](const int& v) { EXPECT_EQ(v, 20); });
+  EXPECT_TRUE(map_.FindIf(string("key1"), [](const int& v) { EXPECT_EQ(v, 20); }));
   EXPECT_EQ(map_.SizeApproximate(), 1u);
 }
 
 TEST_F(ShardedHashMapTest, MutateErase) {
-  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m["key1"] = 1;
+  map_.Mutate(string("key1"), [](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map["key1"] = 1;
   });
   EXPECT_EQ(map_.SizeApproximate(), 1u);
 
-  map_.Mutate(string("key1"), [](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m.erase("key1");
+  map_.Mutate(string("key1"), [](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map.erase("key1");
   });
   EXPECT_EQ(map_.SizeApproximate(), 0u);
 
@@ -74,9 +74,9 @@ TEST_F(ShardedHashMapTest, MutateErase) {
 }
 
 TEST_F(ShardedHashMapTest, FindIfReturnsFalseForMissing) {
-  map_.Mutate(string("a"), [](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m["a"] = 1;
+  map_.Mutate(string("a"), [](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map["a"] = 1;
   });
 
   EXPECT_FALSE(map_.FindIf(string("b"), [](const int&) {}));
@@ -85,9 +85,9 @@ TEST_F(ShardedHashMapTest, FindIfReturnsFalseForMissing) {
 TEST_F(ShardedHashMapTest, MultipleKeys) {
   for (int i = 0; i < 100; ++i) {
     string key = "key" + to_string(i);
-    map_.Mutate(key, [&key, i](auto& m, auto lock_readers) {
-      auto rl = lock_readers();
-      m[key] = i;
+    map_.Mutate(key, [&key, i](const auto& m, auto lock_readers) {
+      auto lm = lock_readers();
+      lm.map[key] = i;
     });
   }
 
@@ -113,9 +113,9 @@ TEST_F(ShardedHashMapTest, MutateByShard) {
   string key = "key1";
   size_t sid = map_.ShardOf(key);
 
-  map_.Mutate(sid, [&key](auto& m, auto lock_readers) {
-    auto rl = lock_readers();
-    m[key] = 99;
+  map_.Mutate(sid, [&key](const auto& m, auto lock_readers) {
+    auto lm = lock_readers();
+    lm.map[key] = 99;
   });
 
   bool found = map_.FindIf(key, [](const int& v) { EXPECT_EQ(v, 99); });
@@ -123,13 +123,13 @@ TEST_F(ShardedHashMapTest, MutateByShard) {
 }
 
 TEST_F(ShardedHashMapTest, ForEachShared) {
-  map_.Mutate(string("a"), [](auto& m, auto lr) {
-    auto rl = lr();
-    m["a"] = 1;
+  map_.Mutate(string("a"), [](const auto& m, auto lr) {
+    auto lm = lr();
+    lm.map["a"] = 1;
   });
-  map_.Mutate(string("b"), [](auto& m, auto lr) {
-    auto rl = lr();
-    m["b"] = 2;
+  map_.Mutate(string("b"), [](const auto& m, auto lr) {
+    auto lm = lr();
+    lm.map["b"] = 2;
   });
 
   int sum = 0;
@@ -138,26 +138,26 @@ TEST_F(ShardedHashMapTest, ForEachShared) {
 }
 
 TEST_F(ShardedHashMapTest, ForEachExclusive) {
-  map_.Mutate(string("x"), [](auto& m, auto lr) {
-    auto rl = lr();
-    m["x"] = 10;
+  map_.Mutate(string("x"), [](const auto& m, auto lr) {
+    auto lm = lr();
+    lm.map["x"] = 10;
   });
-  map_.Mutate(string("y"), [](auto& m, auto lr) {
-    auto rl = lr();
-    m["y"] = 20;
+  map_.Mutate(string("y"), [](const auto& m, auto lr) {
+    auto lm = lr();
+    lm.map["y"] = 20;
   });
 
   // Double all values via exclusive iteration.
   map_.ForEachExclusive([](const string&, int& v) { v *= 2; });
 
-  map_.FindIf(string("x"), [](const int& v) { EXPECT_EQ(v, 20); });
-  map_.FindIf(string("y"), [](const int& v) { EXPECT_EQ(v, 40); });
+  EXPECT_TRUE(map_.FindIf(string("x"), [](const int& v) { EXPECT_EQ(v, 20); }));
+  EXPECT_TRUE(map_.FindIf(string("y"), [](const int& v) { EXPECT_EQ(v, 40); }));
 }
 
 TEST_F(ShardedHashMapTest, WithReadExclusiveLockByKey) {
-  map_.Mutate(string("k"), [](auto& m, auto lr) {
-    auto rl = lr();
-    m["k"] = 5;
+  map_.Mutate(string("k"), [](const auto& m, auto lr) {
+    auto lm = lr();
+    lm.map["k"] = 5;
   });
 
   bool executed = false;
@@ -175,9 +175,9 @@ TEST_F(ShardedHashMapTest, ConcurrentReadersAndWriter) {
   // Insert initial data.
   for (int i = 0; i < 50; ++i) {
     string key = "key" + to_string(i);
-    map_.Mutate(key, [&key, i](auto& m, auto lr) {
-      auto rl = lr();
-      m[key] = i;
+    map_.Mutate(key, [&key, i](const auto& m, auto lr) {
+      auto lm = lr();
+      lm.map[key] = i;
     });
   }
 
@@ -203,9 +203,9 @@ TEST_F(ShardedHashMapTest, ConcurrentReadersAndWriter) {
     barrier.Wait();
     for (int i = 50; i < 100; ++i) {
       string key = "key" + to_string(i);
-      map_.Mutate(key, [&key, i](auto& m, auto lr) {
-        auto rl = lr();
-        m[key] = i;
+      map_.Mutate(key, [&key, i](const auto& m, auto lr) {
+        auto lm = lr();
+        lm.map[key] = i;
       });
     }
   });
@@ -230,9 +230,9 @@ TEST_F(ShardedHashMapTest, ConcurrentWriters) {
       for (int i = 0; i < kKeysPerWriter; ++i) {
         // Each writer writes to its own key space to avoid contention on values.
         string key = "w" + to_string(w) + "_k" + to_string(i);
-        map_.Mutate(key, [&key, val = w * 1000 + i](auto& m, auto lr) {
-          auto rl = lr();
-          m[key] = val;
+        map_.Mutate(key, [&key, val = w * 1000 + i](const auto& m, auto lr) {
+          auto lm = lr();
+          lm.map[key] = val;
         });
       }
     });

@@ -25,9 +25,12 @@ namespace dfly {
 // prepares its mutation (holding only write_mu_). The writer then briefly acquires read_mu_
 // exclusively to publish the change, minimizing the window during which readers are blocked.
 //
-// Shard selection is determined by hashing the key with absl::Hash and taking modulo
-// NUM_SHARDS. All operations are per-shard — there is no global lock, so operations on
-// different shards proceed fully in parallel.
+// Shard selection is determined by hashing the key with Hash (default: absl::Hash<K>) and
+// taking modulo NUM_SHARDS. A custom Hash can be supplied as the fourth template argument
+// when a non-default hash policy is needed. All operations — reads and writes — use the
+// same Hash instance, so shard selection is always consistent regardless of the lookup type
+// passed to heterogeneous overloads. All operations are per-shard — there is no global
+// lock, so operations on different shards proceed fully in parallel.
 //
 // Thread safety guarantees:
 //   - Concurrent reads on the same shard are safe (shared read_mu_).
@@ -35,11 +38,27 @@ namespace dfly {
 //   - A write and a read on the same shard are safe (write_mu_ + exclusive read_mu_).
 //   - Concurrent writes to the same shard are serialized by write_mu_.
 //
-template <typename K, typename V, size_t NUM_SHARDS = 32> class ShardedHashMap {
+// Re-entrancy: callbacks passed to FindIf, ForEachShared, ForEachExclusive, and
+// WithReadExclusiveLock are invoked while one or more shard locks are held. Calling any
+// ShardedHashMap method that would re-acquire the same lock on the same shard from within
+// a callback will deadlock.
+//
+template <typename K, typename V, size_t NUM_SHARDS = 32, typename Hash = absl::Hash<K>>
+class ShardedHashMap {
+  static_assert(NUM_SHARDS > 0, "NUM_SHARDS must be greater than 0");
   using Map = absl::flat_hash_map<K, V>;
 
  public:
   static constexpr size_t kNumShards = NUM_SHARDS;
+
+  // Returned by the AcquireReaderLock callable passed to Mutate(). Holds an exclusive lock on
+  // read_mu_ for the duration of its lifetime and exposes a mutable reference to the shard
+  // map. Mutations must be performed through LockedMap::map to guarantee that no reader
+  // observes a partial update.
+  struct LockedMap {
+    std::unique_lock<util::fb2::SharedMutex> lock;
+    Map& map;
+  };
 
   // Looks up `key` under a shared read lock on its shard. If found, invokes f(const V&)
   // with the mapped value while still holding the lock, then returns true.
@@ -49,7 +68,7 @@ template <typename K, typename V, size_t NUM_SHARDS = 32> class ShardedHashMap {
   // absl::Hash<Q> and comparable against K can be used (e.g., std::string_view for
   // std::string keys).
   template <typename Q, typename F> bool FindIf(const Q& key, F&& f) const {
-    const Shard& shard = shards_[absl::Hash<Q>{}(key) % NUM_SHARDS];
+    const Shard& shard = shards_[Hash{}(key) % NUM_SHARDS];
     std::shared_lock read_lock(shard.read_mu_);
     auto it = shard.map_.find(key);
     if (it == shard.map_.end()) {
@@ -88,26 +107,27 @@ template <typename K, typename V, size_t NUM_SHARDS = 32> class ShardedHashMap {
   }
 
   // Primary mutation interface. Acquires write_mu_ exclusively on the shard that owns `key`,
-  // then invokes f(Map& map, auto AcquireReaderLock).
+  // then invokes f(const Map& map, auto AcquireReaderLock).
   //
   // The callback receives:
-  //   - map: a mutable reference to the shard's underlying absl::flat_hash_map. The caller
-  //     may inspect or prepare changes while only write_mu_ is held (readers still proceed).
-  //   - AcquireReaderLock: a callable that returns std::unique_lock<SharedMutex>. Call it
-  //     to exclusively acquire read_mu_ right before committing a visible change (insert,
-  //     erase, or value update). This blocks new readers and waits for existing ones to
-  //     finish, ensuring the modification is published atomically.
+  //   - map: a const reference to the shard's underlying absl::flat_hash_map. The caller
+  //     may inspect data while only write_mu_ is held (readers still proceed).
+  //   - AcquireReaderLock: a callable that returns LockedMap, which holds an exclusive lock
+  //     on read_mu_ and a mutable Map& reference. Mutations must go through LockedMap::map
+  //     only — this ensures no reader observes a partial update.
   //
   // Typical usage pattern:
-  //   map.Mutate(key, [&](auto& m, auto lock_readers) {
-  //       /* prepare data without blocking readers */
-  //       auto reader_lock = lock_readers();
-  //       m[key] = new_value;  // now no reader sees a partial update
+  //   map.Mutate(key, [&](const auto& m, auto lock_readers) {
+  //       /* optionally inspect m (const) without blocking readers */
+  //       auto lm = lock_readers();
+  //       lm.map[key] = new_value;  // now no reader sees a partial update
   //   });
   template <typename F> void Mutate(const K& key, F&& f) {
-    Shard& shard = shards_[absl::Hash<K>{}(key) % NUM_SHARDS];
+    Shard& shard = shards_[Hash{}(key) % NUM_SHARDS];
     std::unique_lock write_lock{shard.write_mu_};
-    std::forward<F>(f)(shard.map_, [&shard]() { return std::unique_lock{shard.read_mu_}; });
+    std::forward<F>(f)(static_cast<const Map&>(shard.map_), [&shard]() -> LockedMap {
+      return {std::unique_lock<util::fb2::SharedMutex>{shard.read_mu_}, shard.map_};
+    });
   }
 
   // Shard-index overload of Mutate. Same semantics as Mutate(key, f) but addresses the
@@ -118,14 +138,16 @@ template <typename K, typename V, size_t NUM_SHARDS = 32> class ShardedHashMap {
     DCHECK_LT(sid, NUM_SHARDS);
     Shard& shard = shards_[sid];
     std::unique_lock write_lock{shard.write_mu_};
-    std::forward<F>(f)(shard.map_, [&shard]() { return std::unique_lock{shard.read_mu_}; });
+    std::forward<F>(f)(static_cast<const Map&>(shard.map_), [&shard]() -> LockedMap {
+      return {std::unique_lock<util::fb2::SharedMutex>{shard.read_mu_}, shard.map_};
+    });
   }
 
   // Returns the shard index (0 .. NUM_SHARDS-1) that `key` maps to. Can be used to
   // pre-compute the shard for later use with the shard-index overloads of Mutate() or
   // WithReadExclusiveLock(), or to group operations on keys that share a shard.
   template <typename Q> size_t ShardOf(const Q& key) const {
-    return absl::Hash<Q>{}(key) % NUM_SHARDS;
+    return Hash{}(key) % NUM_SHARDS;
   }
 
   // Acquires read_mu_ exclusively on the shard that owns `key`, blocking all concurrent
@@ -134,7 +156,7 @@ template <typename K, typename V, size_t NUM_SHARDS = 32> class ShardedHashMap {
   // need to perform an external side-effect that must not race with readers of this shard
   // but the map itself is not being modified.
   template <typename F> void WithReadExclusiveLock(const K& key, F&& f) {
-    Shard& shard = shards_[absl::Hash<K>{}(key) % NUM_SHARDS];
+    Shard& shard = shards_[Hash{}(key) % NUM_SHARDS];
     std::unique_lock l{shard.read_mu_};
     std::forward<F>(f)();
   }
