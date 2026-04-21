@@ -8,7 +8,7 @@ This document describes how Dragonfly transactions provide atomicity and seriali
 
 Serializability is an isolation level for database transactions. Serializability describes multiple transactions, where a transaction is usually composed of multiple operations on multiple objects.
 
-Database can executed transactions in parallel (and the operations in parallel). Serializability guarantees the result is the same with, as if the transactions were executed one by one. i.e. to behave like executed in a serial order.
+Databases can execute transactions in parallel (and the operations in parallel). Serializability guarantees the result is the same with, as if the transactions were executed one by one. i.e. to behave like executed in a serial order.
 
 Serializability doesn’t guarantee the resulting serial order respects recency. I.e. the serial order can be different from the order in which transactions were actually executed. E.g. Tx1 begins earlier than Tx2, but the result behaves as if Tx2 executed before Tx1. That is also to say, to satisfy the same Serializability, there can be more than one possible execution schedulings.
 
@@ -124,7 +124,7 @@ There are three modes called "multi modes" in which a multi transaction can be e
 
 __1. Global mode__
 
-The transaction is equivalent to a global transaction with multiple hops. It is scheduled globally and the commands are executed as a series of consequitive hops. This mode is required for global commands (like MOVE) and for accessing undeclared keys in Lua scripts. Otherwise, it should be avoided, because it prevents Dragonfly from running concurrently and thus greatly decreases throughput.
+The transaction is equivalent to a global transaction with multiple hops. It is scheduled globally and the commands are executed as a series of consecutive hops. This mode is required for global commands (like MOVE) and for accessing undeclared keys in Lua scripts. Otherwise, it should be avoided, because it prevents Dragonfly from running concurrently and thus greatly decreases throughput.
 
 __2. Lock ahead mode__
 
@@ -144,11 +144,11 @@ Luckily we can make one important observation about command sequences. Given a s
 * each command needs to preserve its order only relative to other commands accessing the same shard
 * commands accessing different shards can run in parallel
 
-The basic idea behind command squashing is identifying consecutive series of single-shard commands and separating them by shards, while maintaing their relative order withing each shard. Once the commands are separated, we can execute a single hop on all relevant shards. Within each shard the hop callback will execute one by one only those commands, that assigned to its respective shard. Because all commands are already placed on their relevant threads, no further hops are required and all command callbacks are executed inline.
+The basic idea behind command squashing is identifying consecutive series of single-shard commands and separating them by shards, while maintaing their relative order whitin each shard. Once the commands are separated, we can execute a single hop on all relevant shards. Within each shard the hop callback will execute one by one only those commands, that assigned to its respective shard. Because all commands are already placed on their relevant threads, no further hops are required and all command callbacks are executed inline.
 
 Reviewing our initial problems, command squashing:
 * Allows executing many commands with only one hop
-* Allows executing commands in pararllel
+* Allows executing commands in parallel
 
 ## Optimizations
 Out of order transactions - TBD
@@ -192,7 +192,7 @@ For the single-threaded Redis the order is determined by following the natural e
 
 However with blocking scenario for BLPOP, we do not have a built-in mechanism to determine which key was filled earlier - since, as stated, the concept of total order does not exist for multiple shards.
 
-### Interesing examples to consider:
+### Interesting examples to consider:
 
 **Ex1:**
 ```
