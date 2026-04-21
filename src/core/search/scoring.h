@@ -19,7 +19,9 @@ struct TextIndex;
 
 // Supported scorer types
 enum class ScorerType : int {
-  BM25STD,  // Standard Okapi BM25 (default)
+  BM25STD,        // Standard Okapi BM25 (default)
+  TFIDF,          // Classic TF * IDF (no document length normalization)
+  TFIDF_DOCNORM,  // TFIDF with document length normalization
 };
 
 // Per-term information needed for scoring a single document
@@ -63,8 +65,38 @@ inline double BM25Std(const ScoringContext& ctx, const ScoringTermInfo& term) {
   return idf * tf;
 }
 
-// Compute BM25STD score for a document matched against multiple terms.
-// Returns sum of per-term BM25 scores.
+// Compute TFIDF score for a single term in a document.
+//
+// Formula: f * IDF
+// where IDF = ln(N / n), clamped to be non-negative.
+//
+// Note: returns 0 when a term appears in every document (N == n, no discriminating power).
+// This differs from BM25STD, which adds a "+1" inside the log to keep the score positive.
+inline double TfIdf(const ScoringContext& ctx, const ScoringTermInfo& term) {
+  double f = term.term_freq;
+  if (f == 0 || term.term_docs == 0)
+    return 0.0;
+
+  double N = ctx.num_docs;
+  double n = term.term_docs;
+  // Clamp N >= n to avoid negative IDF during transient states
+  N = std::max(N, n);
+  double idf = std::log(N / n);
+  return f * idf;
+}
+
+// Compute TFIDF with document length normalization for a single term.
+//
+// Formula: (f * IDF) / fieldDocLen
+inline double TfIdfDocNorm(const ScoringContext& ctx, const ScoringTermInfo& term) {
+  double score = TfIdf(ctx, term);
+  if (score == 0.0 || term.field_doc_len == 0)
+    return score;
+  return score / term.field_doc_len;
+}
+
+// Compute score for a document matched against multiple terms.
+// Returns sum of per-term scores.
 double ScoreDocument(ScorerType scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms);
 

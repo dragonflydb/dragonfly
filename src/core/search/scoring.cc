@@ -14,6 +14,14 @@ double ScoreDocument(ScorerType scorer, const ScoringContext& ctx,
       for (const auto& term : terms)
         score += BM25Std(ctx, term);
       break;
+    case ScorerType::TFIDF:
+      for (const auto& term : terms)
+        score += TfIdf(ctx, term);
+      break;
+    case ScorerType::TFIDF_DOCNORM:
+      for (const auto& term : terms)
+        score += TfIdfDocNorm(ctx, term);
+      break;
   }
   return score;
 }

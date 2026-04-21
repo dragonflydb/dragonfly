@@ -445,6 +445,10 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
 std::optional<search::ScorerType> ParseScorerName(std::string_view name) {
   if (absl::EqualsIgnoreCase(name, "BM25STD"))
     return search::ScorerType::BM25STD;
+  if (absl::EqualsIgnoreCase(name, "TFIDF"))
+    return search::ScorerType::TFIDF;
+  if (absl::EqualsIgnoreCase(name, "TFIDF.DOCNORM"))
+    return search::ScorerType::TFIDF_DOCNORM;
   return std::nullopt;
 }
 
