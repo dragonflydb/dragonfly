@@ -388,8 +388,6 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
     es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
   });
-  LOG(INFO) << "PostLoad: search index rebuild phase returned rss="
-            << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 
   // Now execute all pending synonym commands after indices are rebuilt
   for (auto& syn_cmd : synonym_cmds) {
@@ -397,8 +395,11 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
   }
 
   // Wait until index building ends (all shards' vector data populated).
-  shard_set->RunBlockingInParallel(
-      [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
+  shard_set->RunBlockingInParallel([](EngineShard* es) {
+    es->search_indices()->BlockUntilConstructionEnd();
+    LOG(INFO) << "PostLoad: search index rebuild phase returned rss="
+              << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
+  });
 
   // All shards completed restoration — drain pending ops.
   // DrainPendingVectorUpdates sets kBuilding which allows Add calls.
