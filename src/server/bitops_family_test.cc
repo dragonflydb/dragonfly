@@ -325,6 +325,10 @@ TEST_F(BitOpsFamilyTest, BitCountByteSubRange) {
   auto a_resp = Run({"set", "A", "A"});
   EXPECT_EQ(a_resp, "OK");
   EXPECT_EQ(2, CheckedInt({"bitcount", "A", "0", "-2"}));
+
+  // Both-negative inverted range on a 1-byte key: must be 0, not a count of
+  // byte 0 after both indices clamp up.
+  EXPECT_EQ(0, CheckedInt({"bitcount", "A", "-1", "-2"}));
 }
 
 TEST_F(BitOpsFamilyTest, BitCountByteBitSubRange) {
@@ -343,6 +347,12 @@ TEST_F(BitOpsFamilyTest, BitCountByteBitSubRange) {
   EXPECT_EQ(4, CheckedInt({"bitcount", "foo", "1", "9", "bit"}));
   EXPECT_EQ(7, CheckedInt({"bitcount", "foo", "2", "19", "bit"}));
   EXPECT_EQ(0, CheckedInt({"bitcount", "foo", "-1", "-2", "bit"}));  // illegal range
+
+  // Both-negative inverted range past the end of a 1-byte key: must be 0,
+  // not a count of bit 0 after both indices clamp up.
+  auto x_resp = Run({"set", "x", std::string(1, '\xff')});
+  EXPECT_EQ(x_resp, "OK");
+  EXPECT_EQ(0, CheckedInt({"bitcount", "x", "-9", "-10", "bit"}));
 }
 
 TEST_F(BitOpsFamilyTest, BitCountBitLastBitRegression) {

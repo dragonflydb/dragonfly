@@ -206,13 +206,18 @@ std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits) 
   if (strlen == 0)
     return 0;
 
+  // Both-negative inverted range is empty; without this, clamping pulls both
+  // up to 0 on short strings and counts a spurious byte/bit.
+  if (start < 0 && end < 0 && start > end)
+    return 0;
+
   if (start < 0)
     start = strlen + start;
   if (end < 0)
     end = strlen + end;
 
   start = max(start, int64_t(0));
-  end = max(int64_t(0), min(end, strlen - 1));  // inclusive, clamped to [0, strlen - 1]
+  end = max(int64_t(0), min(end, strlen - 1));
 
   if (start > end)
     return 0;
