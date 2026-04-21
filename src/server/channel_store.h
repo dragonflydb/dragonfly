@@ -4,6 +4,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/hash/hash.h>
 
 #include <array>
 #include <atomic>
@@ -104,16 +105,25 @@ class ChannelStore {
     UpdatablePointer(UpdatablePointer&& other) noexcept;
 
     SubscribeMap* Get() const;
-    void Set(SubscribeMap* sm);
+    void Set(SubscribeMap* sm) const;
 
     SubscribeMap* operator->() const;
     const SubscribeMap& operator*() const;
 
    private:
-    std::atomic<SubscribeMap*> ptr;
+    mutable std::atomic<SubscribeMap*> ptr;
   };
 
-  using ChannelMap = ShardedHashMap<std::string, UpdatablePointer, 16>;
+  // Transparent hash: accepts both std::string and std::string_view for heterogeneous lookup.
+  struct StringViewHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sv) const {
+      return absl::Hash<std::string_view>{}(sv);
+    }
+  };
+
+  using ChannelMap =
+      ShardedHashMap<std::string, UpdatablePointer, 16, StringViewHash, std::equal_to<>>;
 
   // Remove all subscribers from a channel, erasing it from the map.
   void RemoveAllSubscribers(bool pattern, std::string_view channel);

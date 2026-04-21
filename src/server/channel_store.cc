@@ -52,19 +52,19 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = 
 ChannelStore* channel_store = nullptr;
 
 ChannelStore::UpdatablePointer::UpdatablePointer(const UpdatablePointer& other) {
-  ptr.store(other.ptr.load(memory_order_relaxed), memory_order_relaxed);
+  ptr.store(other.ptr.load(memory_order_acquire), memory_order_release);
 }
 
 ChannelStore::UpdatablePointer::UpdatablePointer(UpdatablePointer&& other) noexcept {
-  ptr.store(other.ptr.load(memory_order_relaxed), memory_order_relaxed);
-  other.ptr.store(nullptr, memory_order_relaxed);
+  ptr.store(other.ptr.load(memory_order_acquire), memory_order_release);
+  other.ptr.store(nullptr, memory_order_release);
 }
 
 ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::Get() const {
   return ptr.load(memory_order_acquire);
 }
 
-void ChannelStore::UpdatablePointer::Set(ChannelStore::SubscribeMap* sm) {
+void ChannelStore::UpdatablePointer::Set(ChannelStore::SubscribeMap* sm) const {
   ptr.store(sm, memory_order_release);
 }
 
@@ -196,13 +196,13 @@ void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& 
 void ChannelStore::RemoveAllSubscribers(bool pattern, string_view channel) {
   ChannelMap& map = pattern ? patterns_ : channels_;
   string key{channel};
-  map.Mutate(key, [&](auto& m, auto AcquireReaderExclusiveLock) {
+  map.Mutate(key, [&](const auto& m, auto AcquireReadExclusiveLock) {
     auto it = m.find(key);
     if (it == m.end())
       return;
-    auto lock = AcquireReaderExclusiveLock();
+    auto locked_map = AcquireReadExclusiveLock();
     delete it->second.Get();
-    m.erase(it);
+    locked_map.map.erase(it);
   });
 }
 
@@ -245,7 +245,7 @@ void ChannelStoreUpdater::Apply() {
       continue;
     }
 
-    map.Mutate(sid, [&](auto& m, auto AcquireReaderExclusiveLock) {
+    map.Mutate(ChannelStore::ChannelMap::ShardId{sid}, [&](const auto& m, auto LockReaders) {
       // Track which keys require map changes - new insert or last-subscriber erase.
       absl::InlinedVector<bool, 8> needs_map_change(shard_keys.size(), false);
       bool has_map_change = false;
@@ -283,22 +283,23 @@ void ChannelStoreUpdater::Apply() {
 
       // Apply map changes under exclusive if needed.
       if (has_map_change) {
-        auto lock = AcquireReaderExclusiveLock();
+        auto locked_map = LockReaders();
         for (size_t i = 0; i < shard_keys.size(); ++i) {
           if (!needs_map_change[i]) {
             continue;
           }
           std::string_view key = shard_keys[i];
           if (to_add_) {
-            m.emplace(std::string{key}, ChannelStore::UpdatablePointer{
-                                            new ChannelStore::SubscribeMap{{cntx_, thread_id_}}});
+            locked_map.map.emplace(std::string{key},
+                                   ChannelStore::UpdatablePointer{
+                                       new ChannelStore::SubscribeMap{{cntx_, thread_id_}}});
           } else {
-            auto it = m.find(key);
-            if (it == m.end()) {
+            auto it = locked_map.map.find(key);
+            if (it == locked_map.map.end()) {
               continue;
             }
             delete it->second.Get();
-            m.erase(it);
+            locked_map.map.erase(it);
           }
         }
       }
@@ -306,10 +307,11 @@ void ChannelStoreUpdater::Apply() {
 
     // Delete old SubscribeMaps after taking exclusive read lock.
     if (!freelist_[sid].empty()) {
-      map.WithReadExclusiveLock(sid, [&old_sms = freelist_[sid]]() {
-        for (auto* sm : old_sms)
-          delete sm;
-      });
+      map.WithReadExclusiveLock(ChannelStore::ChannelMap::ShardId{sid},
+                                [&old_sms = freelist_[sid]]() {
+                                  for (auto* sm : old_sms)
+                                    delete sm;
+                                });
     }
   }
 }
