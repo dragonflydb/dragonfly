@@ -3,7 +3,7 @@
 //
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
 
 extern "C" {
@@ -78,6 +78,83 @@ enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MUL
 CompressionMode GetDefaultCompressionMode();
 
 using StringVec = std::vector<std::string>;
+
+// Manages per-entry IO buffers for the RDB serializer, enabling tagged chunk framing for
+// interleaved serialization of multiple keys. When tagging is enabled, entries that were split
+// across multiple flushes are prefixed with a [opcode:1][stream_id:4][payload_length:4] header so
+// the loader can reassemble them.
+class MemBufController {
+  friend class MemBufControllerTest;
+
+ public:
+  using EntryId = uint32_t;
+  // Tagged chunk envelope: [RDB_OPCODE_TAGGED_CHUNK:1][stream_id:4][payload_length:4]
+  static constexpr auto kHeaderSize = 9;
+
+  // Makes entry_buffer_ the current write target and assigns a new entry id.
+  // Must be paired with FinishEntry().
+  void StartEntry();
+
+  // Finalizes the active entry. Drains any remaining data from entry_buffer_ into the
+  // default buffer (tagging it if the entry was split), then resets to default state.
+  void FinishEntry();
+
+  // Moves data from entry_buffer_ into the default buffer. If the entry was
+  // split and tagging is enabled, a tag header is prepended.
+  void TagAndDrainToDefaultBuffer();
+
+  io::IoBuf* CurrentBuffer() const {
+    return current_buffer_;
+  }
+
+  // Marks the active entry as having been split across multiple flushes. Once marked,
+  // later flushes of this entry's data will be tagged with a chunk header.
+  void MarkEntrySplit() {
+    split_entries_.insert(active_id_);
+  }
+
+  // Total bytes available for flushing: current entry buffer + any previously drained
+  // data sitting in the default buffer.
+  size_t FlushableSize() const;
+
+  // Captures the active entry id and points the current buffer to the default buffer. Called before
+  // the serializer's consume callback, which may preempt and allow other entries to interleave.
+  [[nodiscard]] EntryId SaveStateBeforeConsume();
+
+  // Restores a previously saved entry id after the consume callback returns. Points the current
+  // buffer to entry_buffer_.
+  void RestoreStateAfterConsume(EntryId id);
+
+  // Assembles a flush blob in the following steps:
+  // 1. Prepends any data in the default buffer (from previously finished entries) as a prefix.
+  // 2. If the active entry was split, a tag header is inserted before current_bytes.
+  // 3. current_bytes is added.
+  // 3. Consumes all buffers used.
+  // current_bytes is typically CurrentBuffer()->InputBuffer(), passed explicitly because it works
+  // on data returned by PrepareFlush.
+  [[nodiscard]] std::string BuildBlob(io::Bytes current_bytes);
+
+  void SetTagEntries(bool tag_entries) {
+    send_tagged_entries_ = tag_entries;
+  }
+
+ private:
+  // Builds a 9-byte tagged chunk header for the active entry with the given payload size.
+  std::array<uint8_t, 9> MakeTagHeader(size_t size) const;
+
+  bool send_tagged_entries_ = false;
+
+  EntryId next_id_ = 1;
+  EntryId active_id_ = 0;
+
+  io::IoBuf default_buffer_{4096};
+  io::IoBuf entry_buffer_{4096};
+
+  // intent lock to check that some entry id does not own the entry buffer before writing to it
+  EntryId entry_buffer_owner_ = 0;
+  io::IoBuf* current_buffer_ = &default_buffer_;
+  absl::flat_hash_set<EntryId> split_entries_;
+};
 
 class RdbSaver {
  public:

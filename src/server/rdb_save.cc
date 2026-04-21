@@ -1889,4 +1889,98 @@ void RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {
   }
 }
 
+void MemBufController::StartEntry() {
+  DCHECK_EQ(entry_buffer_owner_, 0u);
+  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+  active_id_ = next_id_++;
+  entry_buffer_owner_ = active_id_;
+  current_buffer_ = &entry_buffer_;
+}
+
+void MemBufController::FinishEntry() {
+  if (current_buffer_ == &entry_buffer_)
+    TagAndDrainToDefaultBuffer();
+
+  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+  split_entries_.erase(active_id_);
+  entry_buffer_owner_ = 0;
+  current_buffer_ = &default_buffer_;
+  active_id_ = 0;
+}
+
+void MemBufController::TagAndDrainToDefaultBuffer() {
+  DCHECK_EQ(current_buffer_, &entry_buffer_);
+  if (entry_buffer_.InputLen() == 0)
+    return;
+
+  const auto bytes = entry_buffer_.InputBuffer();
+  if (split_entries_.contains(active_id_) && send_tagged_entries_) {
+    const auto header = MakeTagHeader(entry_buffer_.InputLen());
+    default_buffer_.WriteAndCommit(header.data(), header.size());
+  }
+
+  default_buffer_.WriteAndCommit(bytes.data(), bytes.size());
+  entry_buffer_.ConsumeInput(bytes.size());
+}
+
+std::array<uint8_t, 9> MemBufController::MakeTagHeader(size_t size) const {
+  DCHECK_NE(active_id_, 0u) << "tagging when active entry is invalid";
+  DCHECK_LT(size, std::numeric_limits<uint32>::max());
+
+  std::array<uint8_t, 9> header;
+  header[0] = RDB_OPCODE_TAGGED_CHUNK;
+  absl::little_endian::Store32(header.data() + 1, active_id_);
+  absl::little_endian::Store32(header.data() + 5, size);
+  return header;
+}
+
+size_t MemBufController::FlushableSize() const {
+  auto size = current_buffer_->InputLen();
+  if (current_buffer_ != &default_buffer_)
+    size += default_buffer_.InputLen();
+  return size;
+}
+
+MemBufController::EntryId MemBufController::SaveStateBeforeConsume() {
+  DCHECK_EQ(entry_buffer_owner_, active_id_);
+  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+  const EntryId id = active_id_;
+  entry_buffer_owner_ = 0;
+  current_buffer_ = &default_buffer_;
+  active_id_ = 0;
+  return id;
+}
+
+void MemBufController::RestoreStateAfterConsume(EntryId id) {
+  DCHECK_EQ(entry_buffer_owner_, 0u);
+  DCHECK_EQ(entry_buffer_.InputLen(), 0u);
+  entry_buffer_owner_ = id;
+  active_id_ = id;
+  current_buffer_ = &entry_buffer_;
+}
+
+std::string MemBufController::BuildBlob(Bytes current_bytes) {
+  const bool has_prefix = current_buffer_ != &default_buffer_ && default_buffer_.InputLen() > 0;
+  const auto prefix = has_prefix ? default_buffer_.InputBuffer() : Bytes{};
+  const bool should_tag = send_tagged_entries_ && active_id_ != 0 &&
+                          split_entries_.contains(active_id_) && !current_bytes.empty();
+
+  std::string out;
+  out.reserve(prefix.size() + (should_tag ? kHeaderSize : 0) + current_bytes.size());
+
+  if (has_prefix) {
+    out.append(io::View(prefix));
+    default_buffer_.ConsumeInput(prefix.size());
+  }
+
+  if (should_tag) {
+    const auto header = MakeTagHeader(current_bytes.size());
+    out.append(reinterpret_cast<const char*>(header.data()), header.size());
+  }
+
+  out.append(io::View(current_bytes));
+  current_buffer_->ConsumeInput(current_bytes.size());
+  return out;
+}
+
 }  // namespace dfly
