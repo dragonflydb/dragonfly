@@ -1323,11 +1323,11 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
 
   parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
 
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
