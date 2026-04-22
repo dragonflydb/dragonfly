@@ -997,7 +997,7 @@ bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState e
   return true;
 }
 
-void DflyCmd::CancelAllReplicas() {
+void DflyCmd::Shutdown() {
   ReplicaInfoMap pending;
   {
     util::fb2::LockGuard lk(mu_);
@@ -1007,10 +1007,6 @@ void DflyCmd::CancelAllReplicas() {
   for (auto& [_, replica_ptr] : pending) {
     replica_ptr->Cancel();
   }
-}
-
-void DflyCmd::Shutdown() {
-  CancelAllReplicas();
 }
 
 void FlowInfo::TryShutdownSocket() {

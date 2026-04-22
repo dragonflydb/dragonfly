@@ -1446,15 +1446,11 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
 
-      // Cancel all replicas first (stops journal streamers), then reset the
-      // journal to invalidate old partial sync buffers. The loaded data bypasses
-      // the journal, so replicas in STABLE_SYNC would miss it.
-      // Both operations run while still in LOADING state, so no commands can
-      // execute and no journal writes can race with the reset.
-      dfly_cmd_->CancelAllReplicas();
+      // Loaded data bypasses the journal, so force replicas into full sync.
+      dfly_cmd_->Shutdown();
       shard_set->RunBriefInParallel([](EngineShard* shard) {
         if (shard->journal())
-          journal::StartInThreadAtLsn(1);
+          journal::ClearBuffer();
       });
     }
 
