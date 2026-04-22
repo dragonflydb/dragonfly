@@ -98,6 +98,9 @@ class HnswVectorIndex {
   // Use this during serialization to block concurrent Add/Remove (write) operations.
   MRMWMutexLock GetReadLock() const;
 
+  // Approximate in-memory footprint of this HNSW graph, in bytes.
+  size_t GetMemoryUsage() const;
+
  private:
   bool copy_vector_;
   size_t dim_;

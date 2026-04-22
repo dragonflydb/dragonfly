@@ -399,6 +399,37 @@ TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
       << "Remaining half should still be tracked";
 }
 
+// Verify that HNSW index memory is accounted for in both search_stats.used_memory
+// (surfaced as search_used class of dragonfly_memory_by_class_bytes) and in
+// heap_used_bytes (surfaced as dragonfly_memory_used_bytes). See issue #7110.
+TEST_F(SearchFamilyTest, MemoryTrackingHnsw) {
+  constexpr size_t kDim = 16;
+  constexpr size_t kCapacity = 1024;
+
+  size_t search_mem_before = GetMetrics().search_stats.used_memory;
+  size_t heap_mem_before = GetMetrics().heap_used_bytes;
+
+  EXPECT_EQ(Run({"FT.CREATE", "hnsw_idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                 "TYPE", "FLOAT32", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2",
+                 "INITIAL_CAP", absl::StrCat(kCapacity)}),
+            "OK");
+
+  auto metrics = GetMetrics();
+  size_t search_delta = metrics.search_stats.used_memory - search_mem_before;
+  size_t heap_delta = metrics.heap_used_bytes - heap_mem_before;
+
+  // The level-0 block alone allocates capacity * size_data_per_element_ bytes.
+  // With M=16 (default), maxM0_ = 32, size_data_per_element_ >= 32*4 + 8 = 136 bytes,
+  // so 1024 * 100 is a safe lower bound.
+  constexpr size_t kMinLevel0Bytes = kCapacity * 100;
+  EXPECT_GE(search_delta, kMinLevel0Bytes) << "HNSW index creation must bump search_used memory";
+  EXPECT_GE(heap_delta, kMinLevel0Bytes) << "HNSW index creation must bump heap_used_bytes";
+  // The HNSW contribution is added once (not per-shard), so both gauges must
+  // move by the same amount.
+  EXPECT_EQ(search_delta, heap_delta)
+      << "HNSW memory should be accounted once, producing identical deltas";
+}
+
 // Test how asynchronous indexing indexes documents and reports its progress
 TEST_F(SearchFamilyTest, Indexing) {
   // Create documents

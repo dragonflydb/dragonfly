@@ -424,6 +424,10 @@ struct HnswlibAdapter {
     return MRMWMutexLock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
   }
 
+  size_t GetMemoryUsage() const {
+    return world_.memorySize();
+  }
+
  private:
   HnswSpace space_;
   HierarchicalNSW<float> world_;
@@ -540,6 +544,10 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
 
 MRMWMutexLock HnswVectorIndex::GetReadLock() const {
   return adapter_->GetReadLock();
+}
+
+size_t HnswVectorIndex::GetMemoryUsage() const {
+  return adapter_->GetMemoryUsage();
 }
 
 }  // namespace dfly::search

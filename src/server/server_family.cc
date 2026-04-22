@@ -68,6 +68,7 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/replica.h"
 #include "server/script_mgr.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
@@ -3088,6 +3089,14 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   };  // cb
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
+
+  // HNSW indices live in a single global registry shared across shards, so their
+  // footprint must be added once — not per-shard. Track it in both the search_used
+  // breakdown (memory_by_class_bytes{class="search_used"}) and the overall heap
+  // gauge (memory_used_bytes). See issue #7110.
+  size_t hnsw_memory = GlobalHnswIndexRegistry::Instance().GetTotalMemoryUsage();
+  result.search_stats.used_memory += hnsw_memory;
+  result.heap_used_bytes += hnsw_memory;
 
   uint64_t after_cb = absl::GetCurrentTimeNanos();
 
