@@ -442,14 +442,10 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::ScorerType> ParseScorerName(std::string_view name) {
-  if (absl::EqualsIgnoreCase(name, "BM25STD"))
-    return search::ScorerType::BM25STD;
-  if (absl::EqualsIgnoreCase(name, "TFIDF"))
-    return search::ScorerType::TFIDF;
-  if (absl::EqualsIgnoreCase(name, "TFIDF.DOCNORM"))
-    return search::ScorerType::TFIDF_DOCNORM;
-  return std::nullopt;
+std::optional<search::ScorerType> ParseScorer(CmdArgParser* parser) {
+  return parser->TryMapNext("BM25STD", search::ScorerType::BM25STD, "TFIDF",
+                            search::ScorerType::TFIDF, "TFIDF.DOCNORM",
+                            search::ScorerType::TFIDF_DOCNORM);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -492,10 +488,9 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("WITHSCORES")) {
       params.with_scores = true;
     } else if (parser->Check("SCORER")) {
-      auto scorer_name = parser->Next();
-      auto scorer = ParseScorerName(scorer_name);
+      auto scorer = ParseScorer(parser);
       if (!scorer)
-        return CreateSyntaxError(absl::StrCat("No such scorer: ", scorer_name));
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
     } else if (parser->Check("DIALECT")) {
       parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
@@ -755,10 +750,9 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     // SCORER, ADDSCORES, WITHSCORES can appear anywhere in the command
     if (parser->Check("SCORER")) {
-      auto scorer_name = parser->Next();
-      auto scorer = ParseScorerName(scorer_name);
+      auto scorer = ParseScorer(parser);
       if (!scorer)
-        return CreateSyntaxError(absl::StrCat("No such scorer: ", scorer_name));
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
       continue;
     }

@@ -209,7 +209,7 @@ struct KnnScoreSortOption {
   size_t limit = std::numeric_limits<size_t>::max();
 };
 
-enum class ScorerType : int;
+enum class ScorerType : uint8_t;
 
 // SearchAlgorithm allows searching field indices with a query
 class SearchAlgorithm {
