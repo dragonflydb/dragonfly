@@ -9,13 +9,55 @@
 
 #include <optional>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 #include "facade/facade_types.h"
 
 namespace facade {
 
-// Helper class for numerical range restriction during parsing
+// CmdArgParser — utility for parsing command option lists.
+//
+// Reading individual args:
+//   CmdArgParser parser(args);
+//   auto key = parser.Next<string_view>();                      // read one arg by type
+//   auto [src, dst] = parser.Next<string_view, string_view>();  // read several at once (tuple)
+//   auto db = parser.Next<FInt<0, 15>>();                       // range-restricted int
+//                                                               // (INVALID_INT if out of range)
+//   auto count = parser.NextOrDefault<size_t>(10);              // read optional with default
+//
+// Tag matching:
+//   parser.ExpectTag("LOAD");                                   // required literal keyword
+//   if (parser.Check("NX")) { ... }                             // consume tag only if matched
+//   auto mode = parser.MapNext("EX", Mode::EX, "PX", Mode::PX); // tag -> enum mapping
+//   auto maybe_mode = parser.TryMapNext("ASC", Dir::ASC,        // like MapNext but returns
+//                                       "DESC", Dir::DESC);     // nullopt (no error) on miss
+//
+// Bulk named options with Apply():
+//   parser.Apply(
+//       Exist("WITHSCORES", &params.with_scores),  // tag present -> sets bool true
+//       Tag("LIMIT", &offset, &limit),             // tag -> reads following args
+//       Tag("COUNT", &optional_count),             // std::optional<T>* is supported
+//       Tag("GET", [&](CmdArgParser* p) {          // lambda handler for custom parsing
+//         patterns.push_back(p->Next<string_view>());
+//       }));
+//
+// Navigating manually:
+//   if (parser.HasNext()) { ... }                               // is there another arg?
+//   if (parser.HasAtLeast(3)) { ... }                           // at least N args remain?
+//   auto peek = parser.Peek();                                  // look at next without consuming
+//                                                               //   (useful for error messages)
+//   parser.Skip(n);                                             // advance n args
+//   CmdArgList rest = parser.Tail();                            // remaining args (e.g. k/v pairs)
+//
+// Apply stops at the first unmatched arg without reporting an error. Use ApplyOrSkip() instead
+// to silently ignore unknown tags, or call Finalize() afterwards to require all args were
+// consumed (reports UNPROCESSED otherwise). Error surfacing:
+//   if (parser.HasError()) { ... }                              // any error so far?
+//   if (!parser.Finalize())                                     // common end-of-parse check
+//     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+// Numerical range restriction used with Next<FInt<lo, hi>>().
 template <auto min, auto max> struct FInt {
   decltype(min) value = {};
   operator decltype(min)() {
@@ -31,7 +73,10 @@ template <class T> constexpr bool is_fint = false;
 
 template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
 
-// Utility class for easily parsing command options from argument lists.
+template <class T> constexpr bool is_optional = false;
+
+template <class U> constexpr bool is_optional<std::optional<U>> = true;
+
 struct CmdArgParser {
   enum ErrorType {
     NO_ERROR,
@@ -59,15 +104,13 @@ struct CmdArgParser {
   CmdArgParser(ArgSlice args) : args_{args} {
   }
 
-  // Debug asserts sure error was consumed
+  // DCHECKs that any error was consumed.
   ~CmdArgParser();
 
-  // Get next value without consuming it
   std::string_view Peek() {
     return SafeSV(cur_i_);
   }
 
-  // Consume next value
   template <class T = std::string_view, class... Ts> auto Next() {
     if (cur_i_ + sizeof...(Ts) >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
@@ -85,15 +128,13 @@ struct CmdArgParser {
     }
   }
 
-  // returns next value if exists or default value
   template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
     return HasNext() ? Next<T>() : default_value;
   }
 
-  // check next value ignoring case and consume it
+  // Consumes the next arg; reports INVALID_NEXT if it doesn't match (case-insensitive).
   void ExpectTag(std::string_view tag);
 
-  // Consume next value
   template <class... Cases> auto MapNext(Cases&&... cases) {
     if (cur_i_ >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
@@ -110,7 +151,7 @@ struct CmdArgParser {
     return *res;
   }
 
-  // Consume next value if can map it and return mapped result or return nullopt
+  // Same as MapNext, but returns nullopt (no error) if no case matches.
   template <class... Cases>
   auto TryMapNext(Cases&&... cases)
       -> std::optional<std::tuple_element_t<1, std::tuple<Cases...>>> {
@@ -123,7 +164,7 @@ struct CmdArgParser {
     return res;
   }
 
-  // Check if the next value is equal to a specific tag. If equal, its consumed.
+  // If the next arg matches `tag`, consume it and the following args-into-pointers; else no-op.
   template <class... Args> bool Check(std::string_view tag, Args*... args) {
     if (cur_i_ + sizeof...(Args) >= args_.size())
       return false;
@@ -139,7 +180,22 @@ struct CmdArgParser {
     return true;
   }
 
-  // Skip specified number of arguments
+  // Greedily matches remaining args against the options. See the file header for usage.
+  template <class... Opts> void Apply(Opts... opts) {
+    while (HasNext() && (opts.TryApply(this) || ...)) {
+    }
+  }
+
+  // Like Apply, but silently skips unmatched args (one at a time) instead of stopping. Use when
+  // unknown tags should be ignored rather than reported. Prefer Apply + Finalize when strictness
+  // is desired.
+  template <class... Opts> void ApplyOrSkip(Opts... opts) {
+    while (HasNext()) {
+      if (!(opts.TryApply(this) || ...))
+        Skip(1);
+    }
+  }
+
   CmdArgParser& Skip(size_t n) {
     if (cur_i_ + n > args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
@@ -149,7 +205,7 @@ struct CmdArgParser {
     return *this;
   }
 
-  // Expect no more arguments and return if no error has occured
+  // Requires no leftover args and no prior errors. Reports UNPROCESSED if args remain.
   bool Finalize() {
     if (HasNext()) {
       Report(UNPROCESSED, cur_i_);
@@ -158,12 +214,10 @@ struct CmdArgParser {
     return !HasError();
   }
 
-  // Return remaining arguments
   ArgSlice Tail() const {
     return args_.subspan(cur_i_);
   }
 
-  // Return true if arguments are left and no errors occured
   bool HasNext() {
     return cur_i_ < args_.size() && !error_;
   }
@@ -182,10 +236,8 @@ struct CmdArgParser {
     return cur_i_;
   }
 
-  // Custom error_type should start from CUSTOM_ERROR
+  // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index.
   void Report(int error_type) {
-    // we use previous index, because the check was done outside and it's done after element is
-    // processed
     Report(error_type, cur_i_ - 1);
   }
 
@@ -216,10 +268,12 @@ struct CmdArgParser {
   }
 
   template <class T> T Convert(size_t idx) {
-    static_assert(
-        std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> || is_fint<T>,
-        "incorrect type");
-    if constexpr (std::is_arithmetic_v<T>) {
+    static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> ||
+                      is_fint<T> || is_optional<T>,
+                  "incorrect type");
+    if constexpr (is_optional<T>) {
+      return T{Convert<typename T::value_type>(idx)};
+    } else if constexpr (std::is_arithmetic_v<T>) {
       return Num<T>(idx);
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
@@ -279,5 +333,59 @@ struct CmdArgParser {
 
   ErrorInfo error_;
 };
+
+// Option types used with CmdArgParser::Apply. See the file header for usage.
+namespace detail {
+
+struct ExistOpt {
+  std::string_view tag;
+  bool* field;
+
+  bool TryApply(CmdArgParser* parser) const {
+    if (parser->Check(tag)) {
+      *field = true;
+      return true;
+    }
+    return false;
+  }
+};
+
+template <class... Args> struct TagOpt {
+  std::string_view tag;
+  std::tuple<Args*...> args;
+
+  bool TryApply(CmdArgParser* parser) const {
+    return std::apply([&](auto*... a) { return parser->Check(tag, a...); }, args);
+  }
+};
+
+template <class Func> struct LambdaOpt {
+  std::string_view tag;
+  Func func;
+
+  bool TryApply(CmdArgParser* parser) const {
+    if (parser->Check(tag)) {
+      func(parser);
+      return true;
+    }
+    return false;
+  }
+};
+
+}  // namespace detail
+
+inline detail::ExistOpt Exist(std::string_view tag, bool* field) {
+  return {tag, field};
+}
+
+template <class... Args> detail::TagOpt<Args...> Tag(std::string_view tag, Args*... args) {
+  return detail::TagOpt<Args...>{tag, std::make_tuple(args...)};
+}
+
+// Overload for custom parsing: the callable receives a CmdArgParser* after the tag matches.
+template <class Func, std::enable_if_t<std::is_invocable_v<Func, CmdArgParser*>, int> = 0>
+detail::LambdaOpt<Func> Tag(std::string_view tag, Func func) {
+  return {tag, std::move(func)};
+}
 
 }  // namespace facade

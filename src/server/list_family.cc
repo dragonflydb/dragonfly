@@ -1163,8 +1163,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
   size_t pop_count = 1;
-  if (parser.Check("COUNT"))
-    pop_count = parser.Next<size_t>();
+  parser.Check("COUNT", &pop_count);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1252,8 +1251,7 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
   size_t pop_count = 1;
-  if (parser.Check("COUNT"))
-    pop_count = parser.Next<size_t>();
+  parser.Check("COUNT", &pop_count);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1320,29 +1318,10 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
   int rank = 1;
-  uint32_t count = 1;
+  std::optional<uint32_t> count;
   uint32_t max_len = 0;
-  bool skip_count = true;
 
-  while (parser.HasNext()) {
-    if (parser.Check("RANK")) {
-      rank = parser.Next<int>();
-      continue;
-    }
-
-    if (parser.Check("COUNT")) {
-      count = parser.Next<uint32_t>();
-      skip_count = false;
-      continue;
-    }
-
-    if (parser.Check("MAXLEN")) {
-      max_len = parser.Next<uint32_t>();
-      continue;
-    }
-
-    parser.Skip(1);
-  }
+  parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (rank == 0)
@@ -1351,7 +1330,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
+    return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1363,7 +1342,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  if (skip_count) {
+  if (!count.has_value()) {
     if (result->empty()) {
       rb->SendNull();
     } else {
