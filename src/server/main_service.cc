@@ -503,12 +503,12 @@ bool IsSHA(string_view str) {
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
   string_view num_keys_str = ArgS(args, 1);
-  int32_t num_keys;
+  uint32_t num_keys;
 
-  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0)
+  if (!absl::SimpleAtoi(num_keys_str, &num_keys))
     return ErrorReply{facade::kInvalidIntErr};
 
-  if (unsigned(num_keys) > args.size() - 2)
+  if (num_keys > args.size() - 2)
     return ErrorReply{"Number of keys can't be greater than number of args", kSyntaxErrType};
 
   return nullopt;
