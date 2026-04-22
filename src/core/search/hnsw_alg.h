@@ -716,11 +716,15 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   // Recomputes memory_size_ from the current allocation-defining fields.
   // Must be called whenever max_elements_ changes.
   void updateMemorySize() {
-    size_t per_element = size_data_per_element_ + sizeof(char*) + sizeof(int);
+    // Per-element costs: level-0 block, linkLists_ pointer slot, element_levels_ entry,
+    // link_list_locks_ mutex; plus the copied-vector block when enabled.
+    size_t per_element = size_data_per_element_ + sizeof(char*) + sizeof(int) + sizeof(std::mutex);
     if (copy_vector_) {
       per_element += data_size_;
     }
-    memory_size_.store(max_elements_ * per_element, std::memory_order_relaxed);
+    // label_op_locks_ is a fixed-size shard of mutexes independent of max_elements_.
+    size_t fixed = MAX_LABEL_OPERATION_LOCKS * sizeof(std::mutex);
+    memory_size_.store(fixed + max_elements_ * per_element, std::memory_order_relaxed);
   }
 
   size_t indexFileSize() const {

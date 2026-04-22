@@ -415,6 +415,9 @@ TEST_F(SearchFamilyTest, MemoryTrackingHnsw) {
             "OK");
 
   auto metrics = GetMetrics();
+  // Guard against unsigned underflow if a gauge somehow ticks down between snapshots.
+  ASSERT_GE(metrics.search_stats.used_memory, search_mem_before);
+  ASSERT_GE(metrics.heap_used_bytes, heap_mem_before);
   size_t search_delta = metrics.search_stats.used_memory - search_mem_before;
   size_t heap_delta = metrics.heap_used_bytes - heap_mem_before;
 
@@ -424,10 +427,11 @@ TEST_F(SearchFamilyTest, MemoryTrackingHnsw) {
   constexpr size_t kMinLevel0Bytes = kCapacity * 100;
   EXPECT_GE(search_delta, kMinLevel0Bytes) << "HNSW index creation must bump search_used memory";
   EXPECT_GE(heap_delta, kMinLevel0Bytes) << "HNSW index creation must bump heap_used_bytes";
-  // The HNSW contribution is added once (not per-shard), so both gauges must
-  // move by the same amount.
-  EXPECT_EQ(search_delta, heap_delta)
-      << "HNSW memory should be accounted once, producing identical deltas";
+  // The HNSW contribution is added to both gauges. heap_used_bytes also rolls up
+  // other shard-local state (ShardDocIndices::GetUsedMemory, mimalloc heap, etc.),
+  // so it can grow strictly more than search_used; exact equality is too strict.
+  EXPECT_GE(heap_delta, search_delta)
+      << "heap_used_bytes must include the HNSW contribution counted in search_used";
 }
 
 // Test how asynchronous indexing indexes documents and reports its progress
