@@ -177,8 +177,10 @@ struct TrafficLogger {
   // Also, makes sure that LogTraffic are executed atomically.
   fb2::Mutex mutex;
   unique_ptr<io::WriteFile> log_file;
-  // Bit mask over Connection::ListenerType values, only matching listeners are logged.
-  uint32_t listener_mask = 0;
+  // Listener type that this thread's file is recording. Only connections with a
+  // matching `listener_type_` produce records; others are skipped on the hot path.
+  // Set once when the file is opened, cleared in ResetLocked().
+  Connection::ListenerType listener_type = Connection::ListenerType::RESP;
 
   void ResetLocked();
   // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -191,7 +193,7 @@ void TrafficLogger::ResetLocked() {
     std::ignore = log_file->Close();
     log_file.reset();
   }
-  listener_mask = 0;
+  listener_type = Connection::ListenerType::RESP;
 }
 
 // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -223,9 +225,10 @@ thread_local uint32 pipeline_wait_batch_usec = absl::GetFlag(FLAGS_pipeline_wait
 
 // Opens the per-thread traffic log file. Distinguishes three outcomes so the caller
 // can report an accurate error to the user (was the logger already running, or did
-// we fail to open a file). `listener_mask` is only committed after the file is
+// we fail to open a file). `listener_type` is only committed after the file is
 // successfully opened so the logger's state stays consistent on failure.
-Connection::StartTrafficResult OpenTrafficLogger(string_view base_path, uint32_t listener_mask) {
+Connection::StartTrafficResult OpenTrafficLogger(string_view base_path,
+                                                 Connection::ListenerType listener_type) {
   using Res = Connection::StartTrafficResult;
   unique_lock lk{tl_traffic_logger.mutex};
   if (tl_traffic_logger.log_file)
@@ -241,24 +244,22 @@ Connection::StartTrafficResult OpenTrafficLogger(string_view base_path, uint32_t
     return Res::kOpenFailed;
   }
   tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
-  tl_traffic_logger.listener_mask = listener_mask;
+  tl_traffic_logger.listener_type = listener_type;
 #else
   LOG(WARNING) << "Traffic logger is only supported on Linux";
   return Res::kOpenFailed;
 #endif
 
-  // File header: version byte.
-  // v3 added per-record listener type packed into the upper bits (8..15) of the former
-  // `has_more` (now `flags`) field. v2 files are forwards-compatible for v3 readers:
-  // the upper bits are zero and get mapped to RESP. v2 readers cannot parse v3 files.
-  uint8_t version[1] = {3};
-  std::ignore = tl_traffic_logger.log_file->Write(version);
+  // File header: version byte (v3), followed by a single byte carrying the listener
+  // type for the whole file. Every record in the file belongs to this listener.
+  uint8_t header[2] = {3, static_cast<uint8_t>(listener_type)};
+  std::ignore = tl_traffic_logger.log_file->Write(header);
   return Res::kStarted;
 }
 
 // Writes a single record. `parts[0]` is the command name, following entries are its arguments.
 void LogTrafficParts(uint32_t id, bool has_more, uint32_t db_index,
-                     Connection::ListenerType listener_type, absl::Span<const string_view> parts) {
+                     absl::Span<const string_view> parts) {
   if (parts.empty())
     return;
 
@@ -271,26 +272,21 @@ void LogTrafficParts(uint32_t id, bool has_more, uint32_t db_index,
   char stack_buf[1024];
   char* next = stack_buf;
 
-  // We write id, timestamp, db_index, flags, num_parts, part_len, part_len, part_len, ...
-  // And then all the part blobs concatenated together.
+  // Record header: id, timestamp, db_index, has_more, num_parts, followed by
+  // part_len, part_len, ... and finally the concatenated part blobs.
+  // The listener type is stored once in the file header; it is not repeated per record.
   auto write_u32 = [&next](uint32_t i) {
     absl::little_endian::Store32(next, i);
     next += 4;
   };
 
-  // id
   write_u32(id);
 
-  // timestamp
   absl::little_endian::Store64(next, absl::GetCurrentTimeNanos());
   next += 8;
 
-  // db_index
   write_u32(db_index);
-
-  // flags: bit 0 = has_more; bits 8..15 = listener_type (v3 file format).
-  uint32_t flags = (has_more ? 1u : 0u) | (static_cast<uint32_t>(listener_type) << 8);
-  write_u32(flags);
+  write_u32(has_more ? 1u : 0u);
   write_u32(uint32_t(parts.size()));
 
   // Grab the lock and check if the file is still open.
@@ -335,12 +331,12 @@ void LogTrafficParts(uint32_t id, bool has_more, uint32_t db_index,
 }
 
 void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
-                ServiceInterface::ContextInfo ci, Connection::ListenerType listener_type) {
+                ServiceInterface::ContextInfo ci) {
   absl::InlinedVector<string_view, 16> parts;
   parts.reserve(args.size());
   for (auto v : args.view())
     parts.push_back(v);
-  LogTrafficParts(id, has_more, ci.db_index, listener_type, absl::MakeSpan(parts));
+  LogTrafficParts(id, has_more, ci.db_index, absl::MakeSpan(parts));
 }
 
 // Variant used by the Memcache protocol path.
@@ -358,7 +354,7 @@ void LogTraffic(uint32_t id, bool has_more, const cmn::BackedArguments& args,
 //               FLUSHALL/STATS/
 //               QUIT/VERSION)      : [cmd, *backed_args]
 void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Command& mc,
-                        ServiceInterface::ContextInfo ci, Connection::ListenerType listener_type) {
+                        ServiceInterface::ContextInfo ci) {
   using MP = MemcacheParser;
   string_view cmd_name = MP::CmdName(mc.type);
   if (cmd_name.empty())
@@ -415,7 +411,7 @@ void LogMemcacheTraffic(uint32_t id, bool has_more, const MemcacheParser::Comman
       break;
   }
 
-  LogTrafficParts(id, has_more, ci.db_index, listener_type, absl::MakeSpan(parts));
+  LogTrafficParts(id, has_more, ci.db_index, absl::MakeSpan(parts));
 }
 
 constexpr size_t kMinReadSize = 256;
@@ -1413,10 +1409,8 @@ Connection::ParserStatus Connection::ParseRedis(unsigned max_busy_cycles, bool e
       request_consumed_bytes_ = 0;
       bool has_more = consumed < read_buffer.size();
 
-      if (tl_traffic_logger.log_file &&
-          (tl_traffic_logger.listener_mask & (1u << static_cast<uint8_t>(listener_type_)))) {
-        LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()),
-                   listener_type_);
+      if (tl_traffic_logger.log_file && tl_traffic_logger.listener_type == listener_type_) {
+        LogTraffic(id_, has_more, *parsed_cmd_, service_->GetContextInfo(cc_.get()));
       }
 
       if (enqueue_only) {
@@ -2315,8 +2309,8 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force
 }
 
 Connection::StartTrafficResult Connection::StartTrafficLogging(string_view path,
-                                                               uint32_t listener_mask) {
-  return OpenTrafficLogger(path, listener_mask);
+                                                               ListenerType listener_type) {
+  return OpenTrafficLogger(path, listener_type);
 }
 
 void Connection::StopTrafficLogging() {
@@ -2457,10 +2451,10 @@ bool Connection::ParseMCBatch() {
       return false;
 
     if (result == MemcacheParser::OK && tl_traffic_logger.log_file &&
-        (tl_traffic_logger.listener_mask & (1u << static_cast<uint8_t>(listener_type_)))) {
+        tl_traffic_logger.listener_type == listener_type_) {
       bool has_more = io_buf_.InputLen() > 0;
       LogMemcacheTraffic(id_, has_more, *parsed_cmd_->mc_command(),
-                         service_->GetContextInfo(cc_.get()), listener_type_);
+                         service_->GetContextInfo(cc_.get()));
     }
 
     // We push the command to the parsed queue even in case of parse errors,

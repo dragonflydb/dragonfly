@@ -147,7 +147,7 @@ func Print(files []string) {
 	for i, file := range files {
 		tops[i].ch = make(chan Record, 100)
 		go func(ch chan Record, file string) {
-			parseRecords(file, func(r Record) bool {
+			parseRecords(file, nil, func(r Record) bool {
 				ch <- r
 				return true
 			}, *fIgnoreParseErrors)
@@ -194,7 +194,7 @@ func Analyze(files []string) {
 	for _, file := range files {
 		fileClients := make(map[uint32]bool)
 
-		parseRecords(file, func(r Record) bool {
+		parseRecords(file, nil, func(r Record) bool {
 			total += 1
 			if r.HasMore() {
 				chained += 1
@@ -246,6 +246,8 @@ func main() {
 
 		fmt.Fprintln(os.Stderr, "\nExamples:")
 		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -mc-host 192.168.1.10:11211 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -admin-host 192.168.1.10:6380 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -time-limit 60 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s print *.bin\n", binaryName)

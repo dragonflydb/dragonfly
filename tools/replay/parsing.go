@@ -40,7 +40,15 @@ func parseStrings(file io.Reader) (out []interface{}, err error) {
 	return
 }
 
-func parseRecords(filename string, cb func(Record) bool, ignoreErrors bool) error {
+// parseRecords reads a traffic log file. The file header (version + listener
+// type) is delivered via onHeader before any record callback runs, so callers
+// can configure per-listener behaviour up-front. onHeader may be nil.
+//
+// File format v2: one byte version = 2, then records. Legacy main-listener
+// only, treated as RESP on read.
+// File format v3: one byte version = 3, one byte listener_type, then records.
+func parseRecords(filename string, onHeader func(listenerType uint8),
+	cb func(Record) bool, ignoreErrors bool) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		return err
@@ -50,12 +58,23 @@ func parseRecords(filename string, cb func(Record) bool, ignoreErrors bool) erro
 	reader := bufio.NewReader(file)
 
 	var version uint8
-	binary.Read(reader, binary.LittleEndian, &version)
-	// v2: legacy main-listener-only recordings.
-	// v3: per-record listener type packed into the upper bits of the Flags field
-	//     (bits 8..15). Layout is otherwise identical to v2.
-	if version != 2 && version != 3 {
+	if err := binary.Read(reader, binary.LittleEndian, &version); err != nil {
+		return err
+	}
+
+	var listenerType uint8
+	switch version {
+	case 2:
+		listenerType = ListenerRESP
+	case 3:
+		if err := binary.Read(reader, binary.LittleEndian, &listenerType); err != nil {
+			return err
+		}
+	default:
 		log.Fatalf("Unsupported traffic log version %d (supported: 2, 3)", version)
+	}
+	if onHeader != nil {
+		onHeader(listenerType)
 	}
 
 	recordNum := 0

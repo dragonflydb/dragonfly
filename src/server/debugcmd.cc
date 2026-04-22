@@ -668,10 +668,10 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC START <path>/<file_prefix> [LISTENER <resp|memcache|admin|all> ...]",
-        "    Start traffic logging to files with the given path/prefix.",
-        "    Optional LISTENER clause restricts recording to one or more listener kinds.",
-        "    Without LISTENER, every listener is recorded.",
+        "TRAFFIC START <path>/<file_prefix> LISTENER <resp|memcache|admin>",
+        "    Start traffic logging for a single listener type to files with the given",
+        "    path/prefix. LISTENER is required; mixing listeners in one recording is",
+        "    intentionally not supported - start separate recordings per listener.",
         "TRAFFIC STOP",
         "    Stop traffic logging started by a previous TRAFFIC START.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
@@ -1062,7 +1062,9 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Syntax:
   //   DEBUG TRAFFIC STOP
-  //   DEBUG TRAFFIC START <path> [LISTENER <resp|memcache|admin|all> ...]
+  //   DEBUG TRAFFIC START <path> LISTENER <resp|memcache|admin>
+  // A recording captures exactly one listener type; mixing protocols in one file is
+  // intentionally not supported.
   if (args.empty()) {
     return cmd_cntx->SendError(facade::kSyntaxErr);
   }
@@ -1075,46 +1077,37 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendOk();
   }
 
-  if (first != "START" || args.size() < 2) {
+  if (first != "START" || args.size() != 4) {
     return cmd_cntx->SendError(facade::kSyntaxErr);
   }
 
   string path(ArgS(args, 1));
-  uint32_t mask = 0;
-
-  if (args.size() == 2) {
-    // No LISTENER clause => record all listener types.
-    mask = Connection::kAllListenersMask;
-  } else {
-    string keyword = absl::AsciiStrToUpper(ArgS(args, 2));
-    if (keyword != "LISTENER" || args.size() < 4) {
-      return cmd_cntx->SendError(facade::kSyntaxErr);
-    }
-    for (size_t i = 3; i < args.size(); ++i) {
-      string name = absl::AsciiStrToLower(ArgS(args, i));
-      if (name == "all") {
-        mask = Connection::kAllListenersMask;
-      } else if (name == "resp") {
-        mask |= 1u << static_cast<uint8_t>(Connection::ListenerType::RESP);
-      } else if (name == "memcache") {
-        mask |= 1u << static_cast<uint8_t>(Connection::ListenerType::MEMCACHE);
-      } else if (name == "admin") {
-        mask |= 1u << static_cast<uint8_t>(Connection::ListenerType::ADMIN);
-      } else {
-        return cmd_cntx->SendError(absl::StrCat("Unknown listener name '", name,
-                                                "'. Expected one of: resp, memcache, admin, all"));
-      }
-    }
+  string keyword = absl::AsciiStrToUpper(ArgS(args, 2));
+  if (keyword != "LISTENER") {
+    return cmd_cntx->SendError(facade::kSyntaxErr);
   }
 
-  LOG(INFO) << "Logging traffic to " << path << "*.bin, listener_mask=0x" << std::hex << mask;
+  Connection::ListenerType listener_type;
+  string name = absl::AsciiStrToLower(ArgS(args, 3));
+  if (name == "resp") {
+    listener_type = Connection::ListenerType::RESP;
+  } else if (name == "memcache") {
+    listener_type = Connection::ListenerType::MEMCACHE;
+  } else if (name == "admin") {
+    listener_type = Connection::ListenerType::ADMIN;
+  } else {
+    return cmd_cntx->SendError(
+        absl::StrCat("Unknown listener '", name, "'. Expected one of: resp, memcache, admin"));
+  }
+
+  LOG(INFO) << "Logging traffic to " << path << "*.bin, listener=" << name;
 
   std::atomic<unsigned> started_new{0};
   std::atomic<unsigned> already_logging{0};
   std::atomic<unsigned> open_failed{0};
   shard_set->pool()->AwaitFiberOnAll(
-      [path, mask, &started_new, &already_logging, &open_failed](auto*) {
-        switch (Connection::StartTrafficLogging(path, mask)) {
+      [path, listener_type, &started_new, &already_logging, &open_failed](auto*) {
+        switch (Connection::StartTrafficLogging(path, listener_type)) {
           case Connection::StartTrafficResult::kStarted:
             started_new.fetch_add(1, std::memory_order_relaxed);
             break;

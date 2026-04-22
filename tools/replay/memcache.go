@@ -17,8 +17,8 @@ import (
 
 // mcClient is a synchronous text-protocol memcache client. Each command is
 // written in full and its reply is consumed before returning, so replay is
-// sequential per connection (matches gomemcache's model and the realities of
-// ASCII memcache, which has no pipelining).
+// sequential per connection — matching the memcache ASCII protocol, which has
+// no request multiplexing.
 type mcClient struct {
 	addr string
 	conn net.Conn
@@ -125,9 +125,9 @@ func (c *mcClient) Cas(key string, flags uint32, exp int64, casUnique uint64, va
 	c.send(hdr, value)
 }
 
-// Retrieve issues `<cmd> <key>...\r\n` where cmd is get|gets|gat|gats.
-// For gat/gats, the caller must include <exp> as the first key field via
-// passing a custom header builder (see dispatchMC).
+// Retrieve issues `<cmd> <key>...\r\n` where cmd is get|gets. For gat/gats use
+// RetrieveGat — those commands need an <exp> token between the command and the
+// key list so they get their own helper.
 func (c *mcClient) Retrieve(cmd string, keys []string) {
 	var b bytes.Buffer
 	b.WriteString(cmd)

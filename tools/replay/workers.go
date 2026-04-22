@@ -25,8 +25,10 @@ const (
 
 // Flags field layout:
 //
-//	bit 0        : 1 if the next record belongs to the same batch as this one (HasMore)
-//	bits 8..15   : listener type (v3 only; 0 in v2 files -> treat as RESP)
+//	bit 0     : 1 if the next record belongs to the same batch as this one (HasMore)
+//	bits 1-31 : reserved, must be zero
+//
+// The listener type is stored once in the file header (see parsing.go), not per record.
 type RecordHeader struct {
 	Client  uint32
 	Time    uint64
@@ -38,14 +40,6 @@ func (h RecordHeader) HasMore() bool {
 	return h.Flags&1 != 0
 }
 
-func (h RecordHeader) ListenerType() uint8 {
-	lt := uint8(h.Flags >> 8)
-	if lt == 0 {
-		return ListenerRESP
-	}
-	return lt
-}
-
 type Record struct {
 	RecordHeader
 	values []interface{} // instead of []string to unwrap into variadic
@@ -55,12 +49,12 @@ type Record struct {
 func DetermineBaseTime(files []string) time.Time {
 	var minTime uint64 = math.MaxUint64
 	for _, file := range files {
-		parseRecords(file, func(r Record) bool {
+		parseRecords(file, nil, func(r Record) bool {
 			if r.Time < minTime {
 				minTime = r.Time
 			}
 			return false
-		}, *fIgnoreParseErrors)
+		}, *fIgnoreParseErrors) //nolint:errcheck
 	}
 	return time.Unix(0, int64(minTime))
 }
@@ -283,7 +277,8 @@ func (c *ClientWorker) runRedis(pace bool, worker *FileWorker) {
 }
 
 // runMC replays memcache-listener records via the memcache text protocol.
-// gomemcache has no pipelining, so each command is issued synchronously and the
+// The ASCII protocol has no multiplexing, so each command is issued synchronously
+// on the per-client connection (see mcClient in memcache.go) and the
 // pipeline-range latency digest uses batch size = 1.
 func (c *ClientWorker) runMC(pace bool, worker *FileWorker) {
 	for msg := range c.incoming {
@@ -430,10 +425,15 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	}
 	clients := make(map[uint32]*ClientWorker, 0)
 	recordId := uint64(0)
-	err := parseRecords(file, func(r Record) bool {
+	var listenerType uint8
+	err := parseRecords(file, func(lt uint8) {
+		listenerType = lt
+	}, func(r Record) bool {
 		client, ok := clients[r.Client]
 		if !ok {
-			client = NewClient(w, *fPace, r.ListenerType())
+			// Listener type is uniform for the whole file (file-header), so every
+			// client spawned for this FileWorker targets the same backend.
+			client = NewClient(w, *fPace, listenerType)
 			clients[r.Client] = client
 		}
 		cmdName := strings.ToLower(r.values[0].(string))

@@ -231,13 +231,6 @@ class Connection : public util::Connection {
   // and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
-  // Bit mask over ListenerType values indicating which listeners are being recorded.
-  // Bit N (1 << static_cast<uint8_t>(ListenerType::X)) is set if listener X is logged.
-  static constexpr uint32_t kAllListenersMask =
-      (1u << static_cast<uint8_t>(ListenerType::RESP)) |
-      (1u << static_cast<uint8_t>(ListenerType::MEMCACHE)) |
-      (1u << static_cast<uint8_t>(ListenerType::ADMIN));
-
   // Outcome of a StartTrafficLogging call on a single thread.
   enum class StartTrafficResult : uint8_t {
     kStarted,         // new recording started successfully on this thread
@@ -246,11 +239,11 @@ class Connection : public util::Connection {
   };
 
   // Starts traffic logging in the calling thread. Must be a proactor thread.
-  // Each thread creates its own log file combining requests from all the connections in
-  // that thread whose listener matches `listener_mask`. See StartTrafficResult for the
-  // possible outcomes; callers must distinguish AlreadyLogging (expected when the user
-  // forgot to STOP) from OpenFailed (unrelated I/O error).
-  static StartTrafficResult StartTrafficLogging(std::string_view base_path, uint32_t listener_mask);
+  // Each thread creates its own log file containing requests from connections on
+  // that thread whose listener type equals `listener_type`. Exactly one listener
+  // kind per recording — mixing protocols in a single file is not supported.
+  static StartTrafficResult StartTrafficLogging(std::string_view base_path,
+                                                ListenerType listener_type);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
