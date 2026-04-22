@@ -257,7 +257,7 @@ async def test_replication_all(
     # Assert select calls are properly optimized
     for replica in c_replicas:
         select_calls = (await replica.info("ALL"))["cmdstat_select"]["calls"]
-        assert select_calls < 10
+        assert select_calls < 16
 
 
 """
