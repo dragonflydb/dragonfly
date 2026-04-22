@@ -2449,7 +2449,8 @@ bool ServerFamily::TEST_IsSaving() const {
 }
 
 void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait) {
-  VLOG(1) << "Drakarys";
+  LOG(INFO) << "Drakarys start db=" << db_ind << " wait=" << wait
+            << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 
   vector<fb2::Fiber> fibers(shard_set->size());
   transaction->Execute(
@@ -2462,6 +2463,11 @@ void ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind, bool wait)
   auto action = wait ? &fb2::Fiber::JoinIfNeeded : &fb2::Fiber::Detach;
   for (auto& f : fibers)
     (f.*action)();
+
+  LOG(INFO) << (wait ? "Drakarys main done (shards joined)"
+                     : "Drakarys main dispatched (shards detached; per-shard 'finished decommit' "
+                       "logs mark real completion)")
+            << " rss=" << HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
 }
 
 SaveInfoData ServerFamily::GetLastSaveInfo() const {
@@ -3106,6 +3112,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   }
 
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
+  result.acl_stats = service_.user_registry().GetAclStats();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -3641,6 +3648,19 @@ string ServerFamily::FormatInfoMetrics(const Metrics& m, std::string_view sectio
 
       append(absl::StrFormat("latency_percentiles_usec_%s", cmd_name), absl::StrJoin(stats, ","));
     }
+  }
+
+  if (should_enter("ACL", true)) {
+    const auto& acl = m.acl_stats;
+    append("acl_num_users", acl.num_users);
+    append("acl_num_passwords", acl.num_passwords);
+    append("acl_num_cat_changes", acl.num_cat_changes);
+    append("acl_num_cmd_changes", acl.num_cmd_changes);
+    append("acl_num_key_globs", acl.num_key_globs);
+    append("acl_key_globs_bytes", acl.key_globs_bytes);
+    append("acl_num_pubsub_globs", acl.num_pubsub_globs);
+    append("acl_pubsub_globs_bytes", acl.pubsub_globs_bytes);
+    append("acl_total_bytes", acl.TotalBytes());
   }
 
   return info;

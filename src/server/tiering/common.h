@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <iosfwd>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -42,9 +43,7 @@ struct DiskSegment {
 
   size_t offset = 0, length = 0;
 
-  friend std::ostream& operator<<(std::ostream& os, const DiskSegment& ds) {
-    return os << "[" << ds.offset << ", " << ds.length << "]";
-  }
+  friend std::ostream& operator<<(std::ostream& os, const DiskSegment& ds);
 };
 
 using KeyRef = std::pair<uint16_t /* DbIndex */, std::string_view>;

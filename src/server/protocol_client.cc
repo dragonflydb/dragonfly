@@ -123,8 +123,6 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 }
 
 ProtocolClient::~ProtocolClient() {
-  exec_st_.JoinErrorHandler();
-
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
     SSL_CTX_free(ssl_ctx_);

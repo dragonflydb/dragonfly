@@ -5,9 +5,8 @@
 #pragma once
 
 #include <algorithm>
-#include <iostream>
+#include <iosfwd>
 #include <memory>
-#include <ostream>
 #include <variant>
 #include <vector>
 

@@ -11,6 +11,7 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include <algorithm>
 #include <atomic>
 #include <variant>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "base/logging.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/scoring.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
@@ -440,6 +442,12 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
+std::optional<search::ScorerType> ParseScorerName(std::string_view name) {
+  if (absl::EqualsIgnoreCase(name, "BM25STD"))
+    return search::ScorerType::BM25STD;
+  return std::nullopt;
+}
+
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
 
@@ -477,6 +485,16 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       ParseNumericFilter(parser, &params);
     } else if (parser->Check("WITHSORTKEYS")) {
       params.with_sortkeys = true;
+    } else if (parser->Check("WITHSCORES")) {
+      params.with_scores = true;
+    } else if (parser->Check("SCORER")) {
+      auto scorer_name = parser->Next();
+      auto scorer = ParseScorerName(scorer_name);
+      if (!scorer)
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", scorer_name));
+      params.scorer = *scorer;
+    } else if (parser->Check("DIALECT")) {
+      parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -728,6 +746,26 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
             absl::StrCat("APPLY expression error: ", std::get<std::string>(step_or_err)));
       }
       params.steps.push_back(std::move(std::get<aggregate::AggregationStep>(step_or_err)));
+      continue;
+    }
+
+    // SCORER, ADDSCORES, WITHSCORES can appear anywhere in the command
+    if (parser->Check("SCORER")) {
+      auto scorer_name = parser->Next();
+      auto scorer = ParseScorerName(scorer_name);
+      if (!scorer)
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", scorer_name));
+      params.scorer = *scorer;
+      continue;
+    }
+
+    if (parser->Check("ADDSCORES")) {
+      params.add_scores = true;
+      continue;
+    }
+
+    if (parser->Check("WITHSCORES")) {
+      // Silently ignored for FT.AGGREGATE (use ADDSCORES instead)
       continue;
     }
 
@@ -1089,7 +1127,8 @@ void SearchReply(const SearchParams& params,
 
   const bool reply_with_ids_only = params.IdsOnly();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  const size_t items_per_field = (reply_with_ids_only ? 1 : 2) + params.with_sortkeys;
+  const size_t items_per_field =
+      (reply_with_ids_only ? 1 : 2) + params.with_sortkeys + params.with_scores;
   RedisReplyBuilder::ArrayScope scope{rb, limit * items_per_field + 1};
 
   Overloaded sortable_value_sender{
@@ -1101,6 +1140,9 @@ void SearchReply(const SearchParams& params,
   rb->SendLong(total_hits);
   for (size_t i = offset; i < end; i++) {
     rb->SendBulkString(docs[i]->key);
+    if (params.with_scores) {
+      rb->SendBulkString(absl::StrCat(docs[i]->text_score));
+    }
     if (params.with_sortkeys) {
       visit(sortable_value_sender, docs[i]->sort_score);
     }
@@ -1874,6 +1916,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   vector<SearchResult> css_docs;
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
+    if (params->with_scores || params->scorer) {
+      return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
+    }
     std::string args_str = absl::StrJoin(args.subspan(2), " ");
 
     css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
@@ -1882,6 +1927,12 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str, &params->query_params, &params->optional_filters))
     return builder->SendError("Query syntax error");
+
+  // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
+  if (params->scorer)
+    search_algo.SetScorer(*params->scorer);
+  else if (params->with_scores)
+    search_algo.SetScorer(search::ScorerType::BM25STD);
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
@@ -1974,6 +2025,12 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str, &params->query_params))
     return cmd_cntx->SendError("query syntax error");
+
+  // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
+  if (params->scorer)
+    search_algo.SetScorer(*params->scorer);
+  else if (params->with_scores)
+    search_algo.SetScorer(search::ScorerType::BM25STD);
 
   search_algo.EnableProfiling();
 
@@ -2147,6 +2204,12 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     if (!search_algo.Init(params->query, &params->params))
       return builder->SendError("Query syntax error");
 
+    // Enable scorer: explicit SCORER param, or default BM25STD when ADDSCORES is set
+    if (params->scorer)
+      search_algo.SetScorer(*params->scorer);
+    else if (params->add_scores)
+      search_algo.SetScorer(search::ScorerType::BM25STD);
+
     using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
         declval<OpArgs>(), params.value(), &search_algo));
 
@@ -2154,21 +2217,29 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
 
+    // Per-shard text scores from prefilter for __score injection in ADDSCORES mode.
+    // Indexed by shard_id because local DocIds are not unique across shards.
+    // Always allocated to shard_set->size() so the callback can index unconditionally.
+    std::vector<absl::flat_hash_map<search::DocId, float>> prefilter_text_scores(shard_set->size());
+
     // Build a shard-load callback for HNSW results (KNN or VECTOR_RANGE).
-    // The returned lambda captures shard_docs by const-reference — the caller must ensure
-    // it outlives the ScheduleSingleHop / Execute call.
+    // The returned lambda captures shard_docs and text_scores by const-reference —
+    // the caller must ensure they outlive the ScheduleSingleHop / Execute call.
     auto make_load_cb =
         [&](const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
-            std::string_view score_alias) {
-          return
-              [&query_results, &params, &shard_docs, score_alias](Transaction* t, EngineShard* es) {
-                auto* index = es->search_indices()->GetIndex(params->index);
-                if (!index || shard_docs[es->shard_id()].empty())
-                  return OpStatus::OK;
-                query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
-                    t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], score_alias);
-                return OpStatus::OK;
-              };
+            std::string_view score_alias,
+            const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
+          return [&query_results, &params, &shard_docs, score_alias, &text_scores](
+                     Transaction* t, EngineShard* es) {
+            auto* index = es->search_indices()->GetIndex(params->index);
+            if (!index || shard_docs[es->shard_id()].empty())
+              return OpStatus::OK;
+            DCHECK_LT(es->shard_id(), text_scores.size());
+            query_results[es->shard_id()] = index->LoadHnswRangeDocsForAggregator(
+                t->GetOpArgs(es), params.value(), shard_docs[es->shard_id()], score_alias,
+                text_scores[es->shard_id()]);
+            return OpStatus::OK;
+          };
         };
 
     if (knn) {
@@ -2196,6 +2267,15 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
             },
             false);
         prefilter_global_ids = CollectPrefilterGlobalIds(prefilter_docs);
+
+        // Collect text scores per-shard from prefilter results for __score injection
+        if (params->add_scores) {
+          for (size_t shard_id = 0; shard_id < prefilter_docs.size(); shard_id++) {
+            for (const auto& doc : prefilter_docs[shard_id].docs) {
+              prefilter_text_scores[shard_id][doc.id] = doc.text_score;
+            }
+          }
+        }
       }
 
       // Run global HNSW KNN search
@@ -2207,10 +2287,11 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
       auto shard_docs = GroupByShardId(knn_results, shard_set->size());
 
       if (knn_has_prefilter) {
-        cmd_cntx->tx()->Execute(make_load_cb(shard_docs, knn->score_alias),
+        cmd_cntx->tx()->Execute(make_load_cb(shard_docs, knn->score_alias, prefilter_text_scores),
                                 true);  // finalize multi-hop
       } else {
-        cmd_cntx->tx()->ScheduleSingleHop(make_load_cb(shard_docs, knn->score_alias));
+        cmd_cntx->tx()->ScheduleSingleHop(
+            make_load_cb(shard_docs, knn->score_alias, prefilter_text_scores));
       }
     } else if (auto* vr = search_algo.GetVectorRangeNode();
                vr && GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
@@ -2224,7 +2305,8 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
       auto shard_docs = GroupByShardId(range_results, shard_set->size());
 
-      cmd_cntx->tx()->ScheduleSingleHop(make_load_cb(shard_docs, hnsw_range->score_alias));
+      cmd_cntx->tx()->ScheduleSingleHop(
+          make_load_cb(shard_docs, hnsw_range->score_alias, prefilter_text_scores));
     } else {
       cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
         if (auto* index = es->search_indices()->GetIndex(params->index); index) {
@@ -2343,6 +2425,13 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
     for (const auto& field : params->load_fields.value()) {
       load_fields.push_back(field.OutputName());
     }
+  }
+
+  // Auto-add __score to visible fields when ADDSCORES is set
+  static constexpr std::string_view kScoreField = "__score";
+  if (params->add_scores &&
+      std::find(load_fields.begin(), load_fields.end(), kScoreField) == load_fields.end()) {
+    load_fields.push_back(kScoreField);
   }
 
   auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
