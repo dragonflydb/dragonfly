@@ -17,13 +17,6 @@ namespace dfly::search {
 class FieldIndices;
 struct TextIndex;
 
-// Supported scorer types
-enum class ScorerType : uint8_t {
-  BM25STD,        // Standard Okapi BM25 (default)
-  TFIDF,          // Classic TF * IDF (no document length normalization)
-  TFIDF_DOCNORM,  // TFIDF with document length normalization
-};
-
 // Per-term information needed for scoring a single document
 struct ScoringTermInfo {
   uint32_t term_freq = 0;        // How many times this term appears in the document
@@ -36,6 +29,11 @@ struct ScoringTermInfo {
 struct ScoringContext {
   size_t num_docs = 0;  // Total documents in index
 };
+
+// Scorer function signature: computes the score for a single (term, document) pair.
+// Register new scorers by adding a function with this signature and exposing it via
+// ParseScorer in the command layer.
+using ScorerFn = double (*)(const ScoringContext&, const ScoringTermInfo&);
 
 // Compute BM25STD score for a single term in a document.
 //
@@ -90,8 +88,8 @@ inline double TfIdfDocNorm(const ScoringContext& ctx, const ScoringTermInfo& ter
 }
 
 // Compute score for a document matched against multiple terms.
-// Returns sum of per-term scores.
-double ScoreDocument(ScorerType scorer, const ScoringContext& ctx,
+// Returns sum of per-term scores produced by the given scorer function.
+double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms);
 
 }  // namespace dfly::search

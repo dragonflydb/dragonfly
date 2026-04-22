@@ -442,10 +442,10 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::ScorerType> ParseScorer(CmdArgParser* parser) {
-  return parser->TryMapNext("BM25STD", search::ScorerType::BM25STD, "TFIDF",
-                            search::ScorerType::TFIDF, "TFIDF.DOCNORM",
-                            search::ScorerType::TFIDF_DOCNORM);
+std::optional<search::ScorerFn> ParseScorer(CmdArgParser* parser) {
+  return parser->TryMapNext("BM25STD", &search::BM25Std,  //
+                            "TFIDF", &search::TfIdf,      //
+                            "TFIDF.DOCNORM", &search::TfIdfDocNorm);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -1928,9 +1928,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(*params->scorer);
+    search_algo.SetScorer(params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(search::ScorerType::BM25STD);
+    search_algo.SetScorer(&search::BM25Std);
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
@@ -2026,9 +2026,9 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(*params->scorer);
+    search_algo.SetScorer(params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(search::ScorerType::BM25STD);
+    search_algo.SetScorer(&search::BM25Std);
 
   search_algo.EnableProfiling();
 
@@ -2204,9 +2204,9 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Enable scorer: explicit SCORER param, or default BM25STD when ADDSCORES is set
     if (params->scorer)
-      search_algo.SetScorer(*params->scorer);
+      search_algo.SetScorer(params->scorer);
     else if (params->add_scores)
-      search_algo.SetScorer(search::ScorerType::BM25STD);
+      search_algo.SetScorer(&search::BM25Std);
 
     using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
         declval<OpArgs>(), params.value(), &search_algo));

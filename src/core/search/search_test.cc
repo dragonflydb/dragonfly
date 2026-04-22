@@ -2838,7 +2838,7 @@ TEST_F(ScoringTest, BM25StdMultiTerm) {
   ScoringTermInfo t2{
       .term_freq = 1, .term_docs = 20, .field_doc_len = 10, .field_avg_doc_len = 10.0};
 
-  double multi = ScoreDocument(ScorerType::BM25STD, ctx, {t1, t2});
+  double multi = ScoreDocument(&BM25Std, ctx, {t1, t2});
   double sum = BM25Std(ctx, t1) + BM25Std(ctx, t2);
 
   EXPECT_DOUBLE_EQ(multi, sum);
@@ -2892,9 +2892,9 @@ TEST_F(ScoringTest, ScoreDocumentDispatchesByScorerType) {
   ScoringTermInfo term{
       .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
 
-  EXPECT_DOUBLE_EQ(ScoreDocument(ScorerType::BM25STD, ctx, {term}), BM25Std(ctx, term));
-  EXPECT_DOUBLE_EQ(ScoreDocument(ScorerType::TFIDF, ctx, {term}), TfIdf(ctx, term));
-  EXPECT_DOUBLE_EQ(ScoreDocument(ScorerType::TFIDF_DOCNORM, ctx, {term}), TfIdfDocNorm(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(&BM25Std, ctx, {term}), BM25Std(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdf, ctx, {term}), TfIdf(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdfDocNorm, ctx, {term}), TfIdfDocNorm(ctx, term));
 }
 
 TEST_F(ScoringTest, SearchWithScorer) {
@@ -2914,7 +2914,7 @@ TEST_F(ScoringTest, SearchWithScorer) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(ScorerType::BM25STD);
+  algo.SetScorer(&BM25Std);
 
   auto result = algo.Search(&index);
 
@@ -2954,7 +2954,7 @@ TEST_F(ScoringTest, SearchPrefixWithScorer) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hel*", &params));
-  algo.SetScorer(ScorerType::BM25STD);
+  algo.SetScorer(&BM25Std);
 
   auto result = algo.Search(&index);
 
@@ -3061,7 +3061,7 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(ScorerType::BM25STD);
+  algo.SetScorer(&BM25Std);
 
   auto result_before = algo.Search(&index);
   ASSERT_EQ(result_before.ids.size(), 3u);
@@ -3073,7 +3073,7 @@ TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
   // Re-search
   SearchAlgorithm algo2;
   ASSERT_TRUE(algo2.Init("hello", &params));
-  algo2.SetScorer(ScorerType::BM25STD);
+  algo2.SetScorer(&BM25Std);
 
   auto result_after = algo2.Search(&index);
   ASSERT_EQ(result_after.ids.size(), 2u);
@@ -3108,7 +3108,7 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   QueryParams params;
   SearchAlgorithm algo;
   ASSERT_TRUE(algo.Init("hello", &params));
-  algo.SetScorer(ScorerType::BM25STD);
+  algo.SetScorer(&BM25Std);
 
   // Request only top 3 - should return docs 9, 8, 7 (highest TF)
   auto result = algo.Search(&index, 3);
