@@ -229,6 +229,48 @@ TEST_F(CmdArgParserTest, ApplyOrSkip) {
   }
 }
 
+TEST_F(CmdArgParserTest, ApplyTagMissingValue) {
+  // A matched tag with missing trailing value(s) must surface an error, not be silently skipped.
+  // This guards against a subtle interaction with ApplyOrSkip: if TagOpt treated "tag matches,
+  // values missing" as "no match", the skip path would swallow the malformed option.
+  {
+    auto parser = Make({"COUNT"});  // tag matches, value missing
+    uint32_t count = 0;
+    parser.Apply(Tag("COUNT", &count));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+  }
+  {
+    auto parser = Make({"COUNT"});
+    uint32_t count = 0;
+    parser.ApplyOrSkip(Tag("COUNT", &count));
+    // Tag must have been consumed (not left for Skip to swallow silently).
+    EXPECT_FALSE(parser.HasNext());
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+  }
+  // Also guard the two-field case: LIMIT with only one trailing value.
+  {
+    auto parser = Make({"LIMIT", "10"});  // needs offset + limit
+    uint32_t offset = 0, limit = 0;
+    parser.Apply(Tag("LIMIT", &offset, &limit));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::OUT_OF_BOUNDS);
+  }
+}
+
+TEST_F(CmdArgParserTest, ReportBeforeAnyNext) {
+  // Report(code) at cur_i_ == 0 must clamp the error index to 0 rather than underflow to SIZE_MAX.
+  auto parser = Make({"x"});
+  parser.Report(CmdArgParser::CUSTOM_ERROR);
+  auto err = parser.TakeError();
+  EXPECT_TRUE(err);
+  EXPECT_EQ(err.index, 0u);
+}
+
 TEST_F(CmdArgParserTest, ApplyLambda) {
   // Tag() with a lambda lets callers run custom parsing on match. Useful for side-effectful cases
   // like push_back or toggling a bool to false.

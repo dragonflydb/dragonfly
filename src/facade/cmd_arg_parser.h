@@ -236,9 +236,10 @@ struct CmdArgParser {
     return cur_i_;
   }
 
-  // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index.
+  // Reports a custom error (error_type >= CUSTOM_ERROR) at the previously-consumed index
+  // (or 0 if called before any arg was consumed).
   void Report(int error_type) {
-    Report(error_type, cur_i_ - 1);
+    Report(error_type, cur_i_ > 0 ? cur_i_ - 1 : 0);
   }
 
  private:
@@ -355,7 +356,17 @@ template <class... Args> struct TagOpt {
   std::tuple<Args*...> args;
 
   bool TryApply(CmdArgParser* parser) const {
-    return std::apply([&](auto*... a) { return parser->Check(tag, a...); }, args);
+    // Match the tag first; then read each field via Next<>(). This ensures a matched tag is
+    // always consumed — a missing trailing value surfaces OUT_OF_BOUNDS rather than looking like
+    // "tag didn't match" (which ApplyOrSkip would silently skip past).
+    if (!parser->Check(tag))
+      return false;
+    std::apply(
+        [&](auto*... ptrs) {
+          (((*ptrs) = parser->template Next<std::remove_pointer_t<decltype(ptrs)>>()), ...);
+        },
+        args);
+    return true;
   }
 };
 
