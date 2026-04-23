@@ -2507,15 +2507,21 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   string journal_blob;
   SET_OR_RETURN(FetchGenericString(), journal_blob);
 
+  // Create reader & executor if needed
+  if (!journal_reader_)
+    journal_reader_ = std::make_unique<JournalReader>(nullptr, 0);
+
+  if (!journal_executor_)
+    journal_executor_ = std::make_unique<JournalExecutor>(service);
+
   io::BytesSource bs{io::Buffer(journal_blob)};
-  journal_reader_.SetSource(&bs);
+  journal_reader_->SetSource(&bs);
 
   // Parse and exectue in loop.
   size_t done = 0;
-  JournalExecutor ex{service};
   while (done < num_entries) {
     journal::ParsedEntry entry;
-    auto ec = journal_reader_.ReadEntry(&entry);
+    auto ec = journal_reader_->ReadEntry(&entry);
     if (ec)
       return ec;
 
@@ -2537,7 +2543,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
-    ex.Execute(entry.dbid, entry.cmd);
+    journal_executor_->Execute(entry.dbid, entry.cmd);
   }
 
   return std::error_code{};
