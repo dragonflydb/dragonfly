@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/gtest.h"
@@ -17,6 +18,18 @@
 namespace dfly {
 
 using namespace std;
+
+// Transparent hash for string-like types. absl::Hash<string> is not transparent (its
+// operator() only accepts const string&), so heterogeneous lookup requires a custom hash
+// that declares is_transparent and accepts string_view (which string and const char* both
+// convert to). absl guarantees that hashing equal string contents produces the same value
+// regardless of the concrete string type, so this is consistent with the stored keys.
+struct TransparentStringHash {
+  using is_transparent = void;
+  size_t operator()(std::string_view sv) const {
+    return absl::Hash<std::string_view>{}(sv);
+  }
+};
 
 class ShardedHashMapTest : public testing::Test {
  protected:
@@ -98,6 +111,26 @@ TEST_F(ShardedHashMapTest, MultipleKeys) {
     bool found = map_.FindIf(key, [i](const int& v) { EXPECT_EQ(v, i); });
     EXPECT_TRUE(found);
   }
+}
+
+TEST_F(ShardedHashMapTest, HeterogeneousLookup) {
+  // Use transparent Eq so that string_view / C-string queries compile and match correctly.
+  ShardedHashMap<string, int, 32, TransparentStringHash, std::equal_to<>> hmap;
+
+  hmap.Mutate(string("hello"), [](const auto& m, auto lr) {
+    auto lm = lr();
+    lm.map["hello"] = 7;
+  });
+
+  string_view sv = "hello";
+  bool found = hmap.FindIf(sv, [](const int& v) { EXPECT_EQ(v, 7); });
+  EXPECT_TRUE(found);
+
+  const char* cstr = "hello";
+  found = hmap.FindIf(cstr, [](const int& v) { EXPECT_EQ(v, 7); });
+  EXPECT_TRUE(found);
+
+  EXPECT_FALSE(hmap.FindIf(string_view{"missing"}, [](const int&) {}));
 }
 
 TEST_F(ShardedHashMapTest, ShardOf) {
