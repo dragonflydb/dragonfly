@@ -2471,7 +2471,19 @@ bool Connection::ReplyBatch() {
   }
 
   reply_builder_->SetBatchMode(false);
-  reply_builder_->Flush();
+
+  // V2: Defer flushing to IoLoopV2's natural flush points (idle-await, backpressure-await,
+  // dispatch_q_ path). This coalesces replies from consecutive ParseLoop iterations into a
+  // single sendmsg when the client sends a saturated pipeline, reducing syscalls significantly.
+  // Safety is provided by: SinkReplyBuilder auto-flush (iovec buffer full), kernel TCP
+  // backpressure (socket send buffer full), and IoLoopV2's explicit Flush() before each await.
+  // V1: Always flush unconditionally (AsyncFiber batching is handled separately).
+  if (!ioloop_v2_) {
+    reply_builder_->Flush();
+  } else {
+    GetLocalConnStats().skip_pipeline_flushing++;
+  }
+
   return !reply_builder_->GetError();
 }
 
@@ -2805,6 +2817,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     if (io_buf_.InputLen() == 0) {
       phase_ = READ_SOCKET;
 
+      // Flush replies deferred by ReplyBatch before sleeping — ensures the client
+      // gets its response even when no more data arrives (single commands, end of pipeline).
+      reply_builder_->Flush();
+
       io_event_.await([this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.
@@ -2913,6 +2929,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // first notification. A one-shot subscription would be consumed on the first wake, leaving
         // us "deaf" to future memory relief.
         auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(&backpressure_waiter);
+
+        // Client needs replies to free its send buffer and relieve backpressure.
+        reply_builder_->Flush();
 
         io_event_.await([this, &is_ready_to_migrate]() {
           bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
