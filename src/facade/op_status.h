@@ -35,6 +35,7 @@ enum class OpStatus : uint16_t {
   INVALID_JSON,
   IO_ERROR,
   NAN_OR_INF_DURING_INCR,
+  BLOOM_FILTER_LOAD_IN_PROGRESS,
 };
 
 class OpResultBase {
