@@ -20,8 +20,9 @@ extern "C" {
 #include "io/io_buf.h"
 #include "server/detail/decompress.h"
 #include "server/execution_state.h"
-#include "server/journal/serializer.h"
 #include "server/rdb_load_context.h"
+#include "server/table.h"
+#include "server/tx_base.h"
 
 struct streamID;
 
@@ -31,6 +32,8 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 class Service;
+class JournalExecutor;
+struct JournalReader;
 
 using RdbVersion = std::uint16_t;
 
@@ -243,10 +246,12 @@ class RdbLoaderBase {
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<detail::DecompressImpl> decompress_impl_;
-  JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
   RdbVersion rdb_version_ = RDB_VERSION;
   PendingRead pending_read_;
+
+  std::unique_ptr<JournalReader> journal_reader_;
+  std::unique_ptr<JournalExecutor> journal_executor_;
 
   // State for the tagged chunk currently being parsed
   struct ActiveTaggedChunk {
