@@ -54,15 +54,15 @@ jobs:
 
       - name: Start Dragonfly
         run: |
-          ulimit -c unlimited || true
+          mkdir -p /tmp/df-logs
           ${GITHUB_WORKSPACE}/build/dragonfly \
             --alsologtostderr \
+            --log_dir=/tmp/df-logs \
             --cluster_mode=emulated \
             --lock_on_hashtags \
             --dbfilename= \
             --port 6379 \
-            >/tmp/dragonfly.stdout 2>/tmp/dragonfly.stderr &
-          echo $! > /tmp/dragonfly.pid
+            >/tmp/df-logs/stdout.log 2>/tmp/df-logs/stderr.log &
           timeout 15s bash -c 'until redis-cli -p 6379 PING 2>/dev/null | grep -q PONG; do sleep 0.1; done'
 
       - name: Build BullMQ
@@ -83,30 +83,12 @@ jobs:
             BULLMQ_TEST_PREFIX={b} yarn test
           fi
 
-      - name: Diagnose Dragonfly state
-        if: always()
-        run: |
-          PID=$(cat /tmp/dragonfly.pid 2>/dev/null || echo "")
-          if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-            echo "=== Dragonfly alive (PID=$PID) ==="
-          else
-            echo "=== Dragonfly DIED (PID=$PID) ==="
-            echo "--- dmesg tail ---"
-            dmesg 2>/dev/null | tail -100 || echo "dmesg unavailable"
-            echo "--- dragonfly.stderr tail ---"
-            tail -200 /tmp/dragonfly.stderr 2>/dev/null || echo "stderr unavailable"
-            echo "--- dragonfly.stdout tail ---"
-            tail -50 /tmp/dragonfly.stdout 2>/dev/null || echo "stdout unavailable"
-          fi
-
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: unit_logs
-          path: |
-            /tmp/dragonfly.*
-            /tmp/core*
+          name: dragonfly-logs
+          path: /tmp/df-logs/
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'
