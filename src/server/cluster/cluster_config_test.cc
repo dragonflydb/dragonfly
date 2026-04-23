@@ -574,6 +574,96 @@ TEST_F(ClusterConfigTest, InvalidConfigMigrationsWithoutIP) {
   EXPECT_EQ(config, nullptr);
 }
 
+struct MigrationValidationCase {
+  std::string name;
+  SlotRanges shard_slots;
+  std::vector<MigrationInfo> migrations;
+  bool expected_valid;
+};
+
+class MigrationValidationTest : public ClusterConfigTest,
+                                public testing::WithParamInterface<MigrationValidationCase> {};
+
+TEST_P(MigrationValidationTest, Validate) {
+  const auto& tc = GetParam();
+  // Build a two-shard config where the first shard holds tc.shard_slots (+ migrations)
+  // and the second shard owns the rest, so the full 16384 slot space is always covered.
+  SlotRanges rest = SlotSet(true).GetRemovedSlots(SlotSet(tc.shard_slots)).ToSlotRanges();
+  auto config = ClusterConfig::CreateFromConfig(
+      kMyId, ClusterShardInfos(
+                 {{.slot_ranges = tc.shard_slots,
+                   .master = {{.id = "id0", .ip = "127.0.0.1", .port = 3000}, NodeHealth::ONLINE},
+                   .replicas = {},
+                   .migrations = tc.migrations},
+                  {.slot_ranges = rest,
+                   .master = {{.id = "id1", .ip = "127.0.0.1", .port = 3001}, NodeHealth::ONLINE},
+                   .replicas = {},
+                   .migrations = {}}}));
+  EXPECT_EQ(config == nullptr, !tc.expected_valid);
+}
+
+static MigrationInfo Mig(SlotRanges ranges, std::string target = "id1") {
+  return {.slot_ranges = std::move(ranges),
+          .node_info = {.id = std::move(target), .ip = "127.0.0.1", .port = 9001}};
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    MigrationValidation, MigrationValidationTest,
+    testing::Values(
+        MigrationValidationCase{
+            "Subset", SlotRanges({{0, 8000}}), {Mig(SlotRanges({{7000, 8000}}))}, true},
+        MigrationValidationCase{
+            "ExactMatch", SlotRanges({{0, 8000}}), {Mig(SlotRanges({{0, 8000}}))}, true},
+        MigrationValidationCase{"MultipleMigrationRanges",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{100, 200}, {7000, 8000}}))},
+                                true},
+        MigrationValidationCase{"MultiRangeShardSubsetOfOne",
+                                SlotRanges({{0, 500}, {1000, 8000}}),
+                                {Mig(SlotRanges({{2000, 3000}}))},
+                                true},
+        MigrationValidationCase{"MultipleMigrations",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{100, 200}})), Mig(SlotRanges({{7000, 8000}}))},
+                                true},
+        MigrationValidationCase{
+            "FullyOutsideShard", SlotRanges({{0, 8000}}), {Mig(SlotRanges({{8500, 8600}}))}, false},
+        MigrationValidationCase{"PartiallyOutsideShard",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{7500, 8500}}))},
+                                false},
+        MigrationValidationCase{"StartGreaterThanEnd",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{8000, 7000}}))},
+                                false},
+        MigrationValidationCase{
+            "EndOutOfBounds", SlotRanges({{0, 8000}}), {Mig(SlotRanges({{100, 17000}}))}, false},
+        MigrationValidationCase{"InShardGap",
+                                SlotRanges({{0, 500}, {1000, 8000}}),
+                                {Mig(SlotRanges({{700, 800}}))},
+                                false},
+        MigrationValidationCase{"SpansAdjacentShardRanges",
+                                SlotRanges({{0, 100}, {101, 8000}}),
+                                {Mig(SlotRanges({{50, 150}}))},
+                                false},
+        MigrationValidationCase{"UnknownTarget",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{100, 200}}), "nonexistent")},
+                                false},
+        MigrationValidationCase{"SelfMigration",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{100, 200}}), "id0")},
+                                false},
+        MigrationValidationCase{"OverlappingMigrations",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{100, 500}})), Mig(SlotRanges({{400, 800}}))},
+                                false},
+        MigrationValidationCase{"OverlappingRangesInOneMigration",
+                                SlotRanges({{0, 8000}}),
+                                {Mig(SlotRanges({{100, 500}, {300, 700}}))},
+                                false}),
+    [](const auto& info) { return info.param.name; });
+
 TEST_F(ClusterConfigTest, SlotSetAPI) {
   {
     SlotSet ss(false);
@@ -649,9 +739,7 @@ TEST_F(ClusterConfigTest, ConfigComparison) {
     {
       "slot_ranges": [ { "start": 0, "end": 16383 } ],
       "master": { "id": "id0", "ip": "localhost", "port": 3000 },
-      "replicas": [],
-      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
-                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
+      "replicas": []
     }
   ])json");
   EXPECT_NE(config1->GetConfig(), config2->GetConfig());
@@ -686,8 +774,13 @@ TEST_F(ClusterConfigTest, ConfigComparison) {
                      , "ip": "127.0.0.1", "port" : 9001, "node_id": "id2" }]
     },
     {
-      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "slot_ranges": [ { "start": 8001, "end": 12000 } ],
       "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    },
+    {
+      "slot_ranges": [ { "start": 12001, "end": 16383 } ],
+      "master": { "id": "id2", "ip": "localhost", "port": 3002 },
       "replicas": []
     }
   ])json");
@@ -726,9 +819,7 @@ TEST_F(ClusterConfigTest, NodesHealth) {
       "slot_ranges": [ { "start": 0, "end": 16383 } ],
       "master": { "id": "id0", "ip": "localhost", "port": 3000, "health" : "online" },
       "replicas": [{ "id": "id1", "ip": "localhost", "port": 3001, "health" : "loading" },
-                   { "id": "id2", "ip": "localhost", "port": 3002, "health" : "fail" }],
-      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
-                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
+                   { "id": "id2", "ip": "localhost", "port": 3002, "health" : "fail" }]
     }
 
   ])json");

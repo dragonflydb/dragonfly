@@ -53,6 +53,11 @@ bool IsConfigValid(const ClusterShardInfos& new_config) {
     return false;
   }
 
+  absl::flat_hash_set<string_view> master_ids;
+  for (const auto& shard : new_config) {
+    master_ids.insert(shard.master.id);
+  }
+
   for (const auto& shard : new_config) {
     for (const auto& slot_range : shard.slot_ranges) {
       if (slot_range.start > slot_range.end) {
@@ -75,6 +80,42 @@ bool IsConfigValid(const ClusterShardInfos& new_config) {
         }
 
         slots_found[slot] = true;
+      }
+    }
+
+    vector<SlotRange> seen_migration_ranges;
+    for (const auto& migration : shard.migrations) {
+      if (migration.node_info.id == shard.master.id) {
+        LOG(ERROR) << "Invalid cluster config: migration target equals source master="
+                   << shard.master.id;
+        return false;
+      }
+      if (!master_ids.contains(migration.node_info.id)) {
+        LOG(ERROR) << "Invalid cluster config: migration target " << migration.node_info.id
+                   << " is not a shard master in the config";
+        return false;
+      }
+
+      for (const auto& slot_range : migration.slot_ranges) {
+        if (!slot_range.IsValid()) {
+          LOG(ERROR) << "Invalid cluster config: bad migration slot range "
+                     << slot_range.ToString();
+          return false;
+        }
+        if (!shard.slot_ranges.Contains(slot_range)) {
+          LOG(ERROR) << "Invalid cluster config: migration range " << slot_range.ToString()
+                     << " is not owned by shard master=" << shard.master.id;
+          return false;
+        }
+        for (const auto& prev : seen_migration_ranges) {
+          if (slot_range.Overlaps(prev)) {
+            LOG(ERROR) << "Invalid cluster config: overlapping migration ranges "
+                       << slot_range.ToString() << " and " << prev.ToString()
+                       << " in shard master=" << shard.master.id;
+            return false;
+          }
+        }
+        seen_migration_ranges.push_back(slot_range);
       }
     }
   }

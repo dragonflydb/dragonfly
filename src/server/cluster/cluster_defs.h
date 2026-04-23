@@ -34,6 +34,10 @@ struct SlotRange {
     return id >= start && id <= end;
   }
 
+  bool Overlaps(SlotRange other) const noexcept {
+    return start <= other.end && other.start <= end;
+  }
+
   std::string ToString() const;
 };
 
@@ -45,6 +49,15 @@ class SlotRanges {
   bool Contains(SlotId id) const noexcept {
     for (const auto& sr : ranges_) {
       if (sr.Contains(id))
+        return true;
+    }
+    return false;
+  }
+
+  // True iff `r` lies entirely within a single range of *this. Expects r.IsValid().
+  bool Contains(SlotRange r) const noexcept {
+    for (const auto& sr : ranges_) {
+      if (sr.start <= r.start && r.end <= sr.end)
         return true;
     }
     return false;
