@@ -390,16 +390,17 @@ func NewClient(w *FileWorker, pace bool, listenerType uint8) *ClientWorker {
 		incoming:     make(chan Record, *fClientBuffer),
 	}
 
-	// One invocation of the tool targets one backend (RESP or memcached). The
-	// -memcache boolean on the CLI picks the mode; the file-level filter in
-	// FileWorker.Run guarantees we only reach this function with a listener type
-	// that matches the mode.
-	if *fMemcache {
+	// Protocol is decided per file from its header (see FileWorker.Run), so the
+	// same -host can be reused across invocations that target different backends
+	// of the same Dragonfly instance (main RESP port for RESP records, memcache
+	// port for memcache records). Mixing file types in one invocation is the
+	// caller's responsibility — the tool connects as the file says.
+	if listenerType == ListenerMemcache {
 		client.mc = newMCClient(*fHost)
 	} else {
-		// MAIN_RESP and ADMIN_RESP both speak RESP — they share -host. The replay
-		// target is expected to accept admin-class commands on the main port, or
-		// the user points -host at an admin-capable endpoint.
+		// MAIN_RESP and ADMIN_RESP both speak RESP — they share -host. Replaying
+		// admin-listener traffic against a non-admin port may lose privileged
+		// commands; the caller is expected to point -host at the appropriate port.
 		client.redis = redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true})
 		client.pipe = client.redis.Pipeline()
 		// -compare-host only makes sense for the main-listener path.
@@ -424,22 +425,9 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	clients := make(map[uint32]*ClientWorker, 0)
 	recordId := uint64(0)
 	var listenerType uint8
-	// Files whose listener type does not match the CLI mode (-memcache) are
-	// skipped entirely: a single invocation targets one backend. This keeps the
-	// tool simple to drive against heterogeneous glob expansions like `*.bin`.
-	skipFile := false
 	err := parseRecords(file, func(lt uint8) {
 		listenerType = lt
-		isMC := lt == ListenerMemcache
-		if isMC != *fMemcache {
-			skipFile = true
-			log.Printf("replay: skipping %s (listener_type=%d does not match -memcache=%v)",
-				file, lt, *fMemcache)
-		}
 	}, func(r Record) bool {
-		if skipFile {
-			return false
-		}
 		client, ok := clients[r.Client]
 		if !ok {
 			// Listener type is uniform for the whole file (file-header), so every

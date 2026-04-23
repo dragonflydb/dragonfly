@@ -14,11 +14,9 @@ import (
 )
 
 var fHost = flag.String("host", "127.0.0.1:6379",
-	"host:port of the replay target. By default interpreted as RESP (both main and admin listener "+
-		"records go here); pass -memcache to interpret it as a memcached server")
-var fMemcache = flag.Bool("memcache", false,
-	"if true, -host is a memcached server and only memcache-listener files are replayed. "+
-		"If false (default), only RESP-listener files (main + admin) are replayed")
+	"host:port of the replay target. The client protocol is chosen per file from its "+
+		"header (MAIN_RESP/ADMIN_RESP use RESP, MEMCACHE uses the memcache text protocol); "+
+		"-host must speak the protocol of the files being replayed")
 var fCompareHost = flag.String("compare-host", "", "RESP host to compare with (main listener only)")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
 var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
@@ -248,8 +246,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  analyze - analyzes the traffic")
 
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
-		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:11211 -memcache run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin        # RESP files\n", binaryName)
+		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:11211 run *.bin                  # memcache files\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -skip-time-sec 30 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s -time-limit 60 run *.bin\n", binaryName)
 		fmt.Fprintf(os.Stderr, "   %s print *.bin\n", binaryName)
