@@ -18,6 +18,7 @@
 namespace dfly {
 
 class ExecutionState;
+struct TestDriver;
 
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
@@ -66,6 +67,8 @@ struct DelayedEntryHandler {
   }
 
  private:
+  friend struct TestDriver;
+
   BucketDependencies& deps_;
 
   // Entries that are waiting for tiered storage reads to complete before they can be serialized.
