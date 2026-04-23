@@ -640,7 +640,10 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
             await collect_expiring_events(pclient, keys)
 
 
-@dfly_args({"max_busy_read_usec": 50000})
+@dfly_multi_test_args(
+    {"max_busy_read_usec": 50000, "experimental_io_loop_v2": "false"},
+    {"max_busy_read_usec": 50000, "experimental_io_loop_v2": "true"},
+)
 async def test_reply_count(df_server: DflyInstance):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
@@ -682,7 +685,7 @@ async def test_reply_count(df_server: DflyInstance):
 
     # MULTI-OK + the EXEC array.
     # V1 (dual-fiber) is aggressive (<=2).
-    # V2 (single-fiber cycle) flushes slightly more often (<=3).
+    # V2 (single-fiber): MULTI/OK may flush separately before the EXEC batch (<=3).
     is_v2 = is_io_loop_v2(df_server)
     multi_limit = 3 if is_v2 else 2
     assert await measure(e.execute()) <= multi_limit
@@ -693,9 +696,14 @@ async def test_reply_count(df_server: DflyInstance):
         p.incr("num-1")
 
     # V1: aggressive squashing across dual fibers (<=2).
-    # V2: single-fiber loop flushes based on OS scheduling and batch boundaries (<=12).
+    # V2: conditional flushing (Task 1) defers flush when pending_input_ or io_buf_ has data,
+    # but fast synchronous commands (INCR) don't yield, so io_uring completions aren't processed
+    # mid-batch. Task 2 (Epoch Yield) will fix this by yielding before flush. Until then, V2
+    # flushes based on TCP segment boundaries (<=12).
     pipe_limit = 12 if is_v2 else 2
-    assert await measure(p.execute()) <= pipe_limit
+    pipe_flushes = await measure(p.execute())
+    logging.warning("pipe_flushes=%d pipe_limit=%d is_v2=%s", pipe_flushes, pipe_limit, is_v2)
+    assert pipe_flushes <= pipe_limit
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
@@ -705,6 +713,46 @@ async def test_reply_count(df_server: DflyInstance):
     for i in range(50):
         await async_client.hset(f"key-{i}", "name", f"name number {i}")
     assert await measure(async_client.ft("i1").search("*")) <= 2
+
+
+@dfly_args({"experimental_io_loop_v2": "true"})
+async def test_v2_conditional_flush_no_stall(df_server: DflyInstance):
+    """Verify that V2 conditional flushing never stalls client replies.
+
+    When a pipeline arrives fragmented (separate TCP segments), the server must flush
+    completed replies before sleeping on the socket. If maybe_flush() before the main
+    await fails to flush, the reply stays trapped in memory and the client hangs.
+    """
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    # Send an isolated command and wait for the server to process and sleep.
+    writer.write(b"PING\r\n")
+    await writer.drain()
+    await asyncio.sleep(0.1)
+
+    # If conditional flush is broken, PONG is trapped in the reply buffer.
+    res = await asyncio.wait_for(reader.readline(), timeout=1.0)
+    assert res == b"+PONG\r\n", f"Expected PONG, got {res!r}"
+
+    # Send a fragmented pipeline: two commands in separate TCP segments.
+    writer.write(b"SET foo bar\r\n")
+    await writer.drain()
+    await asyncio.sleep(0.1)
+
+    writer.write(b"GET foo\r\n")
+    await writer.drain()
+
+    res1 = await asyncio.wait_for(reader.readline(), timeout=1.0)
+    assert res1 == b"+OK\r\n", f"Expected +OK, got {res1!r}"
+
+    # GET reply is a bulk string: $3\r\nbar\r\n
+    res2_hdr = await asyncio.wait_for(reader.readline(), timeout=1.0)
+    assert res2_hdr == b"$3\r\n", f"Expected $3, got {res2_hdr!r}"
+    res2_body = await asyncio.wait_for(reader.readline(), timeout=1.0)
+    assert res2_body == b"bar\r\n", f"Expected bar, got {res2_body!r}"
+
+    writer.close()
+    await writer.wait_closed()
 
 
 async def test_big_command(df_server, size=8 * 1024):
@@ -1269,7 +1317,14 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 # This test relies on SquashPipeline() memory lifecycle (V1/AsyncFiber only).
 # V2's single-fiber ExecuteBatch() releases commands incrementally, so the cache
 # is non-empty during execution. Skip when V2 is explicitly enabled.
-@dfly_args({"proactor_threads": 1, "pipeline_squash": 9, "max_busy_read_usec": 50000})
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "pipeline_squash": 9,
+        "max_busy_read_usec": 50000,
+        "experimental_io_loop_v2": "false",
+    }
+)
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
