@@ -35,27 +35,33 @@ namespace facade {
 //
 // Bulk named options with Apply():
 //   parser.Apply(
-//       Exist("WITHSCORES", &params.with_scores),  // tag present -> sets bool true
+//       Exist("WITHSCORES", &with_scores),         // tag present -> sets bool true
 //       Tag("LIMIT", &offset, &limit),             // tag -> reads following args
-//       Tag("COUNT", &optional_count),             // std::optional<T>* is supported
-//       Tag("GET", [&](CmdArgParser* p) {          // lambda handler for custom parsing
+//       Tag("COUNT", &optional_count),             // std::optional<T>* supported directly
+//       Tag("GET", [&](CmdArgParser* p) {          // lambda: custom parsing on tag match
 //         patterns.push_back(p->Next<string_view>());
-//       }));
+//       }),
+//       Map(&dir, "ASC", Dir::ASC, "DESC", Dir::DESC),   // tag -> fixed value mapping
+//       Tag("ATTR", Map(&mask, "v", Mask::Volatile,      // nested: outer tag + inner Map
+//                       "p", Mask::Permanent)),          //   (inner keyword required on match)
+//       OneOf(Exist("NX", &nx), Exist("XX", &xx)),       // mutex — at most one may match
+//       If(!read_only, Tag("STORE", &store_key)));    // runtime-gated option
+//
+// Strict vs lenient dispatch:
+//   parser.Apply(...)        — stops at first unmatched arg; pair with Finalize() to error
+//   parser.ApplyOrSkip(...)  — silently skips unknown tags one-by-one
 //
 // Navigating manually:
 //   if (parser.HasNext()) { ... }                               // is there another arg?
 //   if (parser.HasAtLeast(3)) { ... }                           // at least N args remain?
 //   auto peek = parser.Peek();                                  // look at next without consuming
-//                                                               //   (useful for error messages)
 //   parser.Skip(n);                                             // advance n args
 //   CmdArgList rest = parser.Tail();                            // remaining args (e.g. k/v pairs)
 //
-// Apply stops at the first unmatched arg without reporting an error. Use ApplyOrSkip() instead
-// to silently ignore unknown tags, or call Finalize() afterwards to require all args were
-// consumed (reports UNPROCESSED otherwise). Error surfacing:
-//   if (parser.HasError()) { ... }                              // any error so far?
-//   if (!parser.Finalize())                                     // common end-of-parse check
-//     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+// Error surfacing (at the end of parse):
+//   if (!parser.Finalize())                                     // also reports UNPROCESSED on
+//     return cmd_cntx->SendError(parser.TakeError().MakeReply()); // trailing args
+//   // or: if (parser.HasError()) ...
 
 // Numerical range restriction used with Next<FInt<lo, hi>>().
 template <auto min, auto max> struct FInt {
@@ -335,7 +341,6 @@ struct CmdArgParser {
   ErrorInfo error_;
 };
 
-// Option types used with CmdArgParser::Apply. See the file header for usage.
 namespace detail {
 
 struct ExistOpt {
@@ -356,9 +361,8 @@ template <class... Args> struct TagOpt {
   std::tuple<Args*...> args;
 
   bool TryApply(CmdArgParser* parser) const {
-    // Match the tag first; then read each field via Next<>(). This ensures a matched tag is
-    // always consumed — a missing trailing value surfaces OUT_OF_BOUNDS rather than looking like
-    // "tag didn't match" (which ApplyOrSkip would silently skip past).
+    // Match the tag first, then read fields via Next<>() — so a missing value surfaces
+    // OUT_OF_BOUNDS instead of being swallowed by ApplyOrSkip as "no match".
     if (!parser->Check(tag))
       return false;
     std::apply(
@@ -383,6 +387,74 @@ template <class Func> struct LambdaOpt {
   }
 };
 
+template <class T, class... Cases> struct MapOpt {
+  static_assert(sizeof...(Cases) % 2 == 0, "Map expects alternating tag/value pairs");
+
+  T* field;
+  std::tuple<Cases...> cases;
+
+  bool TryApply(CmdArgParser* parser) const {
+    return TryMatch<0>(parser);
+  }
+
+ private:
+  template <size_t I> bool TryMatch(CmdArgParser* parser) const {
+    if constexpr (I >= sizeof...(Cases)) {
+      return false;
+    } else if (parser->Check(std::get<I>(cases))) {
+      *field = std::get<I + 1>(cases);
+      return true;
+    } else {
+      return TryMatch<I + 2>(parser);
+    }
+  }
+};
+
+template <class Inner> struct IfOpt {
+  bool cond;
+  Inner inner;
+
+  bool TryApply(CmdArgParser* parser) const {
+    return cond && inner.TryApply(parser);
+  }
+};
+
+template <class... Opts> struct OneOfOpt {
+  std::tuple<Opts...> opts;
+  mutable bool matched = false;
+
+  bool TryApply(CmdArgParser* parser) const {
+    bool any = std::apply([&](auto&... os) { return (os.TryApply(parser) || ...); }, opts);
+    if (!any)
+      return false;
+    if (matched)
+      parser->Report(CmdArgParser::INVALID_CASES);
+    matched = true;
+    return true;
+  }
+};
+
+// Nested: outer tag consumes one arg, then inner option runs against the next arg. If the inner
+// doesn't match, reports INVALID_CASES (the inner keyword is required once the outer matched).
+template <class Inner> struct TagNestedOpt {
+  std::string_view tag;
+  Inner inner;
+
+  bool TryApply(CmdArgParser* parser) const {
+    if (!parser->Check(tag))
+      return false;
+    if (!inner.TryApply(parser))
+      parser->Report(CmdArgParser::INVALID_CASES);
+    return true;
+  }
+};
+
+// Concept matching any of the Apply options (has a TryApply(CmdArgParser*) method).
+template <class T>
+concept ParseOption = requires(const T& t, CmdArgParser* p) {
+  { t.TryApply(p) } -> std::same_as<bool>;
+};
+
 }  // namespace detail
 
 inline detail::ExistOpt Exist(std::string_view tag, bool* field) {
@@ -393,10 +465,29 @@ template <class... Args> detail::TagOpt<Args...> Tag(std::string_view tag, Args*
   return detail::TagOpt<Args...>{tag, std::make_tuple(args...)};
 }
 
-// Overload for custom parsing: the callable receives a CmdArgParser* after the tag matches.
-template <class Func, std::enable_if_t<std::is_invocable_v<Func, CmdArgParser*>, int> = 0>
-detail::LambdaOpt<Func> Tag(std::string_view tag, Func func) {
+template <class Func>
+requires std::is_invocable_v<Func, CmdArgParser*> detail::LambdaOpt<Func> Tag(std::string_view tag,
+                                                                              Func func) {
   return {tag, std::move(func)};
+}
+
+// Nested option: outer tag + inner sub-option (e.g. Map). After outer matches, inner must match
+// the following arg or INVALID_CASES is reported.
+template <detail::ParseOption Inner>
+detail::TagNestedOpt<Inner> Tag(std::string_view tag, Inner inner) {
+  return {tag, std::move(inner)};
+}
+
+template <class T, class... Cases> detail::MapOpt<T, Cases...> Map(T* field, Cases... cases) {
+  return {field, std::make_tuple(std::move(cases)...)};
+}
+
+template <class Inner> detail::IfOpt<Inner> If(bool cond, Inner inner) {
+  return {cond, std::move(inner)};
+}
+
+template <class... Opts> detail::OneOfOpt<Opts...> OneOf(Opts... opts) {
+  return {{std::move(opts)...}, false};
 }
 
 }  // namespace facade
