@@ -295,7 +295,9 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
                                   src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
                                   src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
-    sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
+    const auto& blob = src.filters[i].blob;
+    auto* ptr = sbf->AllocateFilter(blob.size(), src.filters[i].hash_cnt);
+    memcpy(ptr, blob.data(), blob.size());
   }
 
   // new obj
