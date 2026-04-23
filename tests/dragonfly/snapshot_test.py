@@ -391,7 +391,8 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
     reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args({**BASIC_ARGS})
-async def test_s3_snapshot(async_client, tmp_dir):
+async def test_s3_snapshot(df_server, tmp_dir):
+    async_client = df_server.client()
     seeder = DebugPopulateSeeder(key_target=10_000)
     await seeder.run(async_client)
 
@@ -461,7 +462,8 @@ async def test_s3_reload_snapshot_after_restart(df_factory, tmp_dir):
     reason="AWS S3 snapshots bucket or credentials are not configured",
 )
 @dfly_args({**BASIC_ARGS})
-async def test_s3_save_local_dir(async_client, tmp_dir):
+async def test_s3_save_local_dir(df_server, tmp_dir):
+    async_client = df_server.client()
     seeder = DebugPopulateSeeder(key_target=10_000)
     await seeder.run(async_client)
 

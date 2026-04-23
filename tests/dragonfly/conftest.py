@@ -250,13 +250,6 @@ def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
     return args_dict
 
 
-@pytest_asyncio.fixture(scope="class")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 @pytest_asyncio.fixture(scope="class", params=[{}])
 async def df_factory(
     request,
@@ -363,15 +356,22 @@ async def async_pool(df_server: DflyInstance):
 
 
 @pytest_asyncio.fixture(scope="function")
-async def async_client(async_pool):
+async def async_client(df_server: DflyInstance):
     """
     Return an async client to the default instance with all entries flushed.
     """
-    client = aioredis.Redis(connection_pool=async_pool)
+    client = aioredis.Redis(
+        host="localhost",
+        port=df_server.port,
+        db=DATABASE_INDEX,
+        decode_responses=True,
+        max_connections=32,
+    )
     await client.client_setname("default-async-fixture")
     await client.flushall()
     await client.select(DATABASE_INDEX)
     yield client
+    await client.aclose()
 
 
 def pytest_addoption(parser):
