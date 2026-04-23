@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
 
+#include <functional>
 #include <string>
 
 #include "core/detail/listpack_wrap.h"
@@ -50,16 +51,30 @@ struct ListPackAccessor : public BaseAccessor {
   detail::ListpackWrap lw_;
 };
 
-// Accessor for hashes stored with StringMap
+// Accessor for hashes stored with StringMap.
+// If cleanup context is supplied, the destructor deletes the underlying key
+// when the StringMap becomes empty (e.g. from lazy field expiry during
+// Serialize).  This keeps post-access cleanup out of search logic.
 struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
+
+  StringMapAccessor(StringMap* hset, std::string cleanup_key, DbContext db_cntx,
+                    const PrimeValue* pv)
+      : hset_{hset}, cleanup_key_{std::move(cleanup_key)}, db_cntx_{db_cntx}, cleanup_pv_{pv} {
+  }
+
+  ~StringMapAccessor() override;
 
   std::optional<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
   StringMap* hset_;
+  // Cleanup state (empty key means no cleanup requested).
+  std::string cleanup_key_;
+  DbContext db_cntx_{};
+  const PrimeValue* cleanup_pv_ = nullptr;
 };
 
 // Accessor for json values
@@ -97,6 +112,9 @@ struct JsonAccessor : public BaseAccessor {
 };
 
 // Get accessor for value
-std::unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv);
+// If cleanup_key is non-empty, the returned StringMapAccessor (if any) will
+// delete the DB key in its destructor when the hash has become empty.
+std::unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv,
+                                          std::string_view cleanup_key = {});
 
 }  // namespace dfly

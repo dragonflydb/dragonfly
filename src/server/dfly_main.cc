@@ -21,8 +21,19 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <unistd.h>
+
 #ifdef __linux__
+#include <grp.h>
+#include <pwd.h>
+
+#include <cerrno>
+#include <cstring>
+#include <filesystem>
+
 #include "util/fibers/uring_proactor.h"
+
+ABSL_DECLARE_FLAG(std::string, dir);
 #endif
 
 #include <mimalloc.h>
@@ -36,7 +47,6 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 #include <thread>
 #endif
@@ -72,6 +82,12 @@ ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
+ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
+
+#ifdef USE_ABSL_LOG
+ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
+#endif
 
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
@@ -92,6 +108,12 @@ ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
 ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
+#ifdef __linux__
+ABSL_FLAG(string, user, "",
+          "If not empty - drop privileges to this user (and their primary group) after binding "
+          "ports. Accepts username or numeric uid. "
+          "If --dir is set, chowns the data directory to this user.");
+#endif
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many buffer ring entries to allocate per thread for io_uring receive operations. "
           "Relevant only for modern kernels with io_uring enabled");
@@ -127,9 +149,9 @@ constexpr size_t kAsanFactor = 1;
 #endif
 
 #ifdef NDEBUG
-constexpr size_t kFiberStackBase = 32_KB;
+constexpr size_t kFiberStackBase = 40_KB;
 #else
-constexpr size_t kFiberStackBase = 48_KB;
+constexpr size_t kFiberStackBase = 56_KB;
 #endif
 
 // Default stack size for fibers. We decrease it by 16 bytes because some allocators
@@ -202,6 +224,86 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
   res->SetConnFiberStackSize(kFiberDefaultStackSize);
   return res;
 }
+
+#ifdef __linux__
+// Drops privileges to the specified user (username or numeric uid).
+// Must be called after ports are bound (so we can bind privileged ports first)
+// and BEFORE service.Init() to avoid racing with background snapshot loading.
+// Returns false on failure.
+bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
+  // Resolve user — accept username or numeric uid.
+  // For numeric UIDs not in /etc/passwd (common in distroless containers),
+  // fall back to using the raw UID with gid=uid and no supplementary groups.
+  uid_t uid;
+  gid_t gid;
+  struct passwd* pw = nullptr;
+  if (absl::SimpleAtoi(user_spec, &uid)) {
+    pw = getpwuid(uid);  // may be NULL for UIDs not in /etc/passwd
+  } else {
+    pw = getpwnam(user_spec.c_str());
+    if (!pw) {
+      LOG(ERROR) << "--user: unknown user '" << user_spec << "'";
+      return false;
+    }
+  }
+
+  if (pw) {
+    uid = pw->pw_uid;
+    gid = pw->pw_gid;
+  } else {
+    // Numeric UID without passwd entry — use uid as gid.
+    gid = uid;
+    LOG(INFO) << "--user: uid " << uid << " not in /etc/passwd, using gid=" << gid;
+  }
+
+  // Recursively chown the data directory so the new user can access existing snapshots.
+  // Only when --dir is explicitly set. Uses lchown to avoid following symlinks.
+  if (!data_dir.empty()) {
+    namespace fs = std::filesystem;
+    auto do_chown = [&](const fs::path& p) {
+      if (lchown(p.c_str(), uid, gid) != 0) {
+        LOG(WARNING) << "lchown(" << p << ") failed: " << strerror(errno);
+      }
+    };
+    do_chown(data_dir);
+    std::error_code ec;
+    fs::recursive_directory_iterator it(data_dir, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+      do_chown(it->path());
+    }
+    if (ec) {
+      LOG(WARNING) << "Error iterating " << data_dir << ": " << ec.message();
+    }
+  }
+
+  // Drop supplementary groups first, then gid, then uid.
+  // Order is critical: after setuid we no longer have permission to call setgid.
+  if (pw) {
+    if (initgroups(pw->pw_name, gid) != 0) {
+      LOG(ERROR) << "initgroups failed: " << strerror(errno);
+      return false;
+    }
+  } else {
+    if (setgroups(0, nullptr) != 0) {
+      LOG(ERROR) << "setgroups failed: " << strerror(errno);
+      return false;
+    }
+  }
+
+  if (setgid(gid) != 0) {
+    LOG(ERROR) << "setgid(" << gid << ") failed: " << strerror(errno);
+    return false;
+  }
+
+  if (setuid(uid) != 0) {
+    LOG(ERROR) << "setuid(" << uid << ") failed: " << strerror(errno);
+    return false;
+  }
+
+  LOG(INFO) << "Dropped privileges to uid=" << uid << " gid=" << gid;
+  return true;
+}
+#endif  // __linux__
 
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = absl::GetFlag(FLAGS_maxmemory);
@@ -352,6 +454,15 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     listeners.push_back(listener.release());
   }
 
+#ifdef __linux__
+  // Drop privileges after ports are bound but BEFORE service.Init() to avoid
+  // racing with background snapshot loading that starts inside service.Init().
+  const string user_flag = GetFlag(FLAGS_user);
+  if (!user_flag.empty() && !DropPrivilegesToUser(user_flag, GetFlag(FLAGS_dir))) {
+    exit(1);
+  }
+#endif
+
   service.Init(acceptor, listeners);
 
   VersionMonitor version_monitor;
@@ -363,7 +474,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   // Start the acceptor loop and wait for the server to shutdown.
   acceptor->Run();
-  google::FlushLogFiles(google::INFO);  // Flush the header.
+  base::FlushLogs();
 
   acceptor->Wait();
 
@@ -686,6 +797,23 @@ void RegisterBufRings(ProactorPool* pool) {
 #endif
 }
 
+class MiMallocResource : public PMR_NS::memory_resource {
+ private:
+  void* do_allocate(std::size_t size, std::size_t align) final {
+    return mi_malloc_aligned(size, align);
+  }
+
+  void do_deallocate(void* ptr, std::size_t size, std::size_t align) final {
+    mi_free_size_aligned(ptr, size, align);
+  }
+
+  bool do_is_equal(const PMR_NS::memory_resource& o) const noexcept final {
+    return this == &o;
+  }
+};
+
+MiMallocResource g_mi_resource;
+
 #ifdef USE_AFL
 // AFL++ fuzzing helper functions
 // These functions support AFL++ persistent mode fuzzing by handling server readiness checks,
@@ -766,10 +894,38 @@ void SendFuzzInputToServer(uint16_t port, const char* data, ssize_t len) {
   }
 }
 
+// Clears the --dir directory so the server starts with a clean state.
+// Without this, dumps from a previous AFL++ loop cycle would be loaded on restart,
+// making RECORD files insufficient to reproduce crashes.
+void ClearDumpDirectory() {
+  string dbfilename = GetFlag(FLAGS_dbfilename);
+  if (dbfilename.empty())
+    return;
+
+  string dir = GetFlag(FLAGS_dir);
+  if (dir.empty())
+    return;
+
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  for (const auto& entry : fs::directory_iterator(dir, ec)) {
+    std::error_code remove_ec;
+    fs::remove_all(entry.path(), remove_ec);
+    if (remove_ec) {
+      LOG(WARNING) << "AFL++: Failed to remove " << entry.path() << ": " << remove_ec.message();
+    }
+  }
+  if (ec) {
+    LOG(WARNING) << "AFL++: Failed to iterate " << dir << ": " << ec.message();
+  }
+}
+
 // Initializes AFL++ fuzzing by starting the server in a separate thread,
 // waiting for it to become ready, and preparing stdin for fuzzing input.
 // Returns the server thread handle. The caller is responsible for the fuzzing loop.
 std::thread InitAflFuzzing(ProactorPool* pool, AcceptServer* acceptor) {
+  ClearDumpDirectory();
+
   // Start server in a separate thread
   std::thread server_thread([pool, acceptor]() {
     dfly::RunEngine(pool, acceptor);
@@ -845,7 +1001,7 @@ void PrintBasicUsageInfo() {
       "                      ..                      \n"
       "* Logs will be written to the first available of the following paths:\n";
 
-  for (const auto& dir : google::GetLoggingDirectories()) {
+  for (const auto& dir : base::GetLoggingDirectories()) {
     const string_view maybe_slash = absl::EndsWith(dir, "/") ? "" : "/";
     absl::StrAppend(&output, dir, maybe_slash, "dragonfly.*\n");
   }
@@ -910,12 +1066,23 @@ Usage: dragonfly [FLAGS]
   };
 
   absl::SetFlagsUsageConfig(config);
+
+#ifndef USE_ABSL_LOG
   google::InitGoogleLogging(argv[0]);
   google::SetLogFilenameExtension(".log");
+#endif
 
   MainInitGuard guard(&argc, &argv);
 
   ParseFlagsFromEnv();
+
+#ifdef USE_ABSL_LOG
+  // alsologtostderr: route all logs to stderr in addition to files.
+  // logtostderr is handled by FileLogSink::Init() in helio.
+  if (GetFlag(FLAGS_alsologtostderr)) {
+    absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+  }
+#endif
 
   if (!GetFlag(FLAGS_omit_basic_usage)) {
     PrintBasicUsageInfo();
@@ -958,6 +1125,14 @@ Usage: dragonfly [FLAGS]
 
 #ifdef __linux__
   UpdateResourceLimitsIfInsideContainer(&mem_info, &max_available_threads);
+  // If --proactor_threads (or DFLY_proactor_threads env var) was explicitly set by the user,
+  // honor it over the cgroup-derived CPU limit. The flag defaults to 0, so any non-zero value
+  // means the user explicitly requested a specific thread count.
+  if (absl::GetFlag(FLAGS_proactor_threads) > 0) {
+    LOG(INFO) << "Using proactor_threads=" << absl::GetFlag(FLAGS_proactor_threads)
+              << " (overriding cgroup-derived " << max_available_threads << ")";
+    max_available_threads = 0;  // causes ProactorPool to use FLAGS_proactor_threads
+  }
 #endif
 
   if (mem_info.swap_total != 0)
@@ -998,7 +1173,7 @@ Usage: dragonfly [FLAGS]
   // To see the options after the override, use:
   // mi_options_print();
 
-  fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
+  fb2::SetDefaultStackResource(&g_mi_resource, kFiberDefaultStackSize);
 
   {
     unique_ptr<util::ProactorPool> pool;
@@ -1026,7 +1201,7 @@ Usage: dragonfly [FLAGS]
     SetupAllocationTracker(pool.get());
     RegisterBufRings(pool.get());
 
-    AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
+    AcceptServer acceptor(pool.get(), &g_mi_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
 #ifdef USE_AFL

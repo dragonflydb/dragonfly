@@ -6,6 +6,8 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/blocking_controller.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -21,7 +23,6 @@ Namespace::Namespace() {
     CHECK(es != nullptr);
     ShardId sid = es->shard_id();
     shard_db_slices_[sid] = make_unique<DbSlice>(sid, absl::GetFlag(FLAGS_cache_mode), es);
-    shard_db_slices_[sid]->UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
   });
 }
 

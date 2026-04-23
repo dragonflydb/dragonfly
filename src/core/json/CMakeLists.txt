@@ -10,6 +10,6 @@ add_library(jsonpath lexer_impl.cc driver.cc path.cc
             detail/interned_string.cc)
 target_link_libraries(jsonpath base absl::strings TRDP::reflex TRDP::jsoncons TRDP::flatbuffers dfly_page_usage)
 
-helio_cxx_test(jsonpath_test jsonpath LABELS DFLY)
+helio_cxx_test(jsonpath_test jsonpath dfly_core LABELS DFLY)
 helio_cxx_test(json_test jsonpath TRDP::jsoncons LABELS DFLY)
 helio_cxx_test(interned_blob_test dfly_core TRDP::mimalloc2 LABELS DFLY)

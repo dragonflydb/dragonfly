@@ -19,6 +19,9 @@ class ABSL_LOCKABLE ThreadLocalMutex {
 
   void lock() ABSL_EXCLUSIVE_LOCK_FUNCTION();
   void unlock() ABSL_UNLOCK_FUNCTION();
+  bool is_locked() const {
+    return flag_;
+  }
 
  private:
   EngineShard* shard_;

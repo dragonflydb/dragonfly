@@ -3,6 +3,7 @@
 //
 #include "core/compact_object.h"
 
+#include <absl/functional/overload.h>
 #include <absl/strings/str_cat.h>
 #include <gtest/gtest.h>
 #include <mimalloc.h>
@@ -118,6 +119,7 @@ class CompactObjectTest : public ::testing::Test {
   }
 
   CompactValue cobj_;
+  CompactKey ckey_;
   string tmp_;
 };
 
@@ -260,7 +262,7 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactValue obj{s};
+  CompactKey obj{s};
 
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
@@ -282,22 +284,151 @@ TEST_F(CompactObjectTest, InlineAsciiEncoded) {
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cobj_.SetString("0");
-  EXPECT_EQ(0, cobj_.TryGetInt());
-  EXPECT_EQ(1, cobj_.Size());
-  EXPECT_EQ(cobj_, "0");
-  EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
-  EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
+  ckey_.SetString("0");
+  EXPECT_EQ(0, ckey_.TryGetInt());
+  EXPECT_EQ(1, ckey_.Size());
+  EXPECT_EQ(ckey_, "0");
+  EXPECT_EQ("0", ckey_.GetSlice(&tmp_));
+  EXPECT_EQ(OBJ_STRING, ckey_.ObjType());
 }
 
 TEST_F(CompactObjectTest, Expire) {
   CompactKey key;
-  key.SetExpire(true);
   key.SetString("42");
+  key.SetExpireTime(10000);
+
   EXPECT_EQ(8181779779123079347, key.HashCode());
-  EXPECT_EQ(OBJ_ENCODING_INT, key.Encoding());
+  EXPECT_EQ(OBJ_ENCODING_RAW, key.Encoding());
   EXPECT_EQ(2, key.Size());
   EXPECT_TRUE(key.HasExpire());
+}
+
+TEST_F(CompactObjectTest, SdsTtlTag) {
+  // 1. Inline key + SetTtl
+  {
+    CompactKey key("hello");
+    ASSERT_TRUE(key.IsInline());
+    uint64_t hash_before = key.HashCode();
+
+    key.SetExpireTime(1000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(1000, key.GetExpireTime());
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_TRUE(key == "hello"sv);
+    EXPECT_EQ(5, key.Size());
+    EXPECT_EQ(OBJ_STRING, key.ObjType());
+
+    string slice;
+    EXPECT_EQ("hello", key.GetSlice(&slice));
+    EXPECT_GT(key.MallocUsed(), 0u);
+  }
+
+  // 2. INT_TAG key + SetTtl
+  {
+    CompactKey key("42");
+    ASSERT_TRUE(key.TryGetInt().has_value());
+    uint64_t hash_before = key.HashCode();
+
+    key.SetExpireTime(2000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(2000, key.GetExpireTime());
+    EXPECT_TRUE(key == "42"sv);
+    EXPECT_EQ(hash_before, key.HashCode());
+    // No longer INT_TAG — TryGetInt should return nullopt.
+    EXPECT_FALSE(key.TryGetInt().has_value());
+  }
+
+  // 3. SMALL_TAG key + SetTtl
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    CompactKey key(s);
+    uint64_t hash_before = key.HashCode();
+
+    key.SetExpireTime(3000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(3000, key.GetExpireTime());
+    EXPECT_TRUE(key == s);
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_EQ(s.size(), key.Size());
+  }
+
+  // 4. ROBJ_TAG key + SetExpireTime
+  {
+    string s(512, 'z');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = static_cast<char>(128 + (i % 128));
+    CompactKey key(s);
+    uint64_t hash_before = key.HashCode();
+
+    key.SetExpireTime(4000);
+    EXPECT_TRUE(key.HasExpire());
+    EXPECT_EQ(4000, key.GetExpireTime());
+    EXPECT_TRUE(key == s);
+    EXPECT_EQ(hash_before, key.HashCode());
+    EXPECT_EQ(s.size(), key.Size());
+  }
+
+  // 5. ExpireTime update in-place
+  {
+    CompactKey key("hello");
+    key.SetExpireTime(1000);
+    EXPECT_EQ(1000, key.GetExpireTime());
+
+    key.SetExpireTime(2000);
+    EXPECT_EQ(2000, key.GetExpireTime());
+    EXPECT_TRUE(key == "hello"sv);
+  }
+
+  // 6. ClearTtl (inline recovery)
+  {
+    CompactKey key("hello");
+    key.SetExpireTime(1000);
+    EXPECT_TRUE(key.ClearExpireTime());
+
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key.IsInline());
+    EXPECT_TRUE(key == "hello"sv);
+  }
+
+  // 7. ClearTtl (INT recovery)
+  {
+    CompactKey key("42");
+    key.SetExpireTime(1000);
+    EXPECT_TRUE(key.ClearExpireTime());
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key.TryGetInt().has_value());
+    EXPECT_EQ(42, key.TryGetInt().value());
+  }
+
+  // 8. ClearTtl (SMALL recovery)
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    CompactKey key(s);
+    key.SetExpireTime(1000);
+    EXPECT_TRUE(key.ClearExpireTime());
+    EXPECT_FALSE(key.HasExpire());
+    EXPECT_TRUE(key == s);
+  }
+
+  // 9. Move semantics
+  {
+    CompactKey a("test");
+    a.SetExpireTime(100);
+    CompactKey b(std::move(a));
+    EXPECT_TRUE(b.HasExpire());
+    EXPECT_EQ(100, b.GetExpireTime());
+    EXPECT_TRUE(b == "test"sv);
+  }
+
+  // 10. Free/destructor — just verify no leaks (TearDown catches them).
+  {
+    CompactKey key("hello");
+    key.SetExpireTime(5000);
+  }
 }
 
 TEST_F(CompactObjectTest, MediumString) {
@@ -337,6 +468,73 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   detail::ascii_unpack_simd(binvec.data(), data3.size(), act_str.data());
 
   ASSERT_EQ(data3, act_str);
+}
+
+TEST_F(CompactObjectTest, AsciiPackByte) {
+  // Test ascii_pack_byte and ascii_unpack_byte for correctness.
+  for (size_t len : {8, 16, 24, 31, 32, 33, 64, 100}) {
+    string original(len, 'a');
+    for (size_t i = 0; i < len; ++i)
+      original[i] = 'A' + (i % 26);
+
+    size_t packed_len = detail::binpacked_len(len);
+    vector<uint8_t> packed(packed_len);
+    detail::ascii_pack(original.data(), len, packed.data());
+
+    // Verify initial pack/unpack round-trip at byte level.
+    for (size_t i = 0; i < len; ++i) {
+      uint8_t got = detail::ascii_unpack_byte(packed.data(), len, i);
+      ASSERT_EQ(static_cast<uint8_t>(original[i]), got) << "len=" << len << " offset=" << i;
+    }
+
+    // Now set each byte to a different value via ascii_pack_byte, verify round-trip.
+    for (size_t i = 0; i < len; ++i) {
+      uint8_t new_val = 'a' + ((i + 3) % 26);
+
+      // Pack the full string, then modify one byte.
+      vector<uint8_t> modified(packed);
+      detail::ascii_pack_byte(modified.data(), len, i, new_val);
+
+      // The modified byte should read back correctly.
+      uint8_t got = detail::ascii_unpack_byte(modified.data(), len, i);
+      EXPECT_EQ(new_val, got) << "len=" << len << " set offset=" << i;
+
+      // All other bytes should be unchanged.
+      for (size_t j = 0; j < len; ++j) {
+        if (j == i)
+          continue;
+        uint8_t other = detail::ascii_unpack_byte(modified.data(), len, j);
+        EXPECT_EQ(static_cast<uint8_t>(original[j]), other)
+            << "len=" << len << " set offset=" << i << " check offset=" << j;
+      }
+    }
+
+    // Test setting all bytes to zero (edge case: clearing bits).
+    {
+      vector<uint8_t> zeroed(packed);
+      string expected = original;
+      for (size_t i = 0; i < len; ++i) {
+        detail::ascii_pack_byte(zeroed.data(), len, i, 0);
+        expected[i] = '\0';
+      }
+      for (size_t i = 0; i < len; ++i) {
+        uint8_t got = detail::ascii_unpack_byte(zeroed.data(), len, i);
+        EXPECT_EQ(0, got) << "len=" << len << " zero check offset=" << i;
+      }
+    }
+
+    // Test setting all bytes to 0x7F (all bits set in 7-bit ASCII).
+    {
+      vector<uint8_t> maxed(packed);
+      for (size_t i = 0; i < len; ++i) {
+        detail::ascii_pack_byte(maxed.data(), len, i, 0x7F);
+      }
+      for (size_t i = 0; i < len; ++i) {
+        uint8_t got = detail::ascii_unpack_byte(maxed.data(), len, i);
+        EXPECT_EQ(0x7F, got) << "len=" << len << " max check offset=" << i;
+      }
+    }
+  }
 }
 
 TEST_F(CompactObjectTest, IntSet) {
@@ -697,6 +895,7 @@ TEST_F(CompactObjectTest, Huffman) {
   HuffmanEncoder encoder;
   BuildEncoderAB(&encoder);
   string bindata = encoder.Export();
+
   for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
     ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, bindata));
     for (unsigned i = 30; i < 2048; i += 10) {
@@ -716,9 +915,232 @@ TEST_F(CompactObjectTest, Huffman) {
       string actual;
       cobj.GetString(&actual);
       EXPECT_EQ(data, actual);
-      EXPECT_EQ(cobj, data);
+      visit(absl::Overload{[&](CompactKey& co) { EXPECT_EQ(co, data); }, [&](CompactValue& co) {}},
+            obj_backing);
     }
   }
+}
+
+TEST_F(CompactObjectTest, GetByteAtOffset) {
+  // Inline string (INLINE_TAG)
+  {
+    string s = "hello";
+    cobj_.SetString(s);
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(s[i], res) << "inline offset " << i;
+    }
+  }
+
+  // Integer-encoded string (INT_TAG)
+  {
+    cobj_.SetString("12345");
+    string expected = "12345";
+    for (size_t i = 0; i < expected.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(expected[i], res) << "int offset " << i;
+    }
+  }
+
+  //  ASCII string with SMALL_TAG
+  {
+    string s(64, 'x');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    cobj_.SetString(s);
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "long ascii offset " << i;
+    }
+  }
+
+  // Non-ASCII string with SMALL_TAG
+  {
+    string s(64, '\xC0');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = static_cast<char>(128 + (i % 128));
+    cobj_.SetString(s);
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "non-ascii offset " << i;
+    }
+  }
+
+  // ASCII string ROBJ_TAG
+  {
+    string s(512, 'z');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'A' + (i % 26);
+    cobj_.SetString(s);
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "medium offset " << i;
+    }
+  }
+
+  // Non-ASCII string ROBJ_TAG
+  {
+    string s(512, 'z');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = static_cast<char>(128 + (i % 128));
+    cobj_.SetString(s);
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "medium offset " << i;
+    }
+  }
+
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, SetByteAtOffset) {
+  // Inline string (INLINE_TAG)
+  {
+    string s = "abcde";
+    cobj_.SetString(s);
+    for (size_t i = 0; i < s.size(); ++i) {
+      std::pair<bool, bool> res_set_byte = cobj_.SetByteAtIndex(i, 'Z');
+      EXPECT_TRUE(res_set_byte.first);
+      EXPECT_TRUE(res_set_byte.second);
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ('Z', res) << "inline set offset " << i;
+    }
+    // All bytes should now be 'Z'
+    string result;
+    cobj_.GetString(&result);
+    EXPECT_EQ(string(5, 'Z'), result);
+  }
+
+  // Integer-encoded string (INT_TAG)
+  {
+    cobj_.SetString("999");
+    std::pair<bool, bool> res_set_byte = cobj_.SetByteAtIndex(0, 'x');
+    EXPECT_TRUE(res_set_byte.first);
+    // We didn't modify in-place, SetString is called
+    EXPECT_FALSE(res_set_byte.second);
+    string result;
+    cobj_.GetString(&result);
+    EXPECT_EQ("x99", result);
+  }
+
+  // ASCII string with SMALL_TAG
+  {
+    string s(64, 'a');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    cobj_.SetString(s);
+
+    // Modify every 10th byte
+    for (size_t i = 0; i < s.size(); i += 10) {
+      std::pair<bool, bool> res_set_byte = cobj_.SetByteAtIndex(i, '!');
+      EXPECT_TRUE(res_set_byte.first);
+      EXPECT_FALSE(res_set_byte.second);
+      s[i] = '!';
+    }
+
+    // Verify all bytes
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "long ascii set offset " << i;
+    }
+  }
+
+  // Non-ASCII string with SMALL_TAG
+  {
+    string s(64, '\x80');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = static_cast<char>(128 + (i % 128));
+    cobj_.SetString(s);
+
+    std::pair<bool, bool> res_set_byte = cobj_.SetByteAtIndex(63, 0xFF);
+    EXPECT_TRUE(res_set_byte.first);
+    EXPECT_FALSE(res_set_byte.second);
+    s[63] = '\xFF';
+
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "non-ascii set offset " << i;
+    }
+  }
+
+  // ASCII string with ROBJ_TAG
+  {
+    string s(512, 'a');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    cobj_.SetString(s);
+
+    // Modify every 10th byte
+    for (size_t i = 0; i < s.size(); i += 10) {
+      std::pair<bool, bool> res_set_byte = cobj_.SetByteAtIndex(i, '!');
+      EXPECT_TRUE(res_set_byte.first);
+      EXPECT_TRUE(res_set_byte.second);
+      s[i] = '!';
+    }
+
+    // Verify all bytes
+    for (size_t i = 0; i < s.size(); ++i) {
+      uint8_t res = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(i, &res));
+      EXPECT_EQ(static_cast<uint8_t>(s[i]), res) << "long ascii set offset " << i;
+    }
+  }
+
+  // ASCII string with ROBJ_TAG modified to non-ASCII
+  {
+    string s(512, 'a');
+    for (size_t i = 0; i < s.size(); ++i)
+      s[i] = 'a' + (i % 26);
+    cobj_.SetString(s);
+
+    // Modify in-place ascii packed string
+    std::pair<bool, bool> res_set_byte = cobj_.SetByteAtIndex(0, 'A');
+    EXPECT_TRUE(res_set_byte.first);
+    EXPECT_TRUE(res_set_byte.second);
+
+    // Adding non-ascii byte modification should still succeed, but not in-place
+    res_set_byte = cobj_.SetByteAtIndex(255, 0xFF);
+    EXPECT_TRUE(res_set_byte.first);
+    EXPECT_FALSE(res_set_byte.second);
+
+    // Modification of non-ascii ROBJ string should succeed and in-place
+    res_set_byte = cobj_.SetByteAtIndex(511, 'C');
+    EXPECT_TRUE(res_set_byte.first);
+    EXPECT_TRUE(res_set_byte.second);
+
+    uint8_t res;
+    EXPECT_TRUE(cobj_.GetByteAtIndex(0, &res));
+    EXPECT_EQ('A', res);
+    EXPECT_TRUE(cobj_.GetByteAtIndex(255, &res));
+    EXPECT_EQ(0xFF, res);
+    EXPECT_TRUE(cobj_.GetByteAtIndex(511, &res));
+    EXPECT_EQ('C', res);
+  }
+
+  // Out-of-bounds access should be handled gracefully.
+  {
+    string s = "abc";
+    cobj_.SetString(s);
+    // SetByteAtIndex: index equal to size() is out-of-bounds.
+    auto res_pair = cobj_.SetByteAtIndex(s.size(), 'X');
+    EXPECT_FALSE(res_pair.first);
+    EXPECT_FALSE(res_pair.second);
+    // GetByteAtIndex: out-of-bounds should set result to 0.
+    uint8_t res = 123;  // sentinel non-zero value
+    EXPECT_FALSE(cobj_.GetByteAtIndex(s.size(), &res));
+    EXPECT_EQ(0u, res);
+  }
+
+  cobj_.Reset();
 }
 
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {

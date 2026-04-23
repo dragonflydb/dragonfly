@@ -151,6 +151,12 @@ class CommandId : public facade::CommandId {
     return interleave_step_;
   }
 
+  template <typename RT> CommandId&& SetAsyncHandler(RT f(CmdArgList, CommandContext*)) && {
+    support_async_ = true;
+    handler_ = [f](CmdArgList args, CommandContext* cntx) { f(args, cntx); };
+    return std::move(*this);
+  }
+
   CommandId&& SetHandler(Handler f, bool async_support = false) && {
     support_async_ |= async_support;
     handler_ = std::move(f);
@@ -266,8 +272,7 @@ class CommandRegistry {
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
-  std::pair<const CommandId*, facade::ParsedArgs> FindExtended(std::string_view cmd,
-                                                               facade::ParsedArgs tail_args) const;
+  std::pair<const CommandId*, facade::ParsedArgs> FindExtended(facade::ParsedArgs args) const;
 
   absl::flat_hash_map<std::string, hdr_histogram*> LatencyMap() const;
 

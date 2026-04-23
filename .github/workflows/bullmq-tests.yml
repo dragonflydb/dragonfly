@@ -13,6 +13,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'dragonflydb/dragonfly'
     runs-on: ubuntu-latest
     name: Build
     timeout-minutes: 60
@@ -53,12 +54,15 @@ jobs:
 
       - name: Start Dragonfly
         run: |
+          mkdir -p /tmp/df-logs
           ${GITHUB_WORKSPACE}/build/dragonfly \
             --alsologtostderr \
+            --log_dir=/tmp/df-logs \
             --cluster_mode=emulated \
             --lock_on_hashtags \
             --dbfilename= \
-            --port 6379 &
+            --port 6379 \
+            >/tmp/df-logs/stdout.log 2>/tmp/df-logs/stderr.log &
           timeout 15s bash -c 'until redis-cli -p 6379 PING 2>/dev/null | grep -q PONG; do sleep 0.1; done'
 
       - name: Build BullMQ
@@ -72,14 +76,19 @@ jobs:
       - name: Run BullMQ tests
         run: |
           cd ${GITHUB_WORKSPACE}/bullmq
-          BULLMQ_TEST_PREFIX={b} yarn test --grep "handle errors.*for flows|Flows - addBulk.*handle errors|removes deduplication key|rejects with missing key for job message|emits waiting when a job has been added|gets all workers for this queue only" --invert
+          SKIP_PATTERN=$(grep -v '^#' ${GITHUB_WORKSPACE}/.github/bullmq-skipped-tests.txt | grep -v '^[[:space:]]*$' | paste -sd '|' || true)
+          if [ -n "${SKIP_PATTERN}" ]; then
+            BULLMQ_TEST_PREFIX={b} yarn test --grep "${SKIP_PATTERN}" --invert
+          else
+            BULLMQ_TEST_PREFIX={b} yarn test
+          fi
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
-          name: unit_logs
-          path: /tmp/dragonfly.*
+          name: dragonfly-logs
+          path: /tmp/df-logs/
 
       - name: Send notification on failure
         if: failure() && github.ref == 'refs/heads/main'

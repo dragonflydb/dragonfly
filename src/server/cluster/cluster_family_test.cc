@@ -818,6 +818,15 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsOutOfBounds) {
+  EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "0", "16384"}),
+              ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "16384", "16384"}),
+              ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "100", "50"}),
+              ErrArg("Invalid slot range"));
+}
+
 TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
   for (int count : {1, 10, 100, 1000, 10000, 100000}) {
     ConfigSingleNodeCluster(GetMyId());
@@ -843,6 +852,64 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
 
     ResetService();
   }
+}
+
+// Regression: FlushSlots launches an async fiber. Entries inserted after FlushSlots returns
+// but before the fiber runs must survive, because they were created after the flush was
+// initiated. The bug was that RegisterOnChange (which captures the version threshold) ran
+// inside the detached fiber instead of synchronously in FlushSlots, so the version threshold
+// was captured too late and freshly-inserted entries appeared "old" to the flush.
+TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  // Run on a shard proactor to control fiber scheduling precisely.
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+
+    // Step 0: Insert pre-existing entries that must be deleted by the flush.
+    // This ensures we can verify the flush fiber actually ran (not just that it was scheduled).
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    for (int i = 0; i < 10; i++) {
+      string key = absl::StrCat("pre:", i);
+      PrimeValue val;
+      val.SetString("old");
+      auto res = db_slice.AddOrUpdate(cntx, key, std::move(val), 0);
+      CHECK(res.ok());
+    }
+    EXPECT_EQ(db_slice.DbSize(0), 10u);
+
+    // Step 1: FlushSlots creates a detached fiber. We do NOT yield, so the fiber
+    // cannot run yet. Acquire the shard lock because RegisterOnChange requires it (#7153).
+    cluster::SlotRanges ranges({{0, 16383}});
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(ranges);
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    // Step 2: Insert entries WITHOUT yielding — the flush fiber still has not executed.
+    // Each insert calls NextVersion(), advancing the global counter.
+    for (int i = 0; i < 50; i++) {
+      string key = absl::StrCat("key:", i);
+      PrimeValue val;
+      val.SetString("val");
+      auto res = db_slice.AddOrUpdate(cntx, key, std::move(val), 0);
+      CHECK(res.ok());
+    }
+    EXPECT_EQ(db_slice.DbSize(0), 60u);
+
+    // Step 3: Yield — the detached flush fiber gets scheduled and runs.
+    // BUG: the fiber calls RegisterOnChange NOW, capturing a version AFTER the 50 inserts.
+    //   All 50 entries have version < next_version → deleted.
+    // FIX: version was captured in FlushSlots (step 1), so entries have version > next_version
+    //   → survive.
+    util::ThisFiber::SleepFor(50ms);
+
+    // Step 4: Verify pre-existing entries were flushed (proving the fiber ran) and
+    // post-flush entries survived.
+    EXPECT_EQ(db_slice.DbSize(0), 50u);
+  });
 }
 
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {

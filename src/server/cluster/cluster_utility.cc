@@ -5,6 +5,8 @@
 #include "server/cluster/cluster_utility.h"
 
 #include "server/cluster/cluster_defs.h"
+#include "server/common.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 

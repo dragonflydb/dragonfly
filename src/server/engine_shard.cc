@@ -5,7 +5,6 @@
 #include "server/engine_shard.h"
 
 #include <absl/strings/escaping.h>
-#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
@@ -14,16 +13,20 @@
 #include "base/flags.h"
 #include "core/huff_coder.h"
 #include "core/page_usage/page_usage_stats.h"
+#include "core/qlist.h"
 #include "io/proc_reader.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
 }
+#include "server/blocking_controller.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
+#include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fibers/proactor_base.h"
@@ -223,14 +226,17 @@ string EngineShard::TxQueueInfo::Format() const {
   return res;
 }
 
-EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 104);
+EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
+  static_assert(sizeof(Stats) == 152);
 
 #define ADD(x) x += o.x
 
   ADD(defrag_attempt_total);
   ADD(defrag_realloc_total);
   ADD(defrag_task_invocation_total);
+  ADD(defrag_skipped_mem_under_threshold);
+  ADD(defrag_skipped_within_check_interval);
+  ADD(defrag_skipped_not_enough_fragmentation);
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
@@ -241,6 +247,9 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(total_heartbeat_expired_calls);
   ADD(total_migrated_keys);
   ADD(huffman_tables_built);
+  ADD(stream_sequential_accesses);
+  ADD(stream_random_accesses);
+  ADD(stream_fetch_all_accesses);
 
 #undef ADD
   return *this;
@@ -264,17 +273,18 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 2. We have memory blocks that can be better utilized (there is a "wasted memory" in them).
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
-bool EngineShard::DefragTaskState::CheckRequired() {
+EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
+  using enum SkipReason;
   if (cursor > kCursorDoneState) {
     VLOG(2) << "cursor: " << cursor;
-    return true;
+    return NotSkipped;
   }
 
   size_t limit = max_memory_limit.load(memory_order_relaxed);
 
   const std::size_t memory_per_shard = limit / shard_set->size();
   if (memory_per_shard < (1 << 16)) {  // Too small.
-    return false;
+    return MemoryTooLow;
   }
 
   thread_local fragmentation_info finfo{
@@ -283,7 +293,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     finfo.bin = 0;  // reset.
-    return false;
+    return MemoryBelowThreshold;
   }
 
   if (finfo.bin == 0) {  // did not start the iterative checking yet
@@ -292,7 +302,7 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
     if (seconds_from_prev_check < mem_defrag_interval) {
-      return false;
+      return CheckWithinInterval;
     }
 
     // start checking.
@@ -318,11 +328,11 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
       VLOG(1) << "memory fragmentation issue found: " << finfo.wasted << " " << finfo.committed;
-      return true;
+      return NotSkipped;
     }
+    return NotEnoughFragmentation;
   }
-
-  return false;
+  return CheckInProgress;
 }
 
 std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
@@ -347,7 +357,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   }
 
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
-  auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
+  auto* prime_table = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur{defrag_state_.cursor};
   uint64_t reallocations = 0;
   uint64_t attempts = 0;
@@ -407,12 +417,14 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
+  using enum DefragTaskState::SkipReason;
+
   constexpr uint32_t kRunAtLowPriority = 0u;
   if (!namespaces) {
     return kRunAtLowPriority;
   }
 
-  if (defrag_state_.CheckRequired()) {
+  if (auto check_result = defrag_state_.CheckRequired(); check_result == NotSkipped) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     static const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
@@ -420,8 +432,34 @@ uint32_t EngineShard::DefragTask() {
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
     if (DoDefrag(&page_usage)) {
       // we didn't finish the scan
-      return util::ProactorBase::kOnIdleMaxLevel;
+      return ProactorBase::kOnIdleMaxLevel;
     }
+  } else {
+    std::string_view reason;
+    switch (check_result) {
+      case MemoryTooLow:
+        // Don't track stats for configuration which is not going to change
+        reason = "memory too low";
+        break;
+      case MemoryBelowThreshold:
+        reason = "rss below threshold";
+        stats_.defrag_skipped_mem_under_threshold++;
+        break;
+      case CheckWithinInterval:
+        reason = "defrag check ran too soon";
+        stats_.defrag_skipped_within_check_interval++;
+        break;
+      case NotEnoughFragmentation:
+        reason = "not enough fragmentation to defrag";
+        stats_.defrag_skipped_not_enough_fragmentation++;
+        break;
+      case CheckInProgress:
+        reason = "check is in progress";
+        break;
+      default:
+        DCHECK(false) << "unexpected result";
+    }
+    VLOG(2) << shard_id_ << " skipped defragmentation task: " << reason;
   }
   return 6;  // priority.
 }
@@ -552,6 +590,7 @@ void EngineShard::DestroyThreadLocal() {
 
   shard_->Shutdown();
 
+  QList::ShutdownThread();
   detail::InternedString::ResetPool();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
@@ -811,9 +850,20 @@ void EngineShard::RetireExpiredAndEvict() {
       continue;
 
     db_cntx.db_index = i;
-    auto [pt, expt] = db_slice.GetTables(i);
-    if (!expt->Empty()) {
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+    auto* pt = db_slice.GetTables(i);
+    uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
+    if (expire_count > 0) {
+      // Scale traversal count to compensate for TTL key dilution in the prime table.
+      // Since we now scan the prime table (not a dedicated expire table), most entries
+      // may not have TTLs. We need more bucket traversals to check the same number of
+      // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
+      unsigned db_ttl_delete_target = ttl_delete_target;
+
+      if (pt->size() >= expire_count * 2) {
+        unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
+        db_ttl_delete_target = ttl_delete_target * ratio;
+      }
+      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
       deleted_bytes += stats.deleted_bytes;
       eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
@@ -987,6 +1037,11 @@ void EngineShard::CacheStats() {
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
 
+  if (VLOG_IS_ON(1)) {
+    LOG_EVERY_T(INFO, 1) << "Entries count " << entries << " "
+                         << "obj_memory: " << obj_memory << ", bytes_per_obj: " << bytes_per_obj;
+  }
+
   db_slice.UpdateMemoryParams(free_mem / shard_set->size(), bytes_per_obj);
   last_mem_params_ = {now, used_mem};
 }
@@ -1081,6 +1136,52 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   }
 
   return info;
+}
+
+size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  auto& prime = db_slice.GetDBTable(db_idx)->prime;
+  size_t total_seg_merged = 0;
+
+  while (true) {
+    bool merged_any = false;
+    // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
+    for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
+      if (SliceSnapshot::IsSnaphotInProgress()) {
+        return total_seg_merged;
+      }
+      // Fetch segment pointer fresh each iteration
+      auto* seg = prime.GetSegment(seg_id);
+
+      unsigned buddy_id = prime.FindBuddyId(seg_id);
+      if (buddy_id == seg_id)
+        continue;
+
+      if (seg_id > buddy_id)
+        continue;
+
+      auto* buddy = prime.GetSegment(buddy_id);
+
+      const size_t combined = seg->SlowSize() + buddy->SlowSize();
+      const size_t max_size = threshold * seg->capacity();
+
+      if (combined > max_size)
+        continue;
+
+      if (prime.Merge(seg_id, buddy_id)) {
+        ++total_seg_merged;
+        merged_any = true;
+      }
+
+      // Yield after merge (don't hold pointers across yield)
+      util::ThisFiber::Yield();
+    }
+
+    if (!merged_any)
+      break;
+  }
+
+  return total_seg_merged;
 }
 
 }  // namespace dfly

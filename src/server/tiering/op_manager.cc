@@ -16,17 +16,23 @@ namespace dfly::tiering {
 
 using namespace std;
 
-OpManager::OwnedEntryId OpManager::ToOwned(OpManager::PendingId id) {
-  Overloaded convert{[](unsigned i) -> OpManager::OwnedEntryId { return i; },
-                     [](std::pair<DbIndex, std::string_view> p) -> OwnedEntryId {
-                       return std::make_pair(p.first, std::string{p.second});
-                     }};
-  return std::visit(convert, id);
+OpManager::OwnedEntryId OpManager::ToOwned(PendingId id) {
+  return std::visit(Overloaded{[](uintptr_t i) -> OpManager::OwnedEntryId { return i; },
+                               [](KeyRef ref) -> OwnedEntryId {
+                                 return std::make_pair(ref.first, std::string{ref.second});
+                               },
+                               [](ListNodeId id) -> OwnedEntryId { return id; }},
+                    id);
 }
 
 string OpManager::ToString(const OwnedEntryId& id) {
-  if (const auto* i = std::get_if<unsigned>(&id); i) {
+  if (const auto* i = std::get_if<uintptr_t>(&id); i) {
     return absl::StrCat(*i);
+  }
+  if (const auto* key = std::get_if<ListNodeId>(&id); key) {
+    // Format dbid::qlist::node
+    return absl::StrCat("(", std::get<0>(*key), ":", absl::StrFormat("%p", std::get<1>(*key)), ":",
+                        absl::StrFormat("%p", std::get<2>(*key)), ")");
   }
   const auto& key = std::get<DbKeyId>(id);
   return absl::StrCat("(", key.first, ":", key.second, ")");
@@ -50,12 +56,21 @@ void OpManager::Close() {
   DCHECK(pending_reads_.empty());
 }
 
-void OpManager::Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder,
-                        ReadCallback cb) {
+void OpManager::Enqueue(PendingId id, DiskSegment segment, const Decoder& decoder, ReadCallback cb,
+                        bool read_only) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
   PrepareRead(segment.ContainingPages())
-      .ForSegment(segment, id, decoder)
-      .callbacks.emplace_back(std::move(cb));
+      .ForSegment(segment, id, decoder, read_only)
+      .read_cbs.emplace_back(std::move(cb));
+}
+
+bool OpManager::HasModificationPending(DiskSegment segment) const {
+  auto it = pending_reads_.find(segment.ContainingPages().offset);
+  if (it == pending_reads_.end())
+    return false;
+
+  auto* ops_ptr = it->second.Find(segment);
+  return ops_ptr && !ops_ptr->read_only;
 }
 
 void OpManager::CancelPending(PendingId id) {
@@ -79,7 +94,8 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   }
 }
 
-void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment, util::fb2::UringBuf buf) {
+void OpManager::Stash(PendingId id_ref, tiering::DiskSegment segment,
+                      util::fb2::RegisteredSlice buf) {
   auto id = ToOwned(id_ref);
   unsigned version = ++pending_stash_counter_;
   pending_stash_ver_[id] = version;
@@ -141,25 +157,25 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   // If we already have a page read for defragmentation pending and some other read for the
   // sub-segment is enqueued, we first must handle the sub-segment read, only then the full page
   // read
-  for (size_t i = 0; i + 1 < info->key_ops.size(); i++) {
-    if (info->key_ops[i].segment.offset % kPageSize == 0) {
-      std::swap(info->key_ops[i], info->key_ops.back());
+  for (size_t i = 0; i + 1 < info->entry_ops.size(); i++) {
+    if (info->entry_ops[i].segment.offset % kPageSize == 0) {
+      std::swap(info->entry_ops[i], info->entry_ops.back());
       break;
     }
   }
 
   bool deleting_full = false;
 
-  // Notify functions in the loop may append items to info->key_ops during the traversal
-  for (size_t i = 0; i < info->key_ops.size(); i++) {
-    auto& ko = info->key_ops[i];
+  // Notify functions in the loop may append items to info->entry_ops during the traversal
+  for (size_t i = 0; i < info->entry_ops.size(); i++) {
+    auto& ko = info->entry_ops[i];
     if (page) {
       size_t offset = ko.segment.offset - info->segment.offset;
       ko.decoder->Initialize(page->substr(offset, ko.segment.length));
-      for (auto& cb : ko.callbacks)
+      for (auto& cb : ko.read_cbs)
         cb(&*ko.decoder);
     } else {
-      for (auto& cb : ko.callbacks)
+      for (auto& cb : ko.read_cbs)
         cb(page.get_unexpected());
     }
 
@@ -182,26 +198,38 @@ void OpManager::ProcessRead(size_t offset, io::Result<std::string_view> page) {
   pending_reads_.erase(offset);
 }
 
-OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder)
-    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()} {
+OpManager::EntryOps::EntryOps(OwnedEntryId id, DiskSegment segment, const Decoder& decoder,
+                              bool read_only)
+    : id{std::move(id)}, segment{segment}, decoder{decoder.Clone()}, read_only{read_only} {
 }
 
 OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, PendingId id,
-                                                   const Decoder& decoder) {
+                                                   const Decoder& decoder, bool read_only) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);
 
-  for (auto& ops : key_ops) {
+  for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset) {
       DCHECK(typeid(*ops.decoder) == typeid(decoder));
+      if (!read_only) {
+        ops.read_only = false;
+      }
       return ops;
     }
   }
-  return key_ops.emplace_back(ToOwned(id), key_segment, decoder);
+  return entry_ops.emplace_back(ToOwned(id), key_segment, decoder, read_only);
 }
 
 OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) {
-  for (auto& ops : key_ops) {
+  for (auto& ops : entry_ops) {
+    if (ops.segment.offset == key_segment.offset)
+      return &ops;
+  }
+  return nullptr;
+}
+
+const OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) const {
+  for (auto& ops : entry_ops) {
     if (ops.segment.offset == key_segment.offset)
       return &ops;
   }

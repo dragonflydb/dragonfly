@@ -9,7 +9,6 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
-#include "core/expire_period.h"
 #include "core/intent_lock.h"
 #include "server/detail/table.h"
 #include "server/tx_base.h"
@@ -27,14 +26,11 @@ using PrimeKey = detail::PrimeKey;
 using PrimeValue = detail::PrimeValue;
 
 using PrimeTable = DashTable<PrimeKey, PrimeValue, detail::PrimeTablePolicy>;
-using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>;
 
 /// Iterators are invalidated when new keys are added to the table or some entries are deleted.
 /// Iterators are still valid if a different entry in the table was mutated.
 using PrimeIterator = PrimeTable::iterator;
 using PrimeConstIterator = PrimeTable::const_iterator;
-using ExpireIterator = ExpireTable::iterator;
-using ExpireConstIterator = ExpireTable::const_iterator;
 
 class TopKeys;
 
@@ -42,15 +38,7 @@ inline bool IsValid(PrimeIterator it) {
   return !it.is_done();
 }
 
-inline bool IsValid(ExpireIterator it) {
-  return !it.is_done();
-}
-
 inline bool IsValid(PrimeConstIterator it) {
-  return !it.is_done();
-}
-
-inline bool IsValid(ExpireConstIterator it) {
   return !it.is_done();
 }
 
@@ -66,11 +54,20 @@ struct DbTableStats {
   // Number of inline keys.
   uint64_t inline_keys = 0;
 
+  // number of keys with ttls set.
+  uint64_t expire_count = 0;
+
   // Object memory usage besides hash-table capacity.
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
 
+  // Number of entries currently offloaded to tiered storage.
   size_t tiered_entries = 0;
+
+  // Sum of the actual value sizes (in bytes) for all tiered entries.
+  // Unlike TieredStats::allocated_bytes, this reflects logical value sizes only —
+  // not the disk space physically reserved, which is larger due to block alignment
+  // and fragmentation in ExternalAllocator.
   size_t tiered_used_bytes = 0;
 
   struct {
@@ -127,7 +124,6 @@ class LockTable {
 // A single Db table that represents a table that can be chosen with "SELECT" command.
 struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_counter> {
   PrimeTable prime;
-  ExpireTable expire;
   DashTable<PrimeKey, uint32_t, detail::ExpireTablePolicy> mcflag;
 
   // Contains transaction locks
@@ -141,7 +137,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 
   mutable DbTableStats stats;
   std::unique_ptr<SlotStats[]> slots_stats;
-  ExpireTable::Cursor expire_cursor;
+  PrimeTable::Cursor expire_cursor;
 
   struct SampleTopKeys {
     TopKeys* top_keys = nullptr;
@@ -177,7 +173,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   PrimeIterator Launder(PrimeIterator it, std::string_view key);
 
   size_t table_memory() const {
-    return expire.mem_usage() + prime.mem_usage();
+    return prime.mem_usage();
   }
 };
 
@@ -186,20 +182,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 // the snapshot process. We copy the pointers in StartSnapshotInShard function.
 using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
 
-// ChangeReq - describes the change to the table.
-struct ChangeReq {
-  // If iterator is set then it's an update to the existing bucket.
-  // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
-  std::variant<PrimeTable::bucket_iterator, std::string_view> change;
-
-  explicit ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
-  }
-  explicit ChangeReq(std::string_view key) : change(key) {
-  }
-
-  const PrimeTable::bucket_iterator* update() const {
-    return std::get_if<PrimeTable::bucket_iterator>(&change);
-  }
-};
+// ChangeReq - describes the change to the table: either single bucket or whole bucket set.
+using ChangeReq = std::variant<PrimeTable::bucket_iterator, PrimeTable::BucketSet>;
 
 }  // namespace dfly

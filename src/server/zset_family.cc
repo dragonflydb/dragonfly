@@ -16,6 +16,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/sorted_map.h"
+#include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
@@ -24,11 +25,15 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
+#include "server/set_family.h"
 #include "server/transaction.h"
+
+namespace rng = std::ranges;
 
 namespace dfly {
 
@@ -278,7 +283,7 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
     blocking_controller->Awaken(op_args.db_cntx.db_index, key);
   }
 
-  return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
+  return DbSlice::ItAndUpdater{add_res.it, std::move(add_res.post_updater)};
 }
 
 enum class Action : uint8_t { RANGE = 0, REMOVE = 1, POP = 2 };
@@ -732,7 +737,13 @@ ScoredMap FromObject(const PrimeValue& co, double weight) {
   return res;
 }
 
-ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight) {
+ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight, const DbContext& db_cntx) {
+  // Enable lazy member expiry before iterating dense sets so expired members
+  // do not pollute the result (and so the caller can detect an emptied set).
+  if (pv.Encoding() == kEncodingStrMap2) {
+    static_cast<StringSet*>(pv.RObjPtr())->set_time(MemberTimeSeconds(db_cntx.time_now_ms));
+  }
+
   ScoredMap result;
   container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
     result.emplace(ce.ToString(), weight);
@@ -800,19 +811,27 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
 
 using KeyIterWeightVec = vector<pair<DbSlice::ConstIterator, double>>;
 
-ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
+ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type,
+                                  DbSlice& db_slice, const DbContext& db_cntx) {
   ScoredMap result;
+  // Collect keys of sets that got emptied by lazy expiry during iteration.
+  // Deleting them inside the loop would invalidate other PrimeTable iterators
+  // held in key_iter_weight_vec.
+  absl::InlinedVector<std::string, 2> emptied_set_keys;
   for (const auto& [it, weight] : key_iter_weight_vec) {
     if (it.is_done()) {
       continue;
     }
 
     ScoredMap sm;
-    if (it->second.ObjType() == OBJ_ZSET)
+    if (it->second.ObjType() == OBJ_ZSET) {
       sm = FromObject(it->second, weight);
-    else {
+    } else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
-      sm = ScoreMapFromSet(it->second, weight);
+      sm = ScoreMapFromSet(it->second, weight, db_cntx);
+      if (it->second.Size() == 0) {
+        emptied_set_keys.emplace_back(it.key());
+      }
     }
     if (result.empty()) {
       result.swap(sm);
@@ -820,6 +839,14 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
       UnionScoredMap(&result, &sm, agg_type);
     }
   }
+
+  // Safe to delete now — the loop above no longer references iterators.
+  for (const auto& key : emptied_set_keys) {
+    if (auto res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET); res) {
+      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, (*res)->second);
+    }
+  }
+
   return result;
 }
 
@@ -866,16 +893,16 @@ OpResult<KeyIterWeightVec> PrepareWeightedSets(const Transaction& trans, bool st
   for (; start != end; ++start) {
     auto it_res = db_slice.FindReadOnly(trans.GetDbContext(), *start);
 
-    if (!IsValid(it_res.it)) {
+    if (!IsValid(it_res)) {
       ++index;
       continue;
     }
 
-    auto obj_type = it_res.it->second.ObjType();
+    auto obj_type = it_res->second.ObjType();
     if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
-    key_weight_vec[index] = {it_res.it, GetKeyWeight(weights, start.index() - cmdargs_keys_offset)};
+    key_weight_vec[index] = {it_res, GetKeyWeight(weights, start.index() - cmdargs_keys_offset)};
     ++index;
   }
 
@@ -892,7 +919,8 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   if (key_vec_res->empty())
     return OpStatus::OK;
 
-  return UnionShardKeysWithScore(*key_vec_res, agg_type);
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  return UnionShardKeysWithScore(*key_vec_res, agg_type, db_slice, t->GetDbContext());
 }
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -906,17 +934,24 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::SKIPPED;
 
   ScoredMap result;
+  // Collect keys of sets that got emptied by lazy expiry during iteration.
+  // Deleting them inside the loop would invalidate other PrimeTable iterators
+  // held in key_vec_res.
+  absl::InlinedVector<std::string, 2> emptied_set_keys;
   for (const auto& [it, weight] : *key_vec_res) {
     if (it.is_done()) {
       return ScoredMap{};
     }
 
     ScoredMap sm;
-    if (it->second.ObjType() == OBJ_ZSET)
+    if (it->second.ObjType() == OBJ_ZSET) {
       sm = FromObject(it->second, weight);
-    else {
+    } else {
       DCHECK_EQ(it->second.ObjType(), OBJ_SET);
-      sm = ScoreMapFromSet(it->second, weight);
+      sm = ScoreMapFromSet(it->second, weight, t->GetDbContext());
+      if (it->second.Size() == 0) {
+        emptied_set_keys.emplace_back(it.key());
+      }
     }
     if (result.empty())
       result.swap(sm);
@@ -924,7 +959,15 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
       InterScoredMap(&result, &sm, agg_type);
 
     if (result.empty())
-      return result;
+      break;
+  }
+
+  // Safe to delete now — the loop above no longer references iterators.
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  for (const auto& key : emptied_set_keys) {
+    if (auto res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET); res) {
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, (*res)->second);
+    }
   }
 
   return result;
@@ -1163,7 +1206,7 @@ void BZPopMinMax(CmdArgList args, bool is_max, CommandContext* cmd_cntx) {
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
-      return cmd_cntx->SendError(std::move(error));
+      return cmd_cntx->SendError(error);
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
@@ -1646,7 +1689,7 @@ void ZBooleanOperation(CmdArgList args, string_view cmd, bool is_union, bool sto
     tx->Execute(store_cb, true);
     builder->SendLong(smvec.size());
   } else {
-    std::sort(std::begin(smvec), std::end(smvec));
+    rng::sort(smvec);
 
     // We can't use SendScoredArray because it expects strings, not string_views
     // TOOD: Not longer relevant with new io, use scoping
@@ -2272,7 +2315,7 @@ void CmdZAdd(CmdArgList args, CommandContext* cmd_cntx) {
       }
     }
     if (to_sort_fields) {
-      std::sort(members.begin(), members.end());
+      rng::sort(members);
     }
   }
 
@@ -2365,7 +2408,7 @@ vector<ScoredMemberView> ZDiffOp(ShardId key_sid, vector<OpResult<vector<ScoredM
   }
 
   // Total O(KlogK)
-  std::sort(std::begin(smvec), std::end(smvec));
+  rng::sort(smvec);
 
   return smvec;
 }
@@ -2917,52 +2960,100 @@ void CmdZUnionStore(CmdArgList args, CommandContext* cmd_cntx) {
 
 #define HFUNC(x) SetHandler(&Cmd##x)
 
+LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) {
+  unsigned char* lp = lpNew(blob.size());
+  if (!ZiplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
+    LOG(ERROR) << "Zset ziplist integrity check failed.";
+    zfree(lp);
+    return LoadBlobResult::kCorrupted;
+  }
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  unsigned encoding = OBJ_ENCODING_LISTPACK;
+  void* inner;
+  if (lpBytes(lp) >= server.max_listpack_map_bytes) {
+    inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp);
+    lpFree(lp);
+    encoding = OBJ_ENCODING_SKIPLIST;
+  } else {
+    lp = lpShrinkToFit(lp);
+    inner = lp;
+  }
+
+  pv->InitRobj(OBJ_ZSET, encoding, inner);
+  return LoadBlobResult::kSuccess;
+}
+
+LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "Zset listpack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* src_lp = (unsigned char*)blob.data();
+  unsigned long long bytes = lpBytes(src_lp);
+  unsigned char* lp = (uint8_t*)zmalloc(bytes);
+  std::memcpy(lp, src_lp, bytes);
+  pv->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+  return LoadBlobResult::kSuccess;
+}
+
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask =
       CO::JOURNALED | CO::VARIADIC_KEYS | CO::DENYOOM | CO::NO_AUTOJOURNAL;
   registry->StartFamily(acl::SORTEDSET);
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
-  *registry
-      << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-      << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
-             .HFUNC(BZPopMin)
-      << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
-             .HFUNC(BZPopMax)
-      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
-      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1}.HFUNC(ZCount)
-      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZDiff)
-      << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZDiffStore)
-      << CI{"ZINCRBY", CO::FAST | CO::JOURNALED, 4, 1, 1}.HFUNC(ZIncrBy)
-      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
-      << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
-      << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
-      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
-      << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(ZMPop)
-      << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL, -5, 3,
-            3}
-             .HFUNC(BZMPop)
-      << CI{"ZPOPMAX", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMax)
-      << CI{"ZPOPMIN", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMin)
-      << CI{"ZREM", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(ZRem)
-      << CI{"ZRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRange)
-      << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(ZRandMember)
-      << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
-      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
-      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
-      << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
-             ZRangeStore)
-      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
-      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)
-      << CI{"ZREMRANGEBYRANK", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByRank)
-      << CI{"ZREMRANGEBYSCORE", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByScore)
-      << CI{"ZREMRANGEBYLEX", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByLex)
-      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRange)
-      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByLex)
-      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByScore)
-      << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRevRank)
-      << CI{"ZSCAN", CO::READONLY, -3, 1, 1}.HFUNC(ZScan)
-      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZUnion)
-      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZUnionStore);
+  // We break up chain into multiple calls to reduce stack usage in this function.
+  *registry << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
+            << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+                  1, -2}
+                   .HFUNC(BZPopMin)
+            << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+                  1, -2}
+                   .HFUNC(BZPopMax)
+            << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
+            << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1}.HFUNC(ZCount)
+            << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZDiff);
+
+  *registry << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZDiffStore)
+            << CI{"ZINCRBY", CO::FAST | CO::JOURNALED, 4, 1, 1}.HFUNC(ZIncrBy)
+            << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
+            << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
+            << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
+            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+            << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
+                   ZMPop)
+            << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+                  -5, 3, 3}
+                   .HFUNC(BZMPop);
+
+  *registry << CI{"ZPOPMAX", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMax)
+            << CI{"ZPOPMIN", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMin)
+            << CI{"ZREM", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(ZRem)
+            << CI{"ZRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRange)
+            << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(ZRandMember)
+            << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
+            << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
+            << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
+            << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
+                   ZRangeStore);
+
+  *registry << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
+            << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)
+            << CI{"ZREMRANGEBYRANK", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByRank)
+            << CI{"ZREMRANGEBYSCORE", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByScore)
+            << CI{"ZREMRANGEBYLEX", CO::JOURNALED, 4, 1, 1}.HFUNC(ZRemRangeByLex)
+            << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRange)
+            << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByLex)
+            << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRevRangeByScore)
+            << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRevRank)
+            << CI{"ZSCAN", CO::READONLY, -3, 1, 1}.HFUNC(ZScan)
+            << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZUnion)
+            << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

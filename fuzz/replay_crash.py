@@ -6,8 +6,10 @@ previous iterations. AFL_PERSISTENT_RECORD saves these as RECORD files.
 This script replays them in order against a running Dragonfly instance.
 
 Usage:
-    # Start dragonfly in another terminal:
-    ./build-dbg/dragonfly --port 6379 --logtostderr --proactor_threads 1
+    # Start dragonfly with flags from the fuzz run:
+    MEM_KB=$(grep '^MEM_LIMIT_KB=' repro.env | cut -d= -f2)
+    readarray -t DF_FLAGS < <(grep -v '^#' repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
+    (ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
 
     # Replay crash:
     python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
@@ -54,10 +56,6 @@ def main():
     # Find RECORD files sorted by cnt
     pattern = os.path.join(crash_dir, f"RECORD:{crash_id},cnt:*")
     records = sorted(glob.glob(pattern))
-
-    if not records:
-        print(f"\033[0;31m[ERROR]\033[0m No RECORD files for crash {crash_id}")
-        sys.exit(1)
 
     # Find crash input file
     crash_files = [

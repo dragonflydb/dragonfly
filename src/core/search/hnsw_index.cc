@@ -14,6 +14,8 @@
 #include "core/search/mrmw_mutex.h"
 #include "core/search/vector_utils.h"
 
+namespace rng = std::ranges;
+
 namespace dfly::search {
 
 using namespace std;
@@ -69,36 +71,22 @@ struct HnswlibAdapter {
   constexpr static size_t kDefaultEfRuntime = 10;
 
   explicit HnswlibAdapter(const SchemaField::VectorParams& params, bool copy_vector)
-      : space_{params.dim, params.sim}, world_{&space_,       params.capacity,
-                                               params.hnsw_m, params.hnsw_ef_construction,
-                                               100 /* seed*/, copy_vector} {
+      : space_{params.dim, params.sim},
+        world_{&space_,       params.capacity, params.hnsw_m, params.hnsw_ef_construction,
+               100 /* seed*/, copy_vector},
+        copy_vector_{copy_vector},
+        data_size_{params.dim * sizeof(float)},
+        stub_vector_(data_size_ / sizeof(float), 1.0f) {
   }
 
   void Add(const void* data, GlobalDocId id) {
-    while (true) {
-      try {
-        MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-        absl::ReaderMutexLock resize_lock(&resize_mutex_);
-        world_.addPoint(data, id);
-        return;
-      } catch (const std::exception& e) {
-        std::string error_msg = e.what();
-        if (absl::StrContains(error_msg, "The number of elements exceeds the specified limit")) {
-          ResizeIfFull();
-          continue;
-        }
-        LOG(ERROR) << "HnswlibAdapter::Add exception: " << e.what();
-      }
-    }
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    DoAdd(data, id);
   }
 
   void Remove(GlobalDocId id) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    HnswErrorStatus status = world_.markDelete(id);
-    if (status != HnswErrorStatus::SUCCESS) {
-      VLOG(1) << "HnswlibAdapter::Remove failed with status: " << static_cast<int>(status)
-              << " for global id: " << id;
-    }
+    DoRemove(id);
   }
 
   vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
@@ -114,7 +102,7 @@ struct HnswlibAdapter {
         return binary_search(allowed->begin(), allowed->end(), id);
       }
 
-      BinsearchFilter(const vector<GlobalDocId>* allowed) : allowed{allowed} {
+      explicit BinsearchFilter(const vector<GlobalDocId>* allowed) : allowed{allowed} {
       }
       const vector<GlobalDocId>* allowed;
     };
@@ -123,6 +111,22 @@ struct HnswlibAdapter {
     BinsearchFilter filter{&allowed};
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnn(target, k, &filter));
+  }
+
+  // Brute-force KNN search over a specific subset of documents.
+  // Computes distances for all provided document IDs and returns the k nearest neighbors.
+  vector<pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+                                             const vector<GlobalDocId>& docs) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return QueueToVec(world_.subsetKnnSearch(target, k, docs));
+  }
+
+  // Returns all documents within the given radius, with their distances.
+  // Uses dynamic-range exploration (searchRange) to correctly handle cases where
+  // the entry point is farther than radius.
+  vector<pair<float, GlobalDocId>> RangeSearch(float* target, float radius) {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return world_.searchRange(target, radius);
   }
 
   HnswIndexMetadata GetMetadata() const {
@@ -165,7 +169,7 @@ struct HnswlibAdapter {
   }
 
   std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    DCHECK(mrmw_mutex_.IsReadLocked());
     size_t count = world_.cur_element_count.load();
     end = std::min(end, count);
     start = std::min(start, end);
@@ -199,6 +203,47 @@ struct HnswlibAdapter {
   }
 
  private:
+  // Actually add the point. Must be called while holding mrmw write lock.
+  void DoAdd(const void* data, GlobalDocId id) {
+    while (true) {
+      try {
+        absl::ReaderMutexLock resize_lock(&resize_mutex_);
+        world_.addPoint(data, id);
+        return;
+      } catch (const std::exception& e) {
+        std::string error_msg = e.what();
+        if (absl::StrContains(error_msg, "The number of elements exceeds the specified limit")) {
+          ResizeIfFull();
+          continue;
+        }
+        LOG(ERROR) << "HnswlibAdapter::DoAdd exception: " << e.what();
+        return;
+      }
+    }
+  }
+
+  void DoRemove(GlobalDocId id) {
+    auto it = copy_vector_ ? world_.label_lookup_.end() : world_.label_lookup_.find(id);
+
+    HnswErrorStatus status = world_.markDelete(id);
+    if (status != HnswErrorStatus::SUCCESS) {
+      VLOG(1) << "HnswlibAdapter::Remove failed with status: " << static_cast<int>(status)
+              << " for global id: " << id;
+      return;
+    }
+
+    // In borrowed mode the node stays in the graph after markDelete and
+    // traversal still computes distances for it.  Replace the external
+    // pointer with stub_vector_ so the caller can free the original data.
+    // Uses 1.0f (not zero) because CosineDistance(v, 0) = 0 would bias
+    // traversal toward deleted nodes.
+    if (it != world_.label_lookup_.end()) {
+      const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
+      char* ptr_location = world_.getDataPtrByInternalId(it->second);
+      memcpy(ptr_location, &safe_ptr, sizeof(void*));
+    }
+  }
+
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
   // insertion (https://github.com/nmslib/hnswlib/issues/267)
   void ResizeIfFull() {
@@ -249,8 +294,15 @@ struct HnswlibAdapter {
     DCHECK_EQ(world_.cur_element_count.load(), 0u)
         << "RestoreFromNodes should only be called on an empty index during deserialization";
 
-    // Ensure we have enough capacity
-    size_t required_capacity = metadata.cur_element_count;
+    // Ensure we have enough capacity.
+    // Metadata may have been captured before the snapshot read-lock, so
+    // cur_element_count can be smaller than actual node internal_ids when
+    // concurrent writes happen.  Compute the real requirement from nodes.
+    size_t max_internal_id = 0;
+    for (const auto& node : nodes) {
+      max_internal_id = std::max<size_t>(max_internal_id, node.internal_id);
+    }
+    size_t required_capacity = std::max(metadata.cur_element_count, max_internal_id + 1);
     if (world_.max_elements_ < required_capacity) {
       world_.resizeIndex(required_capacity);
     }
@@ -298,7 +350,7 @@ struct HnswlibAdapter {
         auto* ll0 = world_.get_linklist0(internal_id);
         world_.setListCount(ll0, node.levels_links[0].size());
         auto* links0 = reinterpret_cast<uint32_t*>(ll0 + 1);
-        std::copy(node.levels_links[0].begin(), node.levels_links[0].end(), links0);
+        rng::copy(node.levels_links[0], links0);
       }
 
       // Restore links for upper layers
@@ -307,16 +359,22 @@ struct HnswlibAdapter {
         auto* ll = world_.get_linklist(internal_id, lvl);
         world_.setListCount(ll, node.levels_links[lvl].size());
         auto* links = reinterpret_cast<uint32_t*>(ll + 1);
-        std::copy(node.levels_links[lvl].begin(), node.levels_links[lvl].end(), links);
+        rng::copy(node.levels_links[lvl], links);
       }
 
       // Track restored count so markDeletedInternal can validate internal_id bounds.
       world_.cur_element_count.store(++restored_count);
 
       // Mark node as deleted until UpdateVectorData provides valid vector data.
-      // This prevents crashes from dereferencing uninitialised data pointers
-      // (especially in borrowed-vector mode).
       world_.markDeletedInternal(internal_id);
+
+      // In borrowed mode, deleted nodes are still traversed by addPoint.
+      // Point to stub_vector_ so distance computations don't dereference nullptr.
+      if (!copy_vector_) {
+        const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
+        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
+        memcpy(ptr_location, &safe_ptr, sizeof(void*));
+      }
     }
 
     // Set the metadata for the graph
@@ -328,15 +386,16 @@ struct HnswlibAdapter {
             << ", enterpoint=" << metadata.enterpoint_node;
   }
 
-  // Update vector data for an existing node (used after RestoreFromNodes)
-  void UpdateVectorData(GlobalDocId id, const void* data) {
+  // Update vector data for an existing node (used after RestoreFromNodes).
+  // Returns false if the node doesn't exist in the index.
+  bool UpdateVectorData(GlobalDocId id, const void* data) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
 
     // Find the internal id for this label
     auto it = world_.label_lookup_.find(id);
     if (it == world_.label_lookup_.end()) {
-      LOG(WARNING) << "UpdateVectorData: label " << id << " not found in index";
-      return;
+      VLOG(1) << "UpdateVectorData: label " << id << " not found in index";
+      return false;
     }
 
     size_t internal_id = it->second;
@@ -358,6 +417,11 @@ struct HnswlibAdapter {
     if (world_.isMarkedDeleted(internal_id)) {
       world_.unmarkDeletedInternal(internal_id);
     }
+    return true;
+  }
+
+  MRMWMutexLock GetReadLock() const {
+    return MRMWMutexLock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
   }
 
  private:
@@ -365,13 +429,16 @@ struct HnswlibAdapter {
   HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
+
+  bool copy_vector_;                // Whether vectors are copied into hnswlib.
+  size_t data_size_;                // Byte size of a single vector.
+  std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,
                                  PMR_NS::memory_resource*)
     : copy_vector_(copy_vector),
       dim_{params.dim},
-      sim_{params.sim},
       adapter_{make_unique<HnswlibAdapter>(params, copy_vector)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
@@ -387,24 +454,19 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
     return false;
   }
 
+  const void* data = nullptr;
   if (std::holds_alternative<OwnedFtVector>(*vector_ptr)) {
-    auto owned_vector = std::get<OwnedFtVector>(*vector_ptr).first.get();
-    if (owned_vector) {
-      adapter_->Add(owned_vector, id);
-      return true;
-    }
+    data = std::get<OwnedFtVector>(*vector_ptr).first.get();
   } else {
-    auto borrowed_vector = std::get<BorrowedFtVector>(*vector_ptr);
-    if (borrowed_vector) {
-      adapter_->Add(borrowed_vector, id);
-      return true;
-    }
+    data = std::get<BorrowedFtVector>(*vector_ptr);
   }
 
-  // For HnswVectorIndex if we didn't add vector to index we should return false. Compared to
-  // other in-shard index implementations where returning false removes document here we only
-  // control if key should or shouldn't be ommited from defragmentation process.
-  return false;
+  if (!data) {
+    return false;
+  }
+
+  adapter_->Add(data, id);
+  return true;
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
@@ -418,7 +480,17 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
   return adapter_->Knn(target, k, ef, allowed);
 }
 
-void HnswVectorIndex::Remove(GlobalDocId id, const DocumentAccessor& doc, string_view field) {
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::SubsetKnn(
+    float* target, size_t k, const std::vector<GlobalDocId>& docs) const {
+  return adapter_->SubsetKnn(target, k, docs);
+}
+
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(float* target,
+                                                                       float radius) const {
+  return adapter_->RangeSearch(target, radius);
+}
+
+void HnswVectorIndex::Remove(GlobalDocId id) {
   adapter_->Remove(id);
 }
 
@@ -463,8 +535,11 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
     data = std::get<BorrowedFtVector>(*vector_ptr);
   }
 
-  adapter_->UpdateVectorData(id, data);
-  return true;
+  return adapter_->UpdateVectorData(id, data);
+}
+
+MRMWMutexLock HnswVectorIndex::GetReadLock() const {
+  return adapter_->GetReadLock();
 }
 
 }  // namespace dfly::search

@@ -26,10 +26,12 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
+#include "server/search/doc_index.h"
 #include "server/tiered_storage.h"
 #include "server/tiering/decoders.h"
 #include "server/tiering/serialized_map.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 
 using namespace std;
 
@@ -199,8 +201,8 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
         fut.Resolve(f(hw));
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
-                                 std::move(read_cb));
+      es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb));
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -218,18 +220,22 @@ OpResult<T> ExecuteRO(Transaction* tx, F&& f) {
   return Unwrap(tx->ScheduleSingleHopT(std::move(shard_cb)));
 }
 
-// Wrap write handler
-template <typename F> auto WrapW(F&& f) {
+// Wrap write handler with field-level extraction for HNSW external data preservation.
+// Note: modified_fields contains string_views into CmdArgList data, which the transaction
+// keeps alive for the duration of execution.
+template <typename F>
+auto WrapW(F&& f, absl::InlinedVector<std::string_view, 4> modified_fields = {}) {
   using RT = std::invoke_result_t<F, HMapWrap&>;
-  return [f = std::forward<F>(f)](Transaction* t, EngineShard* es) -> RT {
+  return [f = std::forward<F>(f), fields = std::move(modified_fields)](Transaction* t,
+                                                                       EngineShard* es) -> RT {
     auto [key, op_args] = KeyAndArgs(t, es);
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
     auto& pv = it_res->it->second;
 
-    // Remove document before modification
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+    // Remove document before modification, preserving HNSW external vector data.
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, fields);
 
     HMapWrap hw{pv, op_args.db_cntx};
     auto res = f(hw);
@@ -305,7 +311,8 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
   } else {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, add_res.it->second);
+    std::string_view fields_arr[] = {field};
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, fields_arr);
 
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
@@ -452,7 +459,12 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
   } else {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
+    // Collect field names being modified for HNSW field data preservation.
+    absl::InlinedVector<std::string_view, 4> field_names;
+    for (size_t i = 0; i < values.size(); i += 2)
+      field_names.push_back(values[i]);
+
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv, field_names);
   }
 
   if (pv.Encoding() == kEncodingListPack) {
@@ -499,7 +511,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
   if (auto* ts = op_args.shard->tiered_storage(); ts) {
-    StashPrimeValue(op_args.db_cntx.db_index, key, false, &pv, ts);
+    StashPrimeValue(op_args.db_cntx.db_index, key, &pv, ts, nullptr);
   }
 
   return created;
@@ -595,7 +607,7 @@ void HSetEx(CmdArgList args, CommandContext* cmd_cntx) {
 
   CmdArgList fields = parser.Tail();
 
-  if (fields.size() % 2 != 0) {
+  if (fields.empty() || fields.size() % 2 != 0) {
     return cmd_cntx->SendError(facade::WrongNumArgsError(cmd_cntx->cid()->name()), kSyntaxErrType);
   }
 
@@ -626,13 +638,19 @@ struct HSetReplies {
 };
 
 void CmdHDel(CmdArgList args, CommandContext* cmd_cntx) {
+  // Collect field names for HNSW data preservation.
+  auto fields_span = args.subspan(1);
+  absl::InlinedVector<std::string_view, 4> field_names;
+  for (auto f : fields_span)
+    field_names.push_back(f);
+
   auto cb = [&](HMapWrap& hw) -> OpResult<uint32_t> {
     unsigned deleted = 0;
-    for (string_view s : args.subspan(1))
+    for (string_view s : fields_span)
       deleted += hw.Erase(s);
     return deleted;
   };
-  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb)));
+  HSetReplies{cmd_cntx}.Send(cmd_cntx->tx()->ScheduleSingleHopT(WrapW(cb, std::move(field_names))));
 }
 
 void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
@@ -667,6 +685,71 @@ void CmdHExpire(CmdArgList args, CommandContext* cmd_cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, flags, fields);
   };
+  OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  switch (result.status()) {
+    case OpStatus::OK:
+      return rb->SendLongArr(absl::MakeConstSpan(result.value()));
+    case OpStatus::KEY_NOTFOUND:
+      return rb->SendLongArr(absl::MakeConstSpan(vector<long>(numFields, -2)));
+    default:
+      return cmd_cntx->SendError(result.status());
+  };
+}
+
+OpResult<vector<long>> OpHTtl(Transaction* t, EngineShard* shard, string_view key,
+                              CmdArgList fields) {
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  const DbContext& db_cntx = t->GetDbContext();
+  auto it_res = db_slice.FindReadOnly(db_cntx, key, OBJ_HASH);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  const PrimeValue& pv = (*it_res)->second;
+  vector<long> res;
+  res.reserve(fields.size());
+
+  for (auto field : fields) {
+    int32_t exp_time = HSetFamily::FieldExpireTime(db_cntx, pv, field);
+    if (exp_time <= 0) {
+      // -3 from FieldExpireTime means field not found -> HTTL returns -2
+      // -1 means no expiry -> stays -1
+      res.push_back(exp_time == -3 ? -2 : exp_time);
+    } else {
+      res.push_back(int32_t(exp_time - MemberTimeSeconds(db_cntx.time_now_ms)));
+    }
+  }
+
+  // FieldExpireTime calls StringMap::Find which triggers lazy field expiry.
+  // If all fields expired, delete the now-empty hash key.
+  HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, pv);
+
+  return res;
+}
+
+void CmdHTtl(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (parser.HasError()) {
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
+  }
+  if (!parser.Check("FIELDS"sv)) {
+    return cmd_cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                               kSyntaxErrType);
+  }
+
+  uint32_t numFields = parser.Next<uint32_t>();
+
+  CmdArgList fields = parser.Tail();
+  if (fields.size() != numFields) {
+    return rb->SendError("The `numfields` parameter must match the number of arguments",
+                         kSyntaxErrType);
+  }
+
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpHTtl(t, shard, key, fields); };
   OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   switch (result.status()) {
@@ -784,6 +867,10 @@ void CmdHIncrByFloat(CmdArgList args, CommandContext* cmd_cntx) {
 
   if (!absl::SimpleAtod(incrs, &dval)) {
     return cmd_cntx->SendError(kInvalidFloatErr);
+  }
+
+  if (isnan(dval) || isinf(dval)) {
+    return cmd_cntx->SendError(kNanOrInfDuringIncr);
   }
 
   IncrByParam param{dval};
@@ -944,15 +1031,18 @@ void CmdHRandField(CmdArgList args, CommandContext* cmd_cntx) {
           str_vec.emplace_back(key, sdslen(key));
         }
       } else {
+        size_t real_size = string_map->SizeSlow();
         size_t actual_count =
-            (count >= 0) ? std::min(size_t(count), string_map->UpperBoundSize()) : abs(count);
+            (count >= 0) ? std::min(size_t(count), real_size) : size_t(-int64_t(count));
         std::vector<sds> keys, vals;
-        if (count >= 0) {
-          string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
-        } else {
-          string_map->RandomPairs(actual_count, keys, vals, with_values);
+        if (real_size > 0 && actual_count > 0) {
+          if (count >= 0) {
+            string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
+          } else {
+            string_map->RandomPairs(actual_count, keys, vals, with_values);
+          }
         }
-        for (size_t i = 0; i < actual_count; ++i) {
+        for (size_t i = 0; i < keys.size(); ++i) {
           str_vec.emplace_back(keys[i], sdslen(keys[i]));
           if (with_values) {
             str_vec.emplace_back(vals[i], sdslen(vals[i]));
@@ -1053,6 +1143,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
                    HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
+            << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
             << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
@@ -1060,6 +1151,57 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HSETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
             << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(HStrLen)
             << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
+}
+
+auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  unsigned char* lp = lpNew(blob.size());
+  if (!ZiplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
+    LOG(ERROR) << "Hash ziplist integrity check failed.";
+    zfree(lp);
+    return LoadBlobResult::kCorrupted;
+  }
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  if (lpBytes(lp) > server.max_listpack_map_bytes) {
+    StringMap* sm = ConvertToStrMap(lp);
+    lpFree(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  } else {
+    lp = lpShrinkToFit(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  }
+
+  return LoadBlobResult::kSuccess;
+}
+
+auto HSetFamily::LoadListpackBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "Hash listpack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* lp = lpNew(blob.size());
+  std::memcpy(lp, blob.data(), blob.size());
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+    return LoadBlobResult::kEmpty;
+  }
+
+  if (lpBytes(lp) > server.max_listpack_map_bytes) {
+    StringMap* sm = ConvertToStrMap(lp);
+    lpFree(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  } else {
+    lp = lpShrinkToFit(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  }
+
+  return LoadBlobResult::kSuccess;
 }
 
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
@@ -1088,6 +1230,24 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
       return -3;
     return it.HasExpiry() ? it.ExpiryTime() : -1;
   }
+}
+
+bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
+                               const PrimeValue& pv) {
+  if (pv.Encoding() != kEncodingStrMap2)
+    return false;
+
+  if (auto* sm = static_cast<StringMap*>(pv.RObjPtr()); !sm->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_HASH); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
+    return true;
+  }
+  return false;
 }
 
 // returns vector of results for each field in values:
@@ -1151,7 +1311,9 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
                                              ExpireFlags flags, string_view key, CmdArgList values,
                                              PrimeValue* pv) {
   DCHECK_EQ(OBJ_HASH, pv->ObjType());
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv);
+  // values contains field names — collect them for HNSW field data preservation.
+  absl::InlinedVector<std::string_view, 4> field_names(values.begin(), values.end());
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
 
   if (pv->Encoding() == kEncodingListPack) {
     // a valid result can never be a listpack, since it doesnt keep ttl

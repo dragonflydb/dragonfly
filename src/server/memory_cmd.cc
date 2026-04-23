@@ -4,6 +4,7 @@
 
 #include "server/memory_cmd.h"
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
 #ifdef __linux__
@@ -24,7 +25,7 @@
 #include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
-#include "server/snapshot.h"
+#include "server/tiered_storage.h"
 
 using namespace std;
 using namespace facade;
@@ -51,7 +52,92 @@ bool MiArenaVisit(const mi_heap_t* heap, const mi_heap_area_t* area, void* block
   (*bmap)[bkey]++;
 
   return true;
+}
+
+struct BlockSummary {
+  size_t reserved = 0;
+  size_t committed = 0;
+  size_t used = 0;
 };
+
+using BlockSummaryMap = absl::flat_hash_map<size_t, BlockSummary>;
+
+bool MiArenaVisitSummary(const mi_heap_t*, const mi_heap_area_t* area, void*, size_t block_size,
+                         void* arg) {
+  BlockSummaryMap* bsm = static_cast<BlockSummaryMap*>(arg);
+  BlockSummary& block_stats = (*bsm)[block_size];
+  block_stats.committed += area->committed;
+  block_stats.reserved += area->reserved;
+  block_stats.used += area->used * block_size;
+  return true;
+}
+
+BlockSummaryMap CollectSummary(bool backing) {
+  BlockSummaryMap summary;
+  const mi_heap_t* data_heap = backing ? mi_heap_get_backing() : ServerState::tlocal()->data_heap();
+  mi_heap_visit_blocks(data_heap, false, MiArenaVisitSummary, &summary);
+  return summary;
+}
+
+vector<BlockSummaryMap> CollectSummaries(bool backing) {
+  std::vector<BlockSummaryMap> summaries(shard_set->size());
+  shard_set->RunBriefInParallel([&summaries, backing](EngineShard* shard) {
+    summaries[shard->shard_id()] = CollectSummary(backing);
+  });
+  return summaries;
+}
+
+void FormatSummary(std::string* str, const BlockSummaryMap& summary) {
+  absl::StrAppend(str, absl::StrFormat("%10s %10s %10s %10s %10s %8s\n", "BlockSize", "Reserved",
+                                       "Committed", "Used", "Wasted", "Waste%"));
+  std::vector<std::pair<size_t, BlockSummary>> entries{summary.begin(), summary.end()};
+  std::ranges::sort(entries, {}, [](const auto& entry) {
+    const BlockSummary& stats = entry.second;
+    return stats.committed > stats.used ? stats.committed - stats.used : 0;
+  });
+
+  size_t total_reserved = 0;
+  size_t total_committed = 0;
+  size_t total_used = 0;
+
+  for (const auto& [size, block_summary] : entries) {
+    const size_t wasted = block_summary.committed > block_summary.used
+                              ? block_summary.committed - block_summary.used
+                              : 0;
+    const double waste_pct = 100.0 * wasted / std::max<size_t>(1UL, block_summary.committed);
+    absl::StrAppend(str, absl::StrFormat("%10zu %10zu %10zu %10zu %10zu %8.2f%%\n", size,
+                                         block_summary.reserved, block_summary.committed,
+                                         block_summary.used, wasted, waste_pct));
+    total_reserved += block_summary.reserved;
+    total_committed += block_summary.committed;
+    total_used += block_summary.used;
+  }
+
+  const size_t wasted = total_committed > total_used ? total_committed - total_used : 0;
+  absl::StrAppend(str, absl::StrFormat("%10s %10zu %10zu %10zu %10zu %8.2f%%\n", "Total:",
+                                       total_reserved, total_committed, total_used, wasted,
+                                       100.0 * wasted / std::max<size_t>(1UL, total_committed)));
+}
+
+string FormatSummaries(const vector<BlockSummaryMap>& summaries) {
+  string str;
+  BlockSummaryMap machine_wide;
+  for (size_t i = 0; i < summaries.size(); ++i) {
+    absl::StrAppend(&str, "\nArena statistics for thread ", i, ":\n");
+    FormatSummary(&str, summaries[i]);
+    for (const auto& [size, block_summary] : summaries[i]) {
+      BlockSummary& machine_block = machine_wide[size];
+      machine_block.reserved += block_summary.reserved;
+      machine_block.committed += block_summary.committed;
+      machine_block.used += block_summary.used;
+    }
+  }
+
+  absl::StrAppend(&str, "\nArena statistics for machine:\n");
+  FormatSummary(&str, machine_wide);
+
+  return str;
+}
 
 std::string MallocStatsCb(bool backing, unsigned tid) {
   string str;
@@ -59,13 +145,14 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
   uint64_t start = absl::GetCurrentTimeNanos();
 
   absl::StrAppend(&str, "\nArena statistics from thread:", tid, "\n");
-  absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
 
   mi_heap_t* data_heap = backing ? mi_heap_get_backing() : ServerState::tlocal()->data_heap();
+
   BlockMap block_map;
 
   mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
   uint64_t reserved = 0, committed = 0, used = 0;
+  absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
   for (const auto& k_v : block_map) {
     uint64_t count = k_v.second;
     absl::StrAppend(&str, count, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
@@ -75,10 +162,11 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
     used += count * get<3>(k_v.first);
   }
 
-  uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
-  absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
-                  " fragmentation waste: ",
-                  (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
+  absl::StrAppend(
+      &str, "total reserved: ", reserved, ", committed: ", committed, ", used: ", used,
+      " fragmentation waste: ",
+      100.0 * (committed > used ? committed - used : 0) / std::max<size_t>(1UL, committed), "%\n");
+  const uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
   return str;
@@ -105,8 +193,11 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Shows breakdown of memory.",
         "MALLOC-STATS",
         "    Show global malloc stats as provided by allocator libraries",
-        "ARENA BACKING] [thread-id]",
+        "ARENA [SUMMARY] [BACKING] [thread-id]",
         "    Show mimalloc arena stats for a heap residing in specified thread-id. 0 by default.",
+        "    If SUMMARY is specified, show stats summarized by block size",
+        "        per thread summary, followed by machine wide summary",
+        "        thread-id is ignored for summary output.",
         "    If BACKING is specified, show stats for the backing heap.",
         "ARENA SHOW",
         "    Prints the arena summary report for the entire process.",
@@ -114,8 +205,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "USAGE <key> [WITHOUTKEY]",
         "    Show memory usage of a key.",
         "    If WITHOUTKEY is specified, the key itself is not accounted.",
-        "DECOMMIT",
+        "DECOMMIT [COOL]",
         "    Force decommit the memory freed by the server back to OS.",
+        "    If COOL is specified, flush the tiered storage cool queue to disk.",
         "TRACK",
         "    Allow tracking of memory allocation via `new` and `delete` based on input criteria.",
         "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
@@ -159,8 +251,17 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (parser.Check("DECOMMIT")) {
-    shard_set->pool()->AwaitBrief(
-        [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
+    if (parser.Check("COOL")) {
+      shard_set->RunBriefInParallel([](EngineShard* shard) {
+        if (auto* ts = shard->tiered_storage(); ts) {
+          ts->ReclaimMemory(SIZE_MAX);
+        }
+      });
+    } else {
+      shard_set->pool()->AwaitBrief([](unsigned, auto* pb) {
+        ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory);
+      });
+    }
     return cmd_cntx_->rb()->SendSimpleString("OK");
   }
 
@@ -205,14 +306,9 @@ void MemoryCmd::Run(CmdArgList args) {
 namespace {
 
 struct ConnectionMemoryUsage {
-  size_t connection_count = 0;
   size_t connection_size = 0;
-  size_t pipelined_bytes = 0;
-  io::IoBuf::MemoryUsage connections_memory;
-
   size_t replication_connection_count = 0;
   size_t replication_connection_size = 0;
-  io::IoBuf::MemoryUsage replication_memory;
 };
 
 ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
@@ -227,44 +323,23 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
       auto* dfly_conn = static_cast<facade::Connection*>(conn);
       auto* cntx = static_cast<ConnectionContext*>(dfly_conn->cntx());
 
-      auto usage = dfly_conn->GetMemoryUsage();
-      if (cntx == nullptr || cntx->replication_flow == nullptr) {
-        mems[thread_index].connection_count++;
-        mems[thread_index].connection_size += usage.mem;
-        mems[thread_index].connections_memory += usage.buf_mem;
+      size_t usage = dfly_conn->GetMemoryUsage();
+      if (cntx == nullptr || cntx->master_repl_flow == nullptr) {
+        mems[thread_index].connection_size += usage;
       } else {
         mems[thread_index].replication_connection_count++;
-        mems[thread_index].replication_connection_size += usage.mem;
-        mems[thread_index].replication_memory += usage.buf_mem;
+        mems[thread_index].replication_connection_size += usage;
       }
     });
   }
 
-  shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
-    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_cmd_cache_bytes;
-    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.dispatch_queue_bytes;
-    mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_queue_bytes;
-  });
-
   ConnectionMemoryUsage mem;
   for (const auto& m : mems) {
-    mem.connection_count += m.connection_count;
-    mem.pipelined_bytes += m.pipelined_bytes;
     mem.connection_size += m.connection_size;
-    mem.connections_memory += m.connections_memory;
     mem.replication_connection_count += m.replication_connection_count;
     mem.replication_connection_size += m.replication_connection_size;
-    mem.replication_memory += m.replication_memory;
   }
   return mem;
-}
-
-void PushMemoryUsageStats(const base::IoBuf::MemoryUsage& mem, string_view prefix, size_t total,
-                          vector<pair<string, size_t>>* stats) {
-  stats->push_back({absl::StrCat(prefix, ".total_bytes"), total});
-  stats->push_back({absl::StrCat(prefix, ".consumed_bytes"), mem.consumed});
-  stats->push_back({absl::StrCat(prefix, ".pending_input_bytes"), mem.input_length});
-  stats->push_back({absl::StrCat(prefix, ".pending_output_bytes"), mem.append_length});
 }
 
 }  // namespace
@@ -275,21 +350,12 @@ void MemoryCmd::Stats() {
   ConnectionMemoryUsage connection_memory = GetConnectionMemoryUsage(owner_);
 
   // Connection stats, excluding replication connections
-  stats.push_back({"connections.count", connection_memory.connection_count});
   stats.push_back({"connections.direct_bytes", connection_memory.connection_size});
-  PushMemoryUsageStats(
-      connection_memory.connections_memory, "connections",
-      connection_memory.connections_memory.GetTotalSize() + connection_memory.connection_size,
-      &stats);
 
   // Replication connection stats
   stats.push_back(
       {"replication.connections_count", connection_memory.replication_connection_count});
   stats.push_back({"replication.direct_bytes", connection_memory.replication_connection_size});
-  PushMemoryUsageStats(connection_memory.replication_memory, "replication",
-                       connection_memory.replication_memory.GetTotalSize() +
-                           connection_memory.replication_connection_size,
-                       &stats);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
   rb->StartCollection(stats.size(), CollectionType::MAP);
@@ -331,6 +397,8 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
   uint32_t tid = 0;
   bool backing = false;
   bool show_arenas = false;
+  bool summarize = false;
+
   if (args.size() >= 2) {
     string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 1));
 
@@ -341,10 +409,24 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
     } else {
       unsigned tid_indx = 1;
 
+      if (sub_cmd == "SUMMARY") {
+        ++tid_indx;
+        summarize = true;
+
+        if (args.size() > tid_indx) {
+          sub_cmd = absl::AsciiStrToUpper(ArgS(args, tid_indx));
+        }
+      }
+
       if (sub_cmd == "BACKING") {
         ++tid_indx;
         backing = true;
       }
+
+      if (summarize && args.size() > tid_indx) {
+        return cmd_cntx_->SendError(kSyntaxErr, kSyntaxErrType);
+      }
+
       if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
         return cmd_cntx_->SendError(kInvalidIntErr);
       }
@@ -356,6 +438,16 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
     return cmd_cntx_->rb()->SendOk();
   }
 
+  if (summarize) {
+    const uint64_t start = absl::GetCurrentTimeNanos();
+    const auto summaries = CollectSummaries(backing);
+    string report = FormatSummaries(summaries);
+    const uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
+    absl::StrAppend(&report, "\n--- End mimalloc statistics, took ", delta, "us ---\n");
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
+    return rb->SendVerbatimString(report);
+  }
+
   if (backing && tid >= shard_set->pool()->size()) {
     return cmd_cntx_->SendError(
         absl::StrCat("Thread id must be less than ", shard_set->pool()->size()));
@@ -365,7 +457,7 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
     return cmd_cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
   }
 
-  string mi_malloc_info =
+  const string mi_malloc_info =
       shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
@@ -377,7 +469,7 @@ void MemoryCmd::Usage(std::string_view key, bool account_key_memory_usage) {
   ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief(
       [key, account_key_memory_usage, this, sid]() -> ssize_t {
         auto& db_slice = cmd_cntx_->server_conn_cntx()->ns->GetDbSlice(sid);
-        auto [pt, exp_t] = db_slice.GetTables(cmd_cntx_->server_conn_cntx()->db_index());
+        auto* pt = db_slice.GetTables(cmd_cntx_->server_conn_cntx()->db_index());
         PrimeIterator it = pt->Find(key);
         if (IsValid(it)) {
           return MemoryUsage(it, account_key_memory_usage);

@@ -30,11 +30,15 @@ inputs:
   s3-bucket:
     required: true
     type: string
-  epoll:
+  azure-container:
     required: false
     type: string
-  df-arg:
-    default: ""
+    description: "Azure Blob Storage container name for snapshot tests"
+  azure-storage-connection-string:
+    required: false
+    type: string
+    description: "Azure Storage connection string"
+  epoll:
     required: false
     type: string
 
@@ -46,21 +50,6 @@ runs:
     - name: Sync valkey-search tests
       uses: ./.github/actions/sync-valkey-tests
 
-    - name: Prepare Step
-      shell: bash
-      run: |
-        DOCKER_VERSION="26.1.4"
-        RUNNER_ARCH="${{ runner.arch }}"
-        if [ "$RUNNER_ARCH" == "X64" ]; then
-          ARCH="x86_64"
-        elif [ "$RUNNER_ARCH" == "ARM64" ]; then
-          ARCH="aarch64"
-        else
-          echo "Unknown architecture: ${RUNNER_ARCH}"
-          exit 1
-        fi
-        curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" | tar xz --strip 1 docker/docker -C ./docker
-        registry="ghcr.io/romange" && for image in fedora:30 ubuntu:noble; do ./docker pull "$registry/$image"; done
     - name: Free disk space
       if: contains(runner.labels, 'self-hosted') == false
       shell: bash
@@ -76,9 +65,7 @@ runs:
 
     - name: Install Python test requirements
       shell: bash
-      run: |
-        cd ${GITHUB_WORKSPACE}/tests
-        pip3 install -r dragonfly/requirements.txt
+      run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
 
     - name: Run S3 snapshot tests with MinIO
       if: inputs.s3-bucket != ''
@@ -103,12 +90,6 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-
-        if [[ "${{inputs.df-arg}}" == 'experimental_io_loop_v2' ]]; then
-          echo "df-arg: experimental io loop v2"
-          export DF_ARG="--df experimental_io_loop_v2=true"
-        fi
-
         export FILTER="${{inputs.filter}}"
 
         # Exclude large tests unless explicitly requested
@@ -123,10 +104,10 @@ runs:
         if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
           FILTER="$FILTER and not exclude_epoll"
           # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --df force_epoll=true --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           # Run only replication tests with iouring
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly $DF_ARG --log-cli-level=INFO || code=$?
+          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
         fi
 
         # timeout returns 124 if we exceeded the timeout duration
@@ -154,6 +135,9 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key || env.AWS_SECRET_ACCESS_KEY }}
         AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         AWS_REGION: ${{ env.AWS_REGION || 'us-east-1' }}
+        # Azure credentials for snapshot tests (optional)
+        DRAGONFLY_AZURE_CONTAINER: ${{ inputs.azure-container }}
+        AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'

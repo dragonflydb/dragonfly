@@ -15,6 +15,7 @@ extern "C" {
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/detail/listpack_wrap.h"
 #include "core/string_set.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
@@ -26,6 +27,8 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/transaction.h"
+
+namespace rng = std::ranges;
 
 namespace dfly {
 
@@ -281,7 +284,10 @@ StringVec RandMemberStrSetPicky(StringSet* strset, size_t count) {
 
   size_t tries = 0;
   while (picks.size() < count && tries++ < count * 2) {
-    auto member = *strset->GetRandomMember();
+    auto it = strset->GetRandomMember();
+    if (it == strset->end())
+      break;
+    sds member = *it;
     picks.insert(picks.end(), {member, sdslen(member)});
   }
 
@@ -430,7 +436,7 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
 
   // Sort the per shard-sorted sets
   if (!sorted_vec.empty()) {
-    std::sort(sorted_vec.begin(), sorted_vec.end(),
+    rng::sort(sorted_vec,
               [](const auto* lhs, const auto* rhs) { return lhs->size() < rhs->size(); });
 
     for (const string& s : *sorted_vec[0]) {
@@ -514,6 +520,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
     // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && overwrite) {
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
+      // Account for the old value's memory under its original type before destroying it,
+      // since InitSet will free the old value and change the type.
+      add_res.post_updater.ReduceHeapUsage();
     }
 
     // does not store the values, merely sets the encoding.
@@ -657,9 +666,10 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
     auto res = db_slice.FindReadOnly(t->GetDbContext(), k, OBJ_SET);
     if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
-      const CompactObj& val = res.value()->second;
-      SetType st{val.RObjPtr(), val.Encoding()};
+      const PrimeValue& pv = res.value()->second;
+      SetType st{pv.RObjPtr(), pv.Encoding()};
       found_[0] = IsInSet(t->GetDbContext(), st, member_);
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), k, pv);
     } else {
       found_[index] = res.status();
     }
@@ -721,8 +731,9 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
   DCHECK(start != end);
   absl::flat_hash_set<string> uniques;
 
+  auto& db_slice = op_args.GetDbSlice();
   for (; start != end; ++start) {
-    auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
+    auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
@@ -733,6 +744,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
         uniques.emplace(ce.ToString());
         return true;
       });
+      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv);
       continue;
     }
 
@@ -768,7 +780,11 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
     return true;
   });
 
-  DCHECK(!uniques.empty());  // otherwise the key would not exist.
+  // Lazy per-member TTL expiry during iteration may have emptied the set.
+  // Delete the stale key and return KEY_NOTFOUND per Redis empty-key semantics.
+  if (SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
 
   for (++start; start != end; ++start) {
     auto diff_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
@@ -779,7 +795,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
       continue;  // KEY_NOTFOUND
     }
 
-    SetType st2{diff_res.value()->second.RObjPtr(), diff_res.value()->second.Encoding()};
+    const PrimeValue& diff_pv = diff_res.value()->second;
+    SetType st2{diff_pv.RObjPtr(), diff_pv.Encoding()};
     if (st2.second == kEncodingIntSet) {
       int ii = 0;
       intset* is = (intset*)st2.first;
@@ -792,6 +809,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
       }
     } else {
       DiffStrSet(op_args.db_cntx, st2, &uniques);
+      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, diff_pv);
     }
   }
 
@@ -820,11 +838,13 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
     }
 
+    result.reserve(pv.Size());
     container_utils::IterateSet(find_res.value()->second,
                                 [&result](container_utils::ContainerEntry ce) {
                                   result.push_back(ce.ToString());
                                   return true;
                                 });
+    SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), *it, pv);
     return result;
   }
 
@@ -854,9 +874,10 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     return SetTypeLen(db_contx, left) < SetTypeLen(db_contx, right);
   };
 
-  std::sort(sets.begin(), sets.end(), comp);
+  rng::sort(sets, comp);
 
   int encoding = sets.front().second;
+  result.reserve(SetTypeLen(t->GetDbContext(), sets.front()));
   if (encoding == kEncodingIntSet) {
     int ii = 0;
     intset* is = (intset*)sets.front().first;
@@ -878,17 +899,29 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     InterStrSet(t->GetDbContext(), sets, &result);
   }
 
+  // Clean up sets emptied by lazy per-member TTL expiry.
+  auto cleanup_it = args.begin();
+  if (remove_first)
+    ++cleanup_it;
+  for (; cleanup_it != args.end(); ++cleanup_it) {
+    auto find_res = db_slice.FindReadOnly(t->GetDbContext(), *cleanup_it, OBJ_SET);
+    if (find_res)
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), *cleanup_it,
+                                  find_res.value()->second);
+  }
+
   return result;
 }
 
 OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, int count) {
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto& db_slice = op_args.GetDbSlice();
+  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
-  const CompactObj& co = find_res.value()->second;
+  const PrimeValue& pv = find_res.value()->second;
 
-  const std::uint32_t size = co.Size();
+  const std::uint32_t size = pv.Size();
   const bool picks_are_unique = count >= 0;
   const std::uint32_t picks_count =
       picks_are_unique ? std::min(static_cast<std::uint32_t>(count), size) : std::abs(count);
@@ -901,7 +934,13 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
     }
   }();
 
-  return RandMemberSet(op_args.db_cntx, co, *generator, picks_count);
+  auto result = RandMemberSet(op_args.db_cntx, pv, *generator, picks_count);
+
+  // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
+  // we must not reference it afterwards.
+  SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
+
+  return result;
 }
 
 // count - how many elements to pop.
@@ -938,6 +977,11 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     // Delete the set as it is now empty
     db_slice.DelMutable(op_args.db_cntx, std::move(*find_res));
 
+    // All members may have expired during iteration (lazy expiry), leaving the result empty.
+    if (result.empty()) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+
     // Replicate as DEL.
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
@@ -957,7 +1001,28 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   auto [removed, is_empty] = RemoveSet(db_cntx, result, &co);
   find_res->post_updater.Run();
 
-  CHECK(!is_empty);
+  // Lazy per-member TTL expiry during RandMemberSet iteration may have emptied
+  // the set (Size() includes expired members, but iteration skips them).
+  if (is_empty) {
+    db_slice.DelMutable(db_cntx, std::move(*find_res));
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    }
+    // Return KEY_NOTFOUND when nothing was actually popped so that CmdSPop
+    // replies with NULL for the single-arg form instead of dereferencing an
+    // empty vector.
+    if (result.empty()) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+    return result;
+  }
+
+  // Lazy expiry may have removed all picked members even though the set is
+  // not fully empty yet (Size() counts stale entries). Return KEY_NOTFOUND so
+  // CmdSPop replies with NULL instead of dereferencing an empty vector.
+  if (result.empty()) {
+    return OpStatus::KEY_NOTFOUND;
+  }
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (removed && op_args.shard->journal()) {
@@ -972,7 +1037,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
-  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto& db_slice = op_args.GetDbSlice();
+  auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res) {
     *cursor = 0;
@@ -995,6 +1061,8 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
     *cursor = 0;
   } else {
     *cursor = StringSetWrapper{it->second, op_args.db_cntx}.Scan(*cursor, scan_op, &res);
+    if (SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, it->second))
+      *cursor = 0;
   }
 
   return res;
@@ -1059,11 +1127,15 @@ void CmdSIsMember(CmdArgList args, CommandContext* cmd_cntx) {
   string_view val = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
+    auto find_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET);
 
     if (find_res) {
-      SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-      return IsInSet(t->GetDbContext(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
+      const PrimeValue& pv = find_res.value()->second;
+      SetType st{pv.RObjPtr(), pv.Encoding()};
+      auto result = IsInSet(t->GetDbContext(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
+      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, pv);
+      return result;
     }
 
     return find_res.status();
@@ -1081,12 +1153,14 @@ void CmdSMIsMember(CmdArgList args, CommandContext* cmd_cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     DbContext db_cntx = t->GetDbContext();
-    auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(db_cntx, key, OBJ_SET);
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
+    auto find_res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET);
     if (find_res) {
-      SetType st{(*find_res)->second.RObjPtr(), find_res.value()->second.Encoding()};
+      const PrimeValue& pv = (*find_res)->second;
+      SetType st{pv.RObjPtr(), pv.Encoding()};
       for (size_t i = 0; i < members.size(); ++i)
         memberships[i] = IsInSet(db_cntx, st, ToSV(members[i]));
-      ;
+      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, pv);
       return OpStatus::OK;
     }
     return find_res.status();
@@ -1526,6 +1600,72 @@ void CmdSAddEx(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 }  // namespace
+
+bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view key,
+                                 const PrimeValue& pv) {
+  if (!IsDenseEncoding(pv))
+    return false;
+
+  if (StringSet* ss = (StringSet*)pv.RObjPtr(); !ss->Empty())
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
+    return true;
+  }
+  return false;
+}
+
+auto SetFamily::LoadIntSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
+    LOG(ERROR) << "Intset integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  const intset* is = (const intset*)blob.data();
+
+  unsigned len = intsetLen(is);
+
+  if (len > SetFamily::MaxIntsetEntries()) {
+    StringSet* set = SetFamily::ConvertToStrSet(is, len);
+
+    if (!set) {
+      LOG(ERROR) << "OOM in ConvertToStrSet " << len;
+      return LoadBlobResult::kOutOfMemory;
+    }
+    pv->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  } else {
+    intset* mine = reinterpret_cast<intset*>(CompactObj::memory_resource()->allocate(blob.size()));
+    ::memcpy(mine, blob.data(), blob.size());
+    pv->InitRobj(OBJ_SET, kEncodingIntSet, mine);
+  }
+
+  return LoadBlobResult::kSuccess;
+}
+
+auto SetFamily::LoadLPSetBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+    LOG(ERROR) << "ListPack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  unsigned char* lp = (unsigned char*)blob.data();
+  StringSet* set = CompactObj::AllocateMR<StringSet>();
+  for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
+    unsigned char field_buf[LP_INTBUF_SIZE];
+    string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
+    if (!set->Add(elem)) {
+      LOG(ERROR) << "Duplicate member " << elem;
+      CompactObj::DeleteMR<StringSet>(set);
+      return LoadBlobResult::kCorrupted;
+    }
+  }
+  pv->InitRobj(OBJ_SET, kEncodingStrMap2, set);
+  return LoadBlobResult::kSuccess;
+}
 
 StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
   int64_t intele;

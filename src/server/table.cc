@@ -19,20 +19,36 @@ unsigned kInitSegmentLog = 3;
 
 void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
   if (type >= memory_usage_by_type.size()) {
-    LOG_FIRST_N(WARNING, 1) << "Encountered unknown type when aggregating per-type memory: "
-                            << type;
-    DCHECK(false) << "Unsupported type " << type;
+    LOG(DFATAL) << "Encountered unknown type when aggregating per-type memory: " << type;
     return;
   }
+
+  DCHECK_GE(obj_memory_usage, memory_usage_by_type[type]);
+
+  if (delta < 0 && memory_usage_by_type[type] < size_t(-delta)) {
+#ifdef NDEBUG
+    LOG_EVERY_T(ERROR, 1)
+#else
+    LOG_EVERY_T(FATAL, 1)
+#endif
+        << "Encountered underflow memory usage when aggregating per-type memory: "
+        << memory_usage_by_type[type] << " + " << delta << ", type: " << type;
+
+    // Truncate delta to avoid underflow, but keep the memory usage consistent with the sum of
+    // per-type usage.
+    delta = -static_cast<int64_t>(memory_usage_by_type[type]);
+  }
+
   obj_memory_usage += delta;
   memory_usage_by_type[type] += delta;
 }
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats) - sizeof(memory_usage_by_type);
-  static_assert(kDbSz == 64);
+  static_assert(kDbSz == 72);
 
   ADD(inline_keys);
+  ADD(expire_count);
   ADD(obj_memory_usage);
   ADD(tiered_entries);
   ADD(tiered_used_bytes);
@@ -92,7 +108,6 @@ DbTable::SampleUniqueKeys::~SampleUniqueKeys() {
 
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
-      expire(0, detail::ExpireTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr),
       index(db_index) {
   if (IsClusterEnabled()) {
@@ -110,7 +125,6 @@ DbTable::~DbTable() {
 void DbTable::Clear() {
   prime.size();
   prime.Clear();
-  expire.Clear();
   mcflag.Clear();
   stats = DbTableStats{};
 }

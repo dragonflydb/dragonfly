@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -14,14 +14,12 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
-#include "facade/facade_stats.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
-#include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -40,8 +38,13 @@ constexpr size_t kReqStorageSize = 88;
 constexpr size_t kReqStorageSize = 120;
 #endif
 
+namespace util {
+class HttpListenerBase;
+}  // namespace util
+
 namespace facade {
 
+struct ConnectionStats;
 class ConnectionContext;
 class ServiceInterface;
 class SinkReplyBuilder;
@@ -154,6 +157,8 @@ class Connection : public util::Connection {
   // Register hook that is executen when the connection breaks.
   void RegisterBreakHook(BreakerCb breaker_cb);
 
+  void FlushReplies();
+
   // Manually shutdown self.
   void ShutdownSelfBlocking();
 
@@ -203,11 +208,8 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  struct MemoryUsage {
-    size_t mem = 0;
-    io::IoBuf::MemoryUsage buf_mem;
-  };
-  MemoryUsage GetMemoryUsage() const;
+  // Returns memory usage of this connection's auxiliary members in bytes.
+  size_t GetMemoryUsage() const;
 
   ConnectionContext* cntx();
 
@@ -275,7 +277,18 @@ class Connection : public util::Connection {
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoop();
 
-  void DoReadOnRecv(const util::FiberSocketBase::RecvNotification& n);
+  void NotifyOnRecv(const util::FiberSocketBase::RecvNotification& n);
+
+  // Enables io_uring multishot receives for the connection if the current thread supports it.
+  // This is required during initial setup or after migrating to a new thread/proactor,
+  // provided the buffer ring is configured and the connection is not using TLS.
+  void MaybeEnableRecvMultishot();
+
+  // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
+  void ReadPendingInput();
+
+  void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
+
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
 
@@ -306,8 +319,7 @@ class Connection : public util::Connection {
   // If add is true, stats are incremented, otherwise decremented.
   void UpdateDispatchStats(const MessageHandle& msg, bool add);
 
-  ParserStatus ParseRedis(unsigned max_busy_cycles);
-  ParserStatus ParseMemcache();
+  ParserStatus ParseRedis(base::IoBuf& buf, unsigned max_busy_cycles, bool enqueue_only = false);
 
   void OnBreakCb(int32_t mask);
 
@@ -354,14 +366,27 @@ class Connection : public util::Connection {
   // Returns true if one or more commands were parsed from the read buffer,
   // and false if no complete commands could be parsed (for example, when
   // parsing is pending more input).
-  bool ParseMCBatch();
+  bool ParseMCBatch(base::IoBuf& buf);
 
+  bool ParseRedisBatch(base::IoBuf& buf);
+
+  // Call the appropriate ParseMCBatch or ParseRedisBatch based on the protocol.
+  // Only CPU-bound work; must not perform I/O or fiber suspension.
+  void ParseFromBuffer(base::IoBuf& buf);
+
+  // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
+  ParserStatus ParseLoop();
+
+  // Loop over enqueued async commands and enqueue them for async execution.
+  // If async execution is not possible, handle them in synchronous mode one by one.
   // Returns true on successful execution, false on reply builder error.
-  bool ExecuteMCBatch();
+  bool ExecuteBatch();
 
+  // Loop over finished async commands and let them reply.
   // Returns true on successful execution, false on reply builder error.
-  bool ReplyMCBatch();
+  bool ReplyBatch();
 
+  // Guard of the current subscription to a parsed commands async task blocker
   struct WaitEvent {
     explicit WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* w);
 
@@ -424,10 +449,23 @@ class Connection : public util::Connection {
   ParsedCommand* parsed_head_ = nullptr;
   ParsedCommand* parsed_tail_ = nullptr;
   ParsedCommand* parsed_to_execute_ = nullptr;
+
   // Total number of commands in parsed command queue
   size_t parsed_cmd_q_len_ = 0;
+
   // Total bytes used by commands in parsed command queue
   size_t parsed_cmd_q_bytes_ = 0;
+
+  // Returns true if there are dispatched commands that haven't been replied yet.
+  bool HasInFlightCommands() const {
+    return parsed_head_ != parsed_to_execute_;
+  }
+
+  // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
+  bool HasCommandToExecute() const {
+    return parsed_head_ && !HasInFlightCommands();
+  }
+
   // Returns true if there are any commands pending in the parsed command queue or dispatch queue.
   bool HasPendingMessages() const {
     return parsed_head_ || !dispatch_q_.empty();
@@ -448,7 +486,6 @@ class Connection : public util::Connection {
     size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
     size_t cmds = 0;                    // total number of commands executed
   } local_stats_;
-  ConnectionStats* stats_ = nullptr;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;
@@ -495,6 +532,7 @@ class Connection : public util::Connection {
 
       // If post migration is allowed to call RegisterRecv
       bool migration_allowed_to_register_ : 1;
+      bool pending_input_ : 1;
     };
   };
 

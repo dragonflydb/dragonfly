@@ -23,18 +23,18 @@ endif()
 add_subdirectory(json)
 add_subdirectory(page_usage)
 
-add_library(dfly_core allocation_tracker.cc bloom.cc compact_object.cc dense_set.cc
+add_library(dfly_core allocation_tracker.cc bloom.cc topk.cc compact_object.cc cms.cc dense_set.cc
     dragonfly_core.cc extent_tree.cc huff_coder.cc
-    interpreter.cc glob_matcher.cc mi_memory_resource.cc qlist.cc sds_utils.cc
+    interpreter.cc glob_matcher.cc mi_memory_resource.cc qlist.cc dict_builder.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc task_queue.cc
-    tx_queue.cc string_set.cc string_map.cc top_keys.cc
+    tx_queue.cc string_set.cc string_map.cc tiering_types.cc top_keys.cc
     detail/bitpacking.cc detail/listpack_wrap.cc detail/listpack.cc
-    count_min_sketch.cc oah_entry.cc)
+    oah_entry.cc)
 
 cxx_link(dfly_core base dfly_search_core dfly_page_usage fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
     TRDP::lua lua_modules
-    OpenSSL::Crypto TRDP::dconv TRDP::lz4 TRDP::hdr_histogram)
+    OpenSSL::Crypto TRDP::dconv TRDP::zstd TRDP::hdr_histogram)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)
@@ -58,9 +58,11 @@ helio_cxx_test(allocation_tracker_test dfly_core absl::random_random LABELS DFLY
 helio_cxx_test(qlist_test dfly_core DATA testdata/list.txt.zst LABELS DFLY)
 helio_cxx_test(listpack_test dfly_core redis_lib LABELS DFLY)
 helio_cxx_test(zstd_test dfly_core TRDP::zstd LABELS DFLY)
+helio_cxx_test(dict_builder_test dfly_core LABELS DFLY)
 helio_cxx_test(top_keys_test dfly_core LABELS DFLY)
+helio_cxx_test(topk_test dfly_core LABELS DFLY)
 helio_cxx_test(page_usage_stats_test dfly_core LABELS DFLY)
-helio_cxx_test(count_min_sketch_test dfly_core LABELS DFLY)
+helio_cxx_test(cms_test dfly_core LABELS DFLY)
 helio_cxx_test(memory_test TRDP::mimalloc2 LABELS DFLY)
 
 if(LIB_PCRE2)

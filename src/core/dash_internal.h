@@ -443,11 +443,13 @@ class Segment {
   }
 
   template <bool UV = kUseVersion>
-  std::enable_if_t<UV, uint64_t> GetVersion(PhysicalBid bid) const {
+  requires UV uint64_t GetVersion(PhysicalBid bid)
+  const {
     return GetBucket(bid).GetVersion();
   }
 
-  template <bool UV = kUseVersion> std::enable_if_t<UV> SetVersion(PhysicalBid bid, uint64_t v) {
+  template <bool UV = kUseVersion>
+  requires UV void SetVersion(PhysicalBid bid, uint64_t v) {
     return GetBucket(bid).SetVersion(v);
   }
 
@@ -529,20 +531,18 @@ class Segment {
   Iterator InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread, OnMoveCb&& on_move_cb);
 
   // capture version change in case of insert.
-  // Returns ids of buckets whose version would cross ver_threshold upon insertion of key_hash
-  // into the segment.
-  // Returns UINT16_MAX if segment is full. Otherwise, returns number of touched bucket ids (1 or 2)
-  // if the insertion would happen. The ids are put into bid array that should have at least 2
-  // spaces.
+  // Determines ids of buckets that would possibly change on insertion
+  // Writes buckets to `bid` and returns the count (1 or 2) or
+  // num_buckets() if the whole segment needs to be split (bid is not used).
   template <bool UV = kUseVersion>
-  std::enable_if_t<UV, unsigned> CVCOnInsert(uint64_t ver_threshold, Hash_t key_hash,
-                                             PhysicalBid bid[2]) const;
+  requires UV uint8_t CVCOnInsert(Hash_t key_hash, PhysicalBid bid[2])
+  const;
 
   // Returns bucket ids whose versions will change as a result of bumping up the item
   // Can return upto 3 buckets.
   template <bool UV = kUseVersion>
-  std::enable_if_t<UV, unsigned> CVCOnBump(uint64_t ver_threshold, unsigned bid, unsigned slot,
-                                           Hash_t hash, PhysicalBid result_bid[3]) const;
+  requires UV unsigned CVCOnBump(unsigned bid, unsigned slot, Hash_t hash,
+                                 PhysicalBid result_bid[3]) const;
 
   // Finds a valid entry going from specified indices up.
   Iterator FindValidStartingFrom(PhysicalBid bid, unsigned slot) const;
@@ -572,6 +572,10 @@ class Segment {
 
   unsigned num_buckets() const {
     return kBucketNum + kStashBucketNum;
+  }
+
+  uint32_t segment_id() const {
+    return segment_id_;
   }
 
   // needed only when DashTable grows its segment table.
@@ -1437,11 +1441,9 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   return Iterator{};
 }
 
-template <typename Key, typename Value, typename Policy>
-template <bool UV>
-std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t ver_threshold,
-                                                                        Hash_t key_hash,
-                                                                        uint8_t bid_res[2]) const {
+template <typename Key, typename Value, typename Policy> template <bool UV>
+requires UV uint8_t Segment<Key, Value, Policy>::CVCOnInsert(Hash_t key_hash, uint8_t bid_res[2])
+const {
   const LogicalBid bid = HomeIndex(key_hash);
   const LogicalBid nid = NextBid(bid);
 
@@ -1451,27 +1453,17 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
 
   const Bucket& bfirst = bucket_[first];
   if (!bfirst.IsFull()) {
-    unsigned cnt = 0;
-    if (!bfirst.IsEmpty() && bfirst.GetVersion() < ver_threshold) {
-      bid_res[cnt++] = first;
-    }
-    return cnt;
+    bid_res[0] = first;
+    return 1;
   }
 
   // both nid and bid are full.
   const LogicalBid after_next = NextBid(nid);
 
-  auto do_fun = [this, ver_threshold, &bid_res](auto bid, auto nid) {
-    unsigned cnt = 0;
-    // We could tighten the checks here and below because
-    // if nid is less than ver_threshold, than nid won't be affected and won't cross
-    // ver_threshold as well.
-    if (GetBucket(bid).GetVersion() < ver_threshold)
-      bid_res[cnt++] = bid;
-
-    if (!GetBucket(nid).IsEmpty() && GetBucket(nid).GetVersion() < ver_threshold)
-      bid_res[cnt++] = nid;
-    return cnt;
+  auto do_fun = [this, &bid_res](auto bid, auto nid) {
+    bid_res[0] = bid;
+    bid_res[1] = nid;
+    return 2;
   };
 
   if (CheckIfMovesToOther(true, nid, after_next)) {
@@ -1488,23 +1480,18 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
     PhysicalBid stash_bid = kBucketNum + ((bid + i) % kStashBucketNum);
     const Bucket& stash = GetBucket(stash_bid);
     if (!stash.IsFull()) {
-      unsigned cnt = 0;
-      if (!stash.IsEmpty() && stash.GetVersion() < ver_threshold)
-        bid_res[cnt++] = stash_bid;
-
-      return cnt;
+      bid_res[0] = stash_bid;
+      return 1;
     }
   }
 
-  return UINT16_MAX;
+  return num_buckets();
 }
 
-template <typename Key, typename Value, typename Policy>
-template <bool UV>
-std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t ver_threshold,
-                                                                      unsigned bid, unsigned slot,
-                                                                      Hash_t hash,
-                                                                      uint8_t result_bid[3]) const {
+template <typename Key, typename Value, typename Policy> template <bool UV>
+requires UV unsigned Segment<Key, Value, Policy>::CVCOnBump(unsigned bid, unsigned slot,
+                                                            Hash_t hash,
+                                                            uint8_t result_bid[3]) const {
   if (bid < kBucketNum) {
     // Right now we do not migrate entries from nid to bid, only from stash to normal buckets.
     // The reason for this is that CVCOnBump implementation swaps the slots of the same bucket
@@ -1530,16 +1517,13 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
   // suspect we could optimize this out by looking at the fingerprints but for now I care about
   // correctness and returning the correct modified buckets. Besides, we are on a path of updating
   // the version anyway which will assert that the bucket won't be send again during snapshotting.
-  unsigned result = 0;
-  if (bucket_[bid].GetVersion() < ver_threshold) {
-    result_bid[result++] = bid;
-  }
+  result_bid[0] = bid;
   const uint8_t target_bid = HomeIndex(hash);
-  result_bid[result++] = target_bid;
+  result_bid[1] = target_bid;
   const uint8_t probing_bid = NextBid(target_bid);
-  result_bid[result++] = probing_bid;
+  result_bid[2] = probing_bid;
 
-  return result;
+  return 3;
 }
 
 template <typename Key, typename Value, typename Policy>

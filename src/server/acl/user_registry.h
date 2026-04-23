@@ -12,7 +12,6 @@
 #include <utility>
 #include <vector>
 
-#include "server/acl/acl_commands_def.h"
 #include "server/acl/user.h"
 #include "util/fibers/synchronization.h"
 
@@ -76,9 +75,30 @@ class UserRegistry {
 
   User::UpdateRequest DefaultUserUpdateRequest() const;
 
+  // Aggregate memory-usage stats across all users. Updated incrementally on every
+  // user creation, deletion, or mutation so that INFO ACL can read them lock-free.
+  struct AclStats : User::MemoryUsage {
+    size_t num_users = 0;
+
+    // Estimated total bytes consumed by all ACL users (base structs + heap collections).
+    size_t TotalBytes() const;
+  };
+
+  // Returns a snapshot of the aggregate stats under the registry read lock.
+  AclStats GetAclStats() const;
+
+  // Updates aggregate stats after a user mutation performed via GetRegistryWithWriteLock.
+  // Must be called while the write lock is held. `before` is zeroed for new users.
+  void TrackUser(const User::MemoryUsage& before, const User::MemoryUsage& after, bool is_new);
+
+  // Resets aggregate stats to zero. Must be called while the write lock is held,
+  // immediately after registry.clear().
+  void ResetStats();
+
  private:
   RegistryType registry_;
   mutable util::fb2::SharedMutex mu_;
+  AclStats stats_;  // maintained under mu_
 
   // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry
   template <template <typename T> typename LockT, typename RegT> class RegistryWithLock {

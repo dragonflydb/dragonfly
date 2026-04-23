@@ -19,6 +19,8 @@
 #include "server/main_service.h"
 #include "util/fibers/synchronization.h"
 
+namespace rng = std::ranges;
+
 ABSL_DECLARE_FLAG(int, migration_finalization_timeout_ms);
 ABSL_FLAG(uint32_t, slot_migration_throttle_us, 0,
           "Incoming migration throttle time in us, we throttle every 100us of migration commands "
@@ -214,8 +216,8 @@ bool IncomingSlotMigration::Join(long attempt) {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 10000) << "Checking whether to continue with join " << passed << " vs "
-                           << timeout;
+    LOG_EVERY_T(INFO, 30) << "Checking whether to continue with join " << passed << " vs "
+                          << timeout;
     if (passed >= timeout) {
       LOG(WARNING) << "Can't join migration in time for " << source_id_;
       ReportError(GenericError("Can't join migration in time"));
@@ -233,9 +235,8 @@ bool IncomingSlotMigration::Join(long attempt) {
     const auto remaining_time = absl::ToInt64Milliseconds(timeout - passed);
     const auto wait_time = (remaining_time > 100 ? 100 : remaining_time) * 1ms;
 
-    const auto is_attempt_correct =
-        std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                    [attempt](const auto& flow) { return flow->GetLastAttempt() == attempt; });
+    const auto is_attempt_correct = rng::all_of(
+        shard_flows_, [attempt](const auto& flow) { return flow->GetLastAttempt() == attempt; });
 
     auto wait_res = bc_->WaitFor(wait_time);
     if (is_attempt_correct) {

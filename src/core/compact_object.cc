@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/redis_aux.h"
+#include "redis/sds.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
@@ -24,6 +25,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/pod_array.h"
 #include "core/bloom.h"
+#include "core/cms.h"
 #include "core/detail/bitpacking.h"
 #include "core/huff_coder.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -31,12 +33,15 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "core/tiering_types.h"
+#include "core/topk.h"
 
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json object defragmentation");
 
 namespace dfly {
 using namespace std;
+using detail::ascii_len;
 using detail::binpacked_len;
 using MemoryResource = detail::RobjWrapper::MemoryResource;
 
@@ -49,7 +54,7 @@ size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
     DCHECK(false) << "Can't decrease " << size << " from " << -update;
-    LOG_EVERY_N(ERROR, 30) << "Can't decrease " << size << " from " << -update;
+    LOG_EVERY_T(ERROR, 30) << "Can't decrease " << size << " from " << -update;
   }
   return result;
 }
@@ -344,13 +349,6 @@ pair<void*, bool> DefragList(unsigned encoding, void* ptr, PageUsage* page_usage
 
 inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
-}
-
-// converts 7-bit packed length back to ascii length. Note that this conversion
-// is not accurate since it maps 7 bytes to 8 bytes (rounds up), while we may have
-// 7 byte strings converted to 7 byte as well.
-inline constexpr size_t ascii_len(size_t bin_len) {
-  return (bin_len * 8) / 7;
 }
 
 inline const uint8_t* to_byte(const void* s) {
@@ -747,6 +745,8 @@ size_t CompactObj::Size() const {
         return decoded_str_size(size, *(uint8_t*)u_.r_obj.inner_obj());
     case INT_TAG:
       return absl::AlphaNum(u_.ival).size();
+    case SDS_TTL_TAG:
+      return decoded_str_size(sdslen(u_.sds_ttl.sds_ptr), u_.sds_ttl.sds_ptr[0]);
     case JSON_TAG:
       if (JsonEnconding() == kEncodingJsonFlat)
         return u_.json_obj.flat.json_len;
@@ -754,6 +754,10 @@ size_t CompactObj::Size() const {
         return u_.json_obj.cons.json_ptr->size();
     case SBF_TAG:
       return u_.sbf->current_size();
+    case CMS_TAG:
+      return 0;
+    case TOPK_TAG:
+      return u_.topk->Size();
     default:
       LOG(DFATAL) << "Should not reach " << int(taglen_);
       return 0;
@@ -777,6 +781,8 @@ uint64_t CompactObj::HashCode() const {
         absl::AlphaNum an(u_.ival);
         return XXH3_64bits_withSeed(an.data(), an.size(), kHashSeed);
       }
+      case SDS_TTL_TAG:
+        return XXH3_64bits_withSeed(u_.sds_ttl.sds_ptr, sdslen(u_.sds_ttl.sds_ptr), kHashSeed);
     }
   }
 
@@ -800,7 +806,7 @@ uint64_t CompactObj::HashCode(string_view str) {
 }
 
 CompactObjType CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG)
+  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == SDS_TTL_TAG)
     return OBJ_STRING;
 
   if (taglen_ == EXTERNAL_TAG) {
@@ -809,6 +815,8 @@ CompactObjType CompactObj::ObjType() const {
         return OBJ_STRING;
       case ExternalRep::SERIALIZED_MAP:
         return OBJ_HASH;
+      case ExternalRep::LIST_NODE:
+        return OBJ_LIST;
     };
   }
 
@@ -821,6 +829,14 @@ CompactObjType CompactObj::ObjType() const {
 
   if (taglen_ == SBF_TAG) {
     return OBJ_SBF;
+  }
+
+  if (taglen_ == CMS_TAG) {
+    return OBJ_CMS;
+  }
+
+  if (taglen_ == TOPK_TAG) {
+    return OBJ_TOPK;
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
@@ -898,7 +914,14 @@ void CompactObj::SetJson(JsonType&& j) {
 void CompactObj::SetJsonSize(int64_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    u_.json_obj.cons.bytes_used = UpdateSize(u_.json_obj.cons.bytes_used, size);
+    int64_t result = static_cast<int64_t>(u_.json_obj.cons.bytes_used) + size;
+    if (result < 1) {
+      LOG_EVERY_T(ERROR, 20) << "JSON size underflow: " << u_.json_obj.cons.bytes_used << " + "
+                             << size << " = " << result;
+      u_.json_obj.cons.bytes_used = 1;
+    } else {
+      u_.json_obj.cons.bytes_used = static_cast<size_t>(result);
+    }
   }
 }
 
@@ -932,6 +955,34 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
 SBF* CompactObj::GetSBF() const {
   DCHECK_EQ(SBF_TAG, taglen_);
   return u_.sbf;
+}
+
+void CompactObj::SetCMS(uint32_t width, uint32_t depth) {
+  if (taglen_ == CMS_TAG) {
+    *u_.cms = CMS(width, depth, tl.local_mr);
+  } else {
+    SetMeta(CMS_TAG);
+    u_.cms = AllocateMR<CMS>(width, depth, tl.local_mr);
+  }
+}
+
+CMS* CompactObj::GetCMS() const {
+  DCHECK_EQ(CMS_TAG, taglen_);
+  return u_.cms;
+}
+
+void CompactObj::SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay) {
+  if (taglen_ == TOPK_TAG) {
+    *u_.topk = TOPK(memory_resource(), k, width, depth, decay);
+  } else {
+    SetMeta(TOPK_TAG);
+    u_.topk = AllocateMR<TOPK>(memory_resource(), k, width, depth, decay);
+  }
+}
+
+TOPK* CompactObj::GetTOPK() const {
+  DCHECK_EQ(TOPK_TAG, taglen_);
+  return u_.topk;
 }
 
 void CompactObj::SetString(std::string_view str) {
@@ -1004,6 +1055,10 @@ string_view CompactObj::GetSlice(string* scratch) const {
     return *scratch;
   }
 
+  if (taglen_ == SDS_TTL_TAG) {
+    return u_.sds_ttl.view();
+  }
+
   LOG(FATAL) << "Bad tag " << int(taglen_);
 
   return string_view{};
@@ -1032,6 +1087,15 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
         return false;
       }
       return u_.json_obj.DefragIfNeeded(page_usage);
+    case SDS_TTL_TAG:
+      if (page_usage->IsPageForObjectUnderUtilized(u_.sds_ttl.sds_ptr)) {
+        size_t len = sdslen(u_.sds_ttl.sds_ptr);
+        char* new_sds = sdsnewlen(u_.sds_ttl.sds_ptr, len);
+        sdsfree(u_.sds_ttl.sds_ptr);
+        u_.sds_ttl.sds_ptr = new_sds;
+        return true;
+      }
+      return false;
     case INT_TAG:
       page_usage->RecordNotRequired();
       // this is not relevant in this case
@@ -1047,18 +1111,19 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
 }
 
 bool CompactObj::HasAllocated() const {
-  if (IsRef() || taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
+  if (taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG);
+  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG ||
+         taglen_ == CMS_TAG || taglen_ == SDS_TTL_TAG || taglen_ == TOPK_TAG);
   return true;
 }
 
 bool CompactObj::TagAllowsEmptyValue() const {
   const auto type = ObjType();
   return type == OBJ_JSON || type == OBJ_STREAM || type == OBJ_STRING || type == OBJ_SBF ||
-         type == OBJ_SET;
+         type == OBJ_CMS || type == OBJ_TOPK || type == OBJ_SET;
 }
 
 void __attribute__((noinline)) CompactObj::GetString(string* res) const {
@@ -1082,29 +1147,7 @@ void CompactObj::GetString(char* dest) const {
 
   if (encoding_) {
     StrEncoding str_encoding = GetStrEncoding();
-    string_view decode_blob;
-
-    if (taglen_ == ROBJ_TAG) {
-      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
-      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-      decode_blob = {(const char*)u_.r_obj.inner_obj(), u_.r_obj.Size()};
-    } else {
-      CHECK_EQ(SMALL_TAG, taglen_);
-      auto& ss = u_.small_str;
-
-      char* copy_dest;
-      if (str_encoding.enc_ == HUFFMAN_ENC) {
-        tl.tmp_buf.resize(ss.size());
-        copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
-      } else {
-        // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
-        size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
-        copy_dest = dest + (decoded_len - ss.size());
-      }
-
-      ss.Get(copy_dest);
-      decode_blob = {copy_dest, ss.size()};
-    }
+    string_view decode_blob = GetEncodedBlob(str_encoding, dest);
 
     str_encoding.Decode(decode_blob, dest);
     return;
@@ -1115,6 +1158,11 @@ void CompactObj::GetString(char* dest) const {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
     memcpy(dest, u_.r_obj.inner_obj(), u_.r_obj.Size());
+    return;
+  }
+
+  if (taglen_ == SDS_TTL_TAG) {
+    memcpy(dest, u_.sds_ttl.sds_ptr, sdslen(u_.sds_ttl.sds_ptr));
     return;
   }
 
@@ -1146,7 +1194,7 @@ CompactObj::ExternalRep CompactObj::GetExternalRep() const {
 }
 
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
-                         detail::TieredColdRecord* record) {
+                         tiering::TieredCoolRecord* record) {
   encoding_ = record->value.encoding_;
   SetMeta(EXTERNAL_TAG, record->value.mask_);
 
@@ -1177,6 +1225,32 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   size_t offset = ext.page_offset;
   offset += size_t(ext.is_cool ? ext.cool_record->page_index : ext.offload.page_index) * 4096;
   return {offset, size_t(u_.ext_ptr.serialized_size)};
+}
+
+string_view CompactObj::GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const {
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    return u_.r_obj.AsView();
+  } else if (IsInline()) {
+    return {u_.inline_str, taglen_};
+  } else if (taglen_ == SDS_TTL_TAG) {
+    return u_.sds_ttl.view();
+  }
+
+  CHECK_EQ(taglen_, SMALL_TAG);
+  auto& ss = u_.small_str;
+  char* copy_dest = nullptr;
+  if (opt_dest && str_encoding.enc_ != HUFFMAN_ENC) {
+    // Write to rightmost location of dest buffer to leave some bytes for inline unpacking
+    size_t decoded_len = str_encoding.DecodedSize(ss.size(), ss.first_byte());
+    copy_dest = opt_dest + (decoded_len - ss.size());
+  } else {
+    tl.tmp_buf.resize(ss.size());
+    copy_dest = reinterpret_cast<char*>(tl.tmp_buf.data());
+  }
+  ss.Get(copy_dest);
+  return {copy_dest, ss.size()};
 }
 
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
@@ -1224,6 +1298,10 @@ uint8_t CompactObj::GetFirstByte() const {
     return u_.small_str.first_byte();
   }
 
+  if (taglen_ == SDS_TTL_TAG) {
+    return u_.sds_ttl.sds_ptr[0];
+  }
+
   if (taglen_ == EXTERNAL_TAG) {
     if (u_.ext_ptr.is_cool) {
       const CompactObj& cooled_obj = u_.ext_ptr.cool_record->value;
@@ -1234,6 +1312,96 @@ uint8_t CompactObj::GetFirstByte() const {
 
   LOG(DFATAL) << "Bad tag " << int(taglen_);
   return 0;
+}
+
+bool CompactObj::GetByteAtIndex(size_t idx, uint8_t* res) const {
+  CHECK(!IsExternal());
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  if (encoding_) {
+    StrEncoding str_encoding = GetStrEncoding();
+    string_view decode_blob = GetEncodedBlob(str_encoding, nullptr);
+
+    if (!str_encoding.DecodeByte(decode_blob, idx, res)) {
+      VLOG(1) << "Offset out of bounds for encoded string: " << idx
+              << " >= " << str_encoding.DecodedSize(decode_blob.size(), decode_blob[0]);
+      *res = 0;
+      return false;
+    }
+    return true;
+  }
+
+  // No encoding, we can directly access the byte at index.
+  string_view sv = GetSlice(&tl.tmp_str);
+  if (idx >= sv.size()) {
+    VLOG(1) << "Offset out of bounds: " << idx << " >= " << sv.size();
+    *res = 0;
+    return false;
+  }
+  *res = sv[idx];
+  return true;
+}
+
+std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
+  CHECK(!IsExternal());
+  DCHECK_EQ(ObjType(), OBJ_STRING);
+
+  // Inline string without encoding: modify directly.
+  if (IsInline() && !encoding_) {
+    if (idx >= taglen_) {
+      VLOG(1) << "Offset out of bounds for inline string: " << idx << " >= " << int(taglen_);
+      return {false, false};
+    }
+    u_.inline_str[idx] = val;
+    return {true, true};
+  }
+
+  // SDS_TTL_TAG raw string without encoding: modify directly.
+  if (taglen_ == SDS_TTL_TAG && !encoding_) {
+    size_t len = sdslen(u_.sds_ttl.sds_ptr);
+    if (idx >= len) {
+      return {false, false};
+    }
+    u_.sds_ttl.sds_ptr[idx] = val;
+    return {true, true};
+  }
+
+  // ROBJ_TAG raw string without encoding: modify the underlying buffer directly.
+  if (taglen_ == ROBJ_TAG && !encoding_) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    if (idx >= u_.r_obj.Size()) {
+      VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.r_obj.Size();
+      return {false, false};
+    }
+    reinterpret_cast<char*>(u_.r_obj.inner_obj())[idx] = val;
+    return {true, true};
+  }
+
+  // For ASCII encoded ROBJ strings we can modify the underlying buffer directly.
+  if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) && taglen_ == ROBJ_TAG &&
+      absl::ascii_isascii(val)) {
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    auto* buf = reinterpret_cast<uint8_t*>(u_.r_obj.inner_obj());
+    size_t decoded_len = GetStrEncoding().DecodedSize(u_.r_obj.Size(), buf[0]);
+    if (idx >= decoded_len) {
+      VLOG(1) << "Offset out of bounds for ASCII encoded string: " << idx << " >= " << decoded_len;
+      return {false, false};
+    }
+    detail::ascii_pack_byte(buf, decoded_len, idx, val);
+    return {true, true};
+  }
+
+  // For other encoded strings, INT_TAG, SMALL_TAG we need to decode, modify, and re-encode.
+  string str;
+  GetString(&str);
+  if (idx >= str.size()) {
+    VLOG(1) << "Offset out of bounds: " << idx << " >= " << str.size();
+    return {false, false};
+  }
+  str[idx] = val;
+  SetString(str);
+  return {true, false};
 }
 
 // Frees all resources if owns.
@@ -1254,6 +1422,12 @@ void CompactObj::Free() {
     }
   } else if (taglen_ == SBF_TAG) {
     DeleteMR<SBF>(u_.sbf);
+  } else if (taglen_ == TOPK_TAG) {
+    DeleteMR<TOPK>(u_.topk);
+  } else if (taglen_ == CMS_TAG) {
+    DeleteMR<CMS>(u_.cms);
+  } else if (taglen_ == SDS_TTL_TAG) {
+    sdsfree(u_.sds_ttl.sds_ptr);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
@@ -1286,34 +1460,21 @@ size_t CompactObj::MallocUsed(bool slow) const {
   if (taglen_ == SBF_TAG) {
     return u_.sbf->MallocUsed();
   }
+
+  if (taglen_ == CMS_TAG) {
+    return u_.cms->MallocUsed();
+  }
+
+  if (taglen_ == SDS_TTL_TAG) {
+    return sdsAllocSize(u_.sds_ttl.sds_ptr);
+  }
+
+  if (taglen_ == TOPK_TAG) {
+    return u_.topk->MallocUsed();
+  }
+
   LOG(DFATAL) << "should not reach";
   return 0;
-}
-
-bool CompactObj::operator==(const CompactObj& o) const {
-  DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
-
-  uint8_t m1 = encoding_;
-  uint8_t m2 = o.encoding_;
-  // TODO: Dangerous with dynamic encoding rules as equal values can have different encodings
-  if (m1 != m2)
-    return false;
-
-  if (taglen_ != o.taglen_)
-    return false;
-
-  if (taglen_ == ROBJ_TAG)
-    return u_.r_obj.Equal(o.u_.r_obj);
-
-  if (taglen_ == INT_TAG)
-    return u_.ival == o.u_.ival;
-
-  if (taglen_ == SMALL_TAG)
-    return u_.small_str.Equal(o.u_.small_str);
-
-  DCHECK(IsInline() && o.IsInline());
-
-  return memcmp(u_.inline_str, o.u_.inline_str, taglen_) == 0;
 }
 
 bool CompactObj::CmpNonInline(std::string_view sv) const {
@@ -1325,6 +1486,8 @@ bool CompactObj::CmpNonInline(std::string_view sv) const {
       return u_.r_obj.Equal(sv);
     case SMALL_TAG:
       return u_.small_str.Equal(sv);
+    case SDS_TTL_TAG:
+      return u_.sds_ttl.view() == sv;
     default:
       break;
   }
@@ -1377,6 +1540,17 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       return false;
 
     return detail::compare_packed(to_byte(u_.r_obj.inner_obj()), sv.data(), sv.size());
+  }
+
+  if (taglen_ == SDS_TTL_TAG) {
+    size_t sds_len = sdslen(u_.sds_ttl.sds_ptr);
+    if (sds_len != encode_len)
+      return false;
+
+    if (!detail::validate_ascii_fast(sv.data(), sv.size()))
+      return false;
+
+    return detail::compare_packed(to_byte(u_.sds_ttl.sds_ptr), sv.data(), sv.size());
   }
 
   if (taglen_ == JSON_TAG) {
@@ -1536,12 +1710,20 @@ std::array<std::string_view, 2> CompactObj::GetRawString() const {
     return u_.small_str.Get();
   }
 
+  if (taglen_ == SDS_TTL_TAG) {
+    return {u_.sds_ttl.view(), {}};
+  }
+
   LOG(FATAL) << "Unsupported tag for GetRawString(): " << int(taglen_);
   return {};
 }
 
 MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
+}
+
+string_view CompactObj::SdsTtlString::view() const {
+  return string_view{sds_ptr, sdslen(sds_ptr)};
 }
 
 bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
@@ -1582,12 +1764,12 @@ bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
   return flat.DefragIfNeeded(page_usage);
 }
 
-constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] =
-    {
-        {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
-        {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
-        {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
-        {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
+constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] = {
+    {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},     {OBJ_SET, "set"sv},
+    {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},     {OBJ_STREAM, "stream"sv},
+    {OBJ_KEY, "key"sv},  // pseudo-type used for memory tracking
+    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}, {OBJ_CMS, "CMSk-TYPE"sv},
+    {OBJ_TOPK, "TopK-TYPE"sv}};
 
 std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {
@@ -1607,6 +1789,65 @@ CompactObjType ObjTypeFromString(std::string_view sv) {
     }
   }
   return kInvalidCompactObjType;
+}
+
+void CompactKey::SetExpireTime(uint64_t abs_ms) {
+  DCHECK(!IsExternal());
+
+  // Already SDS_TTL_TAG — update TTL in place.
+  if (taglen_ == SDS_TTL_TAG) {
+    u_.sds_ttl.exp_ms = abs_ms;
+    return;
+  }
+
+  char* new_sds = nullptr;
+
+  if (IsInline()) {
+    new_sds = sdsnewlen(u_.inline_str, taglen_);
+    // encoding_ preserved as-is.
+  } else if (taglen_ == INT_TAG) {
+    absl::AlphaNum an(u_.ival);
+    new_sds = sdsnewlen(an.data(), an.size());
+    encoding_ = NONE_ENC;
+  } else if (taglen_ == SMALL_TAG) {
+    size_t total = u_.small_str.size();
+    new_sds = sdsnewlen(nullptr, total);
+    u_.small_str.Get(new_sds);
+    tl.small_str_bytes -= u_.small_str.MallocUsed();
+    u_.small_str.Free();
+  } else if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    auto view = u_.r_obj.AsView();
+    new_sds = sdsnewlen(view.data(), view.size());
+    u_.r_obj.Free(tl.local_mr);
+  } else {
+    LOG(FATAL) << "Unexpected tag for SetExpireTime: " << int(taglen_);
+  }
+
+  u_.sds_ttl.sds_ptr = new_sds;
+  u_.sds_ttl.exp_ms = abs_ms;
+  taglen_ = SDS_TTL_TAG;
+}
+
+bool CompactKey::ClearExpireTime() {
+  if (taglen_ != SDS_TTL_TAG)
+    return false;
+  DCHECK(!IsExternal());
+
+  string decoded;
+  GetString(&decoded);
+  SetMeta(0, mask_);
+  encoding_ = NONE_ENC;
+
+  SetString(decoded);
+  return true;
+}
+
+uint64_t CompactKey::GetExpireTime() const {
+  if (taglen_ != SDS_TTL_TAG)
+    return 0;
+  DCHECK(!IsExternal());
+  return u_.sds_ttl.exp_ms;
 }
 
 size_t CompactObj::StrEncoding::DecodedSize(string_view blob) const {
@@ -1648,6 +1889,35 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
   return decoded_len;
 }
 
+bool CompactObj::StrEncoding::DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const {
+  if (blob.empty()) {
+    return false;
+  }
+  size_t decoded_len = DecodedSize(blob);
+  if (idx >= decoded_len) {
+    return false;
+  }
+  switch (enc_) {
+    case NONE_ENC:
+      *dest = blob[idx];
+      break;
+    case ASCII1_ENC:
+    case ASCII2_ENC:
+      *dest = detail::ascii_unpack_byte(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len,
+                                        idx);
+      break;
+    case HUFFMAN_ENC: {
+      std::string decoded_huff_string(decoded_len, 0);
+      auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
+      const auto& decoder = tl.GetHuffmanDecoder(domain);
+      decoder.Decode(blob.substr(1), decoded_len, decoded_huff_string.data());
+      *dest = decoded_huff_string[idx];
+      break;
+    }
+  };
+  return true;
+}
+
 StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
   switch (enc_) {
     case NONE_ENC:
@@ -1660,6 +1930,59 @@ StringOrView CompactObj::StrEncoding::Decode(std::string_view blob) const {
     }
   }
   return {};
+}
+
+/* Create a new stream data structure. */
+stream* streamNew() {
+  stream* s = (stream*)zmalloc(sizeof(stream));
+  s->rax = raxNew();
+  s->length = 0;
+  s->first_id.ms = 0;
+  s->first_id.seq = 0;
+  s->last_id.ms = 0;
+  s->last_id.seq = 0;
+  s->max_deleted_entry_id.seq = 0;
+  s->max_deleted_entry_id.ms = 0;
+  s->entries_added = 0;
+  s->cgroups = NULL; /* Created on demand to save memory when not used. */
+  return s;
+}
+
+/* Free a consumer and associated data structures. Note that this function
+ * will not reassign the pending messages associated with this consumer
+ * nor will delete them from the stream, so when this function is called
+ * to delete a consumer, and not when the whole stream is destroyed, the caller
+ * should do some work before. */
+static void streamFreeConsumer(streamConsumer* sc) {
+  raxFree(sc->pel); /* No value free callback: the PEL entries are shared
+                       between the consumer and the main stream PEL. */
+  sdsfree(sc->name);
+  zfree(sc);
+}
+
+/* Used for generic free functions. */
+static void streamFreeConsumerVoid(void* sc) {
+  streamFreeConsumer((streamConsumer*)sc);
+}
+
+/* Used for generic free functions. */
+static void streamFreeCGVoid(void* cg_) {
+  streamCG* cg = (streamCG*)cg_;
+  raxFreeWithCallback(cg->pel, zfree);
+  raxFreeWithCallback(cg->consumers, streamFreeConsumerVoid);
+  zfree(cg);
+}
+
+static void lpFreeVoid(void* lp) {
+  lpFree((uint8_t*)lp);
+}
+
+/* Free a stream, including the listpacks stored inside the radix tree. */
+void freeStream(stream* s) {
+  raxFreeWithCallback(s->rax, lpFreeVoid);
+  if (s->cgroups)
+    raxFreeWithCallback(s->cgroups, streamFreeCGVoid);
+  zfree(s);
 }
 
 }  // namespace dfly

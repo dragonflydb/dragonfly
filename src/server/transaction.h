@@ -348,7 +348,7 @@ class Transaction {
   std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
   // Write a journal entry to a shard journal with the given payload.
-  void LogJournalOnShard(journal::Entry::Payload&& payload, uint32_t shard_cnt) const;
+  void LogJournalOnShard(journal::Entry::Payload&& payload) const;
 
   // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
   void ReviveAutoJournal();
@@ -431,8 +431,8 @@ class Transaction {
 
   // State of a multi transaction.
   struct MultiData {
-    MultiRole role;
-    MultiMode mode;
+    MultiRole role = MultiRole::DEFAULT;
+    MultiMode mode = MultiMode::NOT_DETERMINED;
     std::optional<IntentLock::Mode> lock_mode;
 
     // Unique normalized fingerprints used for scheduling the multi transaction.

@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <memory>
+
+#include "core/search/mrmw_mutex.h"
 #include "core/search/search.h"
 
 namespace dfly::search {
@@ -11,7 +14,10 @@ namespace dfly::search {
 // Metadata structure for HNSW index serialization
 // Contains the key parameters needed to restore the index state
 struct HnswIndexMetadata {
-  size_t max_elements = 0;       // Maximum number of elements the index can hold
+  size_t max_elements = 0;  // Maximum number of elements the index can hold
+  // Note: cur_element_count may be smaller than actual node count during concurrent writes,
+  // so we compute the real requirement from nodes during restoration.
+  // TODO: consider removing it from metadata and rely entirely on node data for restoration.
   size_t cur_element_count = 0;  // Current number of elements in the index
   int maxlevel = -1;             // Maximum level of the graph
   size_t enterpoint_node = 0;    // Entry point node for the graph
@@ -45,7 +51,8 @@ class HnswVectorIndex {
   ~HnswVectorIndex();
 
   bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
-  void Remove(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+
+  void Remove(search::GlobalDocId id);
 
   bool IsVectorCopied() const {
     return copy_vector_;
@@ -55,6 +62,15 @@ class HnswVectorIndex {
                                                  std::optional<size_t> ef) const;
   std::vector<std::pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                                  const std::vector<GlobalDocId>& allowed) const;
+  std::vector<std::pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+                                                       const std::vector<GlobalDocId>& docs) const;
+
+  // Returns all documents within radius, with their distances.
+  std::vector<std::pair<float, GlobalDocId>> RangeQuery(float* target, float radius) const;
+
+  size_t GetDim() const {
+    return dim_;
+  }
 
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
@@ -78,10 +94,13 @@ class HnswVectorIndex {
   // This populates the vector data for a node that already has graph links
   bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field);
 
+  // Acquire a read lock on the internal MRMW mutex.
+  // Use this during serialization to block concurrent Add/Remove (write) operations.
+  MRMWMutexLock GetReadLock() const;
+
  private:
   bool copy_vector_;
   size_t dim_;
-  VectorSimilarity sim_;
   std::unique_ptr<HnswlibAdapter> adapter_;
 };
 

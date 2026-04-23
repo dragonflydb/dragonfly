@@ -7,7 +7,6 @@
 #include <system_error>
 
 #include "base/logging.h"
-#include "glog/logging.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/error.h"
@@ -75,12 +74,12 @@ void JournalWriter::Write(const journal::Entry& entry) {
     case journal::Op::PING:
       return;
     case journal::Op::COMMAND:
-    case journal::Op::EXPIRED:
       Write(entry.txid);
-      Write(entry.shard_cnt);
+      Write(1u);  // deprecated field, kept for backward compatibility.
       Write(entry.payload);
       break;
     default:
+      LOG(FATAL) << "Unknown journal opcode: " << static_cast<int>(entry.opcode);
       break;
   };
 }
@@ -226,7 +225,9 @@ std::error_code JournalReader::ReadEntry(journal::ParsedEntry* dest) {
   }
 
   SET_OR_RETURN(ReadUInt<uint64_t>(), dest->txid);
-  SET_OR_RETURN(ReadUInt<uint32_t>(), dest->shard_cnt);
+  [[maybe_unused]] uint32_t unused;
+
+  SET_OR_RETURN(ReadUInt<uint32_t>(), unused);
 
   VLOG(1) << "Read entry " << dest->ToString();
 

@@ -5,8 +5,10 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/common.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -22,19 +24,22 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 
+#include <bit>
+#include <cmath>
 #include <cstring>
 
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/bloom.h"
+#include "core/cms.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/json/json_object.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
-#include "facade/reply_capture.h"
+#include "core/topk.h"
 #include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -53,6 +58,7 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/stream_family.h"
 #include "server/transaction.h"
+#include "server/zset_family.h"
 #include "strings/human_readable.h"
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
@@ -74,6 +80,49 @@ using namespace tiering::literals;
 
 namespace {
 
+int64_t LpGetIntegerIfValid(unsigned char* ele, int* valid) {
+  int64_t v = 0;
+  *valid = lpGetInteger(ele, &v);
+  return v;
+}
+
+// Returns 1 if the stream listpack entries structure is valid, 0 otherwise.
+int StreamValidateListpackIntegrity(unsigned char* lp, size_t size) {
+  int valid_record;
+  unsigned char *p, *next;
+
+  if (!lpValidateIntegrity(lp, size, 0, NULL, NULL))
+    return 0;
+
+  next = p = lpValidateFirst(lp);
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+  if (!p)
+    return 0;
+
+  LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+
+  LpGetIntegerIfValid(p, &valid_record);
+  if (!valid_record)
+    return 0;
+  p = next;
+  if (!lpValidateNext(lp, &next, size))
+    return 0;
+  return 1;
+}
+
 // Maximum length of each LoadTrace segment.
 //
 // Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
@@ -85,50 +134,6 @@ inline auto Unexpected(errc ev) {
 }
 
 const error_code kOk;
-
-struct ZiplistCbArgs {
-  long count = 0;
-  absl::flat_hash_set<string_view> fields;
-  unsigned char** lp;
-};
-
-/* callback for hashZiplistConvertAndValidateIntegrity.
- * Check that the ziplist doesn't have duplicate hash field names.
- * The ziplist element pointed by 'p' will be converted and stored into listpack. */
-int ziplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
-  unsigned char* str;
-  unsigned int slen;
-  long long vll;
-
-  ZiplistCbArgs* data = (ZiplistCbArgs*)userdata;
-
-  if (data->fields.empty()) {
-    data->fields.reserve(head_count / 2);
-  }
-
-  if (!ziplistGet(p, &str, &slen, &vll))
-    return 0;
-
-  /* Even records are field names, add to dict and check that's not a dup */
-  if (((data->count) & 1) == 0) {
-    sds field = str ? sdsnewlen(str, slen) : sdsfromlonglong(vll);
-    auto [_, inserted] = data->fields.emplace(field, sdslen(field));
-    if (!inserted) {
-      /* Duplicate, return an error */
-      sdsfree(field);
-      return 0;
-    }
-  }
-
-  if (str) {
-    *(data->lp) = lpAppend(*(data->lp), (unsigned char*)str, slen);
-  } else {
-    *(data->lp) = lpAppendInteger(*(data->lp), vll);
-  }
-
-  (data->count)++;
-  return 1;
-}
 
 /* callback for ziplistValidateIntegrity.
  * The ziplist element pointed by 'p' will be converted and stored into listpack. */
@@ -148,29 +153,6 @@ int ziplistEntryConvertAndValidate(unsigned char* p, unsigned int head_count, vo
 
   return 1;
 }
-
-/* Validate the integrity of the data structure while converting it to
- * listpack and storing it at 'lp'.
- * The function is safe to call on non-validated ziplists, it returns 0
- * when encounter an integrity validation issue. */
-int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsigned char** lp) {
-  /* Keep track of the field names to locate duplicate ones */
-  ZiplistCbArgs data;
-  data.lp = lp;
-
-  int ret = ziplistValidateIntegrity(const_cast<uint8_t*>(zl), size, 1,
-                                     ziplistPairsEntryConvertAndValidate, &data);
-
-  /* make sure we have an even number of records. */
-  if (data.count & 1)
-    ret = 0;
-
-  for (auto field : data.fields) {
-    sdsfree((sds)field.data());
-  }
-  return ret;
-}
-
 string ModuleTypeName(uint64_t module_id) {
   static const char ModuleNameSet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -193,7 +175,8 @@ string ModuleTypeName(uint64_t module_id) {
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
-         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2;
+         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS ||
+         type == RDB_TYPE_TOPK;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -216,6 +199,8 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
   void operator()(const RdbSBF& src);
+  void operator()(const RdbCMS& src);
+  void operator()(const RdbTOPK& src);
 
   std::error_code ec() const {
     return ec_;
@@ -305,20 +290,65 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
-  SBF* sbf =
-      CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+  SBF* sbf = config_.append ? pv_->GetSBF()
+                            : CompactObj::AllocateMR<SBF>(
+                                  src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
                                   src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
-    sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
+    const auto& blob = src.filters[i].blob;
+    auto* ptr = sbf->AllocateFilter(blob.size(), src.filters[i].hash_cnt);
+    memcpy(ptr, blob.data(), blob.size());
   }
-  pv_->SetSBF(sbf);
+
+  // new obj
+  if (!config_.append)
+    pv_->SetSBF(sbf);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTOPK& src) {
+  TOPK* topk = CompactObj::AllocateMR<TOPK>(CompactObj::memory_resource(), src.k, src.width,
+                                            src.depth, src.decay);
+
+  TOPK::SerializedData data;
+  data.k = src.k;
+  data.width = src.width;
+  data.depth = src.depth;
+  data.decay = src.decay;
+
+  // Convert heap items from pairs to TopKItem structs
+  for (const auto& [item_str, count] : src.heap_items) {
+    data.heap_items.push_back({count, item_str});
+  }
+
+  // Convert counter data
+  if (!src.counters_buffer.empty()) {
+    const size_t sz = src.counters_buffer.size();
+    DCHECK_EQ(sz % sizeof(uint32_t), 0u);
+    const size_t counter_count = sz / sizeof(uint32_t);
+    data.counters.resize(counter_count);
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(src.counters_buffer.data());
+
+    for (size_t i = 0; i < counter_count; ++i) {
+      data.counters[i] = absl::little_endian::Load32(bytes + (i * sizeof(uint32_t)));
+    }
+  }
+
+  topk->Deserialize(data);
+  pv_->SetTOPK(topk);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbCMS& src) {
+  CMS* cms = CompactObj::AllocateMR<CMS>(src.width, src.depth, CompactObj::memory_resource());
+  DCHECK_EQ(src.counters.size(), cms->NumCounters());
+  cms->Load(src.total_incr_count, src.counters.data());
+  pv_->SetCMS(cms);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size();
 
   bool is_intset = true;
-  if (!config_.streamed && rdb_type_ == RDB_TYPE_HASH &&
+  if (!config_.chunked && rdb_type_ == RDB_TYPE_SET &&
       ltrace->arr.size() <= SetFamily::MaxIntsetEntries()) {
     Iterate(*ltrace, [&](const LoadBlob& blob) {
       if (!holds_alternative<long long>(blob.rdb_var)) {
@@ -329,7 +359,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     });
   } else {
     /* Use a regular set when there are too many entries, or when the
-     * set is being streamed. */
+     * set is being chunked. */
     is_intset = false;
   }
 
@@ -366,7 +396,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   } else {
     StringSet* set;
     if (config_.append) {
-      // Note we always use StringSet when the object is being streamed.
+      // Note we always use StringSet when the object is being chunked.
       if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
         return;
       }
@@ -439,7 +469,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = !config_.streamed && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
+  bool keep_lp = !config_.chunked && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -642,7 +672,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
   detail::SortedMap* zs;
   if (config_.append) {
-    // Note we always use SortedMap when the object is being streamed.
+    // Note we always use SortedMap when the object is being chunked.
     if (!EnsureObjEncoding(OBJ_ZSET, OBJ_ENCODING_SKIPLIST)) {
       return;
     }
@@ -690,7 +720,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (!config_.streamed && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
+  if (!config_.chunked && zs->Size() <= ZSET_MAX_LISTPACK_ENTRIES &&
       maxelelen <= ZSET_MAX_LISTPACK_VALUE && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
@@ -718,7 +748,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   auto cleanup = absl::Cleanup([&] {
-    if (config_.append) {
+    if (!config_.append) {
       freeStream(s);
     }
   });
@@ -729,20 +759,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
     uint8_t* lp = (uint8_t*)data.data();
 
-    if (!streamValidateListpackIntegrity(lp, data.size(), 0)) {
+    if (!StreamValidateListpackIntegrity(lp, data.size())) {
       LOG(ERROR) << "Stream listpack integrity check failed.";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
     }
-    unsigned char* first = lpFirst(lp);
-    if (first == NULL) {
-      /* Serialized listpacks should never be empty, since on
-       * deletion we should remove the radix tree key if the
-       * resulting listpack is empty. */
-      LOG(ERROR) << "Empty listpack inside stream";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
+    CHECK(lpFirst(lp) != NULL);
     uint8_t* copy_lp = (uint8_t*)zmalloc(data.size());
     ::memcpy(copy_lp, lp, data.size());
     /* Insert the key in the radix tree. */
@@ -859,6 +881,25 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
+  auto handle_load_result = [&](LoadBlobResult load_result) {
+    switch (load_result) {
+      case LoadBlobResult::kCorrupted:
+        LOG(ERROR) << "Corrupted blob detected with size " << blob.size() << " for rdb type "
+                   << rdb_type_;
+        ec_ = RdbError(errc::rdb_file_corrupted);
+        break;
+      case LoadBlobResult::kOutOfMemory:
+        LOG(ERROR) << "OOM in LoadBlob " << blob.size();
+        ec_ = RdbError(errc::out_of_memory);
+        break;
+      case LoadBlobResult::kEmpty:
+        ec_ = RdbError(errc::empty_key);
+        break;
+      default:
+        break;
+    }
+  };
+
   if (rdb_type_ == RDB_TYPE_STRING) {
     if (config_.append) {
       pv_->AppendString(blob);
@@ -871,130 +912,28 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     return;
   }
 
-  if (rdb_type_ == RDB_TYPE_SET_INTSET) {
-    if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
-      LOG(ERROR) << "Intset integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
-
-    const intset* is = (const intset*)blob.data();
-
-    unsigned len = intsetLen(is);
-
-    if (len > SetFamily::MaxIntsetEntries()) {
-      StringSet* set = SetFamily::ConvertToStrSet(is, len);
-
-      if (!set) {
-        LOG(ERROR) << "OOM in ConvertToStrSet " << len;
-        ec_ = RdbError(errc::out_of_memory);
-        return;
-      }
-      pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
-    } else {
-      intset* mine = (intset*)zmalloc(blob.size());
-      ::memcpy(mine, blob.data(), blob.size());
-      pv_->InitRobj(OBJ_SET, kEncodingIntSet, mine);
-    }
-  } else if (rdb_type_ == RDB_TYPE_SET_LISTPACK) {
-    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-      LOG(ERROR) << "ListPack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
-
-    unsigned char* lp = (unsigned char*)blob.data();
-    StringSet* set = CompactObj::AllocateMR<StringSet>();
-    for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-      unsigned char field_buf[LP_INTBUF_SIZE];
-      string_view elem = detail::ListpackWrap::GetView(cur, field_buf);
-      if (!set->Add(elem)) {
-        LOG(ERROR) << "Duplicate member " << elem;
-        ec_ = RdbError(errc::duplicate_key);
-        break;
-      }
-    }
-    if (ec_) {
-      CompactObj::DeleteMR<StringSet>(set);
-      return;
-    }
-    pv_->InitRobj(OBJ_SET, kEncodingStrMap2, set);
-  } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
-    unsigned char* lp = lpNew(blob.size());
-    switch (rdb_type_) {
-      case RDB_TYPE_HASH_ZIPLIST:  // legacy format
-        if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(),
-                                                     &lp)) {
-          LOG(ERROR) << "Zset ziplist integrity check failed.";
-          zfree(lp);
-          ec_ = RdbError(errc::rdb_file_corrupted);
-          return;
-        }
-        break;
-      case RDB_TYPE_HASH_LISTPACK:
-        if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-          LOG(ERROR) << "ListPack integrity check failed.";
-          zfree(lp);
-          ec_ = RdbError(errc::rdb_file_corrupted);
-          return;
-        }
-        std::memcpy(lp, blob.data(), blob.size());
-        break;
-    }
-
-    if (lpLength(lp) == 0) {
-      lpFree(lp);
-      ec_ = RdbError(errc::empty_key);
-      return;
-    }
-
-    if (lpBytes(lp) > server.max_listpack_map_bytes) {
-      StringMap* sm = HSetFamily::ConvertToStrMap(lp);
-      lpFree(lp);
-      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
-    } else {
-      lp = lpShrinkToFit(lp);
-      pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
-    }
+  if (rdb_type_ == RDB_TYPE_SET_INTSET || rdb_type_ == RDB_TYPE_SET_LISTPACK) {
+    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_SET_INTSET
+                                     ? SetFamily::LoadIntSetBlob(blob, pv_)
+                                     : SetFamily::LoadLPSetBlob(blob, pv_);
+    handle_load_result(load_result);
     return;
-  } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {  // legacy format
-    unsigned char* lp = lpNew(blob.size());
-    if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {
-      LOG(ERROR) << "Zset ziplist integrity check failed.";
-      zfree(lp);
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
+  }
 
-    if (lpLength(lp) == 0) {
-      lpFree(lp);
-      ec_ = RdbError(errc::empty_key);
-      return;
-    }
-
-    unsigned encoding = OBJ_ENCODING_LISTPACK;
-    void* inner;
-    if (lpBytes(lp) >= server.max_listpack_map_bytes) {
-      inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp);
-      lpFree(lp);
-      encoding = OBJ_ENCODING_SKIPLIST;
-    } else {
-      lp = lpShrinkToFit(lp);
-      inner = lp;
-    }
-    pv_->InitRobj(OBJ_ZSET, encoding, inner);
+  if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
+    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_HASH_ZIPLIST
+                                     ? HSetFamily::LoadZiplistBlob(blob, pv_)
+                                     : HSetFamily::LoadListpackBlob(blob, pv_);
+    handle_load_result(load_result);
     return;
-  } else if (rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
-    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
-      LOG(ERROR) << "ListPack integrity check failed.";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      return;
-    }
-    unsigned char* src_lp = (unsigned char*)blob.data();
-    unsigned long long bytes = lpBytes(src_lp);
-    unsigned char* lp = (uint8_t*)zmalloc(bytes);
-    std::memcpy(lp, src_lp, bytes);
-    pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+  }
+
+  if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST || rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
+    LoadBlobResult load_result = rdb_type_ == RDB_TYPE_ZSET_ZIPLIST
+                                     ? ZSetFamily::LoadZiplistBlob(blob, pv_)
+                                     : ZSetFamily::LoadListpackBlob(blob, pv_);
+    handle_load_result(load_result);
+    return;
   } else if (rdb_type_ == RDB_TYPE_JSON) {
     size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     {
@@ -1070,7 +1009,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   DVLOG(3) << "Copying " << to_copy << " bytes";
 
   ::memcpy(next, mem_buf_->InputBuffer().data(), to_copy);
-  mem_buf_->ConsumeInput(to_copy);
+  RETURN_ON_ERR(ConsumeInput(to_copy));
   size -= to_copy;
   if (size == 0)
     return kOk;
@@ -1086,6 +1025,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   if (size > 512) {  // Worth reading directly into next.
     io::MutableBytes mb{next, size};
 
+    RETURN_ON_ERR(ConsumeChunkBudget(size));
     SET_OR_RETURN(src_->Read(mb), bytes_read);
     if (bytes_read < size)
       return RdbError(errc::rdb_file_corrupted);
@@ -1115,7 +1055,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
 
   mem_buf_->CommitWrite(bytes_read);
   ::memcpy(next, mem_buf_->InputBuffer().data(), size);
-  mem_buf_->ConsumeInput(size);
+  RETURN_ON_ERR(ConsumeInput(size));
 
   return kOk;
 }
@@ -1211,8 +1151,11 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
 
   // FetchBuf consumes the input but if we have not went through that path
   // we need to consume now.
-  if (zerocopy_decompress)
-    mem_buf_->ConsumeInput(clen);
+  if (zerocopy_decompress) {
+    if (auto ec = ConsumeInput(clen); ec) {
+      return make_unexpected(ec);
+    }
+  }
 
   return res;
 }
@@ -1231,20 +1174,15 @@ auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
 }
 
 io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
-  union {
-    uint64_t val;
-    double d;
-  } u;
-
-  static_assert(sizeof(u) == sizeof(uint64_t));
-  auto ec = EnsureRead(8);
-  if (ec)
+  if (auto ec = EnsureRead(8))
     return make_unexpected(ec);
 
+  if (auto ec = ConsumeChunkBudget(8))
+    return make_unexpected(ec);
   uint8_t buf[8];
   mem_buf_->ReadAndConsume(8, buf);
-  u.val = base::LE::LoadT<uint64_t>(buf);
-  return u.d;
+  const uint64_t val = base::LE::LoadT<uint64_t>(buf);
+  return std::bit_cast<double>(val);
 }
 
 io::Result<double> RdbLoaderBase::FetchDouble() {
@@ -1331,6 +1269,12 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       break;
     case RDB_TYPE_SBF2:
       iores = ReadSBF2();
+      break;
+    case RDB_TYPE_TOPK:
+      iores = ReadTOPK();
+      break;
+    case RDB_TYPE_CMS:
+      iores = ReadCMS();
       break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
@@ -1449,17 +1393,20 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min(len, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; i++) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); i++) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec) {
       return make_unexpected(ec);
     }
   }
+  // cut off extra elements we allocated but stopped short due to budget
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1530,16 +1477,18 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1565,7 +1514,8 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
@@ -1580,11 +1530,12 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     }
     load_trace->arr[i].score = score;
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (zsetlen > n) {
-    pending_read_.remaining = zsetlen - n;
+  if (zsetlen > i) {
+    pending_read_.remaining = zsetlen - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1609,7 +1560,8 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   // therefore using a smaller segment length than kMaxBlobLen.
   size_t n = std::min<size_t>(len, 512);
   load_trace->arr.resize(n);
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
     if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
       SET_OR_UNEXPECT(LoadLen(nullptr), container);
@@ -1632,11 +1584,12 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->arr[i].rdb_var = std::move(var);
     load_trace->arr[i].encoding = container;
   }
+  load_trace->arr.resize(i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
-  if (len > n) {
-    pending_read_.remaining = len - n;
+  if (len > i) {
+    pending_read_.remaining = len - i;
   } else if (pending_read_.remaining > 0) {
     pending_read_.remaining = 0;
   }
@@ -1659,7 +1612,10 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   load_trace->arr.resize(n * 2);
 
   error_code ec;
-  for (size_t i = 0; i < n; ++i) {
+  size_t i = 0;
+  // The sender always sends stream id and blob together, there is no flush between. So the budget
+  // check is not midway between the two entries.
+  for (; i < n && !ChunkBudgetExhausted(); ++i) {
     /* Get the master ID, the one we'll use as key of the radix tree
      * node: the entries inside the listpack itself are delta-encoded
      * relatively to this ID. */
@@ -1684,14 +1640,15 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->arr[2 * i].rdb_var = std::move(stream_id);
     load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
   }
+  load_trace->arr.resize(2 * i);
 
   // If there are still unread elements, cache the number of remaining
   // elements, or clear if the full object has been read.
   //
   // We only load the stream metadata and consumer groups in the final read,
   // so if there are still unread elements return the partial stream.
-  if (listpacks > n) {
-    pending_read_.remaining = listpacks - n;
+  if (listpacks > i) {
+    pending_read_.remaining = listpacks - i;
     return OpaqueObj{std::move(load_trace), rdbtype};
   }
 
@@ -1867,62 +1824,116 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
 
-auto RdbLoaderBase::ReadSBFImpl(bool chunking) -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj> {
   RdbSBF res;
-  uint64_t options;
-  SET_OR_UNEXPECT(LoadLen(nullptr), options);
-  if (options != 0)
-    return Unexpected(errc::rdb_file_corrupted);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-  SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-  if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
-  SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
-
-  unsigned num_filters = 0;
-  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
   auto is_power2 = [](size_t n) { return (n & (n - 1)) == 0; };
 
-  for (unsigned i = 0; i < num_filters; ++i) {
+  unsigned num_filters = 0;
+
+  // Only read SBF metadata if not continuing.
+  if (!pending_read_.sbf_filter.has_value() && pending_read_.remaining == 0) {
+    uint64_t options;
+    SET_OR_UNEXPECT(LoadLen(nullptr), options);
+    if (options != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
+    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
+    SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+  } else {
+    num_filters = pending_read_.remaining;
+    pending_read_.remaining = 0;
+  }
+
+  // Read one SBF filter encoded as [chunk_size][chunk_data][chunk_size][chunk_data] up to a total
+  // size which is the size of the `data` string.
+  // We may stop between chunks if the outer tagged chunk ends.
+  auto read_filter_chunks = [&](string& data, size_t start_offset) -> io::Result<size_t> {
+    // data size never changes after initial reserve, we memcpy directly into it in FetchBuf
+    const size_t total = data.size();
+    size_t curr_offset = start_offset;
+    while (curr_offset < total && !ChunkBudgetExhausted()) {
+      auto chunk_res = LoadLen(nullptr);
+      if (!chunk_res)
+        return make_unexpected(chunk_res.error());
+      const size_t chunk_size = *chunk_res;
+      if (chunk_size == 0 || chunk_size > total - curr_offset)
+        return Unexpected(errc::rdb_file_corrupted);
+      if (auto ec = FetchBuf(chunk_size, data.data() + curr_offset))
+        return make_unexpected(ec);
+      curr_offset += chunk_size;
+    }
+    return curr_offset;
+  };
+
+  // Adds a fully read filter into the SBF object after size validation
+  auto append_filter = [&](unsigned hash_cnt, string filter_data) -> error_code {
+    if (const size_t bit_len = filter_data.size() * 8; !is_power2(bit_len) || filter_data.empty())
+      return RdbError(errc::rdb_file_corrupted);
+    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    return {};
+  };
+
+  // First, complete a partially read filter from the previous state if there is one
+  // In this code path num_filters still includes the partially read filter. So num_filters is
+  // decremented only once the current filter is fully read.
+  if (pending_read_.sbf_filter) {
+    auto& sf = *pending_read_.sbf_filter;
+
+    SET_OR_UNEXPECT(read_filter_chunks(sf.filter_data, sf.offset), sf.offset);
+
+    if (sf.offset < sf.filter_data.size()) {
+      // restore pending_read_ as we did not finish the partially read filter. Also, do not
+      // decrement num_filters. We still need to read the same number of filters next time.
+      pending_read_.remaining = num_filters;
+      return OpaqueObj{std::move(res), RDB_TYPE_SBF};
+    }
+
+    if (auto ec = append_filter(sf.hash_cnt, std::move(sf.filter_data)))
+      return make_unexpected(ec);
+
+    pending_read_.sbf_filter.reset();
+    num_filters--;
+  }
+
+  unsigned filters_read = 0;
+  for (; filters_read < num_filters && !ChunkBudgetExhausted(); ++filters_read) {
     unsigned hash_cnt;
     string filter_data;
     SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
 
-    if (chunking) {
+    if (filter_is_chunked) {
       size_t total_size = 0;
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
-      if (total_size == 0) {
+      if (total_size == 0)
         return Unexpected(errc::rdb_file_corrupted);
-      }
 
+      // This size is fixed and never changes. It acts as a limit of how much to read.
       filter_data.resize(total_size);
       size_t offset = 0;
-      while (offset < total_size) {
-        size_t chunk_size = 0;
-        SET_OR_UNEXPECT(LoadLen(nullptr), chunk_size);
-        if (chunk_size == 0 || chunk_size > total_size - offset) {
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-        error_code ec = FetchBuf(chunk_size, filter_data.data() + offset);
-        if (ec) {
-          return make_unexpected(ec);
-        }
+      SET_OR_UNEXPECT(read_filter_chunks(filter_data, 0), offset);
 
-        offset += chunk_size;
+      if (offset < total_size) {
+        DCHECK(ChunkBudgetExhausted()) << "chunk budget not exhausted but filter read ended early";
+        pending_read_.sbf_filter = {std::move(filter_data), offset, hash_cnt};
+        pending_read_.remaining = num_filters - filters_read;
+        return OpaqueObj{std::move(res), RDB_TYPE_SBF};
       }
     } else {
       SET_OR_UNEXPECT(FetchGenericString(), filter_data);
     }
 
-    size_t bit_len = filter_data.size() * 8;
-    if (!is_power2(bit_len)) {  // must be power of two
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+    if (auto ec = append_filter(hash_cnt, std::move(filter_data)))
+      return make_unexpected(ec);
   }
+
+  pending_read_.remaining = num_filters - filters_read;
   return OpaqueObj{std::move(res), RDB_TYPE_SBF};
 }
 
@@ -1934,12 +1945,116 @@ auto RdbLoaderBase::ReadSBF2() -> io::Result<OpaqueObj> {
   return ReadSBFImpl(true);
 }
 
+auto RdbLoaderBase::ReadTOPK() -> io::Result<OpaqueObj> {
+  RdbTOPK res;
+  uint64_t options;
+
+  // Currently options is a reserved field and set to 0.
+  SET_OR_UNEXPECT(LoadLen(nullptr), options);
+  if (options != 0)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  uint64_t k, width, depth;
+  SET_OR_UNEXPECT(LoadLen(nullptr), k);
+  SET_OR_UNEXPECT(LoadLen(nullptr), width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), depth);
+
+  if ((k == 0) || (width == 0) || (depth == 0) || (k > UINT32_MAX) || (width > UINT32_MAX) ||
+      (depth > UINT32_MAX)) {
+    LOG(ERROR) << "Invalid TOPK parameters: k=" << k << ", width=" << width << ", depth=" << depth;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  // Safely check that width * depth * 4 (sizeof uint32_t) won't overflow size_t
+  if (width > (SIZE_MAX / sizeof(uint32_t)) / depth) {
+    LOG(ERROR) << "TOPK parameters too large: width=" << width << ", depth=" << depth;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  res.k = static_cast<uint32_t>(k);
+  res.width = static_cast<uint32_t>(width);
+  res.depth = static_cast<uint32_t>(depth);
+
+  SET_OR_UNEXPECT(FetchBinaryDouble(), res.decay);
+  if (!std::isfinite(res.decay) || res.decay < 0.0 || res.decay > 1.0) {
+    LOG(ERROR) << "Invalid TOPK decay value: " << res.decay;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  // Load heap items
+  uint64_t heap_size;
+  SET_OR_UNEXPECT(LoadLen(nullptr), heap_size);
+
+  // Validate heap size doesn't exceed k (max items we track)
+  if (heap_size > k)
+    return Unexpected(errc::rdb_file_corrupted);
+
+  res.heap_items.reserve(heap_size);
+  for (uint64_t i{}; i < heap_size; ++i) {
+    std::string item;
+    SET_OR_UNEXPECT(FetchGenericString(), item);
+    uint64_t count;
+    SET_OR_UNEXPECT(LoadLen(nullptr), count);
+
+    // Validate count fits in uint32_t to prevent silent truncation
+    if (count > UINT32_MAX)
+      return Unexpected(errc::rdb_file_corrupted);
+
+    res.heap_items.emplace_back(std::move(item), static_cast<uint32_t>(count));
+  }
+
+  // Load counter data
+  SET_OR_UNEXPECT(FetchGenericString(), res.counters_buffer);
+
+  // Validate counters blob length exactly matches width * depth * sizeof(uint32_t);
+  // TOPK::Deserialize only DCHECKs this, so release builds would index past counters_ otherwise.
+  if (res.counters_buffer.size() != static_cast<size_t>(res.width) * res.depth * sizeof(uint32_t))
+    return Unexpected(errc::rdb_file_corrupted);
+
+  return OpaqueObj{std::move(res), RDB_TYPE_TOPK};
+}
+
+io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
+  RdbCMS res;
+
+  uint64_t width, depth;
+  SET_OR_UNEXPECT(LoadLen(nullptr), width);
+  SET_OR_UNEXPECT(LoadLen(nullptr), depth);
+
+  // Validate parameters: must be positive and fit in uint32_t
+  if ((width == 0) || (depth == 0) || (width > UINT32_MAX) || (depth > UINT32_MAX)) {
+    LOG(ERROR) << "Invalid CMS parameters: width=" << width << ", depth=" << depth;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.total_incr_count);
+
+  // Safely check for multiplication overflow BEFORE multiplying
+  if (depth > 0 && width > (SIZE_MAX / depth))
+    return Unexpected(errc::rdb_file_corrupted);
+
+  res.width = static_cast<uint32_t>(width);
+  res.depth = static_cast<uint32_t>(depth);
+  const size_t num_counters = static_cast<size_t>(width) * depth;
+  res.counters.resize(num_counters);
+  for (size_t i = 0; i < num_counters; ++i) {
+    uint64_t raw;
+    auto ec = FetchBuf(sizeof(raw), &raw);
+    if (ec)
+      return make_unexpected(ec);
+    res.counters[i] = static_cast<int64_t>(base::LE::LoadT<uint64_t>(&raw));
+  }
+
+  return OpaqueObj{std::move(res), RDB_TYPE_CMS};
+}
+
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
-  auto ec = EnsureRead(sizeof(T));
-  if (ec)
+  if (auto ec = EnsureRead(sizeof(T)); ec)
     return make_unexpected(ec);
 
   char buf[16];
+  if (auto ec = ConsumeChunkBudget(sizeof(T)); ec)
+    return make_unexpected(ec);
   mem_buf_->ReadAndConsume(sizeof(T), buf);
 
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
@@ -1981,8 +2096,9 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(Service* service, std::string snapshot_id)
+RdbLoader::RdbLoader(Service* service, RdbLoadContext* load_context, std::string snapshot_id)
     : service_{service},
+      load_context_(load_context),
       snapshot_id_(std::move(snapshot_id)),
       rdb_ignore_expiry_{GetFlag(FLAGS_rdb_ignore_expiry)},
       deserialize_hnsw_index_{GetFlag(FLAGS_deserialize_hnsw_index)},
@@ -2120,9 +2236,10 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
-      VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
+      LOG(INFO) << "Read RDB_OPCODE_FULLSYNC_END rss="
+                << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
       RETURN_ON_ERR(EnsureRead(8));
-      mem_buf_->ConsumeInput(8);  // ignore 8 bytes
+      RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
 
       if (full_sync_cut_cb) {
         FlushAllShards();  // Flush as the handler awakes post load handlers
@@ -2237,21 +2354,31 @@ error_code RdbLoader::Load(io::Source* src) {
       uint64_t elements_number;
       SET_OR_RETURN(LoadLen(nullptr), elements_number);
 
-      // We can keep the same internal ids if shards count is the same and we can reuse the
-      // data-structures as is, otherwise we must rebuild from scratch
-      // TODO add ability to restore index with different shard count by remapping internal ids
-      const bool should_restore = deserialize_hnsw_index_ && shard_count_ == shard_set->size();
-
-      if (should_restore) {
+      if (!deserialize_hnsw_index_) {
+        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
+      } else {
+        DCHECK_GT(shard_count_, 0u);
+        // Parse "index_name:field_name" from the composite key.
         size_t colon_pos = index_key.rfind(':');
         string_view index_name{index_key.data(),
                                colon_pos != string::npos ? colon_pos : index_key.size()};
         string_view field_name = colon_pos != string::npos
                                      ? string_view{index_key.data() + colon_pos + 1}
                                      : string_view{};
-        RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
-      } else {
-        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
+
+        if (shard_count_ == shard_set->size()) {
+          // Same shard count: restore directly.
+          RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
+        } else {
+          // Different shard count: load nodes and defer restoration.
+          // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
+          PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
+          RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
+          LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with "
+                    << pending.nodes.size() << " nodes (shard count mismatch: " << shard_count_
+                    << " vs " << shard_set->size() << ")";
+          load_context_->AddPendingHnswNodes(std::move(pending));
+        }
       }
       continue;
     }
@@ -2277,20 +2404,17 @@ error_code RdbLoader::Load(io::Source* src) {
         pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
       }
 
-      // Only store mappings if deserialization is enabled AND shard count matches.
-      // With different shard counts, keys are distributed differently so the mappings are invalid.
-      if (!deserialize_hnsw_index_ || shard_count_ != shard_set->size()) {
+      if (!deserialize_hnsw_index_) {
         continue;
       }
+      DCHECK_GT(shard_count_, 0u);
 
       VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
               << " entries";
 
-      // Store the mapping to be applied after index creation (thread-safe)
-      {
-        std::lock_guard lk(search_index_mu_);
-        pending_index_mappings_[shard_id].emplace_back(std::move(pim));
-      }
+      // Always store mappings. When shard counts differ, PerformPostLoad will redistribute
+      // keys to replica shards and remap global_ids accordingly.
+      load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
       continue;
     }
 
@@ -2306,6 +2430,9 @@ error_code RdbLoader::Load(io::Source* src) {
 
     ++keys_loaded;
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+
+    VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
+            << " db= " << cur_db_index_;
     settings.Reset();
   }  // main load loop
 
@@ -2336,7 +2463,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
 
-  now_streamed_.clear();
+  now_chunked_.clear();
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -2386,14 +2513,34 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
   return kOk;
 }
 
+std::error_code RdbLoaderBase::ConsumeInput(size_t n) {
+  RETURN_ON_ERR(ConsumeChunkBudget(n));
+  mem_buf_->ConsumeInput(n);
+  return kOk;
+}
+
+std::error_code RdbLoaderBase::ConsumeChunkBudget(size_t n) {
+  if (!current_chunk_state_)
+    return kOk;
+
+  if (n > current_chunk_state_->remaining_payload_bytes) {
+    LOG(ERROR) << "Chunk budget exceeded: requested " << n << " bytes, remaining "
+               << current_chunk_state_->remaining_payload_bytes << ", stream_id "
+               << current_chunk_state_->stream_id << ", bytes_read " << bytes_read_;
+    return RdbError(errc::rdb_chunk_budget_exceeded);
+  }
+
+  current_chunk_state_->remaining_payload_bytes -= n;
+  return kOk;
+}
+
 io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (is_encoded)
     *is_encoded = false;
 
   // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
   // so we can ensure we have 9 bytes to read up until that point.
-  error_code ec = EnsureRead(9);
-  if (ec)
+  if (error_code ec = EnsureRead(9))
     return make_unexpected(ec);
 
   // Read integer meta info.
@@ -2408,7 +2555,9 @@ io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (meta.Type() == RDB_ENCVAL && is_encoded)
     *is_encoded = true;
 
-  mem_buf_->ConsumeInput(1 + meta.ByteSize());
+  if (auto ec = ConsumeInput(1 + meta.ByteSize()); ec) {
+    return make_unexpected(ec);
+  }
 
   return res;
 }
@@ -2507,15 +2656,21 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   string journal_blob;
   SET_OR_RETURN(FetchGenericString(), journal_blob);
 
+  // Create reader & executor if needed
+  if (!journal_reader_)
+    journal_reader_ = std::make_unique<JournalReader>(nullptr, 0);
+
+  if (!journal_executor_)
+    journal_executor_ = std::make_unique<JournalExecutor>(service);
+
   io::BytesSource bs{io::Buffer(journal_blob)};
-  journal_reader_.SetSource(&bs);
+  journal_reader_->SetSource(&bs);
 
   // Parse and exectue in loop.
   size_t done = 0;
-  JournalExecutor ex{service};
   while (done < num_entries) {
     journal::ParsedEntry entry;
-    auto ec = journal_reader_.ReadEntry(&entry);
+    auto ec = journal_reader_->ReadEntry(&entry);
     if (ec)
       return ec;
 
@@ -2537,7 +2692,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
-    ex.Execute(entry.dbid, entry.cmd);
+    journal_executor_->Execute(entry.dbid, entry.cmd);
   }
 
   return std::error_code{};
@@ -2621,6 +2776,7 @@ error_code RdbLoader::HandleAux() {
     uint32_t shard_count;
     if (absl::SimpleAtoi(auxval, &shard_count)) {
       shard_count_ = shard_count;
+      load_context_->SetMasterShardCount(shard_count);
     }
   } else if (auxkey == "shard-id") {
     uint32_t shard_id;
@@ -2702,9 +2858,10 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   };
 
   LoadConfig config_copy = item->load_config;
-  if (item->load_config.streamed && item->load_config.append) {
-    std::unique_lock lk{now_streamed_mu_};
-    if (auto it = now_streamed_.find(item->key); it != now_streamed_.end()) {
+  ChunkedKey chunked_key{db_ind, item->key};
+  if (item->load_config.chunked && item->load_config.append) {
+    std::unique_lock lk{now_chunked_mu_};
+    if (auto it = now_chunked_.find(chunked_key); it != now_chunked_.end()) {
       pv_ptr = it->second.get();
     } else {
       // Sets and hashes are deleted when all their entries are expired.
@@ -2737,21 +2894,21 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       return;
     }
     LOG(ERROR) << "Could not load value for key '" << absl::CHexEscape(item->key) << "' in DB "
-               << db_ind << " " << item->load_config.streamed << " " << item->load_config.append
+               << db_ind << " " << item->load_config.chunked << " " << item->load_config.append
                << " " << item->val.rdb_type;
     stop_early_ = true;
     return;
   }
 
-  if (item->load_config.streamed) {
-    std::unique_lock lk{now_streamed_mu_};
-    if (!now_streamed_.contains(item->key))
-      now_streamed_.emplace(item->key, make_unique<PrimeValue>(std::move(pv)));
+  if (item->load_config.chunked) {
+    std::unique_lock lk{now_chunked_mu_};
+    if (!now_chunked_.contains(chunked_key))
+      now_chunked_.emplace(chunked_key, make_unique<PrimeValue>(std::move(pv)));
 
     if (!item->load_config.finalize)
       return;
 
-    pv = std::move(*now_streamed_.extract(item->key).mapped());
+    pv = std::move(*now_chunked_.extract(chunked_key).mapped());
   }
 
   // We need this extra check because we don't return empty_key
@@ -2773,20 +2930,26 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
     return;
   }
 
-  DbSlice::ItAndUpdater& res = *op_res;
-  res.it->first.SetSticky(item->is_sticky);
+  DbSlice::ItAndUpdater& updater = *op_res;
+  updater.it->first.SetSticky(item->is_sticky);
   if (item->has_mc_flags) {
-    res.it->second.SetFlag(true);
-    db_slice->SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
+    updater.it->second.SetFlag(true);
+    db_slice->SetMCFlag(db_cntx.db_index, updater.it->first, item->mc_flags);
   }
 
-  if (!override_existing_keys_ && !res.is_new) {
+  if (!override_existing_keys_ && !updater.is_new) {
     LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind << " of type "
-                 << res.it->second.ObjType();
+                 << updater.it->second.ObjType();
   }
 
   if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts) {
-    StashPrimeValue(db_cntx.db_index, item->key, false, &res.it->second, ts);
+    // Finalize the AutoUpdater before stashing. The stash callback may complete
+    // (e.g. during the SleepFor yield below) and transform the PrimeValue to external,
+    // changing MallocUsed(). If the AutoUpdater ran after that, it would compute a
+    // bogus negative memory delta and crash in AccountObjectMemory.
+    auto it = updater.it;
+    updater.post_updater.Run();
+    StashPrimeValue(db_cntx.db_index, item->key, &it->second, ts, nullptr);
 
     // Block, if tiered storage is active, but can't keep up
     while (db_slice->shard_owner()->ShouldThrottleForTiering())
@@ -2801,13 +2964,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   DCHECK(!db_slice.IsCacheMode());
 
-  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
-
   for (const auto* item : ib) {
-    if (dry_run) {
-      continue;
-    }
-
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
       return;
@@ -2831,77 +2988,92 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   SET_OR_RETURN(ReadKey(), key);
   last_key_loaded_ = key;
 
-  bool streamed = false;
+  auto remaining_payload_bytes = [&] {
+    return current_chunk_state_ ? current_chunk_state_->remaining_payload_bytes : UINT32_MAX;
+  };
+
+  bool finalized = false;
   do {
-    // If there is a cached Item in the free pool, take it, otherwise allocate
-    // a new Item (LoadItemsBuffer returns free items).
-    Item* item = item_queue_.Pop();
-    if (item == nullptr) {
-      item = new Item;
-    }
-    // Delete the item if we fail to load the key/val pair.
-    auto cleanup = absl::Cleanup([item] { delete item; });
-
-    item->load_config.append = pending_read_.remaining > 0;
-
-    error_code ec = ReadObj(type, &item->val);
-    if (ec) {
-      VLOG(2) << "ReadObj error " << ec << " for key " << key;
-      return ec;
-    }
-
-    // If the key can be discarded, we must still continue to read the
-    // object from the RDB so we can read the next key.
-    if (ShouldDiscardKey(key, *settings)) {
-      pending_read_.reserve = 0;
-      continue;
-    }
-
-    item->load_config.finalize = pending_read_.remaining == 0;
-    if (!item->load_config.finalize) {
-      item->key = key;
-      streamed = true;
-    } else {
-      // Avoid copying the key if this is the last read of the object.
-      item->key = std::move(key);
-    }
-
-    item->load_config.streamed = streamed;
-    item->load_config.reserve = pending_read_.reserve;
-    // Clear 'reserve' as we must only set when the object is first
-    // initialized.
-    pending_read_.reserve = 0;
-
-    item->is_sticky = settings->is_sticky;
-    item->has_mc_flags = settings->has_mc_flags;
-    item->mc_flags = settings->mc_flags;
-    item->expire_ms = settings->expiretime;
-
-    std::move(cleanup).Cancel();
-    ShardId sid = Shard(item->key, shard_set->size());
-    EngineShard* es = EngineShard::tlocal();
-
-    if (es && es->shard_id() == sid) {
-      DbContext db_cntx{&namespaces->GetDefaultNamespace(), cur_db_index_, GetCurrentTimeMs()};
-      CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
-      item_queue_.Push(item);
-    } else {
-      auto& out_buf = shard_buf_[sid];
-
-      out_buf.emplace_back(item);
-
-      constexpr size_t kBufSize = 64;
-      if (out_buf.size() >= kBufSize) {
-        // Despite being async, this function can block if the shard queue is full.
-        FlushShardAsync(sid);
-      }
-    }
-  } while (pending_read_.remaining > 0 && !stop_early_.load(memory_order_relaxed));
+    SET_OR_RETURN(ReadAndDispatchObject(type, key, *settings, cur_db_index_), finalized);
+  } while (!finalized && remaining_payload_bytes() > 0 && !stop_early_.load(memory_order_relaxed));
 
   int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
   LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
 
+  pending_read_ = {};
   return kOk;
+}
+
+io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
+                                                  const ObjSettings& obj_settings,
+                                                  DbIndex db_index) {
+  Item* item = item_queue_.Pop();
+  if (item == nullptr) {
+    item = new Item;
+  }
+
+  auto cleanup = absl::Cleanup([item] { delete item; });
+
+  // The caller restores pending_read_ for continuation chunks.
+  // If it is already non-empty, this call appends to an existing partially built object.
+  const bool was_appending = pending_read_.remaining != 0;
+
+  // Read a part of the object. Updates remaining items
+  if (auto ec = ReadObj(object_type, &item->val); ec)
+    return make_unexpected(ec);
+
+  const bool finalized = pending_read_.remaining == 0;
+
+  if (ShouldDiscardKey(key, obj_settings)) {
+    pending_read_.reserve = 0;
+    return finalized;
+  }
+
+  if (GetFlag(FLAGS_rdb_load_dry_run)) {
+    return finalized;
+  }
+
+  item->load_config = {
+      .chunked = was_appending || !finalized,
+      .reserve = pending_read_.reserve,
+      // append drives create vs. append and stays true for all continuation chunks, including the
+      // final one. It is always false for the first chunk.
+      .append = was_appending,
+      // finalize is the post-read state and tells the caller whether this call finished reading
+      // the object or has remaining data to read.
+      .finalize = finalized,
+  };
+  pending_read_.reserve = 0;
+
+  if (finalized) {
+    item->key = std::move(key);
+  } else {
+    item->key = key;
+  }
+
+  item->is_sticky = obj_settings.is_sticky;
+  item->has_mc_flags = obj_settings.has_mc_flags;
+  item->mc_flags = obj_settings.mc_flags;
+  item->expire_ms = obj_settings.expiretime;
+
+  std::move(cleanup).Cancel();
+
+  const ShardId sid = Shard(item->key, shard_set->size());
+
+  if (const EngineShard* es = EngineShard::tlocal(); es && es->shard_id() == sid) {
+    const DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_index, GetCurrentTimeMs()};
+    CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
+    item_queue_.Push(item);
+  } else {
+    auto& out_buf = shard_buf_[sid];
+    out_buf.emplace_back(item);
+    constexpr size_t kBufSize = 64;
+    if (out_buf.size() >= kBufSize) {
+      FlushShardAsync(sid);
+    }
+  }
+
+  return finalized;
 }
 
 bool RdbLoader::ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const {
@@ -2940,94 +3112,6 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
   }
 }
 
-namespace {
-
-void LoadSearchCommandFromAux(Service* service, string&& def, string_view command_name,
-                              string_view error_context, bool add_NX = false) {
-  facade::CapturingReplyBuilder crb;
-
-  ConnectionContext cntx{nullptr, acl::UserCredentials{}};
-  cntx.is_replicating = true;
-  cntx.journal_emulated = true;
-  cntx.skip_acl_validation = true;
-  cntx.ns = &namespaces->GetDefaultNamespace();
-
-  uint32_t consumed = 0;
-  facade::RespVec resp_vec;
-  facade::RedisParser parser;
-
-  // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
-  def.insert(def.begin(), ' ');
-  def += "\r\n";  // RESP terminator
-  io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
-  auto res = parser.Parse(buffer, &consumed, &resp_vec);
-
-  if (res != facade::RedisParser::Result::OK) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def;
-    return;
-  }
-
-  // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
-  // serialized as "TAG SORTABLE SEPARATOR x" but parser expects "TAG SEPARATOR x SORTABLE".
-  // Reorder arguments if needed.
-  // TODO: Remove this workaround after Apr 2026.
-  for (size_t i = 0; i + 2 < resp_vec.size(); ++i) {
-    std::string_view cur = resp_vec[i].GetView();
-    std::string_view next = resp_vec[i + 1].GetView();
-    if (absl::EqualsIgnoreCase(cur, "SORTABLE") && absl::EqualsIgnoreCase(next, "SEPARATOR")) {
-      // SORTABLE SEPARATOR x -> SEPARATOR x SORTABLE
-      std::swap(resp_vec[i], resp_vec[i + 1]);      // SEPARATOR SORTABLE x
-      std::swap(resp_vec[i + 1], resp_vec[i + 2]);  // SEPARATOR x SORTABLE
-    }
-  }
-
-  // Prepend command name (FT.CREATE or FT.SYNUPDATE)
-  CommandContext cntx_cmd;
-  cntx_cmd.Init(&crb, &cntx);
-
-  cntx_cmd.PushArg(command_name);
-  cntx_cmd.PushArg(resp_vec[0].GetView());  // index name
-  if (add_NX) {
-    cntx_cmd.PushArg("NX");
-  }
-  for (unsigned i = 1; i < resp_vec.size(); i++) {
-    cntx_cmd.PushArg(resp_vec[i].GetView());
-  }
-  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
-                           facade::AsyncPreference::ONLY_SYNC);
-
-  auto response = crb.Take();
-  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
-  }
-}
-
-}  // namespace
-
-// Static storage for synonym commands collected from all RdbLoader instances
-std::vector<std::string> RdbLoader::pending_synonym_cmds_;
-// Static storage for index key-to-DocId mappings collected from all RdbLoader instances
-absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
-    RdbLoader::pending_index_mappings_;
-// Static storage for HNSW index metadata collected from all RdbLoader instances
-std::vector<RdbLoader::PendingHnswMetadata> RdbLoader::pending_hnsw_metadata_;
-// Static synchronization for thread-safe search index creation and pending mappings
-base::SpinLock RdbLoader::search_index_mu_;
-absl::flat_hash_set<std::string> RdbLoader::created_search_indices_;
-std::vector<std::string> RdbLoader::TakePendingSynonymCommands() {
-  std::vector<std::string> result;
-  result.swap(pending_synonym_cmds_);
-  return result;
-}
-
-absl::flat_hash_map<uint32_t, std::vector<RdbLoader::PendingIndexMapping>>
-RdbLoader::TakePendingIndexMappings() {
-  // we don't need to lock here as this is called after all RdbLoader instances are done
-  decltype(pending_index_mappings_) result;
-  std::swap(result, pending_index_mappings_);
-  return result;
-}
-
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   LoadSearchCommandFromAux(service_, std::move(def), "FT.CREATE", "index definition", true);
 }
@@ -3052,28 +3136,15 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
     LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
               << " elements=" << phm.metadata.cur_element_count;
 
-    {
-      std::lock_guard lk(search_index_mu_);
-      pending_hnsw_metadata_.emplace_back(std::move(phm));
-    }
+    load_context_->AddPendingHnswMetadata(std::move(phm));
   } catch (const std::exception& e) {
     LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
   }
 }
 
-error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
-                                         string_view field_name, uint64_t elements_number) {
-  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
-  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
-  if (!hnsw_index) {
-    LOG(ERROR) << "HNSW index not found for restoration: " << index_key
-               << ". Skipping serialized graph data.";
-    return SkipVectorIndex(index_key, elements_number);
-  }
-
-  std::vector<search::HnswNodeData> nodes;
-  nodes.reserve(elements_number);
-
+error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
+                                           std::vector<search::HnswNodeData>* nodes) {
+  nodes->reserve(elements_number);
   for (uint64_t elem = 0; elem < elements_number; ++elem) {
     search::HnswNodeData node;
     SET_OR_RETURN(FetchInt<uint32_t>(), node.internal_id);
@@ -3091,27 +3162,35 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
         SET_OR_RETURN(FetchInt<uint32_t>(), node.levels_links[lvl][i]);
       }
     }
-    nodes.push_back(std::move(node));
+    nodes->push_back(std::move(node));
+  }
+  return {};
+}
+
+error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view index_name,
+                                         string_view field_name, uint64_t elements_number) {
+#ifdef WITH_SEARCH
+  // Look up the HNSW index in the global registry. It should exist from FT.CREATE in aux.
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, field_name);
+  if (!hnsw_index) {
+    LOG(ERROR) << "HNSW index not found for restoration: " << index_key;
+    return SkipVectorIndex(index_key, elements_number);
   }
 
-  if (!nodes.empty()) {
-    // Look up metadata from pending_hnsw_metadata_ (loaded from AUX field)
-    std::optional<search::HnswIndexMetadata> metadata;
-    {
-      std::lock_guard lk(search_index_mu_);
-      for (const auto& phm : pending_hnsw_metadata_) {
-        if (phm.index_name == index_name && phm.field_name == field_name) {
-          metadata = phm.metadata;
-          break;
-        }
-      }
-    }
+  std::vector<search::HnswNodeData> nodes;
+  RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &nodes));
 
-    CHECK(metadata);
+  if (!nodes.empty()) {
+    auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
+    DCHECK(metadata) << "HNSW metadata missing for " << index_key;
+
     hnsw_index->RestoreFromNodes(nodes, *metadata);
     LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   }
   return {};
+#else
+  return SkipVectorIndex(index_key, elements_number);
+#endif
 }
 
 error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_number) {
@@ -3140,60 +3219,7 @@ error_code RdbLoader::SkipVectorIndex(string_view index_key, uint64_t elements_n
 }
 
 void RdbLoader::LoadSearchSynonymsFromAux(string&& def) {
-  // Add to shared static vector (may be called from multiple RdbLoader instances)
-  pending_synonym_cmds_.push_back(std::move(def));
-}
-
-void RdbLoader::PerformPostLoad(Service* service, bool is_error) {
-  const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr)  // In case search module is disabled
-    return;
-
-  // Capture before clearing — indicates HNSW graphs were loaded and need restore path
-  bool has_hnsw_restore;
-  // Clear the created indices tracking set for next load
-  {
-    std::lock_guard lk(search_index_mu_);
-    has_hnsw_restore = !pending_hnsw_metadata_.empty();
-    created_search_indices_.clear();
-    pending_hnsw_metadata_.clear();
-  }
-
-  std::vector<std::string> synonym_cmds = TakePendingSynonymCommands();
-  auto index_mappings = TakePendingIndexMappings();
-
-  if (is_error)
-    return;
-
-  if (!index_mappings.empty()) {
-    // Apply mappings on each shard (assuming same shard count as when snapshot was taken)
-    shard_set->AwaitRunningOnShardQueue([&index_mappings](EngineShard* es) {
-      auto it = index_mappings.find(es->shard_id());
-      if (it == index_mappings.end())
-        return;
-      for (const auto& pim : it->second) {
-        if (auto* index = es->search_indices()->GetIndex(pim.index_name); index) {
-          index->RestoreKeyIndex(pim.mappings);
-          VLOG(1) << "Restored " << pim.mappings.size() << " key mappings for index "
-                  << pim.index_name << " on shard " << es->shard_id();
-        }
-      }
-    });
-  }
-  shard_set->AwaitRunningOnShardQueue([has_hnsw_restore](EngineShard* es) {
-    OpArgs op_args{es, nullptr,
-                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}};
-    es->search_indices()->RebuildAllIndices(op_args, has_hnsw_restore);
-  });
-
-  // Now execute all pending synonym commands after indices are rebuilt
-  for (auto& syn_cmd : synonym_cmds) {
-    LoadSearchCommandFromAux(service, std::move(syn_cmd), "FT.SYNUPDATE", "synonym definition");
-  }
-
-  // Wait until index building ends
-  shard_set->RunBlockingInParallel(
-      [](EngineShard* es) { es->search_indices()->BlockUntilConstructionEnd(); });
+  load_context_->AddPendingSynonymCommand(std::move(def));
 }
 
 }  // namespace dfly

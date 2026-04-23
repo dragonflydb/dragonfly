@@ -4,18 +4,20 @@
 
 #include "server/search/search_family.h"
 
-#include <absl/flags/flag.h>
 #include <absl/strings/str_format.h>
 
 #include <algorithm>
+#include <atomic>
 #include <string_view>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
+#include "server/search/doc_index.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -344,10 +346,57 @@ TEST_F(SearchFamilyTest, Stats) {
   EXPECT_EQ(metrics.search_stats.num_indices, 2);
   EXPECT_EQ(metrics.search_stats.num_entries, 50 * 2);
 
+  // Per-entry overhead includes: rax nodes, block list headers, CSS varint-encoded diffs + freqs,
+  // and per-field BM25 stats (field_doc_lengths_ vector, counters).
   size_t expected_usage = 2 * (50 + 3 /* number of distinct words*/) * (24 + 48 /* kv size */) +
                           50 * 2 * 1 /* posting list entries */;
   EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
-  EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
+  EXPECT_LE(metrics.search_stats.used_memory, 4 * expected_usage);
+}
+
+// Verify that search memory tracking accounts for DocKeyIndex and FieldIndices allocations
+TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
+  constexpr size_t kNumDocs = 500;
+  // "doc-0000-padding-padding-pad" = 28 chars, above SSO threshold so heap-allocated
+  constexpr size_t kKeyLen = 28;
+
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TAG"}),
+            "OK");
+
+  size_t mem_before = GetMetrics().search_stats.used_memory;
+
+  for (size_t i = 0; i < kNumDocs; i++) {
+    Run({"hset", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad"),
+         "name", absl::StrCat("tag", i % 10)});
+  }
+
+  size_t mem_after = GetMetrics().search_stats.used_memory;
+  ASSERT_GE(mem_after, mem_before) << "Memory should not decrease after adding documents";
+  size_t mem_delta = mem_after - mem_before;
+
+  // Per document, tracked allocations via local_mr_:
+  //   keys_ vector:  StatelessString object (sizeof(string)=32) + heap chars (~kKeyLen)
+  //   ids_ map:      StatelessString key (32 + kKeyLen heap) + DocId + slot/control overhead
+  //   all_ids_:      one DocId (4 bytes) via GetNonPmrMemoryUsage
+  // Lower bound: just the string heap data (stored twice) + DocId.
+  // Upper bound: generous per-doc estimate covering allocator rounding and index metadata.
+  constexpr size_t kMinPerDoc = 2 * kKeyLen + sizeof(search::DocId);
+  constexpr size_t kMaxPerDoc = 2 * (sizeof(std::string) + kKeyLen + 16 /*allocator rounding*/) +
+                                sizeof(search::DocId) + 64 /*tag index + map slot overhead*/;
+  EXPECT_GE(mem_delta, kNumDocs * kMinPerDoc)
+      << "Memory tracking should account for DocKeyIndex and FieldIndices storage";
+  EXPECT_LE(mem_delta, kNumDocs * kMaxPerDoc)
+      << "Memory tracking should not over-count (possible double tracking)";
+
+  // Delete half the documents and verify memory decreases proportionally
+  for (size_t i = 0; i < kNumDocs / 2; i++) {
+    Run({"del", absl::StrCat("doc-", absl::Dec(i, absl::kZeroPad4), "-padding-padding-pad")});
+  }
+
+  size_t mem_after_delete = GetMetrics().search_stats.used_memory;
+  EXPECT_LT(mem_after_delete, mem_after) << "Memory should decrease after removing documents";
+  EXPECT_GE(mem_after_delete - mem_before, (kNumDocs / 2) * kMinPerDoc)
+      << "Remaining half should still be tracked";
 }
 
 // Test how asynchronous indexing indexes documents and reports its progress
@@ -463,6 +512,27 @@ TEST_F(SearchFamilyTest, Errors) {
   EXPECT_THAT(Run({"ft.create", "i2", "ON", "JSON", "SCHEMA", "$.sometag", "AS", "sometag", "TAG",
                    "SEPARATOR"}),
               ErrArg("Tag separator must be a single character. Got ``"));
+}
+
+// Regression test: FT.CREATE with a huge PREFIX/STOPWORDS count must not OOM-crash the server.
+// Previously, ParsePrefix called index->prefixes.reserve(count) with a user-supplied count,
+// causing a 3.2 TB allocation for count=99999999999.
+// ParseStopwords had the same unbounded-loop issue.
+TEST_F(SearchFamilyTest, HugeCountNoOOM) {
+  // PREFIX: 99999999999 * sizeof(std::string) = ~3.2 TB — must return syntax error, not crash
+  EXPECT_THAT(Run({"ft.create", "idx1", "ON", "HASH", "PREFIX", "99999999999", "doc:", "SCHEMA",
+                   "content", "TEXT"}),
+              ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"ft.info", "idx1"}), ErrArg(""));  // index must not have been created
+
+  // STOPWORDS: same unbounded-loop protection
+  EXPECT_THAT(Run({"ft.create", "idx2", "ON", "HASH", "STOPWORDS", "99999999999", "the", "a", "an",
+                   "SCHEMA", "content", "TEXT"}),
+              ErrArg(kSyntaxErr));
+  EXPECT_THAT(Run({"ft.info", "idx2"}), ErrArg(""));
+
+  // Verify the server is still alive
+  EXPECT_EQ(Run({"ping"}), "PONG");
 }
 
 TEST_F(SearchFamilyTest, NoPrefix) {
@@ -1844,6 +1914,10 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test SORTBY with a huge nargs value that exceeds available arguments
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "19999999999600", "@name"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
 }
 
 TEST_F(SearchFamilyTest, AggregateSortByParsingErrorsWithoutAt) {
@@ -3700,6 +3774,11 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{maybe} => [KNN 3 @pos $vec]", "PARAMS", "2", "vec",
               query_vec});
   EXPECT_THAT(resp, IntArg(0));
+
+  // Verify that empty prefilter return zero results
+  resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
+              "vec", query_vec});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(SearchFamilyTest, KnnHnswCosineDistanceCalculation) {
@@ -4269,6 +4348,204 @@ TEST_F(SearchFamilyTest, GeoSearchUnits) {
   EXPECT_THAT(resp, AreDocIds("p:1", "p:2"));
 }
 
+TEST_F(SearchFamilyTest, HnswVectorRange) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with an extra numeric field for SORTBY testing
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "val", "NUMERIC"});
+
+  // 10 docs at positions 0..9, val = i*10
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i)), "val",
+         absl::StrFormat("%d", i * 10)});
+  }
+
+  string query_vec = FloatToBytes(5.0f);
+
+  // Basic range: query at 5.0, radius 1.5 → k4 (dist=1), k5 (dist=0), k6 (dist=1)
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+
+  // Score alias is returned in each document by default
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "RETURN", "1", "dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  // Response: [total, key1, [field, val, ...], ...]
+  // Each doc should have "dist" in its fields
+  auto& arr = resp.GetVec();
+  ASSERT_GE(arr.size(), 3u);
+  for (size_t i = 2; i < arr.size(); i += 2) {
+    auto fields = arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    EXPECT_EQ(fields[0].GetString(), "dist");
+  }
+
+  // Large radius — all 10 docs returned
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "LIMIT", "0", "20"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec()[0].GetInt(), 10);
+
+  // SORTBY val ASC — tests that sort_score is populated for non-score SORTBY
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "ASC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& asc_arr = resp.GetVec();
+  // Extract val values from response: [total, key, [val, v1], key, [val, v2], ...]
+  vector<int> vals_asc;
+  for (size_t i = 2; i < asc_arr.size(); i += 2) {
+    auto fields = asc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_asc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_asc, ElementsAre(40, 50, 60));
+
+  // SORTBY val DESC
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "SORTBY", "val", "DESC", "RETURN", "1", "val",
+              "LIMIT", "0", "10"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto& desc_arr = resp.GetVec();
+  vector<int> vals_desc;
+  for (size_t i = 2; i < desc_arr.size(); i += 2) {
+    auto fields = desc_arr[i].GetVec();
+    ASSERT_GE(fields.size(), 2u);
+    vals_desc.push_back(stoi(fields[1].GetString()));
+  }
+  EXPECT_THAT(vals_desc, ElementsAre(60, 50, 40));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeWithoutYieldDistanceAs) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", FloatToBytes(static_cast<float>(i))});
+  }
+
+  string query_vec = FloatToBytes(5.0f);
+
+  // VECTOR_RANGE without =>{$YIELD_DISTANCE_AS: ...} — must work like Redis Stack
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]", "PARAMS", "2", "vec",
+                   query_vec, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+}
+
+TEST_F(SearchFamilyTest, VectorRangeAggregate) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D FLAT index with a TAG field — mirrors semantic routing use case from issue #6802
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+
+  // Two routes: "tech" at positions 1,2,3 and "sports" at positions 7,8,9
+  for (int i : {1, 2, 3}) {
+    Run({"HSET", absl::StrFormat("t%d", i), "vec", FloatToBytes(static_cast<float>(i)), "route",
+         "tech"});
+  }
+  for (int i : {7, 8, 9}) {
+    Run({"HSET", absl::StrFormat("s%d", i), "vec", FloatToBytes(static_cast<float>(i)), "route",
+         "sports"});
+  }
+
+  string query_vec = FloatToBytes(2.0f);  // near "tech" docs (positions 1,2,3)
+
+  // GROUPBY route, REDUCE SUM of distances.
+  // radius=2.5 from pos=2.0 hits t1(dist=1), t2(dist=0), t3(dist=1) — all "tech"
+  // sum of distances = 1+0+1 = 2
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
+           "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  // Large radius — both routes captured; each route has 3 docs
+  resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
+              "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3"),
+                                         IsMap("route", "sports", "cnt", "3")));
+
+  // Zero radius — only exact match (dist=0) is t2
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "1")));
+
+  // No docs in range — FT.AGGREGATE returns 0
+  string far_vec = FloatToBytes(100.0f);
+  resp = Run({"FT.AGGREGATE", "idx", "@vec:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
+              "cnt"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeAggregate) {
+  auto FloatToBytes = [](float f) -> string {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+
+  // 1-D HNSW index with a TAG field — same semantic routing use case but with HNSW index
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2", "route", "TAG"});
+
+  for (int i : {1, 2, 3}) {
+    Run({"HSET", absl::StrFormat("t%d", i), "pos", FloatToBytes(static_cast<float>(i)), "route",
+         "tech"});
+  }
+  for (int i : {7, 8, 9}) {
+    Run({"HSET", absl::StrFormat("s%d", i), "pos", FloatToBytes(static_cast<float>(i)), "route",
+         "sports"});
+  }
+
+  string query_vec = FloatToBytes(2.0f);
+
+  // radius=2.5 from pos=2.0 hits t1(dist=1), t2(dist=0), t3(dist=1) → only "tech"
+  // sum of distances = 2
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 2.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "SUM", "1", "@dist",
+           "AS", "sum_dist"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "sum_dist", "2")));
+
+  // Large radius — both routes; each has 3 docs
+  resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 10 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", query_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0",
+              "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route", "tech", "cnt", "3"),
+                                         IsMap("route", "sports", "cnt", "3")));
+
+  // Zero radius — only exact match (dist=0) is t2
+  resp =
+      Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+           "PARAMS", "2", "vec", query_vec, "GROUPBY", "0", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("cnt", "1")));
+
+  // No docs in range — FT.AGGREGATE returns 0
+  string far_vec = FloatToBytes(100.0f);
+  resp = Run({"FT.AGGREGATE", "idx", "@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "vec", far_vec, "GROUPBY", "1", "@route", "REDUCE", "COUNT", "0", "AS",
+              "cnt"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   // Test 1: Correct geo field definition and usage with HASH
   auto resp =
@@ -4380,6 +4657,1018 @@ TEST_F(SearchFamilyTest, GeoIndexFieldValidation) {
   Run({"JSON.DEL", "j:12"});
   resp = Run({"FT.SEARCH", "idx_json", "@location:*"});
   EXPECT_THAT(resp, AreDocIds("j:1", "j:2"));
+}
+
+TEST_F(SearchFamilyTest, VectorFieldWrongSizeDoesNotCrash) {
+  // DIM=1 FLOAT32 expects exactly 4 bytes per value.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Insert values with wrong byte lengths (6 and 7 bytes instead of 4).
+  Run({"HSET", "k1", "pos", "AAAAAAA"});  // 7 bytes
+  Run({"HSET", "k2", "pos", "AQAAAA"});   // 6 bytes
+  Run({"HSET", "k3", "pos", "AgAAAA"});   // 6 bytes
+
+  // FT.SEARCH must not crash when serializing the wrong-sized vector fields.
+  auto resp = Run({"FT.SEARCH", "idx", "*", "PARAMS", "2", "vec", "AQAAAA", "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+
+  // Same scenario with 10-byte values and multiple keys.
+  Run({"FT.CREATE", "idx2", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  Run({"HSET", "a1", "v", "aaaaaaaaaa"});  // 10 bytes
+  Run({"HSET", "a2", "v", "bbbbbbbbbb"});
+  Run({"HSET", "a3", "v", "cccccccccc"});
+  Run({"HSET", "a4", "v", "dddddddddd"});
+  Run({"HSET", "a5", "v", "eeeeeeeeee"});
+
+  resp = Run({"FT.SEARCH", "idx2", "*", "PARAMS", "2", "vec", "aaaaaaaaaa", "LIMIT", "0", "100"});
+  EXPECT_THAT(resp, Not(ErrArg("")));
+}
+
+TEST_F(SearchFamilyTest, SortBySkipsDocsWithoutSortField) {
+  // KeepTopKSorted skips docs that don't have the sort field, returning fewer sort scores
+  // than result.ids.size(). The loop then accesses sort_scores[i] out-of-bounds.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "valid:1", "val", "123"});
+  Run({"HSET", "valid:2", "val", "456"});
+  Run({"HSET", "valid:3", "val", "789"});
+
+  // These docs are indexed (no prefix restriction) but lack the sort field.
+  // They appear in '*' search results but are skipped by KeepTopKSorted.
+  for (int i = 0; i < 97; i++)
+    Run({"HSET", absl::StrCat("nofield:", i), "txt", "garbage"});
+
+  auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", "val", "LIMIT", "0", "100"});
+  auto vec = resp.GetVec();
+
+  // Extract doc keys from the response (indices 1, 3, 5, ...).
+  vector<string> keys;
+  for (size_t i = 1; i < vec.size(); i += 2)
+    keys.push_back(vec[i].GetString());
+
+  EXPECT_THAT(keys, ElementsAre("valid:1", "valid:2", "valid:3"));
+}
+
+TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
+  // Regression test: HSET with inf/nan values on a NUMERIC field used to crash with
+  // DCHECK(std::isfinite(value)) in RangeTree::Add, because absl::SimpleAtod accepts
+  // "inf", "-inf", "nan" etc. as valid doubles.
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "val", "NUMERIC"});
+
+  Run({"HSET", "doc:1", "val", "inf"});
+  Run({"HSET", "doc:2", "val", "-inf"});
+  Run({"HSET", "doc:3", "val", "+inf"});
+  Run({"HSET", "doc:4", "val", "nan"});
+  Run({"HSET", "doc:5", "val", "42"});  // finite — must still be indexed
+
+  // Non-finite docs are not in the numeric index; only doc:5 should match the range query.
+  auto resp = Run({"FT.SEARCH", "idx", "@val:[-inf +inf]"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "doc:5", _)));
+}
+
+class HnswRaceTest : public BaseFamilyTest {
+ protected:
+  HnswRaceTest() {
+    num_threads_ = 4;
+  }
+};
+
+TEST_F(HnswRaceTest, HnswKnnDeleteRaceCrash) {
+  constexpr int kDim = 128;
+  constexpr int kNumDocs = 5000;
+  // Only delete the K nearest docs to the query: these are guaranteed to appear
+  // in every KNN result, so every deletion is a potential crash trigger.
+  constexpr int kK = 200;
+
+  auto make_vec = [&](float seed) -> std::string {
+    std::string s(kDim * sizeof(float), '\0');
+    for (int j = 0; j < kDim; ++j) {
+      float v = seed + static_cast<float>(j) * 0.001f;
+      memcpy(s.data() + j * sizeof(float), &v, sizeof(float));
+    }
+    return s;
+  };
+
+  Run({"FT.CREATE",
+       "hnsw_race_idx",
+       "ON",
+       "HASH",
+       "PREFIX",
+       "1",
+       "doc:",
+       "SCHEMA",
+       "vec",
+       "VECTOR",
+       "HNSW",
+       "10",
+       "TYPE",
+       "FLOAT32",
+       "DIM",
+       absl::StrCat(kDim),
+       "DISTANCE_METRIC",
+       "L2",
+       "M",
+       "16",
+       "EF_CONSTRUCTION",
+       "200"});
+
+  for (int i = 0; i < kNumDocs; ++i)
+    Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+
+  const std::string kQueryVec = make_vec(0.0f);
+  std::atomic<bool> done{false};
+
+  auto search_fiber = pp_->at(3)->LaunchFiber([&] {
+    for (int i = 0; i < 50 && !done.load(); ++i) {
+      auto resp = Run({"FT.SEARCH", "hnsw_race_idx",
+                       absl::StrCat("*=>[KNN ", kK, " @vec $vec EF_RUNTIME 50000]"), "PARAMS", "2",
+                       "vec", kQueryVec, "DIALECT", "2"});
+      EXPECT_NE(resp.type, RespExpr::ERROR);
+    }
+    done.store(true);
+  });
+
+  auto make_del_fiber = [&](int thread_idx) {
+    return pp_->at(thread_idx)->LaunchFiber([&, thread_idx] {
+      while (!done.load()) {
+        for (int i = 0; i < kK && !done.load(); ++i) {
+          Run({"DEL", absl::StrCat("doc:", i)});
+          Run({"HSET", absl::StrCat("doc:", i), "vec", make_vec(static_cast<float>(i))});
+        }
+      }
+    });
+  };
+
+  auto del0 = make_del_fiber(0);
+  auto del1 = make_del_fiber(1);
+  auto del2 = make_del_fiber(2);
+
+  search_fiber.Join();
+  del0.Join();
+  del1.Join();
+  del2.Join();
+}
+
+TEST_F(SearchFamilyTest, AggregateGroupByHugeNargsDoesNotCrash) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "vec", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+
+  // Intentionally invalid float32 value (1 byte instead of 4).
+  Run({"HSET", "d", "vec", "x"});
+
+  // GROUPBY 9999999999999 — after the reserve() cap, the parser sees "REDUCE" where it
+  // expects a field name starting with '@', and returns a syntax error.  Must not crash.
+  auto resp = Run({"FT.AGGREGATE", "idx",
+                   "@vec:[VECTOR_RANGE 0.01 $vec]=>{$YIELD_DISTANCE_AS: dist}", "PARAMS", "2",
+                   "vec", "far", "GROUPBY", "9999999999999", "REDUCE", "COUNT", "0", "AS", "cnt"});
+  EXPECT_THAT(resp, ErrArg("bad arguments: Field name should start with '@'"));
+
+  // Server must still be alive and respond correctly after the oversized GROUPBY.
+  EXPECT_THAT(Run({"PING"}), "PONG");
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterStringEq) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "10"});
+  Run({"HSET", "h2", "name", "technology", "value", "20"});
+  Run({"HSET", "h3", "name", "cooking", "value", "30"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@name == 'sports'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "total", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterNumericLt) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "0.5"});
+  Run({"HSET", "h2", "name", "b", "value", "0.9"});
+  Run({"HSET", "h3", "name", "c", "value", "0.3"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "AVG", "1", "@value", "AS", "distance",
+                   "FILTER", "@distance < 0.8"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "a", "distance", "0.5"),
+                                         IsMap("name", "c", "distance", "0.3")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterCompound) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "0.5"});
+  Run({"HSET", "h2", "name", "technology", "value", "0.9"});
+  Run({"HSET", "h3", "name", "cooking", "value", "0.3"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "AVG", "1", "@value", "AS", "distance",
+                   "FILTER", "(@name == 'sports' && @distance < 0.8) || @name == 'cooking'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "distance", "0.5"),
+                                         IsMap("name", "cooking", "distance", "0.3")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterEmptyResult) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total > 100"});
+  // clang-format on
+  // When all rows are filtered out, FT.AGGREGATE returns integer 0
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterPipelineOrder) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // FILTER between GROUPBY and SORTBY
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total >= 20",
+                   "SORTBY", "1", "@total"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "b", "total", "20"),
+                                         IsMap("name", "c", "total", "30")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterInvalidExpr) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG"});
+  Run({"HSET", "h1", "name", "a"});
+
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "FILTER", "@a =="});
+  EXPECT_THAT(resp, ErrArg("FILTER expression error"));
+
+  // Missing FILTER argument
+  resp = Run({"FT.AGGREGATE", "idx", "*", "FILTER"});
+  EXPECT_THAT(resp, ErrArg("ERR"));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterMultiple) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // Two FILTER steps applied sequentially
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "@total >= 10",
+                   "FILTER", "@total <= 20"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "a", "total", "10"),
+                                         IsMap("name", "b", "total", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterOnly) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "sports", "value", "10"});
+  Run({"HSET", "h2", "name", "tech", "value", "20"});
+
+  // FILTER as the only pipeline step (no GROUPBY)
+  auto resp = Run(
+      {"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@name", "@value", "FILTER", "@name == 'sports'"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "sports", "value", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterFuncLower) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "Sports", "value", "10"});
+  Run({"HSET", "h2", "name", "TECH", "value", "20"});
+  Run({"HSET", "h3", "name", "cooking", "value", "30"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@name",
+                     "REDUCE", "SUM", "1", "@value", "AS", "total",
+                   "FILTER", "lower(@name) == 'sports'"});
+  // clang-format on
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "Sports", "total", "10")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterAfterLimit) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "name", "TAG", "value", "NUMERIC"});
+  Run({"HSET", "h1", "name", "a", "value", "10"});
+  Run({"HSET", "h2", "name", "b", "value", "20"});
+  Run({"HSET", "h3", "name", "c", "value", "30"});
+
+  // SORTBY -> LIMIT 0 2 -> FILTER: filter applies on the limited set
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "SORTBY", "1", "@value",
+                   "LIMIT", "0", "2",
+                   "FILTER", "@value > 15"});
+  // clang-format on
+  // After SORTBY + LIMIT 0 2 we have the 2 smallest values (10, 20); FILTER keeps only 20
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "20")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateFilterSemanticRouting) {
+  // Simulates the redisvl semantic routing query pattern:
+  // GROUPBY -> REDUCE AVG -> SORTBY -> FILTER with compound expression
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "route_name", "TAG", "distance", "NUMERIC"});
+  Run({"HSET", "h1", "route_name", "technology", "distance", "0.5"});
+  Run({"HSET", "h2", "route_name", "technology", "distance", "0.7"});
+  Run({"HSET", "h3", "route_name", "sports", "distance", "0.3"});
+  Run({"HSET", "h4", "route_name", "sports", "distance", "0.9"});
+  Run({"HSET", "h5", "route_name", "cooking", "distance", "0.2"});
+
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx", "*",
+                   "GROUPBY", "1", "@route_name",
+                     "REDUCE", "AVG", "1", "@distance", "AS", "avg_dist",
+                   "SORTBY", "1", "@avg_dist",
+                   "FILTER",
+                     "(@route_name == 'technology' && @avg_dist < 0.8) || "
+                     "(@route_name == 'sports' && @avg_dist < 0.8) || "
+                     "(@route_name == 'cooking' && @avg_dist < 0.8)"});
+  // clang-format on
+
+  // technology: avg(0.5, 0.7)=0.6 < 0.8
+  // sports: avg(0.3, 0.9)=0.6 < 0.8
+  // cooking: avg(0.2)=0.2 < 0.8
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("route_name", "cooking", "avg_dist", "0.2"),
+                                         IsMap("route_name", "technology", "avg_dist", "0.6"),
+                                         IsMap("route_name", "sports", "avg_dist", "0.6")));
+}
+
+TEST_F(SearchFamilyTest, AggregateDialect) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "price", "NUMERIC"});
+  Run({"HSET", "d1", "title", "hello world", "price", "10"});
+  Run({"HSET", "d2", "title", "goodbye world", "price", "20"});
+
+  // DIALECT 2 should be accepted and ignored (DF always behaves as dialect 2)
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@price", "LIMIT", "0", "10", "DIALECT", "2"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("price", "10"), IsMap("price", "20")));
+}
+
+TEST_F(SearchFamilyTest, AggregateDialectWithParams) {
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "price", "NUMERIC", "vec",
+       "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "title", "machine learning", "price", "10", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "title", "deep learning", "price", "20", "vec", MakeVec(2.0f, 2.0f)});
+
+  // DIALECT 2 enables parameterized queries with PARAMS
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @vec $vector AS dist]", "LOAD", "1", "@title",
+                   "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f), "SORTBY", "2", "@dist", "ASC",
+                   "DIALECT", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplySimple) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "price", "NUMERIC"});
+  Run({"HSET", "d1", "price", "100"});
+  Run({"HSET", "d2", "price", "200"});
+
+  // APPLY creates a new computed field
+  auto resp = Run(
+      {"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@price", "APPLY", "@price * 1.2", "AS", "taxed"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("price", "100", "taxed", "120"),
+                                         IsMap("price", "200", "taxed", "240")));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyFieldRename) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "rating", "NUMERIC"});
+  Run({"HSET", "d1", "rating", "4.5"});
+
+  // APPLY can rename a field
+  auto resp =
+      Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@rating", "APPLY", "@rating", "AS", "score"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("rating", "4.5", "score", "4.5")));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyArithmetic) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC", "b", "NUMERIC"});
+  Run({"HSET", "d1", "a", "10", "b", "3"});
+
+  // APPLY with multi-field arithmetic
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@a", "@b", "APPLY", "(@a - @b) / 2",
+                   "AS", "result"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "10", "b", "3", "result", "3.5")));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyChained) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "distance", "NUMERIC"});
+  Run({"HSET", "d1", "distance", "0.4"});
+  Run({"HSET", "d2", "distance", "1.2"});
+
+  // Multiple APPLY steps chained (redisvl HybridQuery pattern)
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@distance", "APPLY",
+                   "(2 - @distance) / 2", "AS", "similarity", "APPLY", "@similarity * 0.7", "AS",
+                   "weighted", "SORTBY", "2", "@weighted", "DESC"});
+  // d1: similarity = (2-0.4)/2 = 0.8, weighted = 0.56
+  // d2: similarity = (2-1.2)/2 = 0.4, weighted = 0.28
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyWithSortBy) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "price", "NUMERIC"});
+  Run({"HSET", "d1", "price", "100"});
+  Run({"HSET", "d2", "price", "200"});
+  Run({"HSET", "d3", "price", "50"});
+
+  // APPLY + SORTBY on computed field
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@price", "APPLY", "@price * 2", "AS",
+                   "doubled", "SORTBY", "2", "@doubled", "DESC", "LIMIT", "0", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateApplyMissingSyntax) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC"});
+  Run({"HSET", "d1", "a", "1"});
+
+  // APPLY without AS
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "APPLY", "@a * 2"}), ErrArg("syntax"));
+
+  // APPLY without expression
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "APPLY"}), ErrArg(""));
+}
+
+TEST_F(SearchFamilyTest, AggregateKnn) {
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "vec", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "title", "first", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "title", "second", "vec", MakeVec(2.0f, 2.0f)});
+  Run({"HSET", "d3", "title", "third", "vec", MakeVec(3.0f, 3.0f)});
+
+  // KNN in FT.AGGREGATE should return results with distance
+  // LOAD must come before pipeline steps (SORTBY)
+  auto resp = Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @vec $vector AS dist]", "LOAD", "1", "@title",
+                   "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f), "SORTBY", "2", "@dist", "ASC",
+                   "DIALECT", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  // Should return 2 closest docs (d1 is exact match = distance 0)
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(2u));
+}
+
+TEST_F(SearchFamilyTest, AggregateKnnWithFilter) {
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "category", "TAG", "vec", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "category", "science", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "category", "science", "vec", MakeVec(2.0f, 2.0f)});
+  Run({"HSET", "d3", "category", "cooking", "vec", MakeVec(3.0f, 3.0f)});
+
+  // KNN with tag filter in FT.AGGREGATE
+  auto resp = Run({"FT.AGGREGATE", "idx", "(@category:{science})=>[KNN 2 @vec $vector AS dist]",
+                   "LOAD", "1", "@category", "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f), "SORTBY",
+                   "2", "@dist", "ASC", "DIALECT", "2"});
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(1u));
+}
+
+TEST_F(SearchFamilyTest, AggregateKnnWithApply) {
+  // KNN in FT.AGGREGATE combined with APPLY — core use case for redisvl
+  auto MakeVec = [](float x, float y) -> string {
+    string s(2 * sizeof(float), '\0');
+    memcpy(s.data(), &x, sizeof(float));
+    memcpy(s.data() + sizeof(float), &y, sizeof(float));
+    return s;
+  };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "vec", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"});
+
+  Run({"HSET", "d1", "title", "first", "vec", MakeVec(1.0f, 1.0f)});
+  Run({"HSET", "d2", "title", "second", "vec", MakeVec(2.0f, 2.0f)});
+  Run({"HSET", "d3", "title", "third", "vec", MakeVec(3.0f, 3.0f)});
+
+  // KNN + APPLY to compute normalized similarity from distance
+  // clang-format off
+  auto resp = Run({"FT.AGGREGATE", "idx",
+                    "*=>[KNN 3 @vec $vector AS vector_distance]",
+                    "LOAD", "1", "@title",
+                    "APPLY", "(2 - @vector_distance) / 2", "AS", "similarity",
+                    "SORTBY", "2", "@similarity", "DESC", "MAX", "3",
+                    "DIALECT", "2",
+                    "PARAMS", "2", "vector", MakeVec(1.0f, 1.0f)});
+  // clang-format on
+
+  ASSERT_THAT(resp.type, facade::RespExpr::ARRAY);
+  // d1 is exact match (distance=0, similarity=1.0), should be first
+  EXPECT_THAT(resp.GetVec().size(), testing::Ge(3u));
+}
+
+// Verify that BuildRestoreCommand round-trips all HNSW vector parameters
+// including TYPE, M, and EF_CONSTRUCTION.
+TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+  using dfly::search::VectorSimilarity;
+
+  SchemaField field;
+  field.type = SchemaField::VECTOR;
+  field.flags = 0;
+  field.short_name = "embedding";
+
+  SchemaField::VectorParams vparams;
+  vparams.use_hnsw = true;
+  vparams.dim = 4;
+  vparams.sim = VectorSimilarity::COSINE;
+  vparams.capacity = 500;
+  vparams.hnsw_m = 32;
+  vparams.hnsw_ef_construction = 400;
+  field.special_params = vparams;
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["embedding"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  std::string cmd = info.BuildRestoreCommand();
+
+  // HNSW 12 = 6 key-value pairs: TYPE, DIM, DISTANCE_METRIC, INITIAL_CAP, M, EF_CONSTRUCTION
+  EXPECT_THAT(cmd, HasSubstr("HNSW 12"));
+  EXPECT_THAT(cmd, HasSubstr("TYPE FLOAT32"));
+  EXPECT_THAT(cmd, HasSubstr("DIM 4"));
+  EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
+  EXPECT_THAT(cmd, HasSubstr("INITIAL_CAP 500"));
+  EXPECT_THAT(cmd, HasSubstr("M 32"));
+  EXPECT_THAT(cmd, HasSubstr("EF_CONSTRUCTION 400"));
+}
+
+// FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
+// used to cause std::bad_alloc inside FlatVectorIndex, leaving a broken
+// ShardDocIndex registered.  A subsequent FT.SEARCH would dereference the empty
+// optional<FieldIndices> and crash (Abseil: "Use of destroyed hash table.").
+//
+// The fix rejects the index at parse time when dim * capacity overflows.
+TEST_F(SearchFamilyTest, SearchOnIndexWithHugeVectorDim) {
+  auto resp = Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT", "v", "VECTOR",
+                   "FLAT", "6", "TYPE", "FLOAT32", "DIM", "99999999999", "DISTANCE_METRIC", "L2"});
+  EXPECT_THAT(resp, ErrArg("Vector index initial allocation is too large"));
+
+  // Index must not be registered — FT.SEARCH must report "no such index".
+  resp = Run({"FT.SEARCH", "idx", "hello"});
+  EXPECT_THAT(resp, ErrArg("idx: no such index"));
+}
+
+// Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TEXT fields.
+TEST(BuildRestoreCommandTest, TextWithSuffixTriePreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TEXT;
+  field.flags = 0;
+  field.short_name = "title";
+  field.special_params = SchemaField::TextParams{.with_suffixtrie = true};
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["title"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("WITHSUFFIXTRIE"));
+}
+
+// Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TAG fields.
+TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField field;
+  field.type = SchemaField::TAG;
+  field.flags = 0;
+  field.short_name = "tags";
+  field.special_params = SchemaField::TagParams{.separator = ',', .with_suffixtrie = true};
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["tags"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+
+  std::string cmd = info.BuildRestoreCommand();
+  EXPECT_THAT(cmd, HasSubstr("WITHSUFFIXTRIE"));
+  EXPECT_THAT(cmd, HasSubstr("SEPARATOR"));
+}
+
+// Verify that FT.INFO returns all VECTOR field parameters.
+TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
+  EXPECT_EQ(Run({"ft.create",
+                 "idx",
+                 "ON",
+                 "HASH",
+                 "PREFIX",
+                 "1",
+                 "doc:",
+                 "SCHEMA",
+                 "embedding",
+                 "VECTOR",
+                 "HNSW",
+                 "10",
+                 "TYPE",
+                 "FLOAT32",
+                 "DIM",
+                 "4",
+                 "DISTANCE_METRIC",
+                 "COSINE",
+                 "M",
+                 "16",
+                 "EF_CONSTRUCTION",
+                 "200"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  auto vector_field_matcher =
+      IsArray("identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm",
+              "HNSW", "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "M", "16",
+              "ef_construction", "200");
+
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
+                            _, _, _));
+}
+
+// Verify that FT.INFO returns TAG field parameters: SEPARATOR and CASESENSITIVE.
+TEST_F(SearchFamilyTest, InfoIndexTagParams) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG",
+                 "SEPARATOR", "|", "CASESENSITIVE", "WITHSUFFIXTRIE"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  auto tag_field_matcher = IsArray("identifier", "tags", "attribute", "tags", "type", "TAG",
+                                   "SEPARATOR", "|", "CASESENSITIVE", "WITHSUFFIXTRIE");
+
+  EXPECT_THAT(
+      info, IsArray(_, _, _, _, _, _, "attributes", IsArray(tag_field_matcher), _, _, _, _, _, _));
+}
+
+// Verify that FT.INFO returns TEXT field parameter: WITHSUFFIXTRIE.
+TEST_F(SearchFamilyTest, InfoIndexTextParams) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT",
+                 "WITHSUFFIXTRIE"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  auto text_field_matcher =
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WITHSUFFIXTRIE");
+
+  EXPECT_THAT(
+      info, IsArray(_, _, _, _, _, _, "attributes", IsArray(text_field_matcher), _, _, _, _, _, _));
+}
+
+// Verify that FT.INFO returns stopwords_list as top-level field when explicitly set.
+TEST_F(SearchFamilyTest, InfoIndexStopwords) {
+  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "STOPWORDS", "2", "the",
+                 "a", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "stopwords_list",
+                            IsUnordArray("the", "a"), _, _, _, _));
+}
+
+// Verify that stopwords_list is absent when STOPWORDS was not explicitly set.
+TEST_F(SearchFamilyTest, InfoIndexDefaultStopwordsOmitted) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+
+  auto info = Run({"ft.info", "idx"});
+
+  // Collection size is 7 (no stopwords_list field).
+  EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "indexing", _, _, _));
+}
+
+// Verify that BM25 text scores survive document expiration correctly:
+// expired docs must not cause score injection into wrong documents.
+TEST_F(SearchFamilyTest, SearchWithScoresExpiredDoc) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world hello"});
+  Run({"hset", "d:2", "title", "hello there"});
+  Run({"hset", "d:3", "title", "hello universe"});
+  Run({"pexpire", "d:2", "50"});
+
+  // All 3 docs match before expiry
+  auto resp = Run({"ft.search", "i1", "hello", "WITHSCORES"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  // With WITHSCORES: [total, key, score, fields, key, score, fields, ...]
+  // Each doc takes 3 slots (key + score + field-array), plus 1 for total
+  EXPECT_GE(results.size(), 1 + 3 * 3u);
+
+  // Wait for d:2 to expire
+  AdvanceTime(60);
+  ThisFiber::SleepFor(5ms);
+
+  // Now only d:1 and d:3 should match; scores must be positive and assigned to correct docs
+  resp = Run({"ft.search", "i1", "hello", "WITHSCORES"});
+  results = resp.GetVec();
+  ASSERT_GE(results.size(), 1 + 3 * 2u);
+
+  // First element is total hits count
+  EXPECT_THAT(results[0], IntArg(2));
+
+  // Verify each returned doc has a positive score (not 0, not misassigned)
+  for (size_t i = 1; i < results.size(); i += 3) {
+    std::string key = results[i].GetString();
+    std::string score_str = results[i + 1].GetString();
+    double score = std::stod(score_str);
+    EXPECT_GT(score, 0.0) << "Doc " << key << " should have positive BM25 score";
+    EXPECT_TRUE(key == "d:1" || key == "d:3") << "Unexpected key: " << key;
+  }
+
+  Run({"flushall"});
+}
+
+// Verify ADDSCORES injects __score in FT.AGGREGATE and survives GROUPBY + REDUCE SUM
+TEST_F(SearchFamilyTest, AggregateAddScoresGroupBy) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "category", "TAG"}),
+            "OK");
+
+  // Two docs in category "a", one in "b" — all match "hello"
+  Run({"hset", "d:1", "title", "hello world hello", "category", "a"});
+  Run({"hset", "d:2", "title", "hello there", "category", "a"});
+  Run({"hset", "d:3", "title", "hello universe", "category", "b"});
+
+  // ADDSCORES should inject __score, then GROUPBY + REDUCE SUM aggregates them
+  auto resp = Run({"ft.aggregate", "i1", "hello", "ADDSCORES", "GROUPBY", "1", "@category",
+                   "REDUCE", "SUM", "1", "@__score", "AS", "total_score"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+
+  // FT.AGGREGATE returns [count, group1, group2, ...] — skip element [0]
+  ASSERT_GE(results.size(), 3u);  // count + 2 groups
+
+  // Parse groups: extract (category -> total_score)
+  std::map<std::string, double> group_scores;
+  for (size_t g = 1; g < results.size(); g++) {
+    auto group_vec = results[g].GetVec();
+    std::string cat;
+    double total = 0;
+    for (size_t j = 0; j < group_vec.size(); j += 2) {
+      auto key = group_vec[j].GetString();
+      if (key == "category")
+        cat = group_vec[j + 1].GetString();
+      else if (key == "total_score")
+        total = std::stod(group_vec[j + 1].GetString());
+    }
+    ASSERT_FALSE(cat.empty());
+    group_scores[cat] = total;
+  }
+
+  ASSERT_EQ(group_scores.size(), 2u);
+  EXPECT_GT(group_scores["a"], 0.0) << "Group 'a' should have positive total score";
+  EXPECT_GT(group_scores["b"], 0.0) << "Group 'b' should have positive total score";
+  // Group "a" has 2 docs matching "hello", group "b" has 1 — sum should be higher
+  EXPECT_GT(group_scores["a"], group_scores["b"])
+      << "Group with more matching docs should have higher total score";
+}
+
+// Verify WITHSCORES returns positive BM25 scores for basic text search
+TEST_F(SearchFamilyTest, SearchWithScoresBasic) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world hello hello"});  // TF=3
+  Run({"hset", "d:2", "title", "hello there"});              // TF=1
+
+  auto resp = Run({"ft.search", "i1", "hello", "WITHSCORES"});
+  auto results = resp.GetVec();
+  // [total_hits, key, score, fields, key, score, fields]
+  ASSERT_GE(results.size(), 1 + 3 * 2u);
+  EXPECT_THAT(results[0], IntArg(2));
+
+  // Collect (key -> score)
+  std::map<std::string, double> scores;
+  for (size_t i = 1; i < results.size(); i += 3) {
+    scores[results[i].GetString()] = std::stod(results[i + 1].GetString());
+  }
+
+  EXPECT_GT(scores["d:1"], 0.0);
+  EXPECT_GT(scores["d:2"], 0.0);
+  // d:1 has higher TF -> should score higher
+  EXPECT_GT(scores["d:1"], scores["d:2"]) << "Doc with higher TF should score higher";
+}
+
+// Verify ADDSCORES injects __score for simple (non-KNN) FT.AGGREGATE
+TEST_F(SearchFamilyTest, AggregateAddScoresSimple) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world hello hello"});  // TF=3
+  Run({"hset", "d:2", "title", "hello there"});              // TF=1
+  Run({"hset", "d:3", "title", "goodbye world"});            // no match
+
+  auto resp = Run({"ft.aggregate", "i1", "hello", "ADDSCORES", "SORTBY", "2", "@__score", "DESC"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+
+  // FT.AGGREGATE returns [count, result1, result2, ...] — skip element [0]
+  ASSERT_GE(results.size(), 3u);  // count + 2 results
+
+  // Results should be sorted descending by __score
+  auto first = results[1].GetVec();
+  auto second = results[2].GetVec();
+
+  // Find __score values
+  double score1 = 0, score2 = 0;
+  for (size_t j = 0; j < first.size(); j += 2) {
+    if (first[j].GetString() == "__score")
+      score1 = std::stod(first[j + 1].GetString());
+  }
+  for (size_t j = 0; j < second.size(); j += 2) {
+    if (second[j].GetString() == "__score")
+      score2 = std::stod(second[j + 1].GetString());
+  }
+
+  EXPECT_GT(score1, 0.0) << "First result should have positive score";
+  EXPECT_GT(score2, 0.0) << "Second result should have positive score";
+  EXPECT_GE(score1, score2) << "Results should be sorted by score DESC";
+}
+
+// Verify per-field BM25 scoring: a long "body" field shouldn't penalize a short "title" match
+TEST_F(SearchFamilyTest, SearchWithScoresPerField) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "body", "TEXT"}),
+            "OK");
+
+  // d:1 — short title match, very long body (unrelated)
+  Run({"hset", "d:1", "title", "hello", "body",
+       "the quick brown fox jumps over the lazy dog and many other words here to make body long"});
+  // d:2 — short title match, short body
+  Run({"hset", "d:2", "title", "hello", "body", "short"});
+
+  auto resp = Run({"ft.search", "i1", "@title:hello", "WITHSCORES"});
+  auto results = resp.GetVec();
+  ASSERT_GE(results.size(), 1 + 3 * 2u);
+
+  // Collect scores
+  std::map<std::string, double> scores;
+  for (size_t i = 1; i < results.size(); i += 3) {
+    scores[results[i].GetString()] = std::stod(results[i + 1].GetString());
+  }
+
+  EXPECT_GT(scores["d:1"], 0.0);
+  EXPECT_GT(scores["d:2"], 0.0);
+  // With per-field scoring, both docs have the same title field content ("hello", TF=1)
+  // and same title field length (1), so scores should be equal regardless of body length.
+  EXPECT_DOUBLE_EQ(scores["d:1"], scores["d:2"])
+      << "Per-field scoring: body length should not affect title-only query score";
+}
+
+// Verify ADDSCORES makes __score visible even without explicit LOAD or pipeline steps
+TEST_F(SearchFamilyTest, AggregateAddScoresAutoVisible) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world"});
+
+  // ADDSCORES with no LOAD, no SORTBY, no GROUPBY — __score should still be visible
+  auto resp = Run({"ft.aggregate", "i1", "hello", "ADDSCORES"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_GE(results.size(), 2u);  // count + at least 1 result
+
+  auto row = results[1].GetVec();
+  bool found_score = false;
+  for (size_t j = 0; j < row.size(); j += 2) {
+    if (row[j].GetString() == "__score") {
+      double score = std::stod(row[j + 1].GetString());
+      EXPECT_GT(score, 0.0);
+      found_score = true;
+    }
+  }
+  EXPECT_TRUE(found_score) << "__score should be visible with ADDSCORES even without LOAD/pipeline";
+}
+
+// DocKeyIndex: empty-key documents must survive Serialize/Restore and not be
+// confused with freed slots (which also have keys_[id] == "").
+
+class DocKeyIndexTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+};
+
+TEST_F(DocKeyIndexTest, SerializeDistinguishesEmptyKeyFromFreedSlot) {
+  ShardDocIndex::DocKeyIndex index;
+  auto id0 = index.Add("doc1");
+  auto id1 = index.Add("");  // valid empty-key document
+  auto id2 = index.Add("doc2");
+  index.Remove(id0);  // freed slot, also keys_[id0] == ""
+
+  auto serialized = index.Serialize();
+  ASSERT_EQ(serialized.size(), 2u);  // id1 + id2, not the freed id0
+
+  sort(serialized.begin(), serialized.end(),
+       [](const auto& a, const auto& b) { return a.second < b.second; });
+  EXPECT_EQ(serialized[0], make_pair(string(""), id1));
+  EXPECT_EQ(serialized[1], make_pair(string("doc2"), id2));
+}
+
+TEST_F(DocKeyIndexTest, RestoreRoundTripsEmptyKey) {
+  ShardDocIndex::DocKeyIndex index;
+  auto id0 = index.Add("doc1");
+  auto id1 = index.Add("");
+  auto id2 = index.Add("doc2");
+  index.Remove(id0);
+
+  ShardDocIndex::DocKeyIndex restored;
+  restored.Restore(index.Serialize());
+
+  EXPECT_FALSE(restored.IsValid(id0));  // gap slot stays free
+  EXPECT_TRUE(restored.IsValid(id1));   // empty-key doc survives
+  EXPECT_TRUE(restored.IsValid(id2));
+  EXPECT_EQ(restored.Get(id1), "");
+  EXPECT_EQ(restored.Add("doc3"), id0);  // freed slot is reused
+}
+
+// FT.SEARCH loads documents via GetAccessor → GetStringMap (set_time) → Serialize
+// which iterates the StringMap triggering lazy field expiry.  If all fields expired,
+// the hash must be cleaned up — not left as a zombie that crashes SAVE.
+TEST_F(SearchFamilyTest, SearchDeletesEmptyHash) {
+  Run({"ft.create", "idx", "PREFIX", "1", "d:", "SCHEMA", "foo", "TEXT"});
+
+  // Create documents with field-level TTL.
+  for (int i = 0; i < 10; ++i) {
+    Run({"HSETEX", absl::StrCat("d:", i), "1", "foo", absl::StrCat("bar", i)});
+  }
+
+  AdvanceTime(2000);
+
+  // FT.SEARCH triggers GetStringMap(set_time) + Serialize which iterates all fields.
+  // Lazy expiry deletes them.  Without fix, empty hashes remain as zombies.
+  Run({"ft.search", "idx", "*"});
+
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_EQ(0, CheckedInt({"EXISTS", absl::StrCat("d:", i)}));
+  }
 }
 
 }  // namespace dfly

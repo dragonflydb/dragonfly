@@ -221,7 +221,11 @@ void BaseFamilyTest::SetUp() {
 void BaseFamilyTest::TearDown() {
   CHECK_EQ(NumLocked(), 0U);
 
-  connections_.clear();
+  {
+    std::unique_lock conn_lck{mu_};
+    connections_.clear();
+  }
+
   ShutdownService();
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
@@ -259,11 +263,6 @@ void BaseFamilyTest::ResetService() {
   service_->Init(nullptr, {});
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
-  auto default_ns = &namespaces->GetDefaultNamespace();
-  auto cb = [&](EngineShard* s) {
-    default_ns->GetDbSlice(s->shard_id()).UpdateExpireBase(TEST_current_time_ms - 1000, 0);
-  };
-  shard_set->RunBriefInParallel(cb);
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
   LOG(INFO) << "Starting " << test_info->name();
@@ -273,7 +272,11 @@ void BaseFamilyTest::ResetService() {
 
     if (!watchdog_done_.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected!!!!";
+#ifdef USE_ABSL_LOG
+      absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
+#else
       absl::SetFlag(&FLAGS_alsologtostderr, true);
+#endif
       fb2::Mutex m;
       shard_set->pool()->AwaitFiberOnAll([&m, this](unsigned index, ProactorBase* base) {
         ThisFiber::SetName("Watchdog");
@@ -331,11 +334,14 @@ void BaseFamilyTest::ShutdownService() {
   service_->Shutdown();
   service_.reset();
 
-  delete shard_set;
-  shard_set = nullptr;
-
+  // Stop the watchdog before shutting down the service, because shutdown tears down namespaces
+  // which the watchdog's diagnostic code may access. Must run before we delete shard_set as
+  // the watchdog accesses it.
   watchdog_done_.Notify();
   watchdog_fiber_.Join();
+
+  delete shard_set;
+  shard_set = nullptr;
 
   pp_->Stop();
 }

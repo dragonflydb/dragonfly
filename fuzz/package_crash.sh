@@ -4,10 +4,12 @@ set -e
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 print_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+print_warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 
 usage() {
     echo "Usage: $0 <crash_id> [crashes_dir]"
@@ -66,6 +68,32 @@ fi
 # Copy replay_crash.py
 cp "$SCRIPT_DIR/replay_crash.py" "$DEST/"
 
+# Copy repro.env — contains exact Dragonfly flags + memory limit used during fuzzing.
+# triage_crashes.sh reads this to start Dragonfly identically to the fuzz run.
+# repro.env lives one level above the fuzzer instance dir (i.e. OUTPUT_DIR):
+#   crashes_dir  = .../artifacts/<target>/default/crashes
+#   repro.env    = .../artifacts/<target>/repro.env
+REPRO_ENV="$(dirname "$(dirname "$CRASHES_DIR")")/repro.env"
+if [[ -f "$REPRO_ENV" ]]; then
+    cp "$REPRO_ENV" "$DEST/"
+    print_info "Reproduction environment: repro.env included"
+else
+    print_warn "repro.env not found at $REPRO_ENV — crash archive won't include exact fuzz flags"
+fi
+
+REPLAY_PORT=6379
+MODE_HINT="resp"
+if [[ -f "$DEST/repro.env" ]]; then
+    _mc_port=$(grep '^--memcached_port=' "$DEST/repro.env" | cut -d= -f2 || true)
+    if [[ -n "$_mc_port" ]]; then
+        REPLAY_PORT="$_mc_port"
+        MODE_HINT="memcache"
+    else
+        _resp_port=$(grep '^--port=' "$DEST/repro.env" | cut -d= -f2 || true)
+        REPLAY_PORT="${_resp_port:-6379}"
+    fi
+fi
+
 # Create archive
 OUTPUT="$(pwd)/${ARCHIVE_NAME}.tar.gz"
 tar -czf "$OUTPUT" -C "$TMPDIR" "$ARCHIVE_NAME"
@@ -74,25 +102,16 @@ rm -rf "$TMPDIR"
 SIZE=$(du -h "$OUTPUT" | cut -f1)
 print_info "Archive created: ${OUTPUT} (${SIZE})"
 echo ""
-# Detect target from directory structure: artifacts/<target>/default/crashes
-TARGET_NAME=$(basename "$(dirname "$(dirname "$CRASHES_DIR")")")
-IS_MEMCACHE=false
-if [[ "$TARGET_NAME" == "memcache" ]]; then
-    IS_MEMCACHE=true
-fi
 
 echo "To reproduce:"
-echo "  1. Start dragonfly:"
-if [[ "$IS_MEMCACHE" == true ]]; then
-    echo "     ./build/dragonfly --port 6379 --memcached_port=11211 --logtostderr --proactor_threads 1 --dbfilename=\"\""
-else
-    echo "     ./build/dragonfly --port 6379 --logtostderr --proactor_threads 1 --dbfilename=\"\""
-fi
-echo "  2. Extract and replay:"
-echo "     tar xzf ${ARCHIVE_NAME}.tar.gz"
-echo "     cd ${ARCHIVE_NAME}"
-if [[ "$IS_MEMCACHE" == true ]]; then
-    echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 11211"
-else
-    echo "     python3 replay_crash.py crashes ${CRASH_ID}"
-fi
+echo "  1. Extract the archive:"
+echo "     tar xzf ${ARCHIVE_NAME}.tar.gz && cd ${ARCHIVE_NAME}"
+echo "  2. Start Dragonfly with the exact flags from the fuzz run (repro.env):"
+echo "     MEM_KB=\$(grep '^MEM_LIMIT_KB=' repro.env | cut -d= -f2)"
+echo "     readarray -t DF_FLAGS < <(grep -v '^#' repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')"
+echo "     (ulimit -v \"\$MEM_KB\"; exec <path-to-dragonfly> \"\${DF_FLAGS[@]}\") &"
+echo "  3. Replay:"
+echo "     python3 replay_crash.py crashes ${CRASH_ID} 127.0.0.1 ${REPLAY_PORT}"
+echo ""
+echo "Or use the triage script to reproduce all crashes from a zip:"
+echo "  ./fuzz/triage_crashes.sh <path-to-dragonfly> ${MODE_HINT:-resp} <crashes.zip>"

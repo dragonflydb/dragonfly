@@ -5,7 +5,6 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 
-#include <bitset>
 #include <nonstd/expected.hpp>
 
 #include "base/logging.h"
@@ -16,12 +15,15 @@
 #include "server/command_families.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
 #include "src/core/overloaded.h"
 #include "util/varz.h"
+
+namespace rng = std::ranges;
 
 namespace dfly {
 using namespace facade;
@@ -58,7 +60,7 @@ string GetString(const PrimeValue& pv);
 bool SetBitValue(uint32_t offset, bool bit_value, string* entry);
 std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits);
-std::size_t CountBitSetByBitIndices(string_view at, std::size_t start, std::size_t end);
+std::size_t CountBitSetByBitIndices(string_view at, std::size_t front, std::size_t back);
 string RunBitOperationOnValues(string_view op, const BitsStrVec& values);
 
 // ------------------------------------------------------------------------- //
@@ -167,24 +169,21 @@ std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::siz
   return count;
 }
 
-// Count the number of bits that are on, on bits boundaries: i.e. Start and end are the indices for
-// bits locations inside str
-std::size_t CountBitSetByBitIndices(string_view at, std::size_t start, std::size_t end) {
-  auto first_byte_index = GetByteIndex(start);
-  auto last_byte_index = GetByteIndex(end);
-  if (start % OFFSET_FACTOR == 0 && end % OFFSET_FACTOR == 0) {
-    return CountBitSetByByteIndices(at, first_byte_index, last_byte_index);
+// Count the number of bits that are on, in the inclusive bit range [front, back].
+// Caller must guarantee 0 <= front <= back < at.size() * OFFSET_FACTOR.
+std::size_t CountBitSetByBitIndices(string_view at, std::size_t front, std::size_t back) {
+  const size_t front_byte = front / OFFSET_FACTOR;
+  const size_t back_byte = back / OFFSET_FACTOR;
+  const uint8_t front_bit = front % OFFSET_FACTOR;
+  const uint8_t back_bit_end = back % OFFSET_FACTOR + 1;  // exclusive upper
+
+  if (front_byte == back_byte) {
+    return CountBitsRange(static_cast<uint8_t>(at[front_byte]), front_bit, back_bit_end);
   }
-  const auto last_bit_first_byte =
-      first_byte_index != last_byte_index ? OFFSET_FACTOR : GetBitIndex(end);
-  const auto first_byte = GetByteValue(at, start);
-  std::uint32_t count = CountBitsRange(first_byte, GetBitIndex(start), last_bit_first_byte);
-  if (first_byte_index < last_byte_index) {
-    first_byte_index++;
-    const auto last_byte = GetByteValue(at, end);
-    count += CountBitsRange(last_byte, 0, GetBitIndex(end));
-    count += CountBitSetByByteIndices(at, first_byte_index, last_byte_index);
-  }
+  std::size_t count =
+      CountBitsRange(static_cast<uint8_t>(at[front_byte]), front_bit, OFFSET_FACTOR);
+  count += CountBitSetByByteIndices(at, front_byte + 1, back_byte);
+  count += CountBitsRange(static_cast<uint8_t>(at[back_byte]), 0, back_bit_end);
   return count;
 }
 
@@ -204,23 +203,28 @@ int64_t NormalizedOffset(int64_t size, int64_t offset) {
 // Note that when bits is false, it means that we are looking on byte boundaries.
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits) {
   const int64_t strlen = bits ? str.size() * OFFSET_FACTOR : str.size();
+  if (strlen == 0)
+    return 0;
+
+  // Both-negative inverted range is empty; without this, clamping pulls both
+  // up to 0 on short strings and counts a spurious byte/bit.
+  if (start < 0 && end < 0 && start > end)
+    return 0;
 
   if (start < 0)
     start = strlen + start;
   if (end < 0)
     end = strlen + end;
 
-  end = min(end, strlen);
+  start = max(start, int64_t(0));
+  end = max(int64_t(0), min(end, strlen - 1));
 
-  if (strlen == 0 || start > end)
+  if (start > end)
     return 0;
 
-  start = max(start, int64_t(0));
-  end = max(end, int64_t(0));
-
-  ++end;
+  // `end` is passed inclusive to the bit helper, exclusive (end + 1) to the byte helper.
   return bits ? CountBitSetByBitIndices(str, start, end)
-              : CountBitSetByByteIndices(str, start, end);
+              : CountBitSetByByteIndices(str, start, end + 1);
 }
 
 // return true if bit is on
@@ -228,10 +232,6 @@ bool GetBitValue(const string& entry, uint32_t offset) {
   const auto byte_val{GetByteValue(entry, offset)};
   const auto index{GetNormalizedBitIndex(offset)};
   return CheckBitStatus(byte_val, index);
-}
-
-bool GetBitValueSafe(const string& entry, uint32_t offset) {
-  return ((entry.size() * OFFSET_FACTOR) > offset) ? GetBitValue(entry, offset) : false;
 }
 
 constexpr uint8_t TurnBitOn(uint8_t on, uint32_t offset) {
@@ -274,6 +274,9 @@ class ElementAccess {
 
   string Value() const;
 
+  bool GetByteAtIndex(size_t idx, uint8_t* res) const;
+  void SetByteAtIndex(size_t idx, uint8_t value) const;
+
   void Commit(string_view new_value) const;
 
   // return nullopt when key exists but it's not encoded as string
@@ -307,6 +310,20 @@ string ElementAccess::Value() const {
   return IsNewEntry() ? string{} : GetString(updater_.it->second);
 }
 
+bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
+  DCHECK(!IsNewEntry());
+  return updater_.it->second.GetByteAtIndex(idx, res);
+}
+
+void ElementAccess::SetByteAtIndex(size_t idx, uint8_t val) const {
+  DCHECK(!IsNewEntry());
+  DCHECK_LT(idx, updater_.it->second.Size());
+  auto [success, _] = updater_.it->second.SetByteAtIndex(idx, val);
+  if (success) {
+    updater_.post_updater.Run();
+  }
+}
+
 void ElementAccess::Commit(string_view new_value) const {
   if (new_value.empty()) {
     if (!IsNewEntry()) {
@@ -337,25 +354,42 @@ OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset,
   auto find_res = element_access.Find(false);
 
   if (find_res != OpStatus::OK) {
+    VLOG(1) << "Find failed for key: " << key << " with error: " << find_res;
     return find_res;
   }
 
+  const size_t byte_index = GetByteIndex(offset);
+
+  // Create a new entry
   if (element_access.IsNewEntry()) {
-    string new_entry(GetByteIndex(offset) + 1, 0);
+    VLOG(2) << "Creating new key: " << key << " with size: " << (byte_index + 1) << " bytes";
+    string new_entry(byte_index + 1, 0);
     old_value = SetBitValue(offset, bit_value, &new_entry);
     element_access.Commit(new_entry);
-  } else {
-    bool reset = false;
-    string existing_entry{element_access.Value()};
-    if ((existing_entry.size() * OFFSET_FACTOR) <= offset) {
-      existing_entry.resize(GetByteIndex(offset) + 1, 0);
-      reset = true;
-    }
-    old_value = SetBitValue(offset, bit_value, &existing_entry);
-    if (reset || old_value != bit_value) {  // we made a "real" change to the entry, save it
-      element_access.Commit(existing_entry);
-    }
+    return old_value;
   }
+
+  // Get byte where bit offset is located. If offset is out of bound it means
+  // that we need to extend the string otherwise we just update.
+  uint8_t existing_byte;
+  if (element_access.GetByteAtIndex(byte_index, &existing_byte)) {
+    VLOG(2) << "Updating key: " << key << " at byte index: " << byte_index;
+    uint32_t bit_index = GetNormalizedBitIndex(offset);
+    old_value = CheckBitStatus(existing_byte, bit_index);
+    if (old_value != bit_value) {
+      existing_byte =
+          bit_value ? TurnBitOn(existing_byte, bit_index) : TurnBitOff(existing_byte, bit_index);
+      element_access.SetByteAtIndex(byte_index, existing_byte);
+    }
+  } else {
+    VLOG(2) << "Extending key: " << key << " to " << (byte_index + 1) << " bytes";
+    string existing_entry{element_access.Value()};
+    existing_entry.resize(byte_index + 1, 0);
+    SetBitValue(offset, bit_value, &existing_entry);
+    // We always need to commit the extended key
+    element_access.Commit(existing_entry);
+  }
+
   return old_value;
 }
 
@@ -1124,8 +1158,7 @@ void BitOp(CmdArgList args, CommandContext* cmd_cntx) {
                                                          NOT_OP_NAME};
   string op = absl::AsciiStrToUpper(ArgS(args, 0));
   string_view dest_key = ArgS(args, 1);
-  bool illegal = std::none_of(BITOP_OP_NAMES.begin(), BITOP_OP_NAMES.end(),
-                              [&op](auto val) { return op == val; });
+  bool illegal = rng::none_of(BITOP_OP_NAMES, [&op](auto val) { return op == val; });
 
   auto* builder = cmd_cntx->rb();
   if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {
@@ -1238,12 +1271,22 @@ string GetString(const PrimeValue& pv) {
 }
 
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
-  OpResult<string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
-  if (result) {
-    return GetBitValueSafe(result.value(), offset);
-  } else {
-    return result.status();
+  DbSlice& db_slice = op_args.GetDbSlice();
+  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+
+  if (!it_res.ok()) {
+    return it_res.status();
   }
+
+  const PrimeValue& pv = it_res.value()->second;
+
+  uint8_t byte_value = 0;
+  if (!pv.GetByteAtIndex(GetByteIndex(offset), &byte_value)) {
+    return false;
+  }
+
+  const auto bit_index = GetNormalizedBitIndex(offset);
+  return CheckBitStatus(byte_value, bit_index);
 }
 
 OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard) {

@@ -6,7 +6,6 @@
 
 #include <absl/base/internal/endian.h>
 
-#include <boost/intrusive/list_hook.hpp>
 #include <optional>
 #include <type_traits>
 
@@ -16,7 +15,13 @@
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 
+typedef struct stream stream;
+
 namespace dfly {
+
+namespace tiering {
+struct TieredCoolRecord;
+}
 
 constexpr unsigned kEncodingIntSet = 0;
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
@@ -26,6 +31,8 @@ constexpr unsigned kEncodingJsonCons = 0;
 constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
+class TOPK;
+class CMS;
 class PageUsage;
 
 using cmn::StringOrView;
@@ -98,8 +105,6 @@ class RobjWrapper {
 
 static_assert(sizeof(RobjWrapper) == 16);
 
-struct TieredColdRecord;
-
 }  // namespace detail
 
 using CompactObjType = unsigned;
@@ -114,6 +119,7 @@ class CompactObj {
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
 
+ protected:
   // 0-16 is reserved for inline lengths of string type.
   enum TagEnum : uint8_t {
     INT_TAG = 17,
@@ -122,6 +128,9 @@ class CompactObj {
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
     SBF_TAG = 22,
+    CMS_TAG = 23,
+    SDS_TTL_TAG = 24,
+    TOPK_TAG = 25,
   };
 
   // String encoding types.
@@ -142,6 +151,9 @@ class CompactObj {
     size_t DecodedSize(std::string_view blob) const;         // Size of decoded blob
     size_t Decode(std::string_view blob, char* dest) const;  // Decode into dest, return size
     StringOrView Decode(std::string_view blob) const;
+    // Decode a byte at offset into dest. Return true if decoded successfully,
+    // false if idx is out of bounds.
+    bool DecodeByte(std::string_view blob, size_t idx, uint8_t* dest) const;
 
    private:
     friend class CompactObj;
@@ -159,8 +171,9 @@ class CompactObj {
 
   // Different representations of external values
   enum class ExternalRep : uint8_t {
-    STRING,         // OBJ_STRING, Basic representation with various string encodings
-    SERIALIZED_MAP  // OBJ_HASH, Serialized map
+    STRING,          // OBJ_STRING, Basic representation with various string encodings
+    SERIALIZED_MAP,  // OBJ_HASH, Serialized map
+    LIST_NODE        // OBJ_LIST, QList::Node
   };
 
   explicit CompactObj(bool is_key)
@@ -184,10 +197,6 @@ class CompactObj {
   // For containers - returns number of elements in the container.
   size_t Size() const;
 
-  bool IsRef() const {
-    return mask_bits_.ref;
-  }
-
   std::string_view GetSlice(std::string* scratch) const;
 
   std::string ToString() const {
@@ -198,22 +207,6 @@ class CompactObj {
 
   uint64_t HashCode() const;
   static uint64_t HashCode(std::string_view str);
-
-  bool operator==(const CompactObj& o) const;
-
-  bool operator==(std::string_view sl) const;
-
-  bool operator!=(std::string_view sl) const {
-    return !(*this == sl);
-  }
-
-  friend bool operator!=(const CompactObj& lhs, const CompactObj& rhs) {
-    return !(lhs == rhs);
-  }
-
-  friend bool operator==(std::string_view sl, const CompactObj& o) {
-    return o.operator==(sl);
-  }
 
   bool HasFlag() const {
     return mask_bits_.mc_flag;
@@ -304,6 +297,22 @@ class CompactObj {
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
 
+  void SetTOPK(TOPK* topk) {
+    SetMeta(TOPK_TAG);
+    u_.topk = topk;
+  }
+
+  void SetTOPK(uint32_t k, uint32_t width, uint32_t depth, double decay);
+  TOPK* GetTOPK() const;
+
+  void SetCMS(CMS* cms) {
+    SetMeta(CMS_TAG);
+    u_.cms = cms;
+  }
+
+  void SetCMS(uint32_t width, uint32_t depth);
+  CMS* GetCMS() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -330,12 +339,12 @@ class CompactObj {
 
   // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, ExternalRep rep,
-               detail::TieredColdRecord* record);
+               tiering::TieredCoolRecord* record);
 
   struct CoolItem {
     uint16_t page_offset;
     size_t serialized_size;
-    detail::TieredColdRecord* record;
+    tiering::TieredCoolRecord* record;
   };
 
   // Prerequisite: IsCool() is true.
@@ -366,6 +375,11 @@ class CompactObj {
   }
 
   uint8_t GetFirstByte() const;
+  // Returns true if the byte was decoded successfully, false if idx is out of bounds.
+  bool GetByteAtIndex(size_t idx, uint8_t* res) const;
+  // Returns a pair of booleans: {success, in_place}. success is false if offset is out of bounds
+  // in_place is true if the byte was set without needing to rewrite the string.
+  std::pair<bool, bool> SetByteAtIndex(size_t idx, uint8_t val);
 
   struct Stats {
     size_t small_string_bytes = 0;
@@ -414,6 +428,11 @@ class CompactObj {
     return taglen_;
   }
 
+ private:
+  // Returns a string_view corresponding to the serialized encoded blob.
+  // If opt_dest is provided, it may be used to decode directly into the destination buffer.
+  std::string_view GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const;
+
  protected:
   void EncodeString(std::string_view str);
 
@@ -442,7 +461,7 @@ class CompactObj {
     uint8_t first_byte;
 
     // We do not have enough space in the common area to store page_index together with
-    // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
+    // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
     struct Offload {
       uint32_t page_index;
       uint32_t reserved;
@@ -450,10 +469,18 @@ class CompactObj {
 
     union {
       Offload offload;
-      detail::TieredColdRecord* cool_record;
+      tiering::TieredCoolRecord* cool_record;
     };
   } __attribute__((packed));
   static_assert(sizeof(ExternalPtr) == 16);
+
+  struct SdsTtlString {
+    char* sds_ptr;    // SDS string (length via sdslen)
+    uint64_t exp_ms;  // absolute expiry time in ms
+
+    std::string_view view() const;
+  } __attribute__((packed));
+
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
@@ -484,11 +511,14 @@ class CompactObj {
     SmallString small_str;
     detail::RobjWrapper r_obj;
 
-    // using 'packed' to reduce alignement of U to 1.
+    // using 'packed' to reduce alignment of U to 1.
     JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
+    TOPK* topk __attribute__((packed));
+    CMS* cms __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
+    SdsTtlString sds_ttl;
 
     U() : r_obj() {
     }
@@ -499,8 +529,7 @@ class CompactObj {
   union {
     uint8_t mask_ = 0;
     struct {
-      uint8_t ref : 1;      // Mark objects that don't own their allocation.
-      uint8_t expire : 1;   // Mark objects that have expiry timestamp assigned.
+      uint8_t unused : 2;
       uint8_t mc_flag : 1;  // Marks keys that have memcache flags assigned.
 
       // IO_PENDING is set when the tiered storage has issued an i/o request to save the value.
@@ -524,7 +553,45 @@ class CompactObj {
   uint8_t encoding_ : 2;  // Encoding of string values
 };
 
-inline bool CompactObj::operator==(std::string_view sv) const {
+struct CompactKey : public CompactObj {
+  CompactKey() : CompactObj(true) {
+  }
+
+  explicit CompactKey(std::string_view str) : CompactObj{str, true} {
+  }
+
+  bool HasExpire() const {
+    return taglen_ == SDS_TTL_TAG;
+  }
+
+  // Embed expire time directly in the key by converting to SDS_TTL_TAG.
+  void SetExpireTime(uint64_t abs_ms);
+
+  // Remove embedded expire time and convert back to optimal string form.
+  bool ClearExpireTime();
+
+  // Read the embedded expire time.
+  // Returns 0 if there is no embedded expire time, otherwise
+  // returns the absolute expire time in ms.
+  uint64_t GetExpireTime() const;
+
+  CompactKey& operator=(std::string_view sv) noexcept {
+    SetString(sv);
+    return *this;
+  }
+
+  bool operator==(std::string_view sl) const;
+
+  bool operator!=(std::string_view sl) const {
+    return !(*this == sl);
+  }
+
+  friend bool operator==(std::string_view sl, const CompactKey& o) {
+    return o.operator==(sl);
+  }
+};
+
+inline bool CompactKey::operator==(std::string_view sv) const {
   if (encoding_)
     return CmpEncoded(sv);
 
@@ -533,33 +600,6 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   }
   return CmpNonInline(sv);
 }
-
-struct CompactKey : public CompactObj {
-  CompactKey() : CompactObj(true) {
-  }
-
-  explicit CompactKey(std::string_view str) : CompactObj{str, true} {
-  }
-
-  CompactKey AsRef() const {
-    CompactKey res;
-    memcpy(&res.u_, &u_, sizeof(u_));
-    res.encoding_ = encoding_;
-    res.taglen_ = taglen_;
-    res.mask_ = mask_;
-    res.mask_bits_.ref = 1;
-
-    return res;
-  }
-
-  bool HasExpire() const {
-    return mask_bits_.expire;
-  }
-
-  void SetExpire(bool e) {
-    mask_bits_.expire = e;
-  }
-};
 
 struct CompactValue : public CompactObj {
   CompactValue() : CompactObj(false) {
@@ -574,17 +614,7 @@ std::string_view ObjTypeToString(CompactObjType type);
 // Returns kInvalidCompactObjType if sv is not a valid type.
 CompactObjType ObjTypeFromString(std::string_view sv);
 
-namespace detail {
-
-struct TieredColdRecord : public ::boost::intrusive::list_base_hook<
-                              boost::intrusive::link_mode<boost::intrusive::normal_link>> {
-  uint64_t key_hash;  // Allows searching the entry in the dbslice.
-  CompactValue value;
-  uint16_t db_index;
-  uint32_t page_index;
-};
-static_assert(sizeof(TieredColdRecord) == 48);
-
-};  // namespace detail
+stream* streamNew();
+void freeStream(stream* s);
 
 }  // namespace dfly

@@ -10,6 +10,7 @@
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
@@ -22,12 +23,14 @@ extern "C" {
 #include "redis/util.h"
 }
 
+namespace rng = std::ranges;
+
 namespace dfly::container_utils {
 using namespace std;
 namespace {
 
 struct ShardFFResult {
-  PrimeKey key;
+  std::string key;
   ShardId sid = kInvalidSid;
 };
 
@@ -87,7 +90,7 @@ OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_ty
 OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) {
   DCHECK_GT(trans->GetUniqueShardCnt(), 1u);
 
-  using FFResult = std::tuple<PrimeKey, unsigned, ShardId>;  // key, argument index, sid
+  using FFResult = std::tuple<std::string, unsigned, ShardId>;  // key, argument index, sid
   VLOG(2) << "FindFirst::Find " << trans->DebugId();
 
   // Holds Find results: (iterator to a found key, and its index in the passed arguments).
@@ -100,8 +103,9 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
     auto args = t->GetShardArgs(sid);
     auto ff_res = FindFirstReadOnly(t->GetDbSlice(sid), t->GetDbContext(), args, req_obj_type);
     if (ff_res) {
-      find_res[shard->shard_id()] =
-          FFResult{ff_res->first->first.AsRef(), ff_res->second, shard->shard_id()};
+      std::string ff_key;
+      ff_res->first->first.GetString(&ff_key);
+      find_res[shard->shard_id()] = FFResult{std::move(ff_key), ff_res->second, shard->shard_id()};
     } else {
       find_res[shard->shard_id()] = ff_res.status();
     }
@@ -111,7 +115,8 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   trans->Execute(std::move(cb), false);
 
   // If any key is of the wrong type, report it immediately
-  if (std::find(find_res.begin(), find_res.end(), OpStatus::WRONG_TYPE) != find_res.end())
+  if (rng::find_if(find_res, [](const auto& r) { return r == OpStatus::WRONG_TYPE; }) !=
+      find_res.end())
     return OpStatus::WRONG_TYPE;
 
   // Order result by their keys position in the command arguments, push errors to back
@@ -132,7 +137,7 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
 
   CHECK(it->ok());  // No other errors than WRONG_TYPE and KEY_NOTFOUND
   FFResult& res = **it;
-  return ShardFFResult{std::get<PrimeKey>(res).AsRef(), std::get<ShardId>(res)};
+  return ShardFFResult{std::get<0>(res), std::get<2>(res)};
 }
 
 }  // namespace
@@ -330,7 +335,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   if (result.ok()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == result->sid) {
-        result->key.GetString(&result_key);
+        result_key = result->key;
         func(t, shard, result_key);
       }
       return OpStatus::OK;

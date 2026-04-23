@@ -28,6 +28,8 @@ from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
+# Suppress "Unclosed ClusterNode" warnings from redis-py topology refreshes (not actionable)
+logging.getLogger("asyncio").addFilter(lambda r: "Unclosed ClusterNode" not in r.getMessage())
 
 DATABASE_INDEX = 0
 BASE_LOG_DIR = "/tmp/dragonfly_logs/"
@@ -308,6 +310,13 @@ def df_server(df_factory: DflyInstanceFactory) -> typing.Generator[DflyInstance,
         client.client_setname("mgr")
         sleep(0.1)
         clients_left = [x for x in client.client_list() if x["name"] != "mgr"]
+
+        # Graceful shutdown, and avoid saving on shutdown if possible
+        try:
+            if instance.proc:
+                client.shutdown(nosave=True)
+        except Exception:
+            pass
     except Exception as e:
         print(e, file=sys.stderr)
 
@@ -566,8 +575,8 @@ def pytest_runtest_makereport(item, call):
 
 
 @pytest.fixture(scope="function")
-def redis_server(port_picker) -> RedisServer:
-    s = RedisServer(port_picker.get_available_port())
+def redis_server(port_picker, df_log_dir) -> RedisServer:
+    s = RedisServer(port_picker.get_available_port(), log_dir=df_log_dir)
     try:
         s.start()
     except FileNotFoundError as e:

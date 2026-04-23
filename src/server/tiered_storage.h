@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/tiering_types.h"
 #include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/stats.h"
 #include "server/table.h"
@@ -29,9 +30,12 @@ struct Decoder;
 struct TieredStorageBase {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
-  struct StashDescriptor {
-    std::variant<std::array<std::string_view, 2>, uint8_t*> blob;
-    CompactObj::ExternalRep rep;
+  struct StashDescriptor : public tiering::FragmentRef::SerializationDescr {
+    StashDescriptor() = default;
+
+    StashDescriptor(const tiering::FragmentRef::SerializationDescr& params)  // NOLINT
+        : tiering::FragmentRef::SerializationDescr(params) {
+    }
 
     size_t EstimatedSerializedSize() const;
     size_t Serialize(io::MutableBytes buffer) const;
@@ -40,13 +44,7 @@ struct TieredStorageBase {
   template <typename T> using TResult = util::fb2::Future<io::Result<T>>;
 };
 
-struct TieredDelayedEntry {
-  DbIndex dbid;
-  PrimeKey key;
-  util::fb2::Future<io::Result<std::string>> value;
-  time_t expire;
-  uint32_t mc_flags;
-};
+using BackPressureFuture = std::optional<util::fb2::Future<bool>>;
 
 #ifdef WITH_TIERING
 
@@ -66,29 +64,36 @@ class TieredStorage : public TieredStorageBase {
 
   // Enqueue read external value with generic decoder.
   template <typename D, typename F>
-  void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
-            const D& decoder, F&& f) {
+  void Read(tiering::ReadId id, const tiering::DiskSegment& segment, const D& decoder, F&& f,
+            bool read_only = true) {
     // TODO(vlad): untangle endless callback wrapping!
     // Templates don't consider implicit conversions, so explicitly convert to std::function
     auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
       f(res.transform([](auto* d) { return static_cast<D*>(d); }));
     };
-    ReadInternal(dbid, key, segment, decoder, wrapped_cb);
+    ReadInternal(id, segment, decoder, wrapped_cb, read_only);
   }
 
   // Returns StashDescriptor if a value should be stashed.
-  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const;
+  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment_ref) const;
 
-  // Stash value, returns optional future for backpressure
+  // Stash value identified by (dbid, key), returns optional future for backpressure is not null.
   // if `provide_bp` is set and conditions are met.
-  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
-                                               const StashDescriptor& blobs, bool provide_bp);
+  void StashPrimeValue(DbIndex dbid, std::string_view key, const StashDescriptor& blobs,
+                       BackPressureFuture* backpressure);
+
+  // Stash partial value identified by pointer.
+  void StashPartialValue(tiering::PendingId id, const StashDescriptor& blobs,
+                         BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
-  void Delete(DbIndex dbid, PrimeValue* value);
+  void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
 
-  // Cancel pending stash for value, must have IO_PENDING flag set
-  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
+  // Returns true if there is a pending modification for the given segment.
+  bool HasModificationPending(tiering::DiskSegment segment) const;
+
+  // Cancel pending stash for the value. Must have HasStashPending() true.
+  void CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref);
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
@@ -113,19 +118,23 @@ class TieredStorage : public TieredStorageBase {
     return stats_.cool_memory_used;
   }
 
+  bool IsClosed() const {
+    return is_closed_;
+  }
+
  private:
-  void ReadInternal(DbIndex dbid, std::string_view key, const tiering::DiskSegment& segment,
+  void ReadInternal(tiering::ReadId, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
-                    std::function<void(io::Result<tiering::Decoder*>)> cb);
+                    std::function<void(io::Result<tiering::Decoder*>)> cb, bool read_only);
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  PrimeValue DeleteCool(detail::TieredColdRecord* record);
-  detail::TieredColdRecord* PopCool();
+  PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
+  tiering::TieredCoolRecord* PopCool();
 
-  PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
+  PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
 
   // Stash operations waiting for completion to throttle
   tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;
@@ -133,8 +142,10 @@ class TieredStorage : public TieredStorageBase {
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 
-  using CoolQueue = ::boost::intrusive::list<detail::TieredColdRecord>;
+  using CoolQueue = ::boost::intrusive::list<tiering::TieredCoolRecord>;
   CoolQueue cool_queue_;
+
+  bool is_closed_ = false;
 
   struct {
     size_t min_value_size;
@@ -143,6 +154,7 @@ class TieredStorage : public TieredStorageBase {
     float offload_threshold;
     float upload_threshold;
     bool experimental_hash_offload;
+    bool experimental_list_offload;
   } config_;
 
   mutable struct {
@@ -179,6 +191,10 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
       dbid, key, value, [](std::string_view val) { return std::string(val); }, ts);
 }
 
+TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
+                                                const tiering::DiskSegment& segment,
+                                                TieredStorage* ts);
+
 // Reads offloaded value, and applies modifications on it and return generic result from callback.
 // Unlike with immutable Reads - the modified value will be uploaded back to memory.
 // This is handled by OpManager when modf completes.
@@ -186,9 +202,16 @@ template <typename T>
 TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                                        std::function<T(std::string*)> modf, TieredStorage* ts);
 
-std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
-                                                       bool provide_bp, PrimeValue* pv,
-                                                       TieredStorage* ts);
+// Stash prime value if it meets criteria. If the value was stashed and `backpressure` is not
+// nullptr, assign/set the backpressure future to `*backpressure`.
+void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
+                     BackPressureFuture* backpressure);
+
+// Stash list node if it meets criteria.
+// Returns true if stash was initiated, false otherwise.
+bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
+                   BackPressureFuture* backpressure);
+
 #else
 
 class TieredStorage : public TieredStorageBase {
@@ -214,8 +237,8 @@ class TieredStorage : public TieredStorageBase {
   }
 
   template <typename D, typename F>
-  void Read(DbIndex dbid, std::string_view key, const tiering::DiskSegment& value, const D& decoder,
-            F&& f) {
+  void Read(tiering::ReadId id, const tiering::DiskSegment& segment, const D& decoder, F&& f,
+            bool read_only = true) {
   }
 
   template <typename T>
@@ -224,16 +247,19 @@ class TieredStorage : public TieredStorageBase {
     return {};
   }
 
-  std::optional<StashDescriptor> ShouldStash(const PrimeValue& pv) const {
+  std::optional<StashDescriptor> ShouldStash(const tiering::FragmentRef& fragment) const {
     return {};
   }
 
-  std::optional<util::fb2::Future<bool>> Stash(DbIndex dbid, std::string_view key,
-                                               const StashDescriptor& blobs, bool provide_bp) {
-    return {};
+  void Stash(DbIndex dbid, std::string_view key, const StashDescriptor& blobs,
+             BackPressureFuture* backpressure) {
   }
 
-  void Delete(DbIndex dbid, PrimeValue* value) {
+  void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
+  }
+
+  bool HasModificationPending(tiering::DiskSegment segment) const {
+    return false;
   }
 
   size_t ReclaimMemory(size_t goal) {
@@ -248,7 +274,7 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
+  void CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
   }
 
   TieredStats GetStats() const {
@@ -276,6 +302,10 @@ class TieredStorage : public TieredStorageBase {
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
     return PrimeValue{};
   }
+
+  bool IsClosed() const {
+    return true;
+  }
 };
 
 template <typename T>
@@ -294,16 +324,25 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
   return {};
 }
 
+inline TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
+                                                       const tiering::DiskSegment& segment,
+                                                       TieredStorage* ts) {
+  return {};
+}
+
 template <typename T>
 TieredStorage::TResult<T> ModifyTiered(DbIndex dbid, std::string_view key, const PrimeValue& value,
                                        std::function<T(std::string*)> modf, TieredStorage* ts) {
   return {};
 }
 
-inline std::optional<util::fb2::Future<bool>> StashPrimeValue(DbIndex dbid, std::string_view key,
-                                                              bool provide_bp, PrimeValue* pv,
-                                                              TieredStorage* ts) {
-  return {};
+inline void StashPrimeValue(DbIndex dbid, std::string_view key, PrimeValue* pv, TieredStorage* ts,
+                            BackPressureFuture* backpressure) {
+}
+
+inline bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts,
+                          BackPressureFuture* backpressure) {
+  return false;
 }
 
 #endif  // WITH_TIERING

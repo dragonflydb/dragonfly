@@ -15,6 +15,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/range_tree.h"
+#include "core/search/scoring.h"
 #include "core/search/synonyms.h"
 
 namespace dfly::search {
@@ -22,6 +23,7 @@ namespace dfly::search {
 struct AstNode;
 struct TextIndex;
 struct AstKnnNode;
+struct AstVectorRangeNode;
 
 // Optional FILTER
 struct OptionalNumericFilter : public OptionalFilterBase {
@@ -65,6 +67,7 @@ struct SchemaField {
     size_t capacity = 1000;                       // initial capacity
     size_t hnsw_ef_construction = 200;
     size_t hnsw_m = 16;
+    std::string data_type = "FLOAT32";
   };
 
   struct TagParams {
@@ -119,7 +122,11 @@ struct IndicesOptions {
   }
 
   absl::flat_hash_set<std::string> stopwords;
+  bool custom_stopwords = false;  // true when STOPWORDS was explicitly set in FT.CREATE
 };
+
+// BM25 scoring statistics are now tracked per-field inside each TextIndex.
+// See BaseStringIndex::GetFieldDocLength() and GetFieldAvgDocLen().
 
 // Collection of indices for all fields in schema
 class FieldIndices {
@@ -147,12 +154,17 @@ class FieldIndices {
 
   DefragmentResult Defragment(PageUsage* page_usage);
 
+  // Returns memory used by containers with default allocator, not tracked through search local_mr_
+  size_t GetNonPmrMemoryUsage() const;
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices();
 
   const Schema& schema_;
   const IndicesOptions& options_;
+  // These containers use default allocators — tracked manually via GetNonPmrMemoryUsage().
+  // If adding new default-allocator containers, update GetNonPmrMemoryUsage() accordingly.
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
@@ -182,6 +194,9 @@ struct SearchResult {
 
   // Contains final scores if an aggregation was present
   std::vector<std::pair<DocId, float>> knn_scores;
+
+  // Text relevance scores (DocId -> score). Populated when a scorer is active.
+  std::vector<std::pair<DocId, float>> text_scores;
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
@@ -217,10 +232,15 @@ class SearchAlgorithm {
 
   std::unique_ptr<AstNode> PopKnnNode();
 
+  const AstVectorRangeNode* GetVectorRangeNode() const;
+
   void EnableProfiling();
+
+  void SetScorer(ScorerFn scorer);
 
  private:
   bool profiling_enabled_ = false;
+  ScorerFn scorer_ = nullptr;
   std::unique_ptr<AstNode> query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };

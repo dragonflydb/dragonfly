@@ -10,23 +10,21 @@
 #include <string_view>
 #include <vector>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/facade_types.h"
 #include "server/cluster_support.h"
 
 namespace dfly::cluster {
+
+// A SlotId validated to be within [0, kMaxSlotNum], usable directly with CmdArgParser::Next().
+using ParsedSlotId = facade::FInt<SlotId{0}, SlotId{kMaxSlotNum}>;
 
 struct SlotRange {
   static constexpr SlotId kMaxSlotId = 0x3FFF;
   SlotId start = 0;
   SlotId end = 0;
 
-  bool operator==(const SlotRange& r) const noexcept {
-    return start == r.start && end == r.end;
-  }
-
-  bool operator<(const SlotRange& r) const noexcept {
-    return start < r.start || (start == r.start && end < r.end);
-  }
+  std::strong_ordering operator<=>(const SlotRange&) const noexcept = default;
 
   bool IsValid() const noexcept {
     return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;

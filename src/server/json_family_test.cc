@@ -1,9 +1,9 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include <absl/flags/flag.h>
 #include <absl/strings/str_replace.h>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
@@ -713,6 +713,26 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   )";
 
   auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  // Incrementing by a negative value should produce a negative result, not uint64 overflow
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a", "-2"});
+  EXPECT_EQ(resp, "[-1]");
+
+  // Large positive integer (> INT64_MAX) should remain positive after increment.
+  // At 2^63 the double ULP is 2048, so use an increment of 2048 to get an exact result.
+  resp = Run({"JSON.SET", "json", ".", R"({"a":9223372036854775808})"});  // 2^63 = INT64_MAX + 1
+  ASSERT_THAT(resp, "OK");
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a", "2048"});
+  EXPECT_EQ(resp, "[9223372036854777856]");
+
+  // Result below INT64_MIN should report overflow
+  resp = Run({"JSON.SET", "json", ".", R"({"a":-9223372036854775808})"});  // INT64_MIN
+  ASSERT_THAT(resp, "OK");
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a", "-9223372036854775808"});
+  EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
+
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a", "1.1"});
@@ -3497,6 +3517,31 @@ TEST_F(JsonFamilyTest, TOGGLE_RESP3NestedArrayBug) {
   EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
   EXPECT_THAT(resp.GetVec()[0], IntArg(0));
   EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+}
+
+TEST_F(JsonFamilyTest, SetOverLargeStringKey) {
+  // Create a key with a large string value (must be heap-allocated, >16 bytes).
+  string large_value(16000, 'x');
+  Run({"SET", "key", large_value});
+
+  // Overwrite the string key with a small JSON using root path.
+  // Without the fix, freeing the old string inside SetJson caused a negative
+  // memory diff in JsonAutoUpdater::SetJsonSize while bytes_used was 0.
+  auto resp = Run({"JSON.SET", "key", "$", "1"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "key"});
+  EXPECT_EQ(resp, "1");
+}
+
+TEST_F(JsonFamilyTest, SetFullJsonInvalidOnNewKey) {
+  // Try to set invalid JSON on a non-existent key
+  auto resp = Run("JSON.SET newkey $ {invalid}");
+  EXPECT_THAT(resp, ErrArg("failed to parse JSON"));
+
+  // Verify the key was NOT created (proper cleanup)
+  resp = Run("EXISTS newkey");
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 }  // namespace dfly

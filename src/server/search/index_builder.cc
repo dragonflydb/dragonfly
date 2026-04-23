@@ -70,6 +70,15 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
                        << ", removing from key index";
           index_->key_index_.Remove(*doc_id);
         }
+      } else {
+        // New document not in the restored key_index_ (added by journal events during
+        // full sync before the index was created). Use AddNew to allocate a fresh DocId
+        // that won't collide with serialized HNSW node ids from freed slots.
+        auto accessor = GetAccessor(db_cntx, pv);
+        DocId id = index_->key_index_.AddNew(key);
+        if (!index_->indices_->Add(id, *accessor)) {
+          index_->key_index_.Remove(id);
+        }
       }
     } else {
       index_->AddDoc(key, db_cntx, pv);
@@ -99,6 +108,11 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
     return;
   }
 
+  // Non-restored path: rebuilding HNSW from scratch. Clear the restoring flag and discard
+  // any pending updates — the full table traversal below will pick up all current documents.
+  index_->hnsw_state_ = ShardDocIndex::HnswState::kBuilding;
+  index_->pending_vector_updates_.clear();
+
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
     std::string_view key = it->first.GetSlice(&scratch);
@@ -107,18 +121,15 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
       index_->AddDocToGlobalVectorIndex(*local_id, db_cntx, &pv);
   };
 
-  // Because order of acquiring mutexes for global vector indices is not determined, we must run
-  // all accesses on a single thread through the shard queue to have a single linear order
-  // TODO: this prevents asynchronous indexing for vector fields
-  auto shard_cb = [&] {
-    PrimeTable::Cursor cursor;
-    do {
-      cursor = table->prime.Traverse(cursor, cb);
-      if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
-        util::ThisFiber::Yield();
-    } while (cursor && state_.IsRunning());
-  };
-  shard_set->Await(EngineShard::tlocal()->shard_id(), std::move(shard_cb));
+  // NOTE(global-hnsw-mutex): HNSW (hnsw_alg) index uses a thread-blocking mutex making
+  // AddDocToGlobalVectorIndex non-fiber-suspendable from a fiber point of view. This makes it safe
+  // to perform add keys without locking them while sleeping of a mutex.
+  PrimeTable::Cursor cursor;
+  do {
+    cursor = table->prime.Traverse(cursor, cb);
+    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
+      util::ThisFiber::Yield();
+  } while (cursor && state_.IsRunning());
 }
 
 }  // namespace dfly::search

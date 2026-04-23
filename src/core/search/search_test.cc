@@ -15,6 +15,7 @@
 #include <mimalloc.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory_resource>
 #include <random>
 
@@ -23,7 +24,9 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_index.h"
+#include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/scoring.h"
 #include "core/search/stateless_allocator.h"
 #include "core/search/vector_utils.h"
 
@@ -653,6 +656,156 @@ TEST_F(SearchTest, MatchNumericRangeWithCommas) {
 
 class KnnTest : public SearchTest {};
 
+class VectorRangeTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+    InitSimSIMD();
+  }
+};
+
+TEST_F(VectorRangeTest, FlatRange1D) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Place 10 points on a line: 1, 2, ..., 10 (avoid zero vector for doc 0)
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Query at 5.0 with radius 1.5 → points at pos 4,5,6 → doc ids 3,4,5
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
+  }
+
+  // Exact match at pos 4.0 with radius 0 → only doc 3
+  {
+    params["vec"] = ToBytes({4.0f});
+    algo.Init("@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3));
+  }
+
+  // Large radius → all 10 points
+  {
+    params["vec"] = ToBytes({5.0f});
+    algo.Init("@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_EQ(result.ids.size(), 10u);
+  }
+
+  // Empty result when radius is too small
+  {
+    params["vec"] = ToBytes({5.5f});
+    algo.Init("@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
+    auto result = algo.Search(&indices);
+    EXPECT_TRUE(result.ids.empty());
+  }
+}
+
+TEST_F(VectorRangeTest, FlatRangeWithoutYieldDistanceAs) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  for (size_t i = 0; i < 10; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // VECTOR_RANGE without =>{$YIELD_DISTANCE_AS: ...} — must parse and return correct results
+  params["vec"] = ToBytes({5.0f});
+  algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]", &params);
+  auto result = algo.Search(&indices);
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
+
+  // score_alias should be empty when not specified
+  ASSERT_NE(nullptr, algo.GetVectorRangeNode());
+  EXPECT_TRUE(algo.GetVectorRangeNode()->score_alias.empty());
+}
+
+TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Use i+1 so doc positions are 1..5 (query radius 1.5 from pos 2.0 catches docs 0,1,2)
+  for (size_t i = 0; i < 5; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["vec"] = ToBytes({2.0f});
+
+  algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: vector_distance}", &params);
+  ASSERT_NE(nullptr, algo.GetVectorRangeNode());
+  EXPECT_STREQ("vector_distance", algo.GetVectorRangeNode()->score_alias.c_str());
+
+  auto result = algo.Search(&indices);
+  // Positions 1,2,3 (docs 0,1,2) are within L2 distance 1.5 from query pos 2.0
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1, 2));
+  // knn_scores should contain distances for all matched docs
+  EXPECT_EQ(result.knn_scores.size(), 3u);
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // incorrectly skips zero vectors. The zero vector [0.0,...,0.0] is a valid embedding.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // doc 0: zero vector [0.0, 0.0] — valid embedding, must not be skipped
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({0.0f, 0.0f})}}});
+  // doc 1: non-zero vector [1.0, 0.0]
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({1.0f, 0.0f})}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Both docs must appear — zero vector is NOT null
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 1));
+}
+
+TEST_F(VectorRangeTest, FlatStarQueryRemovedDocNotMatched) {
+  // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
+  // iterates entries_ directly and does NOT respect all_ids_. After Remove(), the doc's
+  // slot in entries_ is still non-zero, so the removed doc incorrectly appears in results.
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
+  indices.Add(1, MockedDocument{Map{{"pos", ToBytes({2.0f})}}});
+  indices.Add(2, MockedDocument{Map{{"pos", ToBytes({3.0f})}}});
+
+  // Remove doc 1
+  MockedDocument doc1{Map{{"pos", ToBytes({2.0f})}}};
+  indices.Remove(1, doc1);
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  algo.Init("@pos:*", &params);
+  auto result = algo.Search(&indices);
+  // Doc 1 was removed, only docs 0 and 2 should appear
+  EXPECT_THAT(result.ids, testing::UnorderedElementsAre(0, 2));
+}
+
 TEST_F(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
@@ -971,7 +1124,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   auto metadata = original.GetMetadata();
   ASSERT_EQ(metadata.cur_element_count, num_elements);
 
-  auto nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  std::vector<HnswNodeData> nodes;
+  {
+    auto lock = original.GetReadLock();
+    nodes = original.GetNodesRange(0, metadata.cur_element_count);
+  }
   ASSERT_EQ(nodes.size(), num_elements);
 
   // Verify node data integrity
@@ -1003,7 +1160,11 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
 
   // Graph links must be identical
-  auto restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  std::vector<HnswNodeData> restored_nodes;
+  {
+    auto lock = restored.GetReadLock();
+    restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+  }
   ASSERT_EQ(restored_nodes.size(), nodes.size());
   for (size_t i = 0; i < nodes.size(); i++) {
     EXPECT_EQ(restored_nodes[i].internal_id, nodes[i].internal_id);
@@ -1048,6 +1209,81 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   }
 }
 
+// Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
+// but hnswlib still traverses it and dereferences its data pointer.  If the external
+// data is freed (as happens after DEL), the pointer dangles.  The fix in DoRemove
+// replaces it with stub_vector_.  This test catches the use-after-free under ASAN;
+// without ASAN it exercises the code path but freed memory may still be readable.
+TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
+  constexpr size_t kDim = 256;
+  constexpr size_t kN = 50;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN * 2;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  HnswVectorIndex index(params, /*copy_vector=*/false);
+
+  struct BorrowedDoc : public DocumentAccessor {
+    const char* data;
+    explicit BorrowedDoc(const char* d) : data(d) {
+    }
+    std::optional<VectorInfo> GetVector(string_view, size_t) const override {
+      return BorrowedFtVector{data};
+    }
+    std::optional<StringList> GetStrings(string_view) const override {
+      return std::nullopt;
+    }
+    std::optional<StringList> GetTags(string_view) const override {
+      return std::nullopt;
+    }
+    std::optional<NumsList> GetNumbers(string_view) const override {
+      return std::nullopt;
+    }
+  };
+
+  std::mt19937 rng(42);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+
+  auto MakeBuf = [&] {
+    auto buf = std::make_unique<float[]>(kDim);
+    for (size_t d = 0; d < kDim; d++)
+      buf[d] = dist(rng);
+    return buf;
+  };
+
+  // Add nodes — graph stores pointers into these buffers.
+  std::vector<std::unique_ptr<float[]>> bufs(kN);
+  for (size_t i = 0; i < kN; i++) {
+    bufs[i] = MakeBuf();
+    BorrowedDoc doc(reinterpret_cast<const char*>(bufs[i].get()));
+    index.Add(i, doc, "vec");
+  }
+
+  // Remove + free first 10 (simulates DEL freeing PrimeValue).
+  for (size_t i = 0; i < 10; i++) {
+    index.Remove(i);
+    bufs[i].reset();
+  }
+
+  // Add new nodes — addPoint traverses deleted nodes with freed data.
+  for (size_t i = kN; i < kN + 10; i++) {
+    bufs.push_back(MakeBuf());
+    BorrowedDoc doc(reinterpret_cast<const char*>(bufs.back().get()));
+    index.Add(i, doc, "vec");
+  }
+
+  vector<float> query(kDim, 0.0f);
+  auto results = index.Knn(query.data(), 5, std::nullopt);
+  EXPECT_GT(results.size(), 0u);
+}
+
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
                          testing::Values(HnswSerParam{0, 2, VectorSimilarity::L2},
                                          HnswSerParam{10, 2, VectorSimilarity::L2},
@@ -1062,6 +1298,480 @@ INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
                            name << info.param;
                            return name.str();
                          });
+
+class HnswSubsetKnnTest : public ::testing::TestWithParam<VectorSimilarity> {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+
+  // Helper to create a simple index with vectors on a line for easy verification
+  unique_ptr<HnswVectorIndex> CreateSimple1DIndex(size_t num_elements, VectorSimilarity sim) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 1;
+    params.sim = sim;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+
+    for (size_t i = 0; i < num_elements; i++) {
+      vector<float> coords = {static_cast<float>(i)};
+      auto doc = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+      index->Add(i, MockedDocument(doc), "vec");
+    }
+
+    return index;
+  }
+
+  // Helper to create a 2D index with unit-circle vectors, for COSINE similarity testing.
+  // Vector i is placed at angle i * (2π / num_elements), giving meaningful cosine distances.
+  unique_ptr<HnswVectorIndex> CreateCircle2DIndex(size_t num_elements, VectorSimilarity sim) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 2;
+    params.sim = sim;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+
+    const float step = 2.0f * static_cast<float>(acos(-1.0)) / static_cast<float>(num_elements);
+    for (size_t i = 0; i < num_elements; i++) {
+      float angle = step * static_cast<float>(i);
+      vector<float> coords = {cosf(angle), sinf(angle)};
+      auto doc = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+      index->Add(i, MockedDocument(doc), "vec");
+    }
+
+    return index;
+  }
+};
+
+TEST_P(HnswSubsetKnnTest, CorrectResults) {
+  // Test that SubsetKnn returns correct top-k from a subset
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(100, sim);
+
+  vector<float> query = {50.0f};
+  vector<GlobalDocId> subset;
+
+  // Create subset: only even numbers from 40 to 60
+  for (size_t i = 40; i <= 60; i += 2) {
+    subset.push_back(i);
+  }
+
+  // Ask for top 5
+  auto results = index->SubsetKnn(query.data(), 5, subset);
+
+  // Should get exactly 5 results
+  ASSERT_EQ(results.size(), 5u);
+
+  // All results should be from the subset
+  for (const auto& [dist, id] : results) {
+    EXPECT_TRUE(std::find(subset.begin(), subset.end(), id) != subset.end())
+        << "Result ID " << id << " not in subset";
+  }
+
+  // For L2 similarity, verify the closest point is 50
+  if (sim == VectorSimilarity::L2) {
+    bool found_50 = false;
+    for (const auto& [dist, id] : results) {
+      if (id == 50) {
+        found_50 = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(found_50) << "For L2, point 50 should be in top 5 closest to query {50}";
+  }
+}
+
+TEST_P(HnswSubsetKnnTest, EmptySubset) {
+  // Test edge case: empty subset
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  vector<GlobalDocId> empty_subset;
+
+  auto results = index->SubsetKnn(query.data(), 5, empty_subset);
+  EXPECT_TRUE(results.empty()) << "SubsetKnn with empty subset should return empty results";
+}
+
+TEST_P(HnswSubsetKnnTest, KEqualsZero) {
+  // Test edge case: k = 0
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  vector<GlobalDocId> subset = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+  auto results = index->SubsetKnn(query.data(), 0, subset);
+  EXPECT_TRUE(results.empty()) << "SubsetKnn with k=0 should return empty results";
+}
+
+TEST_P(HnswSubsetKnnTest, KGreaterThanSubsetSize) {
+  // Test edge case: k > number of valid documents in subset
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  vector<GlobalDocId> subset = {1, 3, 5};  // Only 3 elements
+
+  auto results = index->SubsetKnn(query.data(), 10, subset);  // Ask for 10
+  EXPECT_EQ(results.size(), 3u) << "SubsetKnn should return at most subset.size() results";
+
+  // Verify all 3 are returned
+  vector<GlobalDocId> result_ids;
+  for (const auto& [dist, id] : results) {
+    result_ids.push_back(id);
+  }
+  EXPECT_THAT(result_ids, testing::UnorderedElementsAre(1, 3, 5));
+}
+
+TEST_P(HnswSubsetKnnTest, NonExistentIds) {
+  // Test that non-existent IDs in subset are gracefully ignored
+  auto sim = GetParam();
+  auto index = CreateSimple1DIndex(10, sim);
+
+  vector<float> query = {5.0f};
+  // Mix of valid (0-9) and invalid (100-105) IDs
+  vector<GlobalDocId> subset = {100, 4, 101, 5, 102, 6, 103, 104, 105};
+
+  auto results = index->SubsetKnn(query.data(), 3, subset);
+  EXPECT_EQ(results.size(), 3u);
+
+  // Should only return valid IDs: 5, 4, 6 (closest to 5)
+  vector<GlobalDocId> result_ids;
+  for (const auto& [dist, id] : results) {
+    result_ids.push_back(id);
+  }
+  EXPECT_THAT(result_ids, testing::UnorderedElementsAre(4, 5, 6));
+}
+
+TEST_P(HnswSubsetKnnTest, AllDeletedDocuments) {
+  // Test edge case: all documents in subset are marked deleted
+  auto sim = GetParam();
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 1;
+  params.sim = sim;
+  params.capacity = 10;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex index(params, /*copy_vector=*/true);
+
+  // Add and then remove documents
+  vector<MockedDocument> docs;
+  for (size_t i = 0; i < 5; i++) {
+    vector<float> coords = {static_cast<float>(i)};
+    docs.push_back(
+        MockedDocument(MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}}));
+    index.Add(i, docs[i], "vec");
+  }
+
+  // Delete all documents
+  for (size_t i = 0; i < 5; i++) {
+    index.Remove(i);
+  }
+
+  vector<float> query = {2.5f};
+  vector<GlobalDocId> subset = {0, 1, 2, 3, 4};
+
+  auto results = index.SubsetKnn(query.data(), 3, subset);
+  EXPECT_TRUE(results.empty()) << "SubsetKnn should return empty when all docs are deleted";
+}
+
+TEST_P(HnswSubsetKnnTest, MixedDeletedAndValidDocs) {
+  // Test with a mix of deleted and valid documents
+  auto sim = GetParam();
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 1;
+  params.sim = sim;
+  params.capacity = 10;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex index(params, /*copy_vector=*/true);
+
+  // Add documents
+  vector<MockedDocument> docs;
+  for (size_t i = 0; i < 10; i++) {
+    vector<float> coords = {static_cast<float>(i)};
+    docs.push_back(
+        MockedDocument(MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}}));
+    index.Add(i, docs[i], "vec");
+  }
+
+  // Delete even documents
+  for (size_t i = 0; i < 10; i += 2) {
+    index.Remove(i);
+  }
+
+  vector<float> query = {5.0f};
+  // Subset includes both deleted (even) and valid (odd) docs
+  vector<GlobalDocId> subset = {2, 3, 4, 5, 6, 7, 8};
+
+  auto results = index.SubsetKnn(query.data(), 3, subset);
+  EXPECT_EQ(results.size(), 3u);
+
+  // Should only return odd (non-deleted) IDs: 5, 3, 7 (closest to 5)
+  vector<GlobalDocId> result_ids;
+  for (const auto& [dist, id] : results) {
+    result_ids.push_back(id);
+  }
+  EXPECT_THAT(result_ids, testing::UnorderedElementsAre(3, 5, 7));
+}
+
+TEST_P(HnswSubsetKnnTest, CompareWithFilteredKnn) {
+  // Integration test: verify SubsetKnn produces similar results to filtered Knn
+  // SubsetKnn uses brute-force exact search, while Knn uses HNSW approximate search
+  // So results may differ slightly, but should have significant overlap
+  constexpr double kMinOverlapRatio = 0.7;  // 70% minimum overlap threshold
+
+  auto sim = GetParam();
+
+  // COSINE similarity is undefined for 1D positive vectors (all share the same direction,
+  // so all cosine distances equal 0). Use 2D unit-circle vectors instead, where element i
+  // is at angle i * 2π/100, giving each pair a distinct, meaningful cosine distance.
+  unique_ptr<HnswVectorIndex> index;
+  vector<float> query;
+  if (sim == VectorSimilarity::COSINE) {
+    constexpr size_t kNumElements = 100;
+    index = CreateCircle2DIndex(kNumElements, sim);
+    const float step = 2.0f * static_cast<float>(acos(-1.0)) / static_cast<float>(kNumElements);
+    float angle = step * 50.0f;
+    query = {cosf(angle), sinf(angle)};
+  } else {
+    index = CreateSimple1DIndex(100, sim);
+    query = {50.0f};
+  }
+
+  vector<GlobalDocId> subset;
+
+  // Create a small subset (well below typical 8192 threshold)
+  for (size_t i = 40; i <= 60; i++) {
+    subset.push_back(i);
+  }
+
+  size_t k = 10;
+
+  // Get results from SubsetKnn (exact brute-force)
+  auto subset_results = index->SubsetKnn(query.data(), k, subset);
+
+  // Get results from regular filtered Knn (HNSW approximate)
+  auto knn_results = index->Knn(query.data(), k, std::nullopt, subset);
+
+  // Both should return k results (or fewer if subset is smaller)
+  EXPECT_LE(subset_results.size(), k);
+  EXPECT_LE(knn_results.size(), k);
+
+  // Extract IDs from both
+  std::set<GlobalDocId> subset_ids;
+  for (const auto& [dist, id] : subset_results) {
+    subset_ids.insert(id);
+  }
+
+  std::set<GlobalDocId> knn_ids;
+  for (const auto& [dist, id] : knn_results) {
+    knn_ids.insert(id);
+  }
+
+  // Count overlap - since HNSW is approximate, we expect good but not perfect overlap
+  size_t overlap = 0;
+  for (const auto& id : subset_ids) {
+    if (knn_ids.count(id) > 0) {
+      overlap++;
+    }
+  }
+
+  // Expect at least kMinOverlapRatio overlap (HNSW is approximate, so some difference is expected)
+  size_t min_overlap =
+      static_cast<size_t>(std::min(subset_ids.size(), knn_ids.size()) * kMinOverlapRatio);
+  EXPECT_GE(overlap, min_overlap) << "Expected at least " << min_overlap
+                                  << " overlapping results, got " << overlap;
+}
+
+INSTANTIATE_TEST_SUITE_P(SubsetKnnSimilarities, HnswSubsetKnnTest,
+                         testing::Values(VectorSimilarity::L2, VectorSimilarity::COSINE,
+                                         VectorSimilarity::IP),
+                         [](const testing::TestParamInfo<VectorSimilarity>& info) {
+                           switch (info.param) {
+                             case VectorSimilarity::L2:
+                               return "L2";
+                             case VectorSimilarity::COSINE:
+                               return "COSINE";
+                             case VectorSimilarity::IP:
+                               return "IP";
+                             default:
+                               return "Unknown";
+                           }
+                         });
+
+// Tests for HnswVectorIndex::RangeQuery
+class HnswRangeQueryTest : public ::testing::TestWithParam<VectorSimilarity> {
+ protected:
+  void SetUp() override {
+    InitTLSearchMR(PMR_NS::get_default_resource());
+  }
+
+  void TearDown() override {
+    InitTLSearchMR(nullptr);
+  }
+
+  // 1-D index: doc i has vector {float(i)}, GlobalDocId = i
+  unique_ptr<HnswVectorIndex> CreateSimple1DIndex(size_t num_elements) {
+    SchemaField::VectorParams params;
+    params.use_hnsw = true;
+    params.dim = 1;
+    params.sim = VectorSimilarity::L2;
+    params.capacity = std::max<size_t>(num_elements, 10);
+    params.hnsw_m = 16;
+    params.hnsw_ef_construction = 200;
+
+    auto index = make_unique<HnswVectorIndex>(params, /*copy_vector=*/true);
+    for (size_t i = 0; i < num_elements; i++) {
+      vector<float> coords = {static_cast<float>(i)};
+      index->Add(i,
+                 MockedDocument(MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}}),
+                 "vec");
+    }
+    return index;
+  }
+};
+
+TEST_P(HnswRangeQueryTest, BasicRange) {
+  // 10 docs at positions 0..9. Query at 5.0 with radius 1.5 → docs 4,5,6 (dist 1.0,0.0,1.0)
+  (void)GetParam();  // L2 only for 1-D
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {5.0f};
+  auto results = index->RangeQuery(query.data(), 1.5f);
+
+  set<GlobalDocId> ids;
+  for (const auto& [dist, id] : results)
+    ids.insert(id);
+
+  EXPECT_THAT(ids, testing::UnorderedElementsAre(4, 5, 6));
+}
+
+TEST_P(HnswRangeQueryTest, ExactMatch) {
+  // Radius 0: only the doc at exact position
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {3.0f};
+  auto results = index->RangeQuery(query.data(), 0.0f);
+
+  ASSERT_EQ(results.size(), 1u);
+  EXPECT_EQ(results[0].second, GlobalDocId{3});
+  EXPECT_FLOAT_EQ(results[0].first, 0.0f);
+}
+
+TEST_P(HnswRangeQueryTest, LargeRadiusReturnsAll) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(20);
+
+  vector<float> query = {10.0f};
+  auto results = index->RangeQuery(query.data(), 1000.0f);
+
+  EXPECT_EQ(results.size(), 20u);
+}
+
+TEST_P(HnswRangeQueryTest, EmptyResultOutsideRadius) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {5.5f};
+  auto results = index->RangeQuery(query.data(), 0.1f);
+
+  EXPECT_TRUE(results.empty());
+}
+
+TEST_P(HnswRangeQueryTest, EmptyIndex) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(0);
+
+  vector<float> query = {0.0f};
+  auto results = index->RangeQuery(query.data(), 100.0f);
+
+  EXPECT_TRUE(results.empty());
+}
+
+TEST_P(HnswRangeQueryTest, DistancesCorrect) {
+  // Verify returned distances match actual L2 distances
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  vector<float> query = {5.0f};
+  auto results = index->RangeQuery(query.data(), 2.0f);  // docs 3,4,5,6,7
+
+  EXPECT_EQ(results.size(), 5u);
+  for (const auto& [dist, id] : results) {
+    float expected = std::abs(static_cast<float>(id) - 5.0f);
+    // L2Distance returns sqrt(sum of squares); for 1-D: sqrt((a-b)²) = |a-b|
+    EXPECT_FLOAT_EQ(dist, expected);
+  }
+}
+
+TEST_P(HnswRangeQueryTest, DeletedDocNotReturned) {
+  (void)GetParam();
+  auto index = CreateSimple1DIndex(10);
+
+  // Remove doc 5 (at position 5.0, distance 0 from query)
+  index->Remove(5);
+
+  vector<float> query = {5.0f};
+  auto results = index->RangeQuery(query.data(), 1.5f);
+
+  set<GlobalDocId> ids;
+  for (const auto& [dist, id] : results)
+    ids.insert(id);
+
+  EXPECT_THAT(ids, testing::UnorderedElementsAre(4, 6));
+  EXPECT_THAT(ids, testing::Not(testing::Contains(GlobalDocId{5})));
+}
+
+TEST_P(HnswRangeQueryTest, ConsistentWithBruteForce) {
+  // Compare RangeQuery results against brute-force SubsetKnn-based check
+  (void)GetParam();
+  const size_t n = 50;
+  auto index = CreateSimple1DIndex(n);
+
+  vector<float> query = {25.0f};
+  float radius = 5.0f;
+
+  auto results = index->RangeQuery(query.data(), radius);
+
+  // Brute force: collect all docs within radius.
+  // L2Distance returns |a-b| for 1-D vectors (actual Euclidean, not squared).
+  set<GlobalDocId> expected;
+  for (size_t i = 0; i < n; i++) {
+    float dist = std::abs(static_cast<float>(i) - 25.0f);
+    if (dist <= radius)
+      expected.insert(i);
+  }
+
+  set<GlobalDocId> got;
+  for (const auto& [dist, id] : results)
+    got.insert(id);
+
+  EXPECT_EQ(got, expected);
+}
+
+INSTANTIATE_TEST_SUITE_P(HnswRangeL2, HnswRangeQueryTest, testing::Values(VectorSimilarity::L2),
+                         [](const testing::TestParamInfo<VectorSimilarity>&) { return "L2"; });
 
 TEST_F(SearchTest, GeoSearch) {
   auto schema = MakeSimpleSchema({{"name", SchemaField::TEXT}, {"location", SchemaField::GEO}});
@@ -1582,6 +2292,7 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
     MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {"@numeric:[15 +inf]", "@numeric:[-inf 20]", "@numeric:[-inf +inf]",
                            "@numeric:[0 100000]"};
@@ -1631,6 +2342,7 @@ static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
     MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {"@numeric:[0 40000]", "@numeric:[-inf +inf]"};
 
@@ -1687,6 +2399,7 @@ static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
     }};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {absl::StrCat("@numeric1:[15 +inf] @numeric2:[-inf 20]"),
                            absl::StrCat("@numeric1:[-inf 20] @numeric2:[15 +inf]"),
@@ -1745,6 +2458,7 @@ static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
 
     tag_number = (tag_number + 1) % max_tag_number;
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {absl::StrCat("@tag:{tag230|tag3|tag942} @numeric:[15 +inf]"),
                            absl::StrCat("@tag:{tag1|tag829|tag236} @numeric:[-inf 20]"),
@@ -1809,6 +2523,7 @@ static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
 
     tag_number = (tag_number + 1) % max_tag_number;
   }
+  indices.FinalizeInitialization();
 
   std::string queries[] = {
       absl::StrCat(
@@ -1873,6 +2588,7 @@ static void BM_SearchMergeEqualSets(benchmark::State& state) {
     }};
     indices.Add(i, doc);
   }
+  indices.FinalizeInitialization();
 
   std::string query = absl::StrCat("@numeric1:[-inf +inf] @numeric2:[-inf +inf]");
 
@@ -2058,6 +2774,361 @@ BENCHMARK(BM_VectorDistance_Intensive)
     ->Arg(static_cast<int>(VectorSimilarity::IP))
     ->ArgNames({"similarity_type"})
     ->Unit(benchmark::kMicrosecond);
+
+// BM25STD Scoring Tests
+class ScoringTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+  }
+};
+
+TEST_F(ScoringTest, BM25StdFormula) {
+  // Single term, single doc, verify the math
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  double score = BM25Std(ctx, term);
+
+  // IDF = ln(1 + (10 - 3 + 0.5) / (3 + 0.5)) = ln(1 + 7.5/3.5) = ln(3.142857) ~ 1.1451
+  // TF = 2 * (1.2 + 1) / (2 + 1.2 * (1 - 0.75 + 0.75 * 5/5)) = 2*2.2/(2+1.2) = 4.4/3.2 = 1.375
+  // score = 1.1451 * 1.375 ~ 1.5745
+  EXPECT_NEAR(score, 1.5745, 0.01);
+}
+
+TEST_F(ScoringTest, BM25StdZeroFreq) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 0, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  EXPECT_EQ(BM25Std(ctx, term), 0.0);
+}
+
+TEST_F(ScoringTest, BM25StdDocLenNormalization) {
+  // Longer doc -> lower score for same TF
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo term_short{
+      .term_freq = 2, .term_docs = 10, .field_doc_len = 5, .field_avg_doc_len = 10.0};
+  ScoringTermInfo term_long{
+      .term_freq = 2, .term_docs = 10, .field_doc_len = 20, .field_avg_doc_len = 10.0};
+
+  double score_short = BM25Std(ctx, term_short);
+  double score_long = BM25Std(ctx, term_long);
+
+  EXPECT_GT(score_short, score_long);
+}
+
+TEST_F(ScoringTest, BM25StdRareTermHigherIDF) {
+  // Rarer term -> higher IDF -> higher score
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo rare{
+      .term_freq = 1, .term_docs = 2, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+  ScoringTermInfo common{
+      .term_freq = 1, .term_docs = 50, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+
+  EXPECT_GT(BM25Std(ctx, rare), BM25Std(ctx, common));
+}
+
+TEST_F(ScoringTest, BM25StdMultiTerm) {
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo t1{
+      .term_freq = 2, .term_docs = 5, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+  ScoringTermInfo t2{
+      .term_freq = 1, .term_docs = 20, .field_doc_len = 10, .field_avg_doc_len = 10.0};
+
+  double multi = ScoreDocument(&BM25Std, ctx, {t1, t2});
+  double sum = BM25Std(ctx, t1) + BM25Std(ctx, t2);
+
+  EXPECT_DOUBLE_EQ(multi, sum);
+}
+
+TEST_F(ScoringTest, TfIdfFormula) {
+  // f=2, N=10, n=3
+  // IDF = ln(10/3) ~ 1.2039
+  // score = 2 * 1.2039 ~ 2.4079
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{.term_freq = 2, .term_docs = 3};
+
+  EXPECT_NEAR(TfIdf(ctx, term), 2.4079, 0.01);
+}
+
+TEST_F(ScoringTest, TfIdfZeroFreq) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{.term_freq = 0, .term_docs = 3};
+
+  EXPECT_EQ(TfIdf(ctx, term), 0.0);
+}
+
+TEST_F(ScoringTest, TfIdfRareTermHigherScore) {
+  // Same TF, but rare term (small n) should score higher than common term (large n)
+  ScoringContext ctx{.num_docs = 100};
+  ScoringTermInfo rare{.term_freq = 1, .term_docs = 2};
+  ScoringTermInfo common{.term_freq = 1, .term_docs = 50};
+
+  EXPECT_GT(TfIdf(ctx, rare), TfIdf(ctx, common));
+}
+
+TEST_F(ScoringTest, TfIdfDocNormShorterDocScoresHigher) {
+  // Same TF/IDF, but shorter doc should score higher after length normalization
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo short_doc{.term_freq = 1, .term_docs = 3, .field_doc_len = 5};
+  ScoringTermInfo long_doc{.term_freq = 1, .term_docs = 3, .field_doc_len = 50};
+
+  EXPECT_GT(TfIdfDocNorm(ctx, short_doc), TfIdfDocNorm(ctx, long_doc));
+}
+
+TEST_F(ScoringTest, TfIdfDocNormZeroDocLen) {
+  // field_doc_len = 0 should not cause division by zero — falls back to unnormalized score
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{.term_freq = 1, .term_docs = 3, .field_doc_len = 0};
+
+  EXPECT_EQ(TfIdfDocNorm(ctx, term), TfIdf(ctx, term));
+}
+
+TEST_F(ScoringTest, ScoreDocumentDispatchesByScorerType) {
+  ScoringContext ctx{.num_docs = 10};
+  ScoringTermInfo term{
+      .term_freq = 2, .term_docs = 3, .field_doc_len = 5, .field_avg_doc_len = 5.0};
+
+  EXPECT_DOUBLE_EQ(ScoreDocument(&BM25Std, ctx, {term}), BM25Std(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdf, ctx, {term}), TfIdf(ctx, term));
+  EXPECT_DOUBLE_EQ(ScoreDocument(&TfIdfDocNorm, ctx, {term}), TfIdfDocNorm(ctx, term));
+}
+
+TEST_F(ScoringTest, SearchWithScorer) {
+  // Integration test: build index, search with scorer, verify scores are non-zero
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world hello");  // "hello" appears 2x
+  MockedDocument doc2("hello there");        // "hello" appears 1x
+  MockedDocument doc3("goodbye world");      // no "hello"
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(&BM25Std);
+
+  auto result = algo.Search(&index);
+
+  // doc1 and doc2 should match, doc3 should not
+  ASSERT_EQ(result.ids.size(), 2u);
+  EXPECT_EQ(result.text_scores.size(), 2u);
+
+  // Both scores should be positive
+  for (auto& [doc, score] : result.text_scores) {
+    EXPECT_GT(score, 0.0f) << "DocId " << doc << " should have positive score";
+  }
+
+  // doc1 has "hello" 2x in shorter context -> should score higher
+  float score0 = 0, score1 = 0;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      score0 = score;
+    if (doc == 1)
+      score1 = score;
+  }
+  EXPECT_GT(score0, score1) << "Doc with higher TF should score higher";
+}
+
+TEST_F(ScoringTest, SearchPrefixWithScorer) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello help helm");  // 3 terms match "hel*"
+  MockedDocument doc2("hello world");      // 1 term matches "hel*"
+  MockedDocument doc3("goodbye world");    // 0 terms match "hel*"
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hel*", &params));
+  algo.SetScorer(&BM25Std);
+
+  auto result = algo.Search(&index);
+
+  // doc1 and doc2 should match, doc3 should not
+  ASSERT_EQ(result.ids.size(), 2u);
+  EXPECT_EQ(result.text_scores.size(), 2u);
+
+  float score0 = 0, score1 = 0;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      score0 = score;
+    if (doc == 1)
+      score1 = score;
+  }
+
+  // doc1 matches 3 prefix-expanded terms, doc2 matches 1 -> doc1 should score higher
+  EXPECT_GT(score0, score1) << "Doc matching more prefix terms should score higher";
+  EXPECT_GT(score0, 0.0f);
+  EXPECT_GT(score1, 0.0f);
+}
+
+TEST_F(ScoringTest, SearchWithoutScorerNoScores) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world");
+  index.Add(0, doc1);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  // No SetScorer call
+
+  auto result = algo.Search(&index);
+
+  EXPECT_EQ(result.ids.size(), 1u);
+  EXPECT_TRUE(result.text_scores.empty()) << "No scores without scorer";
+}
+
+TEST_F(ScoringTest, IndexStats) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world foo");  // 3 tokens
+  MockedDocument doc2("hello");            // 1 token
+  MockedDocument doc3("bar baz");          // 2 tokens
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+
+  // Per-field stats via TextIndex
+  auto text_indices = index.GetAllTextIndices();
+  ASSERT_EQ(text_indices.size(), 1u);
+  auto* ti = text_indices[0];
+
+  size_t num_docs = index.GetAllDocs().size();
+  EXPECT_EQ(num_docs, 3u);
+  EXPECT_EQ(ti->GetFieldDocLength(0), 3u);
+  EXPECT_EQ(ti->GetFieldDocLength(1), 1u);
+  EXPECT_EQ(ti->GetFieldDocLength(2), 2u);
+  EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.0);  // (3+1+2)/3
+}
+
+TEST_F(ScoringTest, IndexStatsAfterRemove) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world");  // 2 tokens
+  MockedDocument doc2("foo bar baz");  // 3 tokens
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+
+  auto text_indices = index.GetAllTextIndices();
+  ASSERT_EQ(text_indices.size(), 1u);
+  auto* ti = text_indices[0];
+
+  EXPECT_EQ(index.GetAllDocs().size(), 2u);
+  EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.5);  // (2+3)/2
+
+  index.Remove(0, doc1);
+
+  EXPECT_EQ(index.GetAllDocs().size(), 1u);
+  EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 3.0);  // 3/1
+}
+
+TEST_F(ScoringTest, BM25StdAfterDocRemoval) {
+  // Verify scoring correctness after removing a document from the index
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc1("hello world hello");  // "hello" TF=2
+  MockedDocument doc2("hello there");        // "hello" TF=1
+  MockedDocument doc3("hello universe");     // "hello" TF=1
+
+  index.Add(0, doc1);
+  index.Add(1, doc2);
+  index.Add(2, doc3);
+  index.FinalizeInitialization();
+
+  // Score before removal
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(&BM25Std);
+
+  auto result_before = algo.Search(&index);
+  ASSERT_EQ(result_before.ids.size(), 3u);
+  EXPECT_EQ(result_before.text_scores.size(), 3u);
+
+  // Remove doc1
+  index.Remove(0, doc1);
+
+  // Re-search
+  SearchAlgorithm algo2;
+  ASSERT_TRUE(algo2.Init("hello", &params));
+  algo2.SetScorer(&BM25Std);
+
+  auto result_after = algo2.Search(&index);
+  ASSERT_EQ(result_after.ids.size(), 2u);
+  EXPECT_EQ(result_after.text_scores.size(), 2u);
+
+  // All remaining scores should be positive
+  for (auto& [doc, score] : result_after.text_scores) {
+    EXPECT_GT(score, 0.0f) << "DocId " << doc << " should have positive score after removal";
+    EXPECT_TRUE(doc == 1 || doc == 2) << "Unexpected DocId " << doc;
+  }
+}
+
+// Verify that with a scorer active and a cutoff limit, the search returns the
+// highest-scoring documents (top-K by score), not arbitrary ones.
+TEST_F(ScoringTest, ScorerTopKCutoff) {
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // Create 10 docs with increasing TF for "hello": doc0=TF1, doc1=TF2, ..., doc9=TF10
+  for (uint32_t i = 0; i < 10; i++) {
+    string content;
+    for (uint32_t j = 0; j <= i; j++) {
+      if (!content.empty())
+        content += " ";
+      content += "hello";
+    }
+    content += " filler";
+    index.Add(i, MockedDocument(content));
+  }
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("hello", &params));
+  algo.SetScorer(&BM25Std);
+
+  // Request only top 3 - should return docs 9, 8, 7 (highest TF)
+  auto result = algo.Search(&index, 3);
+
+  ASSERT_EQ(result.ids.size(), 3u);
+  ASSERT_EQ(result.text_scores.size(), 3u);
+  EXPECT_EQ(result.total, 10u);
+
+  // Verify returned docs are the top-3 scorers (highest TF = doc9, doc8, doc7)
+  set<DocId> returned(result.ids.begin(), result.ids.end());
+  EXPECT_TRUE(returned.count(9)) << "Doc9 (TF=10) should be in top-3";
+  EXPECT_TRUE(returned.count(8)) << "Doc8 (TF=9) should be in top-3";
+  EXPECT_TRUE(returned.count(7)) << "Doc7 (TF=8) should be in top-3";
+
+  // Verify scores are in descending order
+  for (size_t i = 1; i < result.text_scores.size(); i++) {
+    EXPECT_GE(result.text_scores[i - 1].second, result.text_scores[i].second)
+        << "Scores should be in descending order";
+  }
+}
 
 }  // namespace search
 }  // namespace dfly

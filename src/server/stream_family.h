@@ -9,7 +9,7 @@
 namespace dfly {
 
 class CommandRegistry;
-class CompactValue;
+struct CompactValue;
 
 class StreamMemTracker {
  public:

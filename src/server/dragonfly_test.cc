@@ -16,6 +16,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
@@ -286,6 +287,11 @@ TEST_F(DflyEngineTest, EvalSha) {
   // Important to keep spaces in order to be compatible with Redis.
   // See https://github.com/dragonflydb/dragonfly/issues/146
   EXPECT_THAT(resp, "c6459b95a0e81df97af6fdd49b1a9e0287a57363");
+}
+
+TEST_F(DflyEngineTest, EvalShaNegativeZeroNumKeys) {
+  EXPECT_THAT(Run({"evalsha", "k1", "-0"}), ErrArg(facade::kInvalidIntErr));
+  EXPECT_THAT(Run({"eval", "return 1", "-0"}), ErrArg(facade::kInvalidIntErr));
 }
 
 TEST_F(DflyEngineTest, ScriptFlush) {
@@ -702,8 +708,11 @@ TEST_F(DflyEngineTest, Bug496) {
     auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
+    // RegisterOnChange requires the shard lock to be held (see #7153).
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
     uint32_t cb_id =
         db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     {
       auto res = *db.AddOrFind({}, "key-1", std::nullopt);
@@ -1016,6 +1025,49 @@ TEST_F(DflyEngineTest, MemoryKeys) {
   Run({"debug", "populate", "10000", "abcd_efgh_ijkl_mnop", "10"});
   auto metrics = GetMetrics();
   EXPECT_GT(metrics.db_stats[0].memory_usage_by_type[OBJ_KEY], 100000);
+}
+
+// Verify that inline_keys, expire_count, and OBJ_KEY memory stay consistent
+// when expire is added/removed on inline keys (regression for memory underflow bug).
+TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
+  // Keys short enough to be stored inline (kInlineLen = 16).
+  constexpr int kCount = 10;
+  for (int i = 0; i < kCount; i++)
+    Run({"set", absl::StrCat("k", i), "v"});
+
+  auto stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, kCount);
+  EXPECT_EQ(stats.expire_count, 0u);
+  EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+
+  // Setting expire transitions inline -> SDS_TTL_TAG (heap-allocated).
+  for (int i = 0; i < kCount; i++)
+    Run({"expire", absl::StrCat("k", i), "3600"});
+
+  stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, 0u);
+  EXPECT_EQ(stats.expire_count, kCount);
+  EXPECT_GT(stats.memory_usage_by_type[OBJ_KEY], 0);
+
+  // PERSIST transitions SDS_TTL_TAG -> inline again.
+  for (int i = 0; i < kCount; i++)
+    Run({"persist", absl::StrCat("k", i)});
+
+  stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, kCount);
+  EXPECT_EQ(stats.expire_count, 0u);
+  EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+
+  // Re-expire then delete: prior bug caused memory accounting underflow on deletion.
+  for (int i = 0; i < kCount; i++)
+    Run({"expire", absl::StrCat("k", i), "3600"});
+  for (int i = 0; i < kCount; i++)
+    Run({"del", absl::StrCat("k", i)});
+
+  stats = GetMetrics().db_stats[0];
+  EXPECT_EQ(stats.inline_keys, 0u);
+  EXPECT_EQ(stats.expire_count, 0u);
+  EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
 }
 
 class DflyCommandAliasTest : public DflyEngineTest {

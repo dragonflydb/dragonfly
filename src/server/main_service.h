@@ -20,6 +20,10 @@ namespace util {
 class AcceptServer;
 }  // namespace util
 
+namespace facade {
+class RedisReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 using facade::MemcacheParser;
@@ -65,9 +69,10 @@ class Service : public facade::ServiceInterface {
 
   facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name) ABSL_LOCKS_EXCLUDED(mu_);
 
-  // Returns: the new state.
-  // if from equals the old state then the switch is performed "to" is returned.
-  // Otherwise, does not switch and returns the current state in the system.
+  // Attempts to switch global state from 'from' to 'to'.
+  // Returns the PREVIOUS global state (before the switch attempt).
+  // If from equals the previous state then the switch is performed and 'from' is returned.
+  // Otherwise, does not switch and returns the current (unchanged) state.
   // Upon switch, updates cached global state in threadlocal ServerState struct.
   GlobalState SwitchState(GlobalState from, GlobalState to) ABSL_LOCKS_EXCLUDED(mu_);
 
@@ -111,6 +116,10 @@ class Service : public facade::ServiceInterface {
 
   cluster::ClusterFamily& cluster_family() {
     return cluster_family_;
+  }
+
+  acl::UserRegistry& user_registry() {
+    return user_registry_;
   }
 
   // Utility function used in unit tests
@@ -168,6 +177,9 @@ class Service : public facade::ServiceInterface {
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                              bool force = false);
+
+  void TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& args, CommandContext* cmd_cntx,
+                              facade::RedisReplyBuilder* replier);
 
   void CallFromScript(Interpreter::CallArgs& args, CommandContext* cmd_cntx);
 

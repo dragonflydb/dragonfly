@@ -41,7 +41,7 @@ TEST_F(ServerFamilyTest, ReadTcpInfo) {
   server_addr.sin_port = 0;  // Let the system choose a free port
 
   // Bind to the port
-  ASSERT_EQ(bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
+  ASSERT_EQ(::bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
       << "Failed to bind socket: " << strerror(errno);
 
   // Start listening
@@ -78,7 +78,7 @@ TEST_F(ServerFamilyTest, GetTcpSocketInfoIPv6) {
   server_addr.sin6_port = 0;  // Let the system choose a free port
 
   // Bind to the port
-  ASSERT_EQ(bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
+  ASSERT_EQ(::bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)), 0)
       << "Failed to bind IPv6 socket: " << strerror(errno);
 
   // Start listening
@@ -706,6 +706,41 @@ TEST_F(ServerFamilyTest, InfoMultipleSectionsInvalid) {
   auto info = resp.GetString();
   EXPECT_NE(info.find("# Replication"), std::string::npos);
   EXPECT_EQ(info.find("# invalidsection"), std::string::npos);
+}
+
+// DEBUG POPULATE with val_size=0 caused SIGFPE (division by zero) in DoPopulateBatch.
+TEST_F(ServerFamilyTest, DebugPopulateZeroValSize) {
+  // val_size=0 with the default element count (1) must not crash the server.
+  auto resp = Run({"DEBUG", "POPULATE", "1", "key", "0"});
+  EXPECT_THAT(resp, ErrArg("val_size must be positive"));
+}
+
+TEST_F(ServerFamilyTest, MemoryArenaSummary) {
+  auto resp = Run({"MEMORY", "ARENA", "SUMMARY"});
+  const auto response = resp.GetString();
+
+  EXPECT_THAT(response, HasSubstr("BlockSize"));
+
+  for (const auto shard_id : std::views::iota(0UL, shard_set->size())) {
+    EXPECT_THAT(response, HasSubstr("Arena statistics for thread " + std::to_string(shard_id)));
+  }
+
+  EXPECT_THAT(response, HasSubstr("Arena statistics for machine"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "X"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("BlockSize"));
+
+  resp = Run({"MEMORY", "ARENA", "SUMMARY", "BACKING", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"MEMORY", "ARENA"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("Count"));
 }
 
 }  // namespace dfly

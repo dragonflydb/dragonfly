@@ -7,6 +7,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'dragonflydb/dragonfly'
     # The CMake configure and build commands are platform agnostic and should work equally
     # well on Windows or Mac.  You can convert this to a matrix build if you need
     # cross-platform coverage.
@@ -15,18 +16,20 @@ jobs:
     strategy:
       matrix:
         include:
-          - container: "ubuntu-dev:20-gcc14"
-            build-type: Release
+          - container: "ubuntu-dev:24"
+            build-type: Debug
             compiler: {cxx: g++, c: gcc}
-            cxx_flags: "-fprofile-arcs -ftest-coverage"
-    timeout-minutes: 60
+            cxx_flags: "-fprofile-arcs -ftest-coverage -fprofile-update=atomic"
+    timeout-minutes: 300
     container:
       image: ghcr.io/romange/${{ matrix.container }}
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /:/hostroot
 
     steps:
       - uses: actions/checkout@v6
@@ -46,7 +49,7 @@ jobs:
           uname -a
           cmake --version
           mkdir -p ${{github.workspace}}/build
-          apt update && apt install -y lcov pip
+          apt update && apt install -y lcov python3-pip
       - name: Cache build deps
         id: cache-deps
         uses: actions/cache@v5
@@ -58,9 +61,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-deps-${{ github.base_ref }}-
 
+      - name: Install Python test requirements
+        shell: bash
+        run: ${GITHUB_WORKSPACE}/.github/scripts/install-pytest-requirements.sh
+
       - name: Configure CMake
         run: |
-          pip install -r tests/dragonfly/requirements.txt
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
             -GNinja \
@@ -71,25 +77,55 @@ jobs:
             -L
           pwd
           cd build && pwd
-      - name: Build & Test Coverage
+
+      - name: Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          ninja
+          echo "-----------------------------"
+          ninja src/all
 
-          # Be permissive with errors, we hit compiler bugs from time to time.
-          ninja test || true
+      - name: Run C++ Unit Tests
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          ctest -V -L DFLY
 
+      - name: Run Python Integration Tests
+        run: |
+          cd $GITHUB_WORKSPACE/build
           export DRAGONFLY_PATH=`pwd`/dragonfly
-          pytest ../tests/dragonfly/ || true
+          pytest ../tests/dragonfly/ --durations=10 --timeout=300 --color=yes --log-cli-level=INFO
 
-          lcov -c -d . -o main_coverage.info
-          lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*'
-          genhtml main_coverage.info --ignore-errors source --output-directory covout -p $GITHUB_WORKSPACE
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
+
+      - name: Upload regression logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression_logs
+          path: /tmp/failed/*
+
+      - name: Generate Coverage Report
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          lcov -c -d . -o main_coverage.info --ignore-errors mismatch
+          lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*' '*.y'
+          genhtml main_coverage.info --ignore-errors source,unmapped --output-directory covout -p $GITHUB_WORKSPACE
           ls ./
           echo ls covout
           ls covout/
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          files: build/main_coverage.info
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: build/covout/

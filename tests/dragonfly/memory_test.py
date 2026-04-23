@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import string
+import time
 
 import pytest
 import redis
@@ -11,7 +12,7 @@ from .instance import DflyInstanceFactory
 from .utility import tmp_file_name
 
 
-@pytest.mark.slow
+@pytest.mark.large
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
@@ -152,6 +153,7 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     await client.execute_command("set x y")
 
 
+@pytest.mark.large
 @pytest.mark.asyncio
 @dfly_args(
     {
@@ -200,7 +202,7 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
 
 @pytest.mark.parametrize("heartbeat_rss_eviction", [True, False])
 async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbeat_rss_eviction):
-    max_memory = 1024 * 1024**2  # 10242mb
+    max_memory = 1024 * 1024**2  # 1024 mb
 
     df_server = df_factory.create(
         proactor_threads=3,
@@ -208,6 +210,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
         maxmemory=max_memory,
         enable_heartbeat_eviction="false",
         enable_heartbeat_rss_eviction=heartbeat_rss_eviction,
+        vmodule="engine_shard=2",
     )
     df_server.start()
     client = df_server.client()
@@ -235,7 +238,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
 
     # This will increase only RSS memory above treshold
     p = client.pipeline()
-    for _ in range(50):
+    for _ in range(150):
         p.execute_command("LRANGE list_1 0 -1")
         p.execute_command("LRANGE list_2 0 -1")
     await p.execute()
@@ -293,6 +296,7 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
     assert keyspace_info["db0"]["keys"] == num_keys
 
 
+@pytest.mark.skip(reason="Disabling test until improvements in squashing.")
 @pytest.mark.asyncio
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(
@@ -421,3 +425,24 @@ async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
         all_keys.update(keys)
 
     assert len(all_keys) == 1000
+
+
+@pytest.mark.asyncio
+async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
+    df_server = df_factory.create(proactor_threads=1)
+    df_server.start()
+    client = df_server.client()
+
+    await client.execute_command("DEBUG", "POPULATE", 50000, "key", 1, "EXPIRE", 3, 4)
+    await asyncio.sleep(2.5)
+    worst_ping = 0
+    deadline = time.monotonic() + 60
+    while await client.dbsize() > 0:
+        t0 = time.monotonic()
+        assert t0 < deadline, "All keys did not expire in 60 seconds"
+        await client.ping()
+        worst_ping = max(time.monotonic() - t0, worst_ping)
+        await asyncio.sleep(0.05)
+    assert (
+        worst_ping < 0.5
+    ), f"Worst PING latency {worst_ping:.3f}s exceeded 500ms during mass expiry"

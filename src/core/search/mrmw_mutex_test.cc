@@ -251,4 +251,132 @@ TEST_F(MRMWMutexTest, MixWritersReadersOnDifferentFibers) {
 //   }
 // }
 
+TEST_F(MRMWMutexTest, IsReadLockedReflectsState) {
+  // Initially no lock is held.
+  EXPECT_FALSE(mutex_.IsReadLocked());
+
+  // Acquire a read lock and verify.
+  mutex_.Lock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(mutex_.IsReadLocked());
+
+  // A second concurrent reader should still report read-locked.
+  mutex_.Lock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(mutex_.IsReadLocked());
+
+  // Release one reader — still locked by the other.
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(mutex_.IsReadLocked());
+
+  // Release the last reader.
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_FALSE(mutex_.IsReadLocked());
+}
+
+TEST_F(MRMWMutexTest, IsReadLockedFalseUnderWriteLock) {
+  mutex_.Lock(MRMWMutex::LockMode::kWriteLock);
+  EXPECT_FALSE(mutex_.IsReadLocked());
+  mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
+}
+
+TEST_F(MRMWMutexTest, TryLockSucceedsWhenFree) {
+  // TryLock on a free mutex should succeed for both modes.
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kWriteLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
+}
+
+TEST_F(MRMWMutexTest, TryLockFailsOnConflict) {
+  // Hold a read lock, then try-lock for write should fail.
+  mutex_.Lock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_FALSE(mutex_.TryLock(MRMWMutex::LockMode::kWriteLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+
+  // Hold a write lock, then try-lock for read should fail.
+  mutex_.Lock(MRMWMutex::LockMode::kWriteLock);
+  EXPECT_FALSE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
+}
+
+TEST_F(MRMWMutexTest, TryLockSucceedsForSameMode) {
+  // Multiple readers via TryLock should all succeed.
+  mutex_.Lock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+
+  // Multiple writers via TryLock should all succeed.
+  mutex_.Lock(MRMWMutex::LockMode::kWriteLock);
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kWriteLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
+  mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
+}
+
+TEST_F(MRMWMutexTest, MRMWMutexLockTryLockSemantics) {
+  // Hold a read lock, then try a MRMWMutexLock for write — should not be locked.
+  MRMWMutexLock read_lock(&mutex_, MRMWMutex::LockMode::kReadLock);
+  MRMWMutexLock try_write(&mutex_, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
+  EXPECT_FALSE(try_write.locked());
+
+  // Same-mode try-lock via RAII should succeed.
+  MRMWMutexLock try_read(&mutex_, MRMWMutex::LockMode::kReadLock, std::try_to_lock);
+  EXPECT_TRUE(try_read.locked());
+}
+
+TEST_F(MRMWMutexTest, MoveConstructorTransfersOwnership) {
+  MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(lock1.locked());
+  EXPECT_TRUE(mutex_.IsReadLocked());
+
+  MRMWMutexLock lock2(std::move(lock1));
+  EXPECT_TRUE(lock2.locked());
+  EXPECT_FALSE(lock1.locked());
+  EXPECT_TRUE(mutex_.IsReadLocked());
+}
+
+TEST_F(MRMWMutexTest, MoveConstructorUnlocksOnDestruction) {
+  {
+    MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kWriteLock);
+    MRMWMutexLock lock2(std::move(lock1));
+    EXPECT_TRUE(lock2.locked());
+    EXPECT_FALSE(lock1.locked());
+  }
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+}
+
+TEST_F(MRMWMutexTest, MoveAssignmentTransfersOwnership) {
+  MRMWMutexLock lock1(&mutex_, MRMWMutex::LockMode::kReadLock);
+
+  MRMWMutex other_mutex;
+  other_mutex.Lock(MRMWMutex::LockMode::kReadLock);
+  MRMWMutexLock lock2(&other_mutex, MRMWMutex::LockMode::kWriteLock, std::try_to_lock);
+  EXPECT_FALSE(lock2.locked());
+  other_mutex.Unlock(MRMWMutex::LockMode::kReadLock);
+
+  lock2 = std::move(lock1);
+  EXPECT_TRUE(lock2.locked());
+  EXPECT_FALSE(lock1.locked());
+  EXPECT_TRUE(mutex_.IsReadLocked());
+}
+
+TEST_F(MRMWMutexTest, MoveIntoVector) {
+  std::vector<MRMWMutexLock> locks;
+  MRMWMutex mutex2;
+
+  locks.push_back(MRMWMutexLock(&mutex_, MRMWMutex::LockMode::kWriteLock));
+  locks.push_back(MRMWMutexLock(&mutex2, MRMWMutex::LockMode::kWriteLock));
+
+  EXPECT_EQ(locks.size(), 2u);
+  EXPECT_TRUE(locks[0].locked());
+  EXPECT_TRUE(locks[1].locked());
+
+  locks.clear();
+  EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex_.Unlock(MRMWMutex::LockMode::kReadLock);
+  EXPECT_TRUE(mutex2.TryLock(MRMWMutex::LockMode::kReadLock));
+  mutex2.Unlock(MRMWMutex::LockMode::kReadLock);
+}
+
 }  // namespace dfly::search

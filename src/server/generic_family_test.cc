@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -15,6 +16,8 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
+
+ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 
 using namespace testing;
 using namespace std;
@@ -518,6 +521,21 @@ TEST_F(GenericFamilyTest, RenameSameShard) {
   EXPECT_EQ(Run({"rename", "x", "y"}), "OK");
 }
 
+TEST_F(GenericFamilyTest, RenameCmsNanCrash) {
+  num_threads_ = 2;
+  ResetService();
+
+  // With 2 shards (XXH64 seed 120577240643): myset -> shard 0, dst -> shard 1.
+  // NaN must be rejected: !(NaN > 0 && NaN < 1) is true for both checks.
+  // Before the fix, NaN bypassed <= 0 / >= 1 guards (NaN comparisons are always
+  // false), creating a CMS with width=0 and depth=0.  The subsequent cross-shard
+  // RENAME triggered Renamer::FinalizeRename -> DeserializeDest -> ReadCMS,
+  // which rejected width==0 -> INVALID_VALUE -> DFATAL (SIGABRT in debug builds).
+  EXPECT_THAT(Run({"cms.initbyprob", "myset", "NaN", "NaN"}), ErrArg("between 0 and 1"));
+  EXPECT_THAT(Run({"exists", "myset"}), IntArg(0));
+  EXPECT_THAT(Run({"rename", "myset", "dst"}), ErrArg("no such key"));
+}
+
 TEST_F(GenericFamilyTest, Stick) {
   // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
@@ -863,6 +881,49 @@ TEST_F(GenericFamilyTest, SortStore) {
   AdvanceTime(5000);
   ASSERT_THAT(Run({"lrange", "list-2", "0", "-1"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+}
+
+// Regression test for SORT ... STORE with empty result must delete destination key,
+// not leave an empty list which crashes SAVE (DFATAL in rdb_save.cc).
+TEST_F(GenericFamilyTest, SortStoreEmptyResult) {
+  Run({"lpush", "list-src", "3", "1", "2"});
+
+  // LIMIT offset beyond list length -> empty result
+  auto resp = Run({"sort", "list-src", "LIMIT", "10", "5", "store", "dest"});
+  EXPECT_EQ(0, resp.GetInt());
+  EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must not leave a key";
+
+  // LIMIT count=0 -> empty result
+  Run({"set", "dest", "old"});  // pre-existing key should be deleted
+  resp = Run({"sort", "list-src", "LIMIT", "0", "0", "store", "dest"});
+  EXPECT_EQ(0, resp.GetInt());
+  EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must delete existing key";
+}
+
+TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
+  // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
+  Run({"del", "src", "dest"});
+  Run({"sadd", "src", "3", "1", "2"});
+  Run({"sadd", "dest", "old"});
+  Run({"expire", "dest", "100"});
+  EXPECT_GT(Run({"ttl", "dest"}).GetInt(), 0);
+
+  auto resp = Run({"sort", "src", "store", "dest"});
+  EXPECT_EQ(3, resp.GetInt());
+  // Destination must have no expiry after SORT STORE overwrites it.
+  EXPECT_EQ(-1, Run({"ttl", "dest"}).GetInt());
+  ASSERT_THAT(Run({"lrange", "dest", "0", "-1"}).GetVec(), ElementsAre("1", "2", "3"));
+
+  // SORT src STORE src (same key), src has an expiry — must not crash and must clear expiry.
+  Run({"del", "myset"});
+  Run({"sadd", "myset", "c", "a", "b"});
+  Run({"expire", "myset", "100"});
+  EXPECT_GT(Run({"ttl", "myset"}).GetInt(), 0);
+
+  resp = Run({"sort", "myset", "ALPHA", "store", "myset"});
+  EXPECT_EQ(3, resp.GetInt());
+  EXPECT_EQ(-1, Run({"ttl", "myset"}).GetInt());
+  ASSERT_THAT(Run({"lrange", "myset", "0", "-1"}).GetVec(), ElementsAre("a", "b", "c"));
 }
 
 TEST_F(GenericFamilyTest, Sort_RO) {
@@ -1299,6 +1360,177 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
 }
 
+TEST_F(GenericFamilyTest, IterateMapSetStaleTimeZombie) {
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "hkey", "f0"});
+  Run({"SISMEMBER", "skey", "m0"});
+
+  Run({"DEBUG", "OBJHIST"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+TEST_F(GenericFamilyTest, DebugUniqStrsDeletesEmptyContainers) {
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "hkey", "f0"});
+  Run({"SISMEMBER", "skey", "m0"});
+  Run({"DEBUG", "UNIQ-STRS"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+// Regression: TraverseAllEntries walks every DB but the callback used the
+// connection-selected DB for deletion.  A zombie in DB 1 could cause a
+// same-named non-empty key in DB 0 to be deleted incorrectly.
+TEST_F(GenericFamilyTest, DebugObjHistMultiDbCorrectDb) {
+  // Live hash in DB 0 under the same key name as the zombie in DB 1.
+  Run({"SELECT", "0"});
+  Run({"HSET", "shared", "alive", "value"});
+
+  Run({"SELECT", "1"});
+  for (int i = 0; i < 64; ++i) {
+    Run({"HSETEX", "shared", "1", absl::StrCat("f", i), "v"});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"HGET", "shared", "f0"});  // enable lazy expiry on DB 1's hash
+  Run({"DEBUG", "OBJHIST"});
+
+  // Zombie in DB 1 must be deleted.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "shared"}));
+
+  // Live hash in DB 0 must survive.
+  Run({"SELECT", "0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "shared"}));
+  EXPECT_EQ("value", Run({"HGET", "shared", "alive"}));
+}
+
+TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  // ZINTERSTORE needs at least one non-empty input to reach ScoreMapFromSet.
+  Run({"ZADD", "zkey", "1", "m0"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  AdvanceTime(2000);
+
+  // ZINTERSTORE iterates skey via IterateSet (inside ScoreMapFromSet),
+  // triggering lazy expiry.  The empty set must be cleaned up.
+  Run({"ZINTERSTORE", "zdest", "2", "skey", "zkey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+TEST_F(GenericFamilyTest, ZUnionStoreDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  AdvanceTime(2000);
+
+  // ZUNIONSTORE iterates skey via IterateSet (inside ScoreMapFromSet),
+  // triggering lazy expiry.  The empty set must be cleaned up.
+  Run({"ZUNIONSTORE", "zdest", "1", "skey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+// Iterator invalidation: deleting one input set must not break iteration over
+// the remaining ones in UnionShardKeysWithScore.
+TEST_F(GenericFamilyTest, ZUnionStoreMultipleEmptySets) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "s1", "1", absl::StrCat("a", i)});
+    Run({"SADDEX", "s2", "1", absl::StrCat("b", i)});
+    Run({"SADDEX", "s3", "1", absl::StrCat("c", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"ZUNIONSTORE", "zdest", "3", "s1", "s2", "s3"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "s1"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "s2"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "s3"}));
+}
+
+TEST_F(GenericFamilyTest, SortByPatternDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  AdvanceTime(2000);
+
+  // SORT BY nosort iterates the set, triggering lazy member expiry.
+  // The empty set must be cleaned up on its own — no prior command touching
+  // the set is needed.
+  Run({"SORT", "skey", "BY", "nosort"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
+// Regression: OpFieldExpire for hashes calls SetFieldsExpireTime which triggers
+// lazy field expiry via StringMap::Find(), but does not call DeleteIfEmpty
+// afterward.  When all fields have expired, the hash remains in the DB with
+// Size()==0.  A subsequent SAVE hits the DFATAL in SaveEntry.
+TEST_F(GenericFamilyTest, FieldExpireHashDeletesEmptyHash) {
+  // Create a hash with a short field-level TTL.
+  Run({"HSETEX", "key", "1", "f1", "v1"});
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "key"}));
+
+  AdvanceTime(2000);
+
+  // FIELDEXPIRE on the already-expired field triggers lazy expiry via Find()
+  // inside UpdateTTL.  Without the fix the hash remains as a zombie key.
+  Run({"FIELDEXPIRE", "key", "5", "f1"});
+
+  // The key must have been removed.
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
+}
+
+// SHRINK calls set_time() then DenseSet::Shrink() which expires entries during
+// bucket compaction.  If all entries expire, the key must be deleted.
+TEST_F(GenericFamilyTest, ShrinkDeletesEmptyContainer) {
+  for (int i = 0; i < 128; ++i) {
+    Run({"HSETEX", "hkey", "1", absl::StrCat("f", i), "v"});
+  }
+  for (int i = 4; i < 128; ++i) {
+    Run({"HDEL", "hkey", absl::StrCat("f", i)});
+  }
+
+  for (int i = 0; i < 128; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+  for (int i = 4; i < 128; ++i) {
+    Run({"SREM", "skey", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"SHRINK", "hkey"});
+  Run({"SHRINK", "skey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));
@@ -1312,6 +1544,22 @@ TEST_F(GenericFamilyTest, ExpireTime) {
   Run({"pexpireat", "foo", absl::StrCat(expire_time_in_ms)});
   EXPECT_EQ(expire_time_in_seconds, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(expire_time_in_ms, CheckedInt({"PEXPIRETIME", "foo"}));
+}
+
+TEST_F(GenericFamilyTest, SortDeletesEmptySet) {
+  for (int i = 0; i < 20; ++i) {
+    Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
+  }
+
+  AdvanceTime(2000);
+
+  Run({"SISMEMBER", "skey", "m0"});
+  // SISMEMBER must not delete the key by itself — SORT is the one that should clean up.
+  EXPECT_EQ(1, CheckedInt({"EXISTS", "skey"}));
+
+  Run({"SORT", "skey"});
+
+  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
 }
 
 TEST_F(GenericFamilyTest, RestoreOOM) {
@@ -1663,6 +1911,88 @@ TEST_F(GenericFamilyTest, Delex) {
   EXPECT_THAT(Run({"delex", "key11", "randomarg"}), ErrArg("wrong number of arguments"));
   EXPECT_THAT(Run({"delex", "key12", "IFEQ"}), ErrArg("wrong number of arguments"));
   EXPECT_THAT(Run({"delex", "key13", "xyz"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(GenericFamilyTest, Rm) {
+  // Basic: RM 0 on empty db returns [0, 0]
+  auto resp = Run({"rm", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], "0");
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With MATCH arg — still parses OK
+  resp = Run({"rm", "0", "match", "foo*"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With TYPE arg — still parses OK
+  resp = Run({"rm", "0", "type", "string"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(0));
+
+  // With COUNT arg — still parses OK
+  resp = Run({"rm", "0", "match", "foo*", "count", "100"});
+  ASSERT_THAT(resp, ArrLen(2));
+
+  // Invalid cursor → error
+  resp = Run({"rm", "notanumber"});
+  EXPECT_THAT(resp, ErrArg("invalid cursor"));
+
+  // Invalid options → syntax error
+  resp = Run({"rm", "0", "badopt"});
+  EXPECT_THAT(resp, ErrArg("syntax"));
+}
+
+TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
+  for (int i = 0; i < 10; ++i)
+    Run({"set", absl::StrCat("foo", i), "val"});
+  for (int i = 0; i < 5; ++i)
+    Run({"set", absl::StrCat("bar", i), "val"});
+
+  // Delete all foo* keys by iterating until cursor returns 0
+  uint32_t total_deleted = 0;
+  uint64_t cursor = 0;
+  do {
+    auto resp = Run({"rm", absl::StrCat(cursor), "match", "foo*", "count", "100"});
+    ASSERT_THAT(resp, ArrLen(2));
+    ASSERT_TRUE(absl::SimpleAtoi(resp.GetVec()[0].GetString(), &cursor));
+    total_deleted += resp.GetVec()[1].GetInt().value();
+  } while (cursor != 0);
+
+  EXPECT_EQ(total_deleted, 10u);
+
+  // foo* keys are gone, bar* keys remain
+  EXPECT_EQ(Run({"exists", "foo0"}), 0);
+  EXPECT_EQ(Run({"exists", "bar0"}), 1);
+  EXPECT_EQ(Run({"dbsize"}), 5);
+}
+
+// Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
+// non-concluding Execute() hop to fetch elements, then falls through to the
+// unsorted reply path without a concluding hop or Conclude().
+// This leaves the parent transaction as continuation_trans_ on the shard.
+// When the EXEC transaction is later destroyed, continuation_trans_ becomes
+// a dangling pointer, crashing in DisarmInShard() on the next EXEC.
+TEST_F(GenericFamilyTest, SortByNosortStoreInMulti) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  Run({"lpush", "mylist", "c", "b", "a"});
+
+  // SORT BY nosort STORE goes through ExecuteStandalone (multi-key, possibly
+  // cross-shard) and calls Execute(fetch_cb, conclude=false) on the parent
+  // EXEC transaction but never concludes it.
+  for (int i = 0; i < 10; ++i) {
+    Run({"multi"});
+    Run({"set", "x", StrCat(i)});
+    Run({"sort", "mylist", "BY", "nosort", "STORE", "dest"});
+    auto resp = Run({"exec"});
+    ASSERT_THAT(resp, ArrLen(2));
+  }
+
+  // Verify the store actually happened and the server is healthy.
+  EXPECT_THAT(Run({"lrange", "dest", "0", "-1"}), ArrLen(3));
+  EXPECT_EQ(Run({"get", "x"}), "9");
 }
 
 }  // namespace dfly

@@ -24,7 +24,8 @@ namespace {
 
 inline bool MayHaveTtl(sds s) {
   char* alloc_ptr = (char*)sdsAllocPtr(s);
-  return sdslen(s) + 1 + 4 <= zmalloc_usable_size(alloc_ptr);
+  size_t hdr_size = s - alloc_ptr;
+  return sdslen(s) + 1 + sizeof(uint32_t) + hdr_size <= zmalloc_usable_size(alloc_ptr);
 }
 
 sds AllocImmutableWithTtl(uint32_t len, uint32_t at) {
@@ -97,7 +98,14 @@ unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec
       sds field = MakeSetSds(span[i], ttl_sec);
       AddUnique(field, has_ttl, hash[i]);
     } else if (has_ttl && !keepttl) {
-      ObjUpdateExpireTime(prev, ttl_sec);
+      // We must not call ObjUpdateExpireTime directly on prev because the existing SDS
+      // may have been allocated without TTL space (e.g., via SADD which uses sdsnewlen).
+      // Writing 4 TTL bytes past the null terminator would cause a heap buffer overflow.
+      // Instead, create a new SDS with TTL space and replace the old one.
+      sds field = MakeSetSds(span[i], ttl_sec);
+      void* old = AddOrReplaceObj(field, true);
+      DCHECK(old != nullptr);  // prev was found, so replacement must happen.
+      ObjDelete(old);
     }
   }
 
@@ -173,7 +181,7 @@ void StringSet::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
   return SdsUpdateExpireTime(obj, time_now() + ttl_sec, 0);
 }
 
-void StringSet::ObjDelete(void* obj, bool has_ttl) const {
+void StringSet::ObjDelete(void* obj) const {
   sdsfree((sds)obj);
 }
 
@@ -208,8 +216,14 @@ pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, PageUsage* page
   bool has_ttl = MayHaveTtl(key);
 
   if (has_ttl) {
+    // Verify the memcpy below won't overread: bytes we copy (data + '\0' + TTL)
+    // must not exceed the usable space from the data pointer to the end of the allocation.
+    [[maybe_unused]] size_t bytes_to_copy = key_len + 1 + sizeof(uint32_t);
+    [[maybe_unused]] size_t usable_from_key =
+        zmalloc_usable_size(sdsAllocPtr(key)) - (key - (char*)sdsAllocPtr(key));
+    DCHECK_LE(bytes_to_copy, usable_from_key);
     sds res = AllocSdsWithSpace(key_len, sizeof(uint32_t));
-    std::memcpy(res, key, key_len + sizeof(uint32_t));
+    std::memcpy(res, key, key_len + 1 + sizeof(uint32_t));  // +1 for null terminator
     return {res, true};
   }
 

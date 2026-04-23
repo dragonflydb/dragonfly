@@ -4,6 +4,8 @@
 
 #include "server/journal/cmd_serializer.h"
 
+#include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
@@ -79,6 +81,8 @@ CmdSerializer::CmdSerializer(DbSlice* db_slice, FlushSerialized cb,
 
 size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
                                      uint64_t expire_ms) {
+  DCHECK(!pv.IsExternal());  // Delayed entries are handled separately
+
   // We send RESTORE commands objects we don't support breaking.
   bool use_restore_serialization = true;
   size_t commands = 1;
@@ -124,57 +128,10 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
   return commands;
 }
 
-size_t CmdSerializer::SerializeDelayedEntries(bool force,
-                                              absl::flat_hash_set<std::string>* tiered_keys) {
-  // If there are no delayed entries, or we're not forced to serialize them, or we have only a few
-  // of them, we can skip serialization for now and wait for more entries to accumulate or for force
-  // to be true.
-  // Check next comment that this can be removed once we have better support for skipping unresolved
-  // entries.
-  if (!force && delayed_entries_.size() < 32) {
-    return 0;
-  }
-
-  size_t serialized = 0;
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    auto& entry = it->second;
-
-    // TODO: Once https://github.com/romange/helio/pull/541 is merged we can skip entries that are
-    // not resolved yet.
-    // Skip unresolved entries unless force is true if (!force &&
-    // !entry->value.IsResolved()) {
-    //   ++it;
-    //   continue;
-    // }
-
-    // If tiered_keys filter is provided, only serialize matching keys
-    // Compare the string key from the map with the keys in tiered_keys set
-    if (tiered_keys && !tiered_keys->contains(it->first)) {
-      ++it;
-      continue;
-    }
-
-    // Get the value from the future (blocks if not resolved and force=true)
-    auto res = entry->value.Get();
-    if (!res.has_value()) {
-      LOG(ERROR) << "Failed to read delayed entry for key " << entry->key.ToString();
-      it++;
-      continue;
-    }
-
-    // Serialize the entry and remove it from delayed_entries_
-    PrimeValue pv{*res};
-    serialized += SerializeEntry(entry->key.ToString(), entry->key, pv, entry->expire);
-    delayed_entries_.erase(it++);
-  }
-  return serialized;
-}
-
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command
                        0,                     // db index
-                       1,                     // shard count
                        0,                     // slot-id, but it is ignored at this level
                        journal::Entry::Payload(cmd, ArgSlice(args)));
 
@@ -203,6 +160,16 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
 }
 
 size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
+  // Disable lazy expiry during serialization (same as rdb_save.cc).
+  // We are called under bucket lock so DeleteIfEmpty is not possible.
+  StringSet* ss = nullptr;
+  uint32_t prev_time = 0;
+  if (pv.Encoding() == kEncodingStrMap2) {
+    ss = static_cast<StringSet*>(pv.RObjPtr());
+    prev_time = ss->time_now();
+    ss->set_time(0);
+  }
+
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
       max_serialization_buffer_size_);
@@ -212,6 +179,11 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
     commands += aggregator.AddArg(ce.ToString());
     return true;
   });
+
+  // Restore previous time so subsequent operations can trigger lazy expiry.
+  if (ss)
+    ss->set_time(prev_time);
+
   return commands;
 }
 
@@ -233,6 +205,15 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
 }
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
+  // Disable lazy expiry during serialization (same as rdb_save.cc).
+  StringMap* sm = nullptr;
+  uint32_t prev_time = 0;
+  if (pv.Encoding() == kEncodingStrMap2) {
+    sm = static_cast<StringMap*>(pv.RObjPtr());
+    prev_time = sm->time_now();
+    sm->set_time(0);
+  }
+
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
       max_serialization_buffer_size_);
@@ -244,6 +225,11 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
         commands += aggregator.AddArg(v.ToString());
         return true;
       });
+
+  // Restore previous time so subsequent operations can trigger lazy expiry.
+  if (sm)
+    sm->set_time(prev_time);
+
   return commands;
 }
 
@@ -262,16 +248,7 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
 
 size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
   string str;
-  if (pv.IsExternal()) {
-    if (pv.IsCool()) {
-      pv.GetCool().record->value.GetString(&str);
-    } else {
-      SerializeExternal(key, pv, expire_ms);
-      return 0;
-    }
-  } else {
-    pv.GetString(&str);
-  }
+  pv.GetString(&str);
 
   if (expire_ms) {
     std::string expire_ms_str = to_string(expire_ms);
@@ -295,7 +272,7 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
 
   // TODO we already ignore CRC in the load rdb code during migration, we need to provide ignore_crc
   // = true when we are sure that all shards ignore crc during migration process
-  std::string value_dump = SerializerBase::DumpValue(serializer_.get(), pv, false);
+  std::string value_dump = RdbSerializer::DumpValue(serializer_.get(), pv, false);
   args.push_back(value_dump);
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
@@ -305,18 +282,6 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
   }
 
   SerializeCommand("RESTORE", args);
-}
-
-void CmdSerializer::SerializeExternal(std::string_view key, const PrimeValue& pv,
-                                      time_t expire_time) {
-  // In cluster mode, db_id is always 0
-  constexpr DbIndex kClusterDbId = 0;
-  auto future = ReadTieredString(kClusterDbId, key, pv, EngineShard::tlocal()->tiered_storage());
-  PrimeKey prime_key{key};
-  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(kClusterDbId, prime_key) : 0;
-  auto entry = std::make_unique<TieredDelayedEntry>(kClusterDbId, std::move(prime_key),
-                                                    std::move(future), expire_time, mc_flags);
-  delayed_entries_.emplace(key, std::move(entry));
 }
 
 }  // namespace dfly

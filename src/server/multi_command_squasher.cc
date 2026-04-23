@@ -140,6 +140,11 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(const StoredC
       return SquashResult::NOT_SQUASHED;  // at least two shards
   }
 
+  // Transaction is not active on the requested shard.
+  // Command should result in undeclared key error
+  if (IsAtomic() && !cntx_->transaction->IsActive(last_sid))
+    return SquashResult::NOT_SQUASHED;
+
   auto& sinfo = PrepareShardInfo(last_sid);
 
   sinfo.dispatched.push_back({.cmd = cmd, .reply = {}});
@@ -240,7 +245,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   base::SpinLock lock;
   uint64_t fiber_running_cycles{0}, proactor_running_cycles{0};
   uint32_t max_sched_thread_id{0}, max_sched_seq_num{0};
-  vector<string> past_fibers;
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
@@ -272,7 +276,6 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
             proactor_running_cycles = ProactorBase::me()->GetCurrentBusyCycles();
             max_sched_thread_id = ProactorBase::me()->GetPoolIndex();
             max_sched_seq_num = fb2::GetFiberRunSeq();
-            past_fibers = fb2::GetPastFiberNames();
           }
           break;
         }
@@ -340,9 +343,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         << "Total/Fanout/MaxSchedTime/ThreadCbTime/ThreadId/FiberCbTime/FiberSeq/"
         << "MaxExecTime: " << total_usec << "/" << num_shards_ << "/" << max_sched_usec << "/"
         << proactor_running_usec << "/" << max_sched_thread_id << "/" << fiber_running_usec << "/"
-        << "/" << max_sched_seq_num << "/" << max_exec_usec
-        << "\n past fibers: " << absl::StrJoin(past_fibers, ", ")
-        << "\ncoordinator thread running time: "
+        << "/" << max_sched_seq_num << "/" << max_exec_usec << "\ncoordinator thread running time: "
         << CycleClock::ToUsec(ProactorBase::me()->GetCurrentBusyCycles());
   }
 
