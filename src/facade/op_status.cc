@@ -54,6 +54,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kNanOrInfDuringIncr;
     case OpStatus::IO_ERROR:
       return kTieredIoError;
+    case OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS:
+      return kBloomFilterLoadInProgress;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";

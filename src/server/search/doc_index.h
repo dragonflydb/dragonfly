@@ -130,8 +130,8 @@ struct SearchParams {
 
   search::QueryParams query_params;
 
-  bool with_scores = false;                  // WITHSCORES flag
-  std::optional<search::ScorerType> scorer;  // SCORER parameter
+  bool with_scores = false;           // WITHSCORES flag
+  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
 
   bool ShouldReturnAllFields() const {
     return !return_fields.has_value();
@@ -196,8 +196,8 @@ struct AggregateParams {
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
 
-  bool add_scores = false;                   // ADDSCORES flag
-  std::optional<search::ScorerType> scorer;  // SCORER parameter
+  bool add_scores = false;            // ADDSCORES flag
+  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
 };
 
 // Stores basic info about a document index.

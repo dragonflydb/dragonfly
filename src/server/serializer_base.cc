@@ -148,8 +148,9 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
 
-    if (it.is_done())
-      return false;
+    // Update versions for empty buckets
+    if (it.GetVersion() < snapshot_version_)
+      it.SetVersion(snapshot_version_);
 
     // Force flush all delayed entries in the touched bucket
     if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
