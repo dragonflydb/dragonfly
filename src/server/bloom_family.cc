@@ -99,6 +99,54 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
   return result;
 }
 
+OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_view key,
+                     int64_t cursor) {
+  auto& db_slice = op_args.GetDbSlice();
+
+  if (cursor == 1) {  // Init phase
+    auto load_result = LoadSBFHeader(blob, CompactObj::memory_resource());
+    if (!load_result.has_value()) {
+      LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid header"
+                               << " key=" << key << " cursor=" << cursor
+                               << " blob_size=" << blob.size()
+                               << " load_res=" << ToString(load_result.error());
+      return OpStatus::INVALID_VALUE;
+    }
+
+    // type set to nullopt to find any type key and overwrite it, not just SBF
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
+    if (!op_res) {
+      CompactObj::DeleteMR<SBF>(load_result.value());
+      return op_res.status();
+    }
+
+    // LOADCHUNK overwrites existing key
+    if (!op_res->is_new) {
+      // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
+    }
+
+    op_res->it->second.SetSBF(load_result.value());
+    return OpStatus::OK;
+  }  // cursor == 1 (Init phase)
+
+  // Continue loading chunks into not-yet-fully-loaded filter.
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SBF);
+  if (!op_res)
+    return op_res.status();
+
+  SBF* sbf = op_res->it->second.GetSBF();
+  if (auto load_res = LoadSBFChunk(cursor, blob, sbf); load_res != SBFLoadResult::kOk) {
+    LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid chunk"
+                             << " key=" << key << " cursor=" << cursor
+                             << " blob_size=" << blob.size() << " load_res=" << ToString(load_res);
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  return OpStatus::OK;
+}
+
 void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser(args);
   string_view key = parser.Next();
@@ -241,52 +289,8 @@ void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
 
   const std::string_view blob = parser.Next();
 
-  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
-    auto op_args = t->GetOpArgs(shard);
-    auto& db_slice = op_args.GetDbSlice();
-
-    if (cursor == 1) {
-      auto load_result = LoadSBFHeader(blob, CompactObj::memory_resource());
-      if (!load_result.has_value()) {
-        LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid header"
-                                 << " key=" << key << " cursor=" << cursor
-                                 << " blob_size=" << blob.size()
-                                 << " load_res=" << ToString(load_result.error());
-        return OpStatus::INVALID_VALUE;
-      }
-
-      // type set to nullopt to find any type key and overwrite it, not just SBF
-      auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
-      if (!op_res) {
-        CompactObj::DeleteMR<SBF>(load_result.value());
-        return op_res.status();
-      }
-
-      // LOADCHUNK overwrites existing key
-      if (!op_res->is_new) {
-        // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
-        RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
-        db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
-      }
-
-      op_res->it->second.SetSBF(load_result.value());
-      return OpStatus::OK;
-    }
-
-    auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SBF);
-    if (!op_res)
-      return op_res.status();
-
-    SBF* sbf = op_res->it->second.GetSBF();
-    if (auto load_res = LoadSBFChunk(cursor, blob, sbf); load_res != SBFLoadResult::kOk) {
-      LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid chunk"
-                               << " key=" << key << " cursor=" << cursor
-                               << " blob_size=" << blob.size()
-                               << " load_res=" << ToString(load_res);
-      return OpStatus::OUT_OF_RANGE;
-    }
-
-    return OpStatus::OK;
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpLoadChunk(t->GetOpArgs(shard), blob, key, cursor);
   };
 
   const OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
