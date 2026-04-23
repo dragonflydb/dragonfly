@@ -78,6 +78,10 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
   bool copy_vector_ = true;
 
+  // Cached in-memory footprint (bytes) — maintained by the constructor and resizeIndex;
+  // read lock-free by metrics. See memorySize() for what is / isn't counted.
+  std::atomic<size_t> memory_size_{0};
+
   bool allow_replace_deleted_ =
       false;  // flag to replace deleted elements (marked as deleted) during insertions
 
@@ -155,6 +159,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     size_links_per_element_ = maxM_ * sizeof(tableint) + sizeof(linklistsizeint);
     mult_ = 1 / log(1.0 * M_);
     revSize_ = 1.0 / mult_;
+    updateMemorySize();
   }
 
   ~HierarchicalNSW() {
@@ -689,6 +694,37 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     linkLists_ = linkLists_new;
 
     max_elements_ = new_max_elements;
+    updateMemorySize();
+  }
+
+  // Approximate in-memory footprint in bytes. Lock-free: reads the cached
+  // capacity-based total plus rough estimates of the two dynamic containers
+  // (label_lookup_, deleted_elements) from their already-atomic counters.
+  // Per-element upper-layer link lists remain uncounted (< 5% of the total).
+  size_t memorySize() const {
+    // Rough std::unordered_map<labeltype, tableint> entry: node (key+value+hash+
+    // next-ptr) plus amortized bucket-slot overhead.
+    constexpr size_t kLabelLookupEntryBytes = sizeof(labeltype) + sizeof(tableint) + 32;
+    // std::unordered_set<tableint> entry, populated only in allow_replace_deleted mode.
+    constexpr size_t kDeletedEntryBytes = sizeof(tableint) + 24;
+    size_t total = memory_size_.load(std::memory_order_relaxed);
+    total += cur_element_count.load(std::memory_order_relaxed) * kLabelLookupEntryBytes;
+    total += num_deleted_.load(std::memory_order_relaxed) * kDeletedEntryBytes;
+    return total;
+  }
+
+  // Recomputes memory_size_ from the current allocation-defining fields.
+  // Must be called whenever max_elements_ changes.
+  void updateMemorySize() {
+    // Per-element costs: level-0 block, linkLists_ pointer slot, element_levels_ entry,
+    // link_list_locks_ mutex; plus the copied-vector block when enabled.
+    size_t per_element = size_data_per_element_ + sizeof(char*) + sizeof(int) + sizeof(std::mutex);
+    if (copy_vector_) {
+      per_element += data_size_;
+    }
+    // label_op_locks_ is a fixed-size shard of mutexes independent of max_elements_.
+    size_t fixed = MAX_LABEL_OPERATION_LOCKS * sizeof(std::mutex);
+    memory_size_.store(fixed + max_elements_ * per_element, std::memory_order_relaxed);
   }
 
   size_t indexFileSize() const {

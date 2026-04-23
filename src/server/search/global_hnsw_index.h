@@ -41,6 +41,9 @@ class GlobalHnswIndexRegistry {
   // Returns unique index names from all registered HNSW indices
   absl::flat_hash_set<std::string> GetIndexNames() const;
 
+  // Aggregate in-memory footprint of all registered HNSW indices, in bytes.
+  size_t GetTotalMemoryUsage() const;
+
   void Reset();
 
  private:
