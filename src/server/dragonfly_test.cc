@@ -16,6 +16,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
@@ -286,6 +287,11 @@ TEST_F(DflyEngineTest, EvalSha) {
   // Important to keep spaces in order to be compatible with Redis.
   // See https://github.com/dragonflydb/dragonfly/issues/146
   EXPECT_THAT(resp, "c6459b95a0e81df97af6fdd49b1a9e0287a57363");
+}
+
+TEST_F(DflyEngineTest, EvalShaNegativeZeroNumKeys) {
+  EXPECT_THAT(Run({"evalsha", "k1", "-0"}), ErrArg(facade::kInvalidIntErr));
+  EXPECT_THAT(Run({"eval", "return 1", "-0"}), ErrArg(facade::kInvalidIntErr));
 }
 
 TEST_F(DflyEngineTest, ScriptFlush) {

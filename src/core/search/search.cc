@@ -115,8 +115,8 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, std::optional<ScorerType> scorer = std::nullopt)
-      : indices_{indices}, scorer_type_{scorer} {
+  BasicSearch(const FieldIndices* indices, ScorerFn scorer = nullptr)
+      : indices_{indices}, scorer_{scorer} {
   }
 
   void EnableProfiling() {
@@ -234,7 +234,7 @@ struct BasicSearch {
 
     // Track matched terms for scoring (prefix/suffix/infix expand to multiple terms).
     // Synonym shadow entries (freq=0) are resolved to their group_id for correct scoring.
-    if (scorer_type_) {
+    if (scorer_) {
       for (auto* index : indices) {
         auto term_cb = [this, index](string_view term, const auto*) {
           std::string resolved{term};
@@ -280,7 +280,7 @@ struct BasicSearch {
 
     if (!active_field.empty()) {
       if (auto* index = GetIndex<TextIndex>(active_field); index) {
-        if (scorer_type_)
+        if (scorer_)
           AddMatchedTerm(index, term);
         return IndexResult{index->Matching(term, strip_whitespace)};
       }
@@ -290,7 +290,7 @@ struct BasicSearch {
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
 
     // Track terms for scoring
-    if (scorer_type_) {
+    if (scorer_) {
       for (auto* index : selected_indices)
         AddMatchedTerm(index, term);
     }
@@ -505,7 +505,7 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    if (scorer_type_ && !matched_text_terms_.empty()) {
+    if (scorer_ && !matched_text_terms_.empty()) {
       // Score ALL matched docs and return top-K by score (not arbitrary cutoff).
       auto [out, total_size, text_scores] = TakeScoredTopK(std::move(result), cuttoff_limit);
       return SearchResult{
@@ -573,7 +573,7 @@ struct BasicSearch {
           term_infos[t].field_avg_doc_len = cursors[t].index->GetFieldAvgDocLen();
         }
       }
-      scored.emplace_back(static_cast<float>(ScoreDocument(*scorer_type_, ctx, term_infos)), doc);
+      scored.emplace_back(static_cast<float>(ScoreDocument(scorer_, ctx, term_infos)), doc);
     }
 
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
@@ -602,7 +602,7 @@ struct BasicSearch {
   }
 
   const FieldIndices* indices_;
-  std::optional<ScorerType> scorer_type_;
+  ScorerFn scorer_ = nullptr;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
@@ -866,7 +866,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
 SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t cuttoff_limit) const {
   DCHECK(query_);
 
-  auto bs = BasicSearch{index, scorer_type_};
+  auto bs = BasicSearch{index, scorer_};
   if (profiling_enabled_)
     bs.EnableProfiling();
   return bs.Search(*query_, cuttoff_limit);
@@ -915,8 +915,8 @@ void SearchAlgorithm::EnableProfiling() {
   profiling_enabled_ = true;
 }
 
-void SearchAlgorithm::SetScorer(ScorerType type) {
-  scorer_type_ = type;
+void SearchAlgorithm::SetScorer(ScorerFn scorer) {
+  scorer_ = scorer;
 }
 
 const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {

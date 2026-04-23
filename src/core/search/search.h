@@ -15,6 +15,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/range_tree.h"
+#include "core/search/scoring.h"
 #include "core/search/synonyms.h"
 
 namespace dfly::search {
@@ -209,8 +210,6 @@ struct KnnScoreSortOption {
   size_t limit = std::numeric_limits<size_t>::max();
 };
 
-enum class ScorerType : int;
-
 // SearchAlgorithm allows searching field indices with a query
 class SearchAlgorithm {
  public:
@@ -237,11 +236,11 @@ class SearchAlgorithm {
 
   void EnableProfiling();
 
-  void SetScorer(ScorerType type);
+  void SetScorer(ScorerFn scorer);
 
  private:
   bool profiling_enabled_ = false;
-  std::optional<ScorerType> scorer_type_;
+  ScorerFn scorer_ = nullptr;
   std::unique_ptr<AstNode> query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };
