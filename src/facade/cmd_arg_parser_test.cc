@@ -315,6 +315,22 @@ TEST_F(CmdArgParserTest, ApplyMap) {
     EXPECT_FALSE(reversed);
     EXPECT_TRUE(parser.HasNext());
   }
+  // Standalone Map allows repeated matches — last wins, no error. This matches Redis SORT
+  // semantics where "ASC DESC" is equivalent to "DESC".
+  {
+    auto parser = Make({"DESC", "ASC"});
+    bool reversed = true;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_FALSE(reversed);  // ASC came last
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"ASC", "DESC"});
+    bool reversed = false;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_TRUE(reversed);  // DESC came last
+    EXPECT_FALSE(parser.HasError());
+  }
   // OneOf + Map — DESC followed by ASC is a mutex violation.
   {
     auto parser = Make({"DESC", "ASC"});

@@ -723,6 +723,11 @@ TEST_F(GenericFamilyTest, Sort) {
   // desc strig
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "ALPHA"}).GetVec(),
               ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
+  // ASC/DESC are not mutually exclusive — last one wins (matches Redis behavior).
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "ASC"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort", "list-1", "ASC", "DESC"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   // limits
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "5"}).GetVec(),
               ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));

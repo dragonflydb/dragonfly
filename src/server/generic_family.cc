@@ -1997,7 +1997,7 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   params.is_read_only = is_read_only;
 
   parser.Apply(
-      Exist("ALPHA", &params.alpha), OneOf(Map(&params.reversed, "DESC", true, "ASC", false)),
+      Exist("ALPHA", &params.alpha), Map(&params.reversed, "DESC", true, "ASC", false),
       Tag("LIMIT",
           [&](CmdArgParser* p) {
             auto [offset, limit] = p->Next<uint32_t, uint32_t>();
