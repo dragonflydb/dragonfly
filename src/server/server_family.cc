@@ -1283,7 +1283,7 @@ void ServerFamily::Shutdown() {
     }
     StopAllClusterReplicas();
 
-    dfly_cmd_->Shutdown();
+    dfly_cmd_->CancelReplicas();
     DebugCmd::Shutdown();
 #ifdef WITH_SEARCH
     SearchFamily::Shutdown();
@@ -1447,7 +1447,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
 
       // Loaded data bypasses the journal, so force replicas into full sync.
-      dfly_cmd_->Shutdown();
+      dfly_cmd_->CancelReplicas();
       shard_set->RunBriefInParallel([](EngineShard* shard) {
         if (shard->journal())
           journal::ClearBuffer();
