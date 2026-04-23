@@ -84,6 +84,7 @@ bool IsConfigValid(const ClusterShardInfos& new_config) {
     }
 
     vector<SlotRange> seen_migration_ranges;
+    absl::flat_hash_set<string_view> seen_migration_targets;
     for (const auto& migration : shard.migrations) {
       if (migration.node_info.id == shard.master.id) {
         LOG(ERROR) << "Invalid cluster config: migration target equals source master="
@@ -93,6 +94,18 @@ bool IsConfigValid(const ClusterShardInfos& new_config) {
       if (!master_ids.contains(migration.node_info.id)) {
         LOG(ERROR) << "Invalid cluster config: migration target " << migration.node_info.id
                    << " is not a shard master in the config";
+        return false;
+      }
+      if (!seen_migration_targets.insert(migration.node_info.id).second) {
+        // Runtime matches outgoing migrations by target id alone, so duplicates would
+        // make cancellation ambiguous.
+        LOG(ERROR) << "Invalid cluster config: duplicate migration target "
+                   << migration.node_info.id << " in shard master=" << shard.master.id;
+        return false;
+      }
+      if (migration.slot_ranges.Empty()) {
+        LOG(ERROR) << "Invalid cluster config: empty migration slot_ranges to target "
+                   << migration.node_info.id << " in shard master=" << shard.master.id;
         return false;
       }
 

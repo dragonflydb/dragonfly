@@ -1985,6 +1985,7 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
     await seeder_task
 
     logging.debug("finish migration")
+    nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
@@ -2257,6 +2258,7 @@ async def test_cluster_migration_while_seeding(
     logging.debug("Migration finished")
 
     logging.debug("Finalizing migration")
+    nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])

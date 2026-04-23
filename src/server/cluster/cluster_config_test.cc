@@ -622,10 +622,6 @@ INSTANTIATE_TEST_SUITE_P(
                                 SlotRanges({{0, 500}, {1000, 8000}}),
                                 {Mig(SlotRanges({{2000, 3000}}))},
                                 true},
-        MigrationValidationCase{"MultipleMigrations",
-                                SlotRanges({{0, 8000}}),
-                                {Mig(SlotRanges({{100, 200}})), Mig(SlotRanges({{7000, 8000}}))},
-                                true},
         MigrationValidationCase{
             "FullyOutsideShard", SlotRanges({{0, 8000}}), {Mig(SlotRanges({{8500, 8600}}))}, false},
         MigrationValidationCase{"PartiallyOutsideShard",
@@ -661,7 +657,14 @@ INSTANTIATE_TEST_SUITE_P(
         MigrationValidationCase{"OverlappingRangesInOneMigration",
                                 SlotRanges({{0, 8000}}),
                                 {Mig(SlotRanges({{100, 500}, {300, 700}}))},
-                                false}),
+                                false},
+        MigrationValidationCase{
+            "EmptyMigrationSlotRanges", SlotRanges({{0, 8000}}), {Mig(SlotRanges())}, false},
+        MigrationValidationCase{
+            "DuplicateTargetIds",
+            SlotRanges({{0, 8000}}),
+            {Mig(SlotRanges({{100, 200}}), "id1"), Mig(SlotRanges({{7000, 8000}}), "id1")},
+            false}),
     [](const auto& info) { return info.param.name; });
 
 TEST_F(ClusterConfigTest, SlotSetAPI) {
