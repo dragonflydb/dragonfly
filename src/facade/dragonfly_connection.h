@@ -194,10 +194,12 @@ class Connection : public util::Connection {
   // Classification of the listener this connection belongs to, used as a filter for the
   // traffic logger (DEBUG TRAFFIC) and persisted in the recorded file format.
   // The numeric values are part of the on-disk format, do not change them.
+  // MAIN_RESP and ADMIN_RESP share the RESP protocol but live on different ports
+  // (main TCP/unix-socket vs. privileged admin port).
   enum class ListenerType : uint8_t {
-    RESP = 1,      // main RESP listener (TCP and unix-socket)
-    MEMCACHE = 2,  // memcached protocol listener
-    ADMIN = 3,     // privileged / admin listener
+    MAIN_RESP = 1,   // main RESP listener (TCP and unix-socket)
+    MEMCACHE = 2,    // memcached protocol listener
+    ADMIN_RESP = 3,  // privileged / admin listener (RESP protocol on admin port)
   };
 
   ListenerType GetListenerType() const {
@@ -554,7 +556,7 @@ class Connection : public util::Connection {
     };
   };
 
-  ListenerType listener_type_ = ListenerType::RESP;
+  ListenerType listener_type_ = ListenerType::MAIN_RESP;
 
   bool request_shutdown_ = false;
 };

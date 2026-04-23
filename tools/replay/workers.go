@@ -16,11 +16,12 @@ import (
 )
 
 // Listener type identifiers as stored in traffic log v3 (must match
-// facade::Connection::ListenerType in the C++ code).
+// facade::Connection::ListenerType in the C++ code). MAIN_RESP and ADMIN_RESP
+// both speak RESP but live on different ports on the source server.
 const (
-	ListenerRESP     uint8 = 1
-	ListenerMemcache uint8 = 2
-	ListenerAdmin    uint8 = 3
+	ListenerMainRESP  uint8 = 1
+	ListenerMemcache  uint8 = 2
+	ListenerAdminRESP uint8 = 3
 )
 
 // Flags field layout:
@@ -389,23 +390,20 @@ func NewClient(w *FileWorker, pace bool, listenerType uint8) *ClientWorker {
 		incoming:     make(chan Record, *fClientBuffer),
 	}
 
-	switch listenerType {
-	case ListenerMemcache:
-		client.mc = newMCClient(*fMCHost)
-	case ListenerAdmin:
-		// Route admin-listener records to the admin host. Fall back to -host if
-		// -admin-host was not explicitly set (useful when the user replays against
-		// a server that exposes only a single RESP port).
-		addr := *fAdminHost
-		if addr == "" {
-			addr = *fHost
-		}
-		client.redis = redis.NewClient(&redis.Options{Addr: addr, PoolSize: 1, DisableIndentity: true})
-		client.pipe = client.redis.Pipeline()
-	default: // ListenerRESP or unknown
+	// One invocation of the tool targets one backend (RESP or memcached). The
+	// -memcache boolean on the CLI picks the mode; the file-level filter in
+	// FileWorker.Run guarantees we only reach this function with a listener type
+	// that matches the mode.
+	if *fMemcache {
+		client.mc = newMCClient(*fHost)
+	} else {
+		// MAIN_RESP and ADMIN_RESP both speak RESP — they share -host. The replay
+		// target is expected to accept admin-class commands on the main port, or
+		// the user points -host at an admin-capable endpoint.
 		client.redis = redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true})
 		client.pipe = client.redis.Pipeline()
-		if *fCompareHost != "" {
+		// -compare-host only makes sense for the main-listener path.
+		if listenerType == ListenerMainRESP && *fCompareHost != "" {
 			client.compare = redis.NewClient(&redis.Options{Addr: *fCompareHost, PoolSize: 1, DisableIndentity: true})
 			client.comparePipe = client.compare.Pipeline()
 		}
@@ -426,9 +424,22 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	clients := make(map[uint32]*ClientWorker, 0)
 	recordId := uint64(0)
 	var listenerType uint8
+	// Files whose listener type does not match the CLI mode (-memcache) are
+	// skipped entirely: a single invocation targets one backend. This keeps the
+	// tool simple to drive against heterogeneous glob expansions like `*.bin`.
+	skipFile := false
 	err := parseRecords(file, func(lt uint8) {
 		listenerType = lt
+		isMC := lt == ListenerMemcache
+		if isMC != *fMemcache {
+			skipFile = true
+			log.Printf("replay: skipping %s (listener_type=%d does not match -memcache=%v)",
+				file, lt, *fMemcache)
+		}
 	}, func(r Record) bool {
+		if skipFile {
+			return false
+		}
 		client, ok := clients[r.Client]
 		if !ok {
 			// Listener type is uniform for the whole file (file-header), so every

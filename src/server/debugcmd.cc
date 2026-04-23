@@ -668,7 +668,7 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    calling VALUES OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC START <path>/<file_prefix> LISTENER <resp|memcache|admin>",
+        "TRAFFIC START <path>/<file_prefix> LISTENER <main|memcache|admin>",
         "    Start traffic logging for a single listener type to files with the given",
         "    path/prefix. LISTENER is required; mixing listeners in one recording is",
         "    intentionally not supported - start separate recordings per listener.",
@@ -1062,52 +1062,36 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Syntax:
   //   DEBUG TRAFFIC STOP
-  //   DEBUG TRAFFIC START <path> LISTENER <resp|memcache|admin>
+  //   DEBUG TRAFFIC START <path> LISTENER <main|memcache|admin>
   // A recording captures exactly one listener type; mixing protocols in one file is
   // intentionally not supported.
-  if (args.empty()) {
-    return cmd_cntx->SendError(facade::kSyntaxErr);
-  }
-
-  string first = absl::AsciiStrToUpper(ArgS(args, 0));
-
-  if (first == "STOP" && args.size() == 1) {
+  CmdArgParser parser(args);
+  if (parser.Check("STOP")) {
+    if (!parser.Finalize())
+      return cmd_cntx->SendError(parser.TakeError().MakeReply());
     LOG(INFO) << "Traffic logging stopped";
     shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
     return rb->SendOk();
   }
 
-  if (first != "START" || args.size() != 4) {
-    return cmd_cntx->SendError(facade::kSyntaxErr);
-  }
+  parser.ExpectTag("START");
+  auto path = parser.Next<string_view>();
+  parser.ExpectTag("LISTENER");
+  auto listener_type = parser.MapNext("main", Connection::ListenerType::MAIN_RESP, "memcache",
+                                      Connection::ListenerType::MEMCACHE, "admin",
+                                      Connection::ListenerType::ADMIN_RESP);
+  if (!parser.Finalize())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
-  string path(ArgS(args, 1));
-  string keyword = absl::AsciiStrToUpper(ArgS(args, 2));
-  if (keyword != "LISTENER") {
-    return cmd_cntx->SendError(facade::kSyntaxErr);
-  }
-
-  Connection::ListenerType listener_type;
-  string name = absl::AsciiStrToLower(ArgS(args, 3));
-  if (name == "resp") {
-    listener_type = Connection::ListenerType::RESP;
-  } else if (name == "memcache") {
-    listener_type = Connection::ListenerType::MEMCACHE;
-  } else if (name == "admin") {
-    listener_type = Connection::ListenerType::ADMIN;
-  } else {
-    return cmd_cntx->SendError(
-        absl::StrCat("Unknown listener '", name, "'. Expected one of: resp, memcache, admin"));
-  }
-
-  LOG(INFO) << "Logging traffic to " << path << "*.bin, listener=" << name;
+  LOG(INFO) << "Logging traffic to " << path << "*.bin, listener=" << unsigned(listener_type);
 
   std::atomic<unsigned> started_new{0};
   std::atomic<unsigned> already_logging{0};
   std::atomic<unsigned> open_failed{0};
+  std::string path_str(path);
   shard_set->pool()->AwaitFiberOnAll(
-      [path, listener_type, &started_new, &already_logging, &open_failed](auto*) {
-        switch (Connection::StartTrafficLogging(path, listener_type)) {
+      [path_str, listener_type, &started_new, &already_logging, &open_failed](auto*) {
+        switch (Connection::StartTrafficLogging(path_str, listener_type)) {
           case Connection::StartTrafficResult::kStarted:
             started_new.fetch_add(1, std::memory_order_relaxed);
             break;
@@ -1124,31 +1108,29 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
   unsigned refused = already_logging.load(std::memory_order_relaxed);
   unsigned failed = open_failed.load(std::memory_order_relaxed);
 
-  // Failures are always terminal: if any thread failed to open its file the recording
-  // would be incomplete. Roll back any thread that did start so we end up fully stopped.
-  if (failed > 0) {
+  // Any failure rolls back any thread that started, then reports a specific error.
+  // The only success path is when every thread reports kStarted.
+  if (failed > 0 || refused > 0) {
     if (started > 0)
       shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
-    return cmd_cntx->SendError(
-        "Failed to open traffic log file on one or more threads; "
-        "no recording is active. Check server logs for details.");
-  }
 
-  if (refused > 0 && started > 0) {
-    // Partial state: some threads started a new recording, others refused because they
-    // were already logging. The previously-active recording is already corrupt (half its
-    // threads are now writing to the new file) and cannot be restored, so stop everything
-    // to reach a clean non-logging state before reporting the error.
-    shard_set->pool()->AwaitFiberOnAll([](auto*) { Connection::StopTrafficLogging(); });
-    return cmd_cntx->SendError(
-        "Traffic logging was in an inconsistent state; all recording has been stopped. "
-        "Retry DEBUG TRAFFIC START.");
-  }
-  if (refused > 0) {
-    // Every thread was already logging - leave that recording alone and just report the
-    // conflict to the caller.
-    return cmd_cntx->SendError(
-        "Traffic logging is already in progress. Call DEBUG TRAFFIC STOP first.");
+    const char* msg;
+    if (failed > 0) {
+      msg =
+          "Failed to open traffic log file on one or more threads; "
+          "no recording is active. Check server logs for details.";
+    } else if (started > 0) {
+      // Partial state: some threads started a new recording while others refused
+      // (they were already logging). The previously-active recording is now split
+      // across two files and cannot be restored, so we stop everything.
+      msg =
+          "Traffic logging was in an inconsistent state; all recording has been stopped. "
+          "Retry DEBUG TRAFFIC START.";
+    } else {
+      // Every thread was already logging — the original recording is untouched.
+      msg = "Traffic logging is already in progress. Call DEBUG TRAFFIC STOP first.";
+    }
+    return cmd_cntx->SendError(msg);
   }
   rb->SendOk();
 }

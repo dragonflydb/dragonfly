@@ -180,7 +180,7 @@ struct TrafficLogger {
   // Listener type that this thread's file is recording. Only connections with a
   // matching `listener_type_` produce records; others are skipped on the hot path.
   // Set once when the file is opened, cleared in ResetLocked().
-  Connection::ListenerType listener_type = Connection::ListenerType::RESP;
+  Connection::ListenerType listener_type = Connection::ListenerType::MAIN_RESP;
 
   void ResetLocked();
   // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -193,7 +193,7 @@ void TrafficLogger::ResetLocked() {
     std::ignore = log_file->Close();
     log_file.reset();
   }
-  listener_type = Connection::ListenerType::RESP;
+  listener_type = Connection::ListenerType::MAIN_RESP;
 }
 
 // Returns true if Write succeeded, false if it failed and the recording should be aborted.
@@ -258,10 +258,11 @@ Connection::StartTrafficResult OpenTrafficLogger(string_view base_path,
 }
 
 // Writes a single record. `parts[0]` is the command name, following entries are its arguments.
+// Callers must guarantee a non-empty span (both LogTraffic and LogMemcacheTraffic push
+// the command name as the first element before invoking this function).
 void LogTrafficParts(uint32_t id, bool has_more, uint32_t db_index,
                      absl::Span<const string_view> parts) {
-  if (parts.empty())
-    return;
+  DCHECK(!parts.empty());
 
   string_view cmd = parts.front();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
@@ -822,12 +823,12 @@ void Connection::OnConnectionStart() {
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
     is_main_ = lsnr->IsMainInterface();
     if (lsnr->IsPrivilegedInterface()) {
-      listener_type_ = ListenerType::ADMIN;
+      listener_type_ = ListenerType::ADMIN_RESP;
     } else if (protocol_ == Protocol::MEMCACHE) {
       listener_type_ = ListenerType::MEMCACHE;
     } else {
-      // RESP covers TCP main listener as well as unix-socket RESP listeners.
-      listener_type_ = ListenerType::RESP;
+      // MAIN_RESP covers TCP main listener as well as unix-socket RESP listeners.
+      listener_type_ = ListenerType::MAIN_RESP;
     }
   }
 

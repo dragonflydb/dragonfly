@@ -65,7 +65,7 @@ func parseRecords(filename string, onHeader func(listenerType uint8),
 	var listenerType uint8
 	switch version {
 	case 2:
-		listenerType = ListenerRESP
+		listenerType = ListenerMainRESP
 	case 3:
 		if err := binary.Read(reader, binary.LittleEndian, &listenerType); err != nil {
 			return err
