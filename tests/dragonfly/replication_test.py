@@ -4631,3 +4631,51 @@ async def test_hnsw_external_vector_replication_crash(df_factory: DflyInstanceFa
     await traffic_task
 
     await check_all_replicas_finished([c_replica], c_master, timeout=60)
+
+
+async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Populate initial data and save a snapshot.
+    seeder = DebugPopulateSeeder(key_target=1000, data_size=100)
+    await seeder.run(c_master)
+    await c_master.execute_command("SAVE", "DF", dbfilename)
+    await c_master.execute_command("FLUSHALL")
+
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+    await wait_available_async(c_replica)
+
+    # Stream writes during DFLY LOAD to exercise the race between journal
+    # writes and the load that bypasses the journal. LOADING state rejects
+    # seeder Lua scripts, so the seeder task may fail.
+    stream_seeder = SeederV2(key_target=500)
+    seed_task = asyncio.create_task(stream_seeder.run(c_master, target_deviation=0.1))
+    await asyncio.sleep(
+        0.5
+    )  # Let the seeder start and write some data before we load the snapshot.
+
+    await c_master.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    await asyncio.sleep(0.5)  # Let the seeder fail because of the loading state.
+    seed_task.cancel()
+    try:
+        await seed_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    # Wait for the replica to complete the new full sync.
+    await wait_for_replicas_state(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    master_capture = await DebugPopulateSeeder.capture(c_master)
+    replica_capture = await DebugPopulateSeeder.capture(c_replica)
+    assert master_capture == replica_capture
+
+    await c_replica.execute_command("REPLICAOF", "NO", "ONE")
