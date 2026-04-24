@@ -2343,78 +2343,12 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      // HNSW vector index graph data.
-      // Binary format: [index_key, elements_number,
-      //   then for each node (little-endian):
-      //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
-      //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
-      string index_key;
-      SET_OR_RETURN(FetchGenericString(), index_key);
-
-      uint64_t elements_number;
-      SET_OR_RETURN(LoadLen(nullptr), elements_number);
-
-      if (!deserialize_hnsw_index_) {
-        RETURN_ON_ERR(SkipVectorIndex(index_key, elements_number));
-      } else {
-        DCHECK_GT(shard_count_, 0u);
-        // Parse "index_name:field_name" from the composite key.
-        size_t colon_pos = index_key.rfind(':');
-        string_view index_name{index_key.data(),
-                               colon_pos != string::npos ? colon_pos : index_key.size()};
-        string_view field_name = colon_pos != string::npos
-                                     ? string_view{index_key.data() + colon_pos + 1}
-                                     : string_view{};
-
-        if (shard_count_ == shard_set->size()) {
-          // Same shard count: restore directly.
-          RETURN_ON_ERR(RestoreVectorIndex(index_key, index_name, field_name, elements_number));
-        } else {
-          // Different shard count: load nodes and defer restoration.
-          // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
-          PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
-          RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
-          LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with "
-                    << pending.nodes.size() << " nodes (shard count mismatch: " << shard_count_
-                    << " vs " << shard_set->size() << ")";
-          load_context_->AddPendingHnswNodes(std::move(pending));
-        }
-      }
+      RETURN_ON_ERR(HandleVectorIndex());
       continue;
     }
 
     if (type == RDB_OPCODE_SHARD_DOC_INDEX) {
-      // Load ShardDocIndex key-to-DocId mapping
-      // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
-      PendingIndexMapping pim;
-      uint32_t shard_id;
-      SET_OR_RETURN(LoadLen(nullptr), shard_id);
-
-      SET_OR_RETURN(FetchGenericString(), pim.index_name);
-
-      uint64_t mapping_count;
-      SET_OR_RETURN(LoadLen(nullptr), mapping_count);
-      pim.mappings.reserve(mapping_count);
-
-      for (uint64_t i = 0; i < mapping_count; ++i) {
-        string key;
-        SET_OR_RETURN(FetchGenericString(), key);
-        uint64_t doc_id;
-        SET_OR_RETURN(LoadLen(nullptr), doc_id);
-        pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
-      }
-
-      if (!deserialize_hnsw_index_) {
-        continue;
-      }
-      DCHECK_GT(shard_count_, 0u);
-
-      VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
-              << " entries";
-
-      // Always store mappings. When shard counts differ, PerformPostLoad will redistribute
-      // keys to replica shards and remap global_ids accordingly.
-      load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
+      RETURN_ON_ERR(HandleShardDocIndex());
       continue;
     }
 
@@ -3145,6 +3079,81 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
   } catch (const std::exception& e) {
     LOG(ERROR) << "Failed to parse HNSW index metadata JSON: " << e.what() << " def: " << def;
   }
+}
+
+error_code RdbLoader::HandleVectorIndex() {
+  // HNSW vector index graph data.
+  // Binary format: [index_key, elements_number,
+  //   then for each node (little-endian):
+  //     internal_id (4 bytes), global_id (8 bytes), level (4 bytes),
+  //     for each level (0 to level): links_num (4 bytes) + links (4 bytes each)]
+  string index_key;
+  SET_OR_RETURN(FetchGenericString(), index_key);
+
+  uint64_t elements_number;
+  SET_OR_RETURN(LoadLen(nullptr), elements_number);
+
+  if (!deserialize_hnsw_index_) {
+    return SkipVectorIndex(index_key, elements_number);
+  }
+
+  DCHECK_GT(shard_count_, 0u);
+  // Parse "index_name:field_name" from the composite key.
+  size_t colon_pos = index_key.rfind(':');
+  string_view index_name{index_key.data(),
+                         colon_pos != string::npos ? colon_pos : index_key.size()};
+  string_view field_name =
+      colon_pos != string::npos ? string_view{index_key.data() + colon_pos + 1} : string_view{};
+
+  if (shard_count_ == shard_set->size()) {
+    // Same shard count: restore directly.
+    return RestoreVectorIndex(index_key, index_name, field_name, elements_number);
+  }
+
+  // Different shard count: load nodes and defer restoration.
+  // Global_ids will be remapped in PerformPostLoad after all key mappings are collected.
+  PendingHnswNodes pending{std::string(index_name), std::string(field_name), {}};
+  RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &pending.nodes));
+  LOG(INFO) << "Deferred HNSW index restore for " << index_key << " with " << pending.nodes.size()
+            << " nodes (shard count mismatch: " << shard_count_ << " vs " << shard_set->size()
+            << ")";
+  load_context_->AddPendingHnswNodes(std::move(pending));
+  return kOk;
+}
+
+error_code RdbLoader::HandleShardDocIndex() {
+  // Load ShardDocIndex key-to-DocId mapping.
+  // Format: [shard_id, index_name, mapping_count, then for each mapping: key_string, doc_id]
+  PendingIndexMapping pim;
+  uint32_t shard_id;
+  SET_OR_RETURN(LoadLen(nullptr), shard_id);
+
+  SET_OR_RETURN(FetchGenericString(), pim.index_name);
+
+  uint64_t mapping_count;
+  SET_OR_RETURN(LoadLen(nullptr), mapping_count);
+  pim.mappings.reserve(mapping_count);
+
+  for (uint64_t i = 0; i < mapping_count; ++i) {
+    string key;
+    SET_OR_RETURN(FetchGenericString(), key);
+    uint64_t doc_id;
+    SET_OR_RETURN(LoadLen(nullptr), doc_id);
+    pim.mappings.emplace_back(std::move(key), static_cast<search::DocId>(doc_id));
+  }
+
+  if (!deserialize_hnsw_index_) {
+    return kOk;
+  }
+  DCHECK_GT(shard_count_, 0u);
+
+  VLOG(2) << "Loaded index mapping for shard " << shard_id << " with " << mapping_count
+          << " entries";
+
+  // Always store mappings. When shard counts differ, PerformPostLoad will redistribute
+  // keys to replica shards and remap global_ids accordingly.
+  load_context_->AddPendingIndexMapping(shard_id, std::move(pim));
+  return kOk;
 }
 
 error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,

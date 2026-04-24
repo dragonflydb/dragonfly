@@ -412,6 +412,11 @@ class RdbLoader : protected RdbLoaderBase {
   // Skip over serialized HNSW vector index node data without restoring.
   std::error_code SkipVectorIndex(std::string_view index_key, uint64_t elements_number);
 
+  // Extracted opcode handlers — kept out of RdbLoader::Load() so their
+  // locals don't accumulate in Load()'s stack frame.
+  std::error_code HandleVectorIndex();
+  std::error_code HandleShardDocIndex();
+
   Service* service_;
   RdbLoadContext* load_context_;
 
