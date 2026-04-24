@@ -1072,6 +1072,30 @@ TEST_F(KnnTest, AutoResize) {
   EXPECT_EQ(indices.GetAllDocs().size(), 100);
 }
 
+// Seeds the given HNSW index with `n` deterministic random vectors of dim `dim` using
+// the given RNG seed. Returns the owning MockedDocuments so the caller can pass them
+// back to UpdateVectorData after a restore. Used by the serialization/restore tests.
+inline vector<MockedDocument> SeedHnswIndex(HnswVectorIndex& index, size_t n, size_t dim,
+                                            uint32_t rng_seed) {
+  vector<MockedDocument> docs(n);
+  std::mt19937 rng(rng_seed);
+  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+  for (size_t i = 0; i < n; i++) {
+    vector<float> coords(dim);
+    for (size_t d = 0; d < dim; d++)
+      coords[d] = dist(rng);
+    docs[i] = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
+    index.Add(i, docs[i], "vec");
+  }
+  return docs;
+}
+
+// Snapshots all nodes from the index under its read lock.
+inline vector<HnswNodeData> SnapshotHnswNodes(const HnswVectorIndex& index) {
+  auto lock = index.GetReadLock();
+  return index.GetNodesRange(0, index.GetNodeCount());
+}
+
 // Parameterized HNSW serialization round-trip test.
 // Parameters: {num_elements, dim, similarity}
 struct HnswSerParam {
@@ -1108,27 +1132,12 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   params.hnsw_ef_construction = 200;
 
   HnswVectorIndex original(params, /*copy_vector=*/true);
+  vector<MockedDocument> docs = SeedHnswIndex(original, num_elements, dim, /*rng_seed=*/42);
 
-  std::mt19937 rng(42);
-  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-  vector<MockedDocument> docs(num_elements);
-  for (size_t i = 0; i < num_elements; i++) {
-    vector<float> coords(dim);
-    for (size_t d = 0; d < dim; d++)
-      coords[d] = dist(rng);
-    docs[i] = MockedDocument::Map{{"vec", ToBytes(absl::MakeConstSpan(coords))}};
-    original.Add(i, docs[i], "vec");
-  }
-
-  // Serialize
   auto metadata = original.GetMetadata();
-  ASSERT_EQ(metadata.cur_element_count, num_elements);
+  ASSERT_EQ(original.GetNodeCount(), num_elements);
 
-  std::vector<HnswNodeData> nodes;
-  {
-    auto lock = original.GetReadLock();
-    nodes = original.GetNodesRange(0, metadata.cur_element_count);
-  }
+  std::vector<HnswNodeData> nodes = SnapshotHnswNodes(original);
   ASSERT_EQ(nodes.size(), num_elements);
 
   // Verify node data integrity
@@ -1139,8 +1148,7 @@ TEST_P(HnswSerializationTest, RoundTrip) {
 
   // Deserialize into a fresh index
   HnswVectorIndex restored(params, /*copy_vector=*/true);
-  restored.SetMetadata(metadata);
-  restored.RestoreFromNodes(nodes, metadata);
+  ASSERT_TRUE(restored.RestoreFromNodes(nodes, metadata));
 
   // Before UpdateVectorData, all nodes must be marked deleted.
   // KNN should safely return empty results (no crash from nullptr dereference).
@@ -1153,17 +1161,16 @@ TEST_P(HnswSerializationTest, RoundTrip) {
   for (size_t i = 0; i < num_elements; i++)
     restored.UpdateVectorData(i, docs[i], "vec");
 
-  // Metadata must match
   auto rm = restored.GetMetadata();
-  EXPECT_EQ(rm.cur_element_count, metadata.cur_element_count);
-  EXPECT_EQ(rm.maxlevel, metadata.maxlevel);
+  EXPECT_EQ(restored.GetNodeCount(), num_elements);
   EXPECT_EQ(rm.enterpoint_node, metadata.enterpoint_node);
+  EXPECT_EQ(restored.GetMaxLevel(), original.GetMaxLevel());
 
   // Graph links must be identical
   std::vector<HnswNodeData> restored_nodes;
   {
     auto lock = restored.GetReadLock();
-    restored_nodes = restored.GetNodesRange(0, rm.cur_element_count);
+    restored_nodes = restored.GetNodesRange(0, restored.GetNodeCount());
   }
   ASSERT_EQ(restored_nodes.size(), nodes.size());
   for (size_t i = 0; i < nodes.size(); i++) {
@@ -1207,6 +1214,76 @@ TEST_P(HnswSerializationTest, RoundTrip) {
     EXPECT_EQ(orig_f[i].second, rest_f[i].second);
     EXPECT_NEAR(orig_f[i].first, rest_f[i].first, 1e-5);
   }
+}
+
+// Regression for the save-side race where an Add raises maxlevel between metadata
+// capture and node serialization (see RestoreFromNodes for the rationale). Simulated
+// by forging metadata with a low-level entry point against a multi-level node set;
+// expects maxlevel_ to clamp to the entry point's level rather than max(node.level).
+TEST(HnswRestoreInvariant, MaxLevelClampedToEntryPointLevel) {
+  constexpr size_t kDim = 8;
+  constexpr size_t kN = 100;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex original(params, /*copy_vector=*/true);
+  SeedHnswIndex(original, kN, kDim, /*rng_seed=*/42);
+  std::vector<HnswNodeData> nodes = SnapshotHnswNodes(original);
+
+  int global_max_level = -1;
+  std::optional<uint32_t> low_level_internal_id;
+  for (const auto& n : nodes) {
+    global_max_level = std::max(global_max_level, n.level);
+    if (!low_level_internal_id && n.level == 0)
+      low_level_internal_id = n.internal_id;
+  }
+  ASSERT_GT(global_max_level, 0) << "test setup: need a multi-level graph";
+  ASSERT_TRUE(low_level_internal_id.has_value()) << "test setup: need a level-0 node";
+
+  HnswIndexMetadata forged_metadata{.enterpoint_node = *low_level_internal_id};
+
+  HnswVectorIndex restored(params, /*copy_vector=*/true);
+  ASSERT_TRUE(restored.RestoreFromNodes(nodes, forged_metadata));
+
+  EXPECT_EQ(restored.GetMaxLevel(), 0)
+      << "maxlevel_ must equal entry-point level; got " << restored.GetMaxLevel()
+      << " while node set max level=" << global_max_level;
+}
+
+// Malformed/mismatched metadata (entry point not in serialized node set) must
+// fail restoration gracefully — returning false — instead of SIGABRT'ing via
+// CHECK. Callers then rebuild the index from the keyspace.
+TEST(HnswRestoreInvariant, MissingEntrypointFailsGracefully) {
+  constexpr size_t kDim = 4;
+  constexpr size_t kN = 10;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+
+  HnswVectorIndex original(params, /*copy_vector=*/true);
+  SeedHnswIndex(original, kN, kDim, /*rng_seed=*/7);
+  std::vector<HnswNodeData> nodes = SnapshotHnswNodes(original);
+
+  HnswIndexMetadata bad_metadata{.enterpoint_node = 999999};  // well past any real id
+  HnswVectorIndex restored(params, /*copy_vector=*/true);
+  EXPECT_FALSE(restored.RestoreFromNodes(nodes, bad_metadata));
 }
 
 // Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted

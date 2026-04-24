@@ -3133,13 +3133,10 @@ void RdbLoader::LoadHnswIndexMetadataFromAux(string&& def) {
     PendingHnswMetadata phm;
     phm.index_name = json["index_name"].as<string>();
     phm.field_name = json["field_name"].as<string>();
-    phm.metadata.max_elements = json["max_elements"].as<size_t>();
-    phm.metadata.cur_element_count = json["cur_element_count"].as<size_t>();
-    phm.metadata.maxlevel = json["maxlevel"].as<int>();
     phm.metadata.enterpoint_node = json["enterpoint_node"].as<size_t>();
 
     LOG(INFO) << "Loaded HNSW metadata for index=" << phm.index_name << " field=" << phm.field_name
-              << " elements=" << phm.metadata.cur_element_count;
+              << " enterpoint=" << phm.metadata.enterpoint_node;
 
     load_context_->AddPendingHnswMetadata(std::move(phm));
   } catch (const std::exception& e) {
@@ -3185,13 +3182,21 @@ error_code RdbLoader::RestoreVectorIndex(string_view index_key, string_view inde
   std::vector<search::HnswNodeData> nodes;
   RETURN_ON_ERR(LoadVectorIndexNodes(elements_number, &nodes));
 
-  if (!nodes.empty()) {
-    auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
-    DCHECK(metadata) << "HNSW metadata missing for " << index_key;
+  if (nodes.empty())
+    return {};
 
-    hnsw_index->RestoreFromNodes(nodes, *metadata);
-    LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
+  auto metadata = load_context_->FindHnswMetadata(index_name, field_name);
+  if (!metadata) {
+    LOG(ERROR) << "HNSW metadata missing for " << index_key
+               << "; skipping graph restore — index will be rebuilt from keyspace";
+    return {};
   }
+  if (!hnsw_index->RestoreFromNodes(nodes, *metadata)) {
+    LOG(WARNING) << "HNSW graph restore rejected for " << index_key
+                 << "; index will be rebuilt from keyspace";
+    return {};
+  }
+  LOG(INFO) << "Restored HNSW index " << index_key << " with " << nodes.size() << " nodes";
   return {};
 #else
   return SkipVectorIndex(index_key, elements_number);
