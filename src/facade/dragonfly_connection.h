@@ -191,6 +191,21 @@ class Connection : public util::Connection {
   // This method returns true for customer facing listeners.
   bool IsMainOrMemcache() const;
 
+  // Classification of the listener this connection belongs to, used as a filter for the
+  // traffic logger (DEBUG TRAFFIC) and persisted in the recorded file format.
+  // The numeric values are part of the on-disk format, do not change them.
+  // MAIN_RESP and ADMIN_RESP share the RESP protocol but live on different ports
+  // (main TCP/unix-socket vs. privileged admin port).
+  enum class ListenerType : uint8_t {
+    MAIN_RESP = 1,   // main RESP listener (TCP and unix-socket)
+    MEMCACHE = 2,    // memcached protocol listener
+    ADMIN_RESP = 3,  // privileged / admin listener (RESP protocol on admin port)
+  };
+
+  ListenerType GetListenerType() const {
+    return listener_type_;
+  }
+
   void SetName(std::string name);
 
   void SetLibName(std::string name);
@@ -218,10 +233,19 @@ class Connection : public util::Connection {
   // and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest, bool force);
 
+  // Outcome of a StartTrafficLogging call on a single thread.
+  enum class StartTrafficResult : uint8_t {
+    kStarted,         // new recording started successfully on this thread
+    kAlreadyLogging,  // this thread already had an active recording (noop)
+    kOpenFailed,      // failed to open the log file (or unsupported platform)
+  };
+
   // Starts traffic logging in the calling thread. Must be a proactor thread.
-  // Each thread creates its own log file combining requests from all the connections in
-  // that thread. A noop if the thread is already logging.
-  static void StartTrafficLogging(std::string_view base_path);
+  // Each thread creates its own log file containing requests from connections on
+  // that thread whose listener type equals `listener_type`. Exactly one listener
+  // kind per recording — mixing protocols in a single file is not supported.
+  static StartTrafficResult StartTrafficLogging(std::string_view base_path,
+                                                ListenerType listener_type);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
@@ -535,6 +559,8 @@ class Connection : public util::Connection {
       bool pending_input_ : 1;
     };
   };
+
+  ListenerType listener_type_ = ListenerType::MAIN_RESP;
 
   bool request_shutdown_ = false;
 };
