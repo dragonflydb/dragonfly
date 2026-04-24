@@ -344,12 +344,17 @@ io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(string_view d
                        prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
         cloud::GCS gcs(&creds_provider_, ctx_, proactor);
         vector<SnapStat> res;
-        error_code ec =
-            gcs.List(bucket_name, prefix, false, [&res](const cloud::StorageListItem& item) {
-              res.emplace_back(SnapStat{string(item.key), item.mtime_ns});
-            });
-        if (ec)
-          return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        string cursor;
+        do {
+          error_code ec = gcs.List(
+              bucket_name, prefix, false, 500,
+              [&res](const cloud::StorageListItem& item) {
+                res.emplace_back(string(item.key), item.mtime_ns);
+              },
+              &cursor);
+          if (ec)
+            return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        } while (!cursor.empty());
         return res;
       });
 
@@ -380,25 +385,30 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
 
   // Find snapshot shard files if we're loading DFS.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  auto paths = proactor->Await([&, &bucket_name =
-                                       bucket_name]() -> io::Result<vector<string>, GenericError> {
-    vector<string> res;
-    cloud::GCS gcs(&creds_provider_, ctx_, proactor);
+  auto paths = proactor->Await(
+      [&, &bucket_name = bucket_name]() -> io::Result<vector<string>, GenericError> {
+        vector<string> res;
+        cloud::GCS gcs(&creds_provider_, ctx_, proactor);
+        string cursor;
 
-    error_code ec = gcs.List(bucket_name, prefix, false, [&](const cloud::StorageListItem& item) {
-      std::smatch m;
-      string key{item.key};
-      if (std::regex_match(key, m, re)) {
-        res.push_back(absl::StrCat(kGCSPrefix, bucket_name, "/", item.key));
-      }
-    });
+        do {
+          error_code ec = gcs.List(
+              bucket_name, prefix, false, 500,
+              [&](const cloud::StorageListItem& item) {
+                std::smatch m;
+                string key{item.key};
+                if (std::regex_match(key, m, re)) {
+                  res.push_back(absl::StrCat(kGCSPrefix, bucket_name, "/", item.key));
+                }
+              },
+              &cursor);
 
-    if (ec) {
-      return nonstd::make_unexpected(ec);
-    }
-
-    return res;
-  });
+          if (ec) {
+            return nonstd::make_unexpected(ec);
+          }
+        } while (!cursor.empty());
+        return res;
+      });
 
   if (!paths || paths->empty()) {
     return nonstd::make_unexpected(
@@ -480,12 +490,18 @@ io::Result<std::string, GenericError> AzureSnapshotStorage::LoadPath(string_view
                        prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
         cloud::azure::Storage azure(creds_provider_.get());
         vector<SnapStat> res;
-        error_code ec =
-            azure.List(bucket_name, prefix, false, 500, [&res](const cloud::StorageListItem& item) {
-              res.emplace_back(string(item.key), item.mtime_ns);
-            });
-        if (ec)
-          return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        string cursor;
+        do {
+          error_code ec = azure.List(
+              bucket_name, prefix, false, 500,
+              [&res](const cloud::StorageListItem& item) {
+                res.emplace_back(string(item.key), item.mtime_ns);
+              },
+              &cursor);
+          if (ec)
+            return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        } while (!cursor.empty());
+
         return res;
       });
 
@@ -520,19 +536,23 @@ io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
       [&, &bucket_name = bucket_name]() -> io::Result<vector<string>, GenericError> {
         vector<string> res;
         cloud::azure::Storage azure(static_cast<cloud::azure::Credentials*>(creds_provider_.get()));
+        string cursor;
+        do {
+          error_code ec = azure.List(
+              bucket_name, prefix, false, 500,
+              [&](const cloud::StorageListItem& item) {
+                std::smatch m;
+                string key{item.key};
+                if (std::regex_match(key, m, re)) {
+                  res.push_back(absl::StrCat(kAzurePrefix, bucket_name, "/", item.key));
+                }
+              },
+              &cursor);
 
-        error_code ec =
-            azure.List(bucket_name, prefix, false, 500, [&](const cloud::StorageListItem& item) {
-              std::smatch m;
-              string key{item.key};
-              if (std::regex_match(key, m, re)) {
-                res.push_back(absl::StrCat(kAzurePrefix, bucket_name, "/", item.key));
-              }
-            });
-
-        if (ec) {
-          return nonstd::make_unexpected(ec);
-        }
+          if (ec) {
+            return nonstd::make_unexpected(ec);
+          }
+        } while (!cursor.empty());
 
         return res;
       });
@@ -767,23 +787,28 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
 
   if (use_helio_) {
-    // TODO: use continuation_token.
     string adjusted_prefix(prefix);
     if (!prefix.empty() && prefix.back() != '/') {
       adjusted_prefix.push_back('/');
     }
+    string cursor;
 
-    error_code ec = proactor->Await([&]() -> error_code {
-      cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
-      return s3.List(bucket_name, adjusted_prefix, false, 1000,
-                     [&keys](const cloud::StorageListItem& item) {
-                       keys.emplace_back(string(item.key), item.mtime_ns);
-                     });
-    });
+    do {
+      error_code ec = proactor->Await([&]() -> error_code {
+        cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
+        return s3.List(
+            bucket_name, adjusted_prefix, false, 1000,
+            [&keys](const cloud::StorageListItem& item) {
+              keys.emplace_back(string(item.key), item.mtime_ns);
+            },
+            &cursor);
+      });
 
-    if (ec) {
-      return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
-    }
+      if (ec) {
+        return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
+      }
+    } while (!cursor.empty());
+
     return keys;
   }
 
