@@ -2329,6 +2329,26 @@ void Connection::StopTrafficLogging() {
   tl_traffic_logger.ResetLocked();
 }
 
+void Connection::LogReplicaCommand(const cmn::BackedArguments& args, uint32_t db_index) {
+  // Contract: LSN/PING opcodes are filtered before ExecuteTx, and
+  // COMMAND/EXPIRED journal entries always carry at least a command name.
+  DCHECK(!args.empty());
+  // Fast-path gate: cheap thread-local reads without the mutex. If the logger
+  // was swapped out concurrently, LogTrafficParts re-checks `log_file` inside
+  // the lock so at worst we do a bit of wasted work (building `parts`).
+  // id=0 is a synthetic client id — replication has no connection/client of its
+  // own, and callers on the same fiber serialise naturally.
+  if (!tl_traffic_logger.log_file ||
+      tl_traffic_logger.listener_type != ListenerType::REPLICA_RESP) {
+    return;
+  }
+  absl::InlinedVector<string_view, 16> parts;
+  parts.reserve(args.size());
+  for (auto v : args.view())
+    parts.push_back(v);
+  LogTrafficParts(/*id=*/0, /*has_more=*/false, db_index, absl::MakeSpan(parts));
+}
+
 bool Connection::IsHttp() const {
   return is_http_;
 }
