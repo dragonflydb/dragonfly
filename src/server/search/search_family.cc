@@ -1083,7 +1083,8 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
 
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
-                 absl::Span<SearchResult> results, SinkReplyBuilder* builder, bool is_css) {
+                 std::string_view inject_score_alias, absl::Span<SearchResult> results,
+                 SinkReplyBuilder* builder, bool is_css) {
   size_t total_hits = 0;
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
@@ -1105,6 +1106,10 @@ void SearchReply(const SearchParams& params,
     ignore_sort = !params.sort_option || params.sort_option->IsSame(*knn_sort_option);
     if (params.ShouldReturnField(knn_sort_option->score_field_alias))
       knn_score_ret_field = knn_sort_option->score_field_alias;
+  } else if (!inject_score_alias.empty() && params.ShouldReturnField(inject_score_alias)) {
+    // FLAT VECTOR_RANGE without distance-based SORTBY: expose the alias without
+    // forcing a global reorder. Matches Redis Stack default ordering.
+    knn_score_ret_field = string{inject_score_alias};
   }
 
   // Apply LIMIT
@@ -1994,11 +1999,28 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
                                       *cmd_cntx);
   }
 
+  // FLAT VECTOR_RANGE alias: HNSW is handled above. For FLAT, the per-shard Search()
+  // populates SerializedSearchDoc::knn_score but doesn't expose the alias name.
+  // If the user is sorting by the alias, route through knn_sort_option to get distance
+  // ordering; otherwise expose the alias without forcing a global reorder.
+  std::string_view inject_score_alias;
+  if (!knn && !hnsw_range && !knn_sort_option) {
+    if (auto* vr = search_algo.GetVectorRangeNode(); vr && !vr->score_alias.empty()) {
+      search::KnnScoreSortOption opt{vr->score_alias, std::numeric_limits<size_t>::max()};
+      if (params->sort_option && params->sort_option->IsSame(opt)) {
+        knn_sort_option = opt;
+      } else {
+        inject_score_alias = vr->score_alias;
+      }
+    }
+  }
+
   // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
   docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
               std::make_move_iterator(css_docs.end()));
 
-  SearchReply(*params, knn_sort_option, absl::MakeSpan(docs), builder, is_cross_shard);
+  SearchReply(*params, knn_sort_option, inject_score_alias, absl::MakeSpan(docs), builder,
+              is_cross_shard);
 }
 
 void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
@@ -2079,8 +2101,8 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    SearchReply(*params, search_algo.GetKnnScoreSortOption(), absl::MakeSpan(search_results), rb,
-                false);
+    SearchReply(*params, search_algo.GetKnnScoreSortOption(), {}, absl::MakeSpan(search_results),
+                rb, false);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);

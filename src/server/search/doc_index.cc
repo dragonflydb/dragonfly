@@ -873,8 +873,13 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   bool skip_sort = false;
   if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
     skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
-    if (!skip_sort)
+    if (skip_sort) {
+      // Caller (SearchReply) will globally reorder by knn_score. Don't cut at the
+      // shard level — otherwise multi-shard top-K-by-distance can drop true winners.
+      limit = numeric_limits<size_t>::max();
+    } else {
       limit = max(limit, ko->limit);
+    }
   }
 
   // We don't apply limit if this is prefilter HNSW KNN search
