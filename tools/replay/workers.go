@@ -16,12 +16,14 @@ import (
 )
 
 // Listener type identifiers as stored in traffic log v3 (must match
-// facade::Connection::ListenerType in the C++ code). MAIN_RESP and ADMIN_RESP
-// both speak RESP but live on different ports on the source server.
+// facade::Connection::ListenerType in the C++ code). MAIN_RESP, ADMIN_RESP and
+// REPLICA_RESP all carry RESP-format commands and are replayed via the same
+// RESP client; only MEMCACHE needs a different client.
 const (
-	ListenerMainRESP  uint8 = 1
-	ListenerMemcache  uint8 = 2
-	ListenerAdminRESP uint8 = 3
+	ListenerMainRESP    uint8 = 1
+	ListenerMemcache    uint8 = 2
+	ListenerAdminRESP   uint8 = 3
+	ListenerReplicaRESP uint8 = 4
 )
 
 // Flags field layout:

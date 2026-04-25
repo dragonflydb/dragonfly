@@ -191,15 +191,18 @@ class Connection : public util::Connection {
   // This method returns true for customer facing listeners.
   bool IsMainOrMemcache() const;
 
-  // Classification of the listener this connection belongs to, used as a filter for the
-  // traffic logger (DEBUG TRAFFIC) and persisted in the recorded file format.
-  // The numeric values are part of the on-disk format, do not change them.
-  // MAIN_RESP and ADMIN_RESP share the RESP protocol but live on different ports
-  // (main TCP/unix-socket vs. privileged admin port).
+  // Classification of the traffic source for the DEBUG TRAFFIC recorder.
+  // Persisted as the second byte of the file header in the on-disk format;
+  // the numeric values are part of that format — do not change them.
+  // MAIN_RESP / ADMIN_RESP / REPLICA_RESP all carry RESP-format commands;
+  // MAIN vs ADMIN differ by the port they were accepted on, while REPLICA
+  // covers commands that arrived on a replica via the replication stream
+  // (not from a client-facing listener).
   enum class ListenerType : uint8_t {
-    MAIN_RESP = 1,   // main RESP listener (TCP and unix-socket)
-    MEMCACHE = 2,    // memcached protocol listener
-    ADMIN_RESP = 3,  // privileged / admin listener (RESP protocol on admin port)
+    MAIN_RESP = 1,     // main RESP listener (TCP and unix-socket)
+    MEMCACHE = 2,      // memcached protocol listener
+    ADMIN_RESP = 3,    // privileged / admin listener (RESP protocol on admin port)
+    REPLICA_RESP = 4,  // commands arriving on a replica from its master
   };
 
   ListenerType GetListenerType() const {
@@ -249,6 +252,15 @@ class Connection : public util::Connection {
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
+
+  // Writes a single command to the per-thread traffic log if (and only if) the
+  // logger on this thread is currently recording the REPLICA_RESP source.
+  // Used by the replication read path on replicas to capture commands that
+  // arrived from the master — they do not travel through a Connection, so the
+  // regular per-connection hot path does not see them.
+  // `db_index` is the database the command should be applied to; it is stored
+  // in the record so replay tools can issue SELECT before dispatch.
+  static void LogReplicaCommand(const cmn::BackedArguments& args, uint32_t db_index);
 
   // Get quick debug info for logs
   std::string DebugInfo() const;

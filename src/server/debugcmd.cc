@@ -672,6 +672,9 @@ void DebugCmd::Run(CmdArgList args, CommandContext* cmd_cntx) {
         "    Start traffic logging for a single listener type to files with the given",
         "    path/prefix. LISTENER is required; mixing listeners in one recording is",
         "    intentionally not supported - start separate recordings per listener.",
+        "TRAFFIC START <path>/<file_prefix> REPLICA",
+        "    On a replica, capture commands received from the master via the replication",
+        "    stream. Fails with an error on a master/standalone server.",
         "TRAFFIC STOP",
         "    Stop traffic logging started by a previous TRAFFIC START.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
@@ -1063,8 +1066,10 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
   // Syntax:
   //   DEBUG TRAFFIC STOP
   //   DEBUG TRAFFIC START <path> LISTENER <main|memcache|admin>
-  // A recording captures exactly one listener type; mixing protocols in one file is
-  // intentionally not supported.
+  //   DEBUG TRAFFIC START <path> REPLICA
+  // A recording captures exactly one source; LISTENER and REPLICA are mutually
+  // exclusive. REPLICA captures commands received from a master via the
+  // replication stream (only meaningful while this server is a replica).
   CmdArgParser parser(args);
   if (parser.Check("STOP")) {
     if (!parser.Finalize())
@@ -1076,10 +1081,26 @@ void DebugCmd::LogTraffic(CmdArgList args, CommandContext* cmd_cntx) {
 
   parser.ExpectTag("START");
   auto path = parser.Next<string_view>();
-  parser.ExpectTag("LISTENER");
-  auto listener_type = parser.MapNext("main", Connection::ListenerType::MAIN_RESP, "memcache",
-                                      Connection::ListenerType::MEMCACHE, "admin",
-                                      Connection::ListenerType::ADMIN_RESP);
+
+  Connection::ListenerType listener_type;
+  if (parser.Check("REPLICA")) {
+    // Replication stream is only incoming on a replica; there is no stream to
+    // capture on a master/standalone server. Fail fast so the caller gets a
+    // clear diagnosis instead of an empty log. We intentionally skip Finalize()
+    // here: the role error is more actionable than "extra arg after REPLICA",
+    // and calling Finalize would leave an unchecked UNPROCESSED error that
+    // trips CmdArgParser's destructor DCHECK.
+    if (ServerState::tlocal()->is_master) {
+      return cmd_cntx->SendError(
+          "REPLICA option requires this server to be a replica (current role is master)");
+    }
+    listener_type = Connection::ListenerType::REPLICA_RESP;
+  } else {
+    parser.ExpectTag("LISTENER");
+    listener_type = parser.MapNext("main", Connection::ListenerType::MAIN_RESP, "memcache",
+                                   Connection::ListenerType::MEMCACHE, "admin",
+                                   Connection::ListenerType::ADMIN_RESP);
+  }
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
