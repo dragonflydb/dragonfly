@@ -2619,7 +2619,18 @@ bool Connection::ReplyBatch() {
   }
 
   reply_builder_->SetBatchMode(false);
-  reply_builder_->Flush();
+
+  // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
+  //
+  // V2: operates as a single-fiber event loop where reading, parsing, and executing happen
+  // sequentially. Because ParseLoop processes pipelines in chunks, flushing here would trigger a
+  // sendmsg syscall for every single chunk. Instead, V2 delegates flushing to IoLoopV2, which
+  // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
+  // are reached.
+  if (!ioloop_v2_) {
+    reply_builder_->Flush();
+  }
+
   return !reply_builder_->GetError();
 }
 
@@ -2953,6 +2964,13 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     if (io_buf_.InputLen() == 0) {
       phase_ = READ_SOCKET;
 
+      // Flush replies deferred by ReplyBatch before sleeping - ensures the client
+      // gets its response even when no more data arrives (single commands, end of pipeline).
+      reply_builder_->Flush();
+      if (auto err = reply_builder_->GetError(); err) {
+        return err;
+      }
+
       io_event_.await([this, &is_ready_to_migrate]() {
         // TODO: optimize CanReply with looking up waiter key
         // io_buf_.InputLen() > 0 is still needed for multishot flow.
@@ -2990,10 +3008,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
       }
 
-      // TODO: Possibly don't flush unconditionally - optimize it
-      reply_builder_->Flush();
-      if (auto ec = reply_builder_->GetError(); ec)
-        return ec;
+      // Note: No flush needed here: the `continue` below re-enters the loop, which either
+      // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
+      // (Flush 1), which always flushes before sleeping.
 
       // TODO: Properly handle backpressure
       GetQueueBackpressure().pubsub_ec.notifyAll();
@@ -3062,6 +3079,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // us "deaf" to future memory relief.
         auto sub_key = qbp.v2_pipeline_backpressure_ec.subscribe_persistent(&backpressure_waiter);
 
+        // Client needs replies to free its send buffer and relieve backpressure.
+        reply_builder_->Flush();
+        if (auto err = reply_builder_->GetError(); err) {
+          return err;
+        }
+
         io_event_.await([this, &is_ready_to_migrate]() {
           bool cmd_ready = parsed_head_ && parsed_head_->CanReply();
           bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
@@ -3085,6 +3108,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // Check io_ec_ after parsing and flushing replies, so that half-closed
     // connections get their responses before we close.
     if (io_ec_) {
+      reply_builder_->Flush();
+      if (auto err = reply_builder_->GetError(); err) {
+        return err;
+      }
       LOG_IF(WARNING, cntx()->replica_conn) << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
     }
@@ -3095,6 +3122,12 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
     // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
     if (is_ready_to_migrate()) {
+      // Flush before migrating: handing off unflushed thread-local buffers to a
+      // new thread will cause data corruption or a hard crash.
+      reply_builder_->Flush();
+      if (auto err = reply_builder_->GetError(); err) {
+        return err;  // Connection is dead, no point migrating it cross-thread.
+      }
       continue;
     }
 
