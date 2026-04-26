@@ -9,6 +9,7 @@
 
 #include <random>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"

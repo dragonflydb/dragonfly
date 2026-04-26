@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
