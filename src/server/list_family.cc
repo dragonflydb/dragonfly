@@ -986,7 +986,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     return op_res;
   }
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
+  const auto key_checker = [](EngineShard* owner, const DbContext& context,
                               std::string_view key) -> bool {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
@@ -1012,7 +1012,7 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
     return op_res;
   }
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
+  const auto key_checker = [](EngineShard* owner, const DbContext& context,
                               std::string_view key) -> bool {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };

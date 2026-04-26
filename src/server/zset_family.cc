@@ -2656,7 +2656,7 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
       using namespace std::chrono;
       limit_tp = steady_clock::now() + milliseconds(limit_ms);
     }
-    const auto key_checker = [ns](EngineShard* owner, const DbContext& context, Transaction*,
+    const auto key_checker = [ns](EngineShard* owner, const DbContext& context,
                                   std::string_view key) -> bool {
       return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET).ok();
     };

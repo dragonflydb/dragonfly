@@ -9,6 +9,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "base/logging.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
@@ -227,13 +228,20 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
   auto& queue = wq->items;
   ShardId sid = owner_->shard_id();
 
+  // Fast path: if the key doesn't exist, no checker will pass (all start with FindReadOnly).
+  // We can't use key_ready_checker here because checkers can be per-transaction (e.g. XREAD BLOCK
+  // checks stream-specific conditions beyond key existence), so the front item's checker returning
+  // false doesn't mean later items won't pass. A raw existence check is the safe common gate.
+  if (queue.empty() || !IsValid(context.GetDbSlice(owner_->shard_id()).FindReadOnly(context, key)))
+    return;
+
   // In the most cases we shouldn't have skipped elements at all
   absl::InlinedVector<dfly::WatchItem, 4> skipped;
   while (!queue.empty()) {
     auto& wi = queue.front();
     Transaction* head = wi.get();
     // We check may the transaction be notified otherwise move it to the end of the queue
-    if (wi.key_ready_checker(owner_, context, head, key)) {
+    if (wi.key_ready_checker(owner_, context, key)) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
       if (head->NotifySuspended(sid, key)) {

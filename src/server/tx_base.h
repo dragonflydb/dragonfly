@@ -109,7 +109,7 @@ class LockTag {
 
 // Checks whether the touched key is valid for a blocking transaction watching it.
 using KeyReadyChecker =
-    std::function<bool(EngineShard*, const DbContext& context, Transaction* tx, std::string_view)>;
+    std::function<bool(EngineShard*, const DbContext& context, std::string_view)>;
 
 // References arguments in another array.
 using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)

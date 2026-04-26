@@ -3006,7 +3006,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   auto tp = (opts->timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts->timeout)
                             : Transaction::time_point::max();
 
-  const auto key_checker = [opts](EngineShard* owner, const DbContext& context, Transaction* tx,
+  const auto key_checker = [opts](EngineShard* owner, const DbContext& context,
                                   std::string_view key) -> bool {
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
