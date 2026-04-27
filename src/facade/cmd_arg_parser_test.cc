@@ -290,6 +290,181 @@ TEST_F(CmdArgParserTest, ApplyLambda) {
   EXPECT_FALSE(parser.HasError());
 }
 
+TEST_F(CmdArgParserTest, ApplyMap) {
+  // Map(&field, tag, value, ...) — matches any tag and writes the corresponding value.
+  // Standalone Map allows repeated matches (last wins); wrap in OneOf to require at most one.
+  {
+    auto parser = Make({"DESC"});
+    bool reversed = false;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_TRUE(reversed);
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"ASC"});
+    bool reversed = true;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_FALSE(reversed);
+    EXPECT_FALSE(parser.HasError());
+  }
+  // Unrelated tag leaves field untouched and stops Apply.
+  {
+    auto parser = Make({"OTHER"});
+    bool reversed = false;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_FALSE(reversed);
+    EXPECT_TRUE(parser.HasNext());
+  }
+  // Standalone Map allows repeated matches — last wins, no error. This matches Redis SORT
+  // semantics where "ASC DESC" is equivalent to "DESC".
+  {
+    auto parser = Make({"DESC", "ASC"});
+    bool reversed = true;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_FALSE(reversed);  // ASC came last
+    EXPECT_FALSE(parser.HasError());
+  }
+  {
+    auto parser = Make({"ASC", "DESC"});
+    bool reversed = false;
+    parser.Apply(Map(&reversed, "DESC", true, "ASC", false));
+    EXPECT_TRUE(reversed);  // DESC came last
+    EXPECT_FALSE(parser.HasError());
+  }
+  // OneOf + Map — DESC followed by ASC is a mutex violation.
+  {
+    auto parser = Make({"DESC", "ASC"});
+    bool reversed = false;
+    parser.Apply(OneOf(Map(&reversed, "DESC", true, "ASC", false)));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  }
+}
+
+TEST_F(CmdArgParserTest, ApplyTagNested) {
+  // Tag(tag, inner_opt) — outer tag matches, then inner option runs against the next arg.
+  // If the inner doesn't match, INVALID_CASES is reported (the inner keyword is required).
+  enum class Mode { A, B, C };
+  {
+    auto parser = Make({"MODE", "B"});
+    Mode mode = Mode::A;
+    parser.Apply(Tag("MODE", Map(&mode, "A", Mode::A, "B", Mode::B, "C", Mode::C)));
+    EXPECT_EQ(mode, Mode::B);
+    EXPECT_FALSE(parser.HasError());
+  }
+  // Unknown inner tag -> INVALID_CASES.
+  {
+    auto parser = Make({"MODE", "BOGUS"});
+    Mode mode = Mode::A;
+    parser.Apply(Tag("MODE", Map(&mode, "A", Mode::A, "B", Mode::B)));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  }
+  // Outer tag absent -> no effect, no error.
+  {
+    auto parser = Make({});
+    Mode mode = Mode::A;
+    parser.Apply(Tag("MODE", Map(&mode, "A", Mode::A, "B", Mode::B)));
+    EXPECT_EQ(mode, Mode::A);
+    EXPECT_FALSE(parser.HasError());
+  }
+}
+
+TEST_F(CmdArgParserTest, ApplyTagIf) {
+  // If(cond, opt) behaves like `opt` when cond is true, and never matches when false.
+  // Use to gate an option on a runtime flag (e.g. is_read_only).
+
+  // cond=true -> delegate to inner (matches and sets field).
+  {
+    auto parser = Make({"STORE", "dest"});
+    std::string_view store;
+    parser.Apply(If(true, Tag("STORE", &store)));
+    EXPECT_EQ(store, "dest");
+    EXPECT_FALSE(parser.HasError());
+  }
+
+  // cond=false -> inner is skipped. Apply stops at the (now unmatched) arg; Finalize reports
+  // UNPROCESSED so the caller can surface a syntax error.
+  {
+    auto parser = Make({"STORE", "dest"});
+    std::string_view store;
+    parser.Apply(If(false, Tag("STORE", &store)));
+    EXPECT_EQ(store, "");
+    EXPECT_FALSE(parser.HasError());
+    EXPECT_TRUE(parser.HasNext());
+    EXPECT_FALSE(parser.Finalize());
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
+  }
+
+  // Composes: cond=false + Exist - does not toggle the bool even when the tag is present.
+  {
+    auto parser = Make({"FLAG"});
+    bool flag = false;
+    parser.Apply(If(false, Exist("FLAG", &flag)));
+    EXPECT_FALSE(flag);
+  }
+}
+
+TEST_F(CmdArgParserTest, ApplyOneOf) {
+  // OneOf groups mutually-exclusive options. Zero or one may match across the Apply loop.
+  // A second match reports an error instead of being quietly accepted.
+
+  // Zero matches — fine.
+  {
+    auto parser = Make({});
+    bool nx = false, xx = false;
+    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
+    EXPECT_FALSE(nx);
+    EXPECT_FALSE(xx);
+    EXPECT_FALSE(parser.HasError());
+  }
+
+  // Single match — fine.
+  {
+    auto parser = Make({"NX"});
+    bool nx = false, xx = false;
+    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
+    EXPECT_TRUE(nx);
+    EXPECT_FALSE(xx);
+    EXPECT_FALSE(parser.HasError());
+  }
+
+  // Two different members of the group match -> error.
+  {
+    auto parser = Make({"NX", "XX"});
+    bool nx = false, xx = false;
+    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  }
+
+  // Same member twice also counts as a second match -> error.
+  {
+    auto parser = Make({"NX", "NX"});
+    bool nx = false, xx = false;
+    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)));
+    auto err = parser.TakeError();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err.type, CmdArgParser::INVALID_CASES);
+  }
+
+  // OneOf composes with other Apply options. Unrelated tags are not affected.
+  {
+    auto parser = Make({"NX", "COUNT", "5"});
+    bool nx = false, xx = false;
+    uint32_t count = 0;
+    parser.Apply(OneOf(Exist("NX", &nx), Exist("XX", &xx)), Tag("COUNT", &count));
+    EXPECT_TRUE(nx);
+    EXPECT_EQ(count, 5u);
+    EXPECT_FALSE(parser.HasError());
+  }
+}
+
 TEST_F(CmdArgParserTest, ApplyOptional) {
   // Tag present -> optional engaged.
   {

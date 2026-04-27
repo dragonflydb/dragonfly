@@ -68,6 +68,9 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/replica.h"
 #include "server/script_mgr.h"
+#ifdef WITH_SEARCH
+#include "server/search/global_hnsw_index.h"
+#endif
 #include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
@@ -1283,7 +1286,7 @@ void ServerFamily::Shutdown() {
     }
     StopAllClusterReplicas();
 
-    dfly_cmd_->Shutdown();
+    dfly_cmd_->CancelReplicas();
     DebugCmd::Shutdown();
 #ifdef WITH_SEARCH
     SearchFamily::Shutdown();
@@ -1445,6 +1448,13 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     } else {
       load_context->PerformPostLoad(&service_);
       LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
+
+      // Loaded data bypasses the journal, so force replicas into full sync.
+      dfly_cmd_->CancelReplicas();
+      shard_set->RunBriefInParallel([](EngineShard* shard) {
+        if (shard->journal())
+          journal::ClearBuffer();
+      });
     }
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -3094,6 +3104,16 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   };  // cb
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
+
+#ifdef WITH_SEARCH
+  // HNSW indices live in a single global registry shared across shards, so their
+  // footprint must be added once — not per-shard. Track it in both the search_used
+  // breakdown (memory_by_class_bytes{class="search_used"}) and the overall heap
+  // gauge (memory_used_bytes). See issue #7110.
+  size_t hnsw_memory = GlobalHnswIndexRegistry::Instance().GetTotalMemoryUsage();
+  result.search_stats.used_memory += hnsw_memory;
+  result.heap_used_bytes += hnsw_memory;
+#endif
 
   uint64_t after_cb = absl::GetCurrentTimeNanos();
 

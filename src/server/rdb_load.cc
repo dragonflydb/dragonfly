@@ -295,7 +295,9 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
                                   src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
                                   src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
-    sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
+    const auto& blob = src.filters[i].blob;
+    auto* ptr = sbf->AllocateFilter(blob.size(), src.filters[i].hash_cnt);
+    memcpy(ptr, blob.data(), blob.size());
   }
 
   // new obj
@@ -2654,15 +2656,21 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   string journal_blob;
   SET_OR_RETURN(FetchGenericString(), journal_blob);
 
+  // Create reader & executor if needed
+  if (!journal_reader_)
+    journal_reader_ = std::make_unique<JournalReader>(nullptr, 0);
+
+  if (!journal_executor_)
+    journal_executor_ = std::make_unique<JournalExecutor>(service);
+
   io::BytesSource bs{io::Buffer(journal_blob)};
-  journal_reader_.SetSource(&bs);
+  journal_reader_->SetSource(&bs);
 
   // Parse and exectue in loop.
   size_t done = 0;
-  JournalExecutor ex{service};
   while (done < num_entries) {
     journal::ParsedEntry entry;
-    auto ec = journal_reader_.ReadEntry(&entry);
+    auto ec = journal_reader_->ReadEntry(&entry);
     if (ec)
       return ec;
 
@@ -2684,7 +2692,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
-    ex.Execute(entry.dbid, entry.cmd);
+    journal_executor_->Execute(entry.dbid, entry.cmd);
   }
 
   return std::error_code{};
@@ -2999,12 +3007,20 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
                                                   const ObjSettings& obj_settings,
                                                   DbIndex db_index) {
-  Item* item = item_queue_.Pop();
-  if (item == nullptr) {
-    item = new Item;
+  const ShardId sid = Shard(key, shard_set->size());
+  bool run_inlined = EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid;
+  Item local_item, *item = &local_item;
+
+  // If we run non-inlined, take an item from the queue
+  if (!run_inlined) {
+    if (item = item_queue_.Pop(); item == nullptr)
+      item = new Item;
   }
 
-  auto cleanup = absl::Cleanup([item] { delete item; });
+  auto cleanup = absl::Cleanup([item, run_inlined] {
+    if (!run_inlined)
+      delete item;
+  });
 
   // The caller restores pending_read_ for continuation chunks.
   // If it is already non-empty, this call appends to an existing partially built object.
@@ -3050,12 +3066,9 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
 
   std::move(cleanup).Cancel();
 
-  const ShardId sid = Shard(item->key, shard_set->size());
-
-  if (const EngineShard* es = EngineShard::tlocal(); es && es->shard_id() == sid) {
+  if (run_inlined) {
     const DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_index, GetCurrentTimeMs()};
     CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
-    item_queue_.Push(item);
   } else {
     auto& out_buf = shard_buf_[sid];
     out_buf.emplace_back(item);

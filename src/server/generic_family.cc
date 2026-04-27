@@ -7,6 +7,7 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
+#include <limits>
 #include <optional>
 
 #include "facade/cmd_arg_parser.h"
@@ -267,52 +268,29 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
 // args[3] .. args[n]: optional arguments that can be [REPLACE] [ABSTTL] [IDLETIME seconds]
 //            [FREQ frequency], in any order
 OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
+  using namespace facade;
   RestoreArgs out_args;
-  string cur_arg{ArgS(args, 1)};  // extract ttl
-  if (!absl::SimpleAtoi(cur_arg, &out_args.expiration_) || (out_args.expiration_ < 0)) {
+  CmdArgParser parser(args);
+
+  // args[0] = key (skip); args[1] = ttl; args[2] = serialized value (skip).
+  parser.Skip(1);
+  out_args.expiration_ = parser.Next<int64_t>();
+  if (parser.TakeError() || out_args.expiration_ < 0)
     return OpStatus::INVALID_INT;
+  parser.Skip(1);
+
+  // IDLETIME and FREQ are parsed (for compat with Redis) but not used currently. Both are
+  // range-checked at parse time via FInt — out-of-range values surface as INVALID_INT.
+  FInt<int64_t{0}, std::numeric_limits<int64_t>::max()> idle_time{};
+  FInt<0, 255> freq{};
+  parser.Apply(Exist("REPLACE", &out_args.replace_), Exist("ABSTTL", &out_args.abs_time_),
+               Exist("STICK", &out_args.sticky_), Tag("IDLETIME", &idle_time), Tag("FREQ", &freq));
+
+  if (!parser.Finalize()) {
+    auto err = parser.TakeError();
+    return err.type == CmdArgParser::INVALID_INT ? OpStatus::INVALID_INT : OpStatus::SYNTAX_ERR;
   }
 
-  // the 3rd arg is the serialized value, so we are starting from one pass it
-  // Note that all these are actually optional
-  // note about the redis doc for this command: https://redis.io/commands/restore/
-  // the IDLETIME and FREQ are not required, but to make this the same as in redis
-  // we would parse them and ensure that they are correct, maybe later they will be used
-  int64_t idle_time = 0;
-
-  for (size_t i = 3; i < args.size(); ++i) {
-    cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
-    bool additional = args.size() - i - 1 >= 1;
-    if (cur_arg == "REPLACE") {
-      out_args.replace_ = true;
-    } else if (cur_arg == "ABSTTL") {
-      out_args.abs_time_ = true;
-    } else if (cur_arg == "STICK") {
-      out_args.sticky_ = true;
-    } else if (cur_arg == "IDLETIME" && additional) {
-      ++i;
-      cur_arg = ArgS(args, i);
-      if (!absl::SimpleAtoi(cur_arg, &idle_time)) {
-        return OpStatus::INVALID_INT;
-      }
-      if (idle_time < 0) {
-        return OpStatus::SYNTAX_ERR;
-      }
-    } else if (cur_arg == "FREQ" && additional) {
-      ++i;
-      cur_arg = ArgS(args, i);
-      int freq = 0;
-      if (!absl::SimpleAtoi(cur_arg, &freq)) {
-        return OpStatus::INVALID_INT;
-      }
-      if (freq < 0 || freq > 255) {
-        return OpStatus::OUT_OF_RANGE;  // need to translate in this case
-      }
-    } else {
-      LOG(WARNING) << "Got unknown command line option for restore '" << cur_arg << "'";
-      return OpStatus::SYNTAX_ERR;
-    }
-  }
   return out_args;
 }
 
@@ -1373,12 +1351,10 @@ void GenericFamily::Persist(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sec = ArgS(args, 1);
-  int64_t int_arg;
-
-  if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  facade::CmdArgParser parser{args};
+  auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
@@ -1403,12 +1379,10 @@ void GenericFamily::Expire(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sec = ArgS(args, 1);
-  int64_t int_arg;
-
-  if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  facade::CmdArgParser parser{args};
+  auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
@@ -1454,12 +1428,10 @@ void GenericFamily::Keys(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view msec = ArgS(args, 1);
-  int64_t int_arg;
-
-  if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  facade::CmdArgParser parser{args};
+  auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
@@ -1485,12 +1457,10 @@ void GenericFamily::PexpireAt(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Pexpire(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view msec = ArgS(args, 1);
-  int64_t int_arg;
-
-  if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  facade::CmdArgParser parser{args};
+  auto [key, int_arg] = parser.Next<string_view, int64_t>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
   int_arg = std::max<int64_t>(int_arg, -1);
 
@@ -2026,28 +1996,17 @@ void SortGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_read_only) {
   SortParams params;
   params.is_read_only = is_read_only;
 
-  while (parser.HasNext()) {
-    if (parser.Check("ALPHA")) {
-      params.alpha = true;
-    } else if (parser.Check("DESC")) {
-      params.reversed = true;
-    } else if (parser.Check("ASC")) {
-      params.reversed = false;
-    } else if (parser.Check("LIMIT")) {
-      uint32_t offset = parser.Next<uint32_t>();
-      uint32_t limit = parser.Next<uint32_t>();
-      params.bounds = {offset, limit};
-    } else if (!is_read_only && parser.Check("STORE", &params.store_key)) {
-    } else if (parser.Check("BY", &params.by_pattern)) {
-    } else if (parser.Check("GET")) {
-      params.get_patterns.push_back(parser.Next());
-    } else {
-      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << parser.Peek();
-      return cmd_cntx->SendError(kSyntaxErr);
-    }
-  }
+  parser.Apply(
+      Exist("ALPHA", &params.alpha), Map(&params.reversed, "DESC", true, "ASC", false),
+      Tag("LIMIT",
+          [&](CmdArgParser* p) {
+            auto [offset, limit] = p->Next<uint32_t, uint32_t>();
+            params.bounds = std::pair{offset, limit};
+          }),
+      If(!is_read_only, Tag("STORE", &params.store_key)), Tag("BY", &params.by_pattern),
+      Tag("GET", [&](CmdArgParser* p) { params.get_patterns.push_back(p->Next<string_view>()); }));
 
-  if (parser.HasError()) {
+  if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
@@ -2296,10 +2255,9 @@ void GenericFamily::Restore(CmdArgList args, CommandContext* cmd_cntx) {
 void GenericFamily::FieldExpire(CmdArgList args, CommandContext* cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
-  string_view ttl_str = parser.Next();
-  uint32_t ttl_sec;
-  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
   CmdArgList fields = parser.Tail();
 
@@ -2338,11 +2296,10 @@ void GenericFamily::FieldTtl(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  string_view target_db_sv = ArgS(args, 1);
-  int32_t target_db;
-  if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
-    return cmd_cntx->SendError(kInvalidIntErr);
+  facade::CmdArgParser parser{args};
+  auto [key, target_db] = parser.Next<string_view, int32_t>();
+  if (auto err = parser.TakeError(); err) {
+    return cmd_cntx->SendError(err.MakeReply());
   }
 
   if (target_db < 0 || uint32_t(target_db) >= absl::GetFlag(FLAGS_dbnum)) {
@@ -2355,6 +2312,8 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
 
   OpStatus res = OpStatus::SKIPPED;
   ShardId target_shard = Shard(key, shard_set->size());
+  // Holds the serialized target_db for the journal record (ArgSlice cannot own storage).
+  string target_db_str = absl::StrCat(target_db);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     // MOVE runs as a global transaction and is therefore scheduled on every shard.
     if (target_shard == shard->shard_id()) {
@@ -2363,7 +2322,7 @@ void GenericFamily::Move(CmdArgList args, CommandContext* cmd_cntx) {
       // MOVE runs as global command but we want to write the
       // command to only one journal.
       if (op_args.shard->journal()) {
-        RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_sv});
+        RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_str});
       }
     }
     return OpStatus::OK;
@@ -2444,9 +2403,9 @@ void GenericFamily::Pttl(CmdArgList args, CommandContext* cmd_cntx) {
 }
 
 void GenericFamily::Select(CmdArgList args, CommandContext* cmd_cntx) {
-  string_view key = ArgS(args, 0);
-  int64_t index;
-  if (!absl::SimpleAtoi(key, &index)) {
+  facade::CmdArgParser parser{args};
+  int64_t index = parser.Next<int64_t>();
+  if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
   }
   if (IsClusterEnabled() && index != 0) {

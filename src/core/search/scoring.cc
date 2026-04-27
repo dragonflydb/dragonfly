@@ -6,15 +6,11 @@
 
 namespace dfly::search {
 
-double ScoreDocument(ScorerType scorer, const ScoringContext& ctx,
+double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms) {
   double score = 0.0;
-  switch (scorer) {
-    case ScorerType::BM25STD:
-      for (const auto& term : terms)
-        score += BM25Std(ctx, term);
-      break;
-  }
+  for (const auto& term : terms)
+    score += scorer(ctx, term);
   return score;
 }
 

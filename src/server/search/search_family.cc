@@ -442,10 +442,10 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::ScorerType> ParseScorerName(std::string_view name) {
-  if (absl::EqualsIgnoreCase(name, "BM25STD"))
-    return search::ScorerType::BM25STD;
-  return std::nullopt;
+std::optional<search::ScorerFn> ParseScorer(CmdArgParser* parser) {
+  return parser->TryMapNext("BM25STD", &search::BM25Std,  //
+                            "TFIDF", &search::TfIdf,      //
+                            "TFIDF.DOCNORM", &search::TfIdfDocNorm);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -488,10 +488,9 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
     } else if (parser->Check("WITHSCORES")) {
       params.with_scores = true;
     } else if (parser->Check("SCORER")) {
-      auto scorer_name = parser->Next();
-      auto scorer = ParseScorerName(scorer_name);
+      auto scorer = ParseScorer(parser);
       if (!scorer)
-        return CreateSyntaxError(absl::StrCat("No such scorer: ", scorer_name));
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
     } else if (parser->Check("DIALECT")) {
       parser->Skip(1);  // Accepted and ignored — DF always behaves as dialect 2
@@ -751,10 +750,9 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
     // SCORER, ADDSCORES, WITHSCORES can appear anywhere in the command
     if (parser->Check("SCORER")) {
-      auto scorer_name = parser->Next();
-      auto scorer = ParseScorerName(scorer_name);
+      auto scorer = ParseScorer(parser);
       if (!scorer)
-        return CreateSyntaxError(absl::StrCat("No such scorer: ", scorer_name));
+        return CreateSyntaxError(absl::StrCat("No such scorer: ", parser->Peek()));
       params.scorer = *scorer;
       continue;
     }
@@ -1930,9 +1928,9 @@ void CmdFtSearch(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(*params->scorer);
+    search_algo.SetScorer(params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(search::ScorerType::BM25STD);
+    search_algo.SetScorer(&search::BM25Std);
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
@@ -2028,9 +2026,9 @@ void CmdFtProfile(CmdArgList args, CommandContext* cmd_cntx) {
 
   // Enable scorer: explicit SCORER param, or default BM25STD when WITHSCORES is set
   if (params->scorer)
-    search_algo.SetScorer(*params->scorer);
+    search_algo.SetScorer(params->scorer);
   else if (params->with_scores)
-    search_algo.SetScorer(search::ScorerType::BM25STD);
+    search_algo.SetScorer(&search::BM25Std);
 
   search_algo.EnableProfiling();
 
@@ -2206,9 +2204,9 @@ void CmdFtAggregate(CmdArgList args, CommandContext* cmd_cntx) {
 
     // Enable scorer: explicit SCORER param, or default BM25STD when ADDSCORES is set
     if (params->scorer)
-      search_algo.SetScorer(*params->scorer);
+      search_algo.SetScorer(params->scorer);
     else if (params->add_scores)
-      search_algo.SetScorer(search::ScorerType::BM25STD);
+      search_algo.SetScorer(&search::BM25Std);
 
     using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
         declval<OpArgs>(), params.value(), &search_algo));

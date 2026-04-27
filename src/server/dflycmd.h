@@ -138,7 +138,7 @@ class DflyCmd {
   void OnClose(unsigned sync_id);
 
   // Stop all background processes so we can exit in orderly manner.
-  void Shutdown();
+  void CancelReplicas() ABSL_LOCKS_EXCLUDED(mu_);
 
   // Create new sync session. Returns (session_id, number of flows)
   std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionState* state) ABSL_LOCKS_EXCLUDED(mu_);

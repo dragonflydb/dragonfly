@@ -25,6 +25,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
 #include "facade/socket_utils.h"
@@ -1140,6 +1141,10 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
 
   if (!tx_data.IsGlobalCmd()) {
     VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    // Traffic logger hook: gate is inside LogReplicaCommand, so the no-op path
+    // (logger disabled) is cheap. Log before Execute so a crash during execute
+    // still leaves the record on disk for post-mortem replay.
+    facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
     return executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
   }
 
@@ -1168,6 +1173,9 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // replica.
   bool execution_res = true;
   if (inserted_by_me) {
+    // Global command — log exactly once (only the inserter flow runs Execute,
+    // so this guard naturally dedups across per-shard flows).
+    facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
     execution_res = executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
   }
   // Wait until exection is done, to make sure we done execute next commands while the global is

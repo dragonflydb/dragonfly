@@ -17,11 +17,6 @@ namespace dfly::search {
 class FieldIndices;
 struct TextIndex;
 
-// Supported scorer types
-enum class ScorerType : int {
-  BM25STD,  // Standard Okapi BM25 (default)
-};
-
 // Per-term information needed for scoring a single document
 struct ScoringTermInfo {
   uint32_t term_freq = 0;        // How many times this term appears in the document
@@ -34,6 +29,11 @@ struct ScoringTermInfo {
 struct ScoringContext {
   size_t num_docs = 0;  // Total documents in index
 };
+
+// Scorer function signature: computes the score for a single (term, document) pair.
+// Register new scorers by adding a function with this signature and exposing it via
+// ParseScorer in the command layer.
+using ScorerFn = double (*)(const ScoringContext&, const ScoringTermInfo&);
 
 // Compute BM25STD score for a single term in a document.
 //
@@ -63,9 +63,33 @@ inline double BM25Std(const ScoringContext& ctx, const ScoringTermInfo& term) {
   return idf * tf;
 }
 
-// Compute BM25STD score for a document matched against multiple terms.
-// Returns sum of per-term BM25 scores.
-double ScoreDocument(ScorerType scorer, const ScoringContext& ctx,
+// Compute TFIDF score for a single term in a document.
+//
+// Formula: f * IDF
+// where IDF = ln(N / n), clamped to be non-negative.
+//
+// Note: returns 0 when a term appears in every document (N == n, no discriminating power).
+// This differs from BM25STD, which adds a "+1" inside the log to keep the score positive.
+inline double TfIdf(const ScoringContext& ctx, const ScoringTermInfo& term) {
+  if (term.term_docs == 0)
+    return 0.0;
+
+  // Clamp N >= n to avoid negative IDF during transient states
+  double N = std::max(ctx.num_docs, term.term_docs);
+  return std::log(N / term.term_docs) * term.term_freq;
+}
+
+// Compute TFIDF with document length normalization for a single term.
+//
+// Formula: (f * IDF) / fieldDocLen
+inline double TfIdfDocNorm(const ScoringContext& ctx, const ScoringTermInfo& term) {
+  auto d_len = term.field_doc_len == 0 ? 1 : term.field_doc_len;
+  return TfIdf(ctx, term) / d_len;
+}
+
+// Compute score for a document matched against multiple terms.
+// Returns sum of per-term scores produced by the given scorer function.
+double ScoreDocument(ScorerFn scorer, const ScoringContext& ctx,
                      const std::vector<ScoringTermInfo>& terms);
 
 }  // namespace dfly::search

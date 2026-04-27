@@ -35,6 +35,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/search/vector_utils.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/error.h"
@@ -502,13 +503,14 @@ bool IsSHA(string_view str) {
 }
 
 optional<ErrorReply> EvalValidator(CmdArgList args) {
-  string_view num_keys_str = ArgS(args, 1);
-  int32_t num_keys;
+  facade::CmdArgParser parser{args};
+  parser.Skip(1);  // script body / sha
+  uint32_t num_keys = parser.Next<uint32_t>();
 
-  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0)
-    return ErrorReply{facade::kInvalidIntErr};
+  if (auto err = parser.TakeError(); err)
+    return err.MakeReply();
 
-  if (unsigned(num_keys) > args.size() - 2)
+  if (num_keys > parser.Tail().size())
     return ErrorReply{"Number of keys can't be greater than number of args", kSyntaxErrType};
 
   return nullopt;
