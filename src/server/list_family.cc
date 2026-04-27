@@ -988,9 +988,12 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context,
                               std::string_view key) -> KeyReadyResult {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok()
-               ? KeyReadyResult::kReady
-               : KeyReadyResult::kKeyNotFound;
+    auto res = context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST);
+    if (res.ok())
+      return KeyReadyResult::kReady;
+    if (res.status() == OpStatus::WRONG_TYPE)
+      return KeyReadyResult::kNotReady;
+    return KeyReadyResult::kKeyNotFound;
   };
 
   // Block
@@ -1016,9 +1019,12 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context,
                               std::string_view key) -> KeyReadyResult {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok()
-               ? KeyReadyResult::kReady
-               : KeyReadyResult::kKeyNotFound;
+    auto res = context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST);
+    if (res.ok())
+      return KeyReadyResult::kReady;
+    if (res.status() == OpStatus::WRONG_TYPE)
+      return KeyReadyResult::kNotReady;
+    return KeyReadyResult::kKeyNotFound;
   };
 
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.

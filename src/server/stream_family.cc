@@ -3011,7 +3011,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
     if (!res_it.ok())
-      return KeyReadyResult::kKeyNotFound;
+      return res_it.status() == OpStatus::WRONG_TYPE ? KeyReadyResult::kNotReady
+                                                     : KeyReadyResult::kKeyNotFound;
 
     StreamIDsItem& sitem = opts->stream_ids.at(key);
     if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)

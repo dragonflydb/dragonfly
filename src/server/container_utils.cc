@@ -369,9 +369,12 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   auto* ns = &trans->GetNamespace();
   const auto key_checker = [req_obj_type, ns](EngineShard* owner, const DbContext& context,
                                               std::string_view key) -> KeyReadyResult {
-    return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type).ok()
-               ? KeyReadyResult::kReady
-               : KeyReadyResult::kKeyNotFound;
+    auto res = ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type);
+    if (res.ok())
+      return KeyReadyResult::kReady;
+    if (res.status() == OpStatus::WRONG_TYPE)
+      return KeyReadyResult::kNotReady;
+    return KeyReadyResult::kKeyNotFound;
   };
 
   auto status =
