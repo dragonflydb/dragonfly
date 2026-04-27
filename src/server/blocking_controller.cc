@@ -9,7 +9,6 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "base/logging.h"
-#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
@@ -141,6 +140,8 @@ void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
   if (wt.queue_map.empty()) {
     watched_dbs_.erase(dbit);
   }
+  // TODO: awakened_keys.insert in UnwatchTx already guards on !wq->items.empty(), so we could
+  // skip awakened_indices_.emplace when no key was re-queued, avoiding a spurious NotifyPending.
   awakened_indices_.emplace(tx->GetDbIndex());
 }
 
@@ -228,20 +229,16 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
   auto& queue = wq->items;
   ShardId sid = owner_->shard_id();
 
-  // Fast path: if the key doesn't exist, no checker will pass (all start with FindReadOnly).
-  // We can't use key_ready_checker here because checkers can be per-transaction (e.g. XREAD BLOCK
-  // checks stream-specific conditions beyond key existence), so the front item's checker returning
-  // false doesn't mean later items won't pass. A raw existence check is the safe common gate.
-  if (queue.empty() || !IsValid(context.GetDbSlice(owner_->shard_id()).FindReadOnly(context, key)))
-    return;
-
   // In the most cases we shouldn't have skipped elements at all
   absl::InlinedVector<dfly::WatchItem, 4> skipped;
   while (!queue.empty()) {
     auto& wi = queue.front();
     Transaction* head = wi.get();
-    // We check may the transaction be notified otherwise move it to the end of the queue
-    if (wi.key_ready_checker(owner_, context, key)) {
+    KeyReadyResult result = wi.key_ready_checker(owner_, context, key);
+    if (result == KeyReadyResult::kKeyNotFound) {
+      // Key is gone - no tx in this queue can be woken, abort the scan entirely.
+      break;
+    } else if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
       if (head->NotifySuspended(sid, key)) {
@@ -251,7 +248,7 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
         awakened_transactions_.insert(head);
         break;
       }
-    } else {
+    } else {  // kNotReady - key exists but per-tx conditions not met, try next
       skipped.push_back(std::move(wi));
     }
 

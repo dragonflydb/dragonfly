@@ -2657,8 +2657,10 @@ void ZMPopGeneric(CmdArgList args, CommandContext* cmd_cntx, bool is_blocking) {
       limit_tp = steady_clock::now() + milliseconds(limit_ms);
     }
     const auto key_checker = [ns](EngineShard* owner, const DbContext& context,
-                                  std::string_view key) -> bool {
-      return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET).ok();
+                                  std::string_view key) -> KeyReadyResult {
+      return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET).ok()
+                 ? KeyReadyResult::kReady
+                 : KeyReadyResult::kKeyNotFound;
     };
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
