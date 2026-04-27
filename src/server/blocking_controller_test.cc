@@ -95,6 +95,45 @@ TEST_F(BlockingControllerTest, Basic) {
   });
 }
 
+// Regression for https://github.com/dragonflydb/dragonfly/pull/7225:
+// NotifyWatchQueue used to walk every queued waiter (O(N) per notify) when
+// the key was absent. The fast path now short-circuits via FindReadOnly. We
+// assert the per-waiter checker is never invoked.
+TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
+  constexpr size_t kWaiters = 64;
+  const std::string_view key = str_vec_[0];  // "x", hashes to shard 0 (verified in SetUp)
+
+  std::vector<boost::intrusive_ptr<Transaction>> txs;
+  txs.reserve(kWaiters);
+  for (size_t i = 0; i < kWaiters; ++i) {
+    auto t = boost::intrusive_ptr<Transaction>(new Transaction{&cid_});
+    t->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {arg_vec_.data(), arg_vec_.size()});
+    txs.push_back(std::move(t));
+  }
+
+  size_t checker_calls = 0;
+
+  shard_set->Await(0, [&] {
+    EngineShard* shard = EngineShard::tlocal();
+    BlockingController bc(shard, &namespaces->GetDefaultNamespace());
+
+    auto checker = [&checker_calls](EngineShard*, const DbContext&, std::string_view) {
+      ++checker_calls;
+      return false;
+    };
+
+    for (auto& t : txs) {
+      bc.AddWatched(t->GetShardArgs(shard->shard_id()), checker, t.get());
+    }
+    ASSERT_EQ(1u, bc.NumWatched(0));  // 1 watched key, kWaiters items in its queue
+
+    bc.Awaken(0, key);
+    bc.NotifyPending();
+  });
+
+  EXPECT_EQ(0u, checker_calls) << "fast path did not short-circuit";
+}
+
 TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
   bool blocked;
