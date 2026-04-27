@@ -58,6 +58,13 @@ class ShardedHashMap {
  public:
   static constexpr size_t kNumShards = NUM_SHARDS;
 
+  // Tag type to disambiguate shard-index Mutate(ShardId{idx}, ...) from key-based Mutate(key, ...).
+  struct ShardId {
+    size_t value;
+    explicit ShardId(size_t v) : value(v) {
+    }
+  };
+
   // Returned by the AcquireReaderLock callable passed to Mutate(). Holds an exclusive lock on
   // read_mu_ for the duration of its lifetime and exposes a mutable reference to the shard
   // map. Mutations must be performed through LockedMap::map to guarantee that no reader
@@ -72,8 +79,7 @@ class ShardedHashMap {
   // Returns false if the key is not present. The callback must not modify the value.
   //
   // The template parameter Q allows heterogeneous lookup — any type hashable via
-  // absl::Hash<Q> and comparable against K can be used (e.g., std::string_view for
-  // std::string keys).
+  // Hash and comparable against K can be used.
   template <typename Q, typename F> bool FindIf(const Q& key, F&& f) const {
     const Shard& shard = shards_[ShardOf(key)];
     std::shared_lock read_lock(shard.read_mu_);
@@ -133,7 +139,10 @@ class ShardedHashMap {
   //       auto lm = lock_readers();
   //       lm.map[key] = new_value;  // now no reader sees a partial update
   //   });
-  template <typename F> void Mutate(const K& key, F&& f) {
+  //
+  // The template parameter Q allows heterogeneous lookup — any type hashable via
+  // Hash and comparable against K can be used.
+  template <typename Q, typename F> void Mutate(const Q& key, F&& f) {
     Shard& shard = shards_[ShardOf(key)];
     std::unique_lock write_lock{shard.write_mu_};
     std::forward<F>(f)(static_cast<const InternalMap&>(shard.map_), [&shard]() -> LockedMap {
@@ -146,9 +155,9 @@ class ShardedHashMap {
   // already computed the shard via ShardOf() or needs to batch multiple keys that map to
   // the same shard under a single lock acquisition. The same lock_readers() re-entrancy
   // restriction applies: do not hold two LockedMap instances at the same time.
-  template <typename F> void Mutate(size_t sid, F&& f) {
-    DCHECK_LT(sid, NUM_SHARDS);
-    Shard& shard = shards_[sid];
+  template <typename F> void Mutate(ShardId sid, F&& f) {
+    DCHECK_LT(sid.value, NUM_SHARDS);
+    Shard& shard = shards_[sid.value];
     std::unique_lock write_lock{shard.write_mu_};
     std::forward<F>(f)(static_cast<const InternalMap&>(shard.map_), [&shard]() -> LockedMap {
       return {std::unique_lock<util::fb2::SharedMutex>{shard.read_mu_}, shard.map_};
@@ -167,7 +176,10 @@ class ShardedHashMap {
   // is NOT acquired, so this does not serialize against other writers. Use this when you
   // need to perform an external side-effect that must not race with readers of this shard
   // but the map itself is not being modified.
-  template <typename F> void WithReadExclusiveLock(const K& key, F&& f) {
+  //
+  // The template parameter Q allows heterogeneous lookup — any type hashable via
+  // Hash and comparable against K can be used.
+  template <typename Q, typename F> void WithReadExclusiveLock(const Q& key, F&& f) {
     Shard& shard = shards_[ShardOf(key)];
     std::unique_lock l{shard.read_mu_};
     std::forward<F>(f)();
@@ -175,9 +187,9 @@ class ShardedHashMap {
 
   // Shard-index overload of WithReadExclusiveLock. Same semantics but addresses the shard
   // directly by its index `sid` (0 <= sid < NUM_SHARDS).
-  template <typename F> void WithReadExclusiveLock(size_t sid, F&& f) {
-    DCHECK_LT(sid, NUM_SHARDS);
-    std::unique_lock l{shards_[sid].read_mu_};
+  template <typename F> void WithReadExclusiveLock(ShardId sid, F&& f) {
+    DCHECK_LT(sid.value, NUM_SHARDS);
+    std::unique_lock l{shards_[sid.value].read_mu_};
     std::forward<F>(f)();
   }
 

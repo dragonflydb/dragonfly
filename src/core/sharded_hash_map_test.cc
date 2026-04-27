@@ -146,7 +146,7 @@ TEST_F(ShardedHashMapTest, MutateByShard) {
   string key = "key1";
   size_t sid = map_.ShardOf(key);
 
-  map_.Mutate(sid, [&key](const auto& m, auto lock_readers) {
+  map_.Mutate(ShardedHashMap<string, int>::ShardId{sid}, [&key](const auto& m, auto lock_readers) {
     auto lm = lock_readers();
     lm.map[key] = 99;
   });
@@ -200,7 +200,8 @@ TEST_F(ShardedHashMapTest, WithReadExclusiveLockByKey) {
 
 TEST_F(ShardedHashMapTest, WithReadExclusiveLockByShard) {
   bool executed = false;
-  map_.WithReadExclusiveLock(size_t{0}, [&executed]() { executed = true; });
+  map_.WithReadExclusiveLock(ShardedHashMap<string, int>::ShardId{0},
+                             [&executed]() { executed = true; });
   EXPECT_TRUE(executed);
 }
 
