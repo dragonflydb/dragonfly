@@ -86,7 +86,7 @@ TEST_F(BlockingControllerTest, Basic) {
     BlockingController bc(shard, &namespaces->GetDefaultNamespace());
     auto keys = t->GetShardArgs(shard->shard_id());
     bc.AddWatched(
-        keys, [](auto...) { return true; }, t);
+        keys, [](auto...) { return KeyReadyResult::kReady; }, t);
     EXPECT_EQ(1, bc.NumWatched(0));
 
     bc.RemovedWatched(keys, t);
@@ -119,7 +119,7 @@ TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
 
     auto checker = [&checker_calls](EngineShard*, const DbContext&, std::string_view) {
       ++checker_calls;
-      return false;
+      return KeyReadyResult::kKeyNotFound;
     };
 
     for (auto& t : txs) {
@@ -131,7 +131,9 @@ TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
     bc.NotifyPending();
   });
 
-  EXPECT_EQ(0u, checker_calls) << "fast path did not short-circuit";
+  // With the enum-based fast path, the first item's checker is called once and returns
+  // kKeyNotFound, aborting the scan without visiting the remaining kWaiters-1 items.
+  EXPECT_EQ(1u, checker_calls) << "fast path did not short-circuit";
 }
 
 TEST_F(BlockingControllerTest, Timeout) {
@@ -140,7 +142,8 @@ TEST_F(BlockingControllerTest, Timeout) {
   bool paused;
 
   facade::OpStatus status = trans_->WaitOnWatch(
-      tp, Transaction::kShardArgs, [](auto...) { return true; }, &blocked, &paused);
+      tp, Transaction::kShardArgs, [](auto...) { return KeyReadyResult::kReady; }, &blocked,
+      &paused);
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(
