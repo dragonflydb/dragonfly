@@ -2149,7 +2149,7 @@ async def test_blocking_command_close_eof(df_server: DflyInstance):
     matching the reaper-driven leak seen in production with a Sidekiq/Puma
     connection-pool reaper that closes idle conns. The race only manifests
     under sustained concurrent open+close churn against BLPOP-parked conns;
-    a single batch is handled correctly. Plain `redis-server` closes its half
+    a single batch is handled correctly. Plain valkey closes its half
     immediately on FIN even mid-BLPOP.
     """
     client = df_server.client()
@@ -2158,7 +2158,6 @@ async def test_blocking_command_close_eof(df_server: DflyInstance):
     workers = 8
     conns_per_cycle = 25
     cycles = 4
-    park_seconds = 0.2
     blpop_cmd = b"*3\r\n$5\r\nBLPOP\r\n$10\r\n__no_queue\r\n$1\r\n0\r\n"
 
     def churn():
