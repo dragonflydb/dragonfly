@@ -12,10 +12,10 @@ import async_timeout
 import pytest
 import redis as base_redis
 from redis import asyncio as aioredis
-from redis.cache import CacheConfig
 from redis.backoff import NoBackoff
-from redis.retry import Retry
+from redis.cache import CacheConfig
 from redis.exceptions import ConnectionError, ResponseError
+from redis.retry import Retry
 
 from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory
@@ -60,10 +60,32 @@ class CollectingMonitor:
             async for message in monitor.listen():
                 self.messages.append(CollectedRedisMsg(message["command"], message["client_type"]))
 
+    async def _wait_monitor_ready(self):
+        probe = aioredis.Redis(connection_pool=self.client.connection_pool)
+        try:
+            # is bound by timeout of 5
+            while True:
+                marker = f"__monitor_ready__:{time.monotonic_ns()}"
+                expected = CollectedRedisMsg(f"ECHO {marker}")
+                await probe.echo(marker)
+                # only try a few times, retry if ECHO ran before MONITOR
+                for _ in range(10):
+                    if self._monitor_task.done():
+                        await self._monitor_task
+                        raise AssertionError("monitor task exited before MONITOR was registered")
+                    # monitor is set up now
+                    if expected in self.messages:
+                        self.messages.clear()
+                        return
+                    await asyncio.sleep(0.05)
+        finally:
+            await probe.aclose()
+
     async def start(self):
         if self._monitor_task is None:
             self._monitor_task = asyncio.create_task(self._monitor())
-        await asyncio.sleep(0.1)
+        async with async_timeout.timeout(5):
+            await self._wait_monitor_ready()
 
     async def stop(self, timeout=0.1):
         if self._monitor_task:
