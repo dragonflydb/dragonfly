@@ -2136,3 +2136,57 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await flood_task
         writer.close()
         await writer.wait_closed()
+
+
+async def test_blocking_command_close_eof(df_server: DflyInstance):
+    """Server must drop a connection that is parked on a blocking command
+    when the client closes its socket.
+
+    Without this handling, the connection's reader fiber is suspended waiting
+    for the blocking-command wakeup and does not observe the socket EOF, so
+    the FD lingers until the command times out or the client is CLIENT KILL'd.
+    Symptom: client sockets accumulate in FIN_WAIT_2 (server in CLOSE_WAIT),
+    matching the reaper-driven leak seen in production with a Sidekiq/Puma
+    connection-pool reaper that closes idle conns. The race only manifests
+    under sustained concurrent open+close churn against BLPOP-parked conns;
+    a single batch is handled correctly. Plain `redis-server` closes its half
+    immediately on FIN even mid-BLPOP.
+    """
+    client = df_server.client()
+    baseline = int((await client.info("clients"))["connected_clients"])
+
+    workers = 8
+    conns_per_cycle = 25
+    cycles = 4
+    park_seconds = 0.2
+    blpop_cmd = b"*3\r\n$5\r\nBLPOP\r\n$10\r\n__no_queue\r\n$1\r\n0\r\n"
+
+    def churn():
+        for _ in range(cycles):
+            socks = []
+            try:
+                for _ in range(conns_per_cycle):
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.connect(("127.0.0.1", df_server.port))
+                    s.sendall(blpop_cmd)
+                    socks.append(s)
+                    time.sleep(0.1)
+            finally:
+                for s in socks:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+
+    threads = [Thread(target=churn) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    await asyncio.to_thread(lambda: [t.join() for t in threads])
+
+    @assert_eventually(timeout=5)
+    async def wait_disconnected():
+        info = await client.info("clients")
+        assert int(info["connected_clients"]) <= baseline, info["connected_clients"]
+        assert int(info["blocked_clients"]) == 0, info["blocked_clients"]
+
+    await wait_disconnected()
