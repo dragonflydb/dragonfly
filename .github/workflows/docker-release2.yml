@@ -326,7 +326,7 @@ jobs:
 
     - name: Create Helm Chart PR
       if: env.IS_PRERELEASE != 'true'
-      uses: peter-evans/create-pull-request@v7
+      uses: peter-evans/create-pull-request@v8
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
         branch: helm-chart-update/${{ env.TAG_NAME }}
