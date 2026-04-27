@@ -3006,16 +3006,17 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   auto tp = (opts->timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts->timeout)
                             : Transaction::time_point::max();
 
-  const auto key_checker = [opts](EngineShard* owner, const DbContext& context, Transaction* tx,
-                                  std::string_view key) -> bool {
+  const auto key_checker = [opts](EngineShard* owner, const DbContext& context,
+                                  std::string_view key) -> KeyReadyResult {
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
     if (!res_it.ok())
-      return false;
+      return res_it.status() == OpStatus::WRONG_TYPE ? KeyReadyResult::kNotReady
+                                                     : KeyReadyResult::kKeyNotFound;
 
     StreamIDsItem& sitem = opts->stream_ids.at(key);
     if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
-      return true;
+      return KeyReadyResult::kReady;
 
     const CompactObj& cobj = (*res_it)->second;
     stream* s = GetReadOnlyStream(cobj);
@@ -3028,10 +3029,11 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     if (opts->read_group) {
       sitem.group = StreamLookupCG(s, WrapSds(opts->group_name));
       if (!sitem.group)
-        return true;  // abort
+        return KeyReadyResult::kReady;  // abort
     }
 
-    return streamCompareID(&last_id, &sitem.group->last_id) > 0;
+    return streamCompareID(&last_id, &sitem.group->last_id) > 0 ? KeyReadyResult::kReady
+                                                                : KeyReadyResult::kNotReady;
   };
 
   if (auto status =
