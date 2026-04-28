@@ -4409,6 +4409,42 @@ async def test_hnsw_search_replication_with_network_disruptions(
         await proxy.close(proxy_task)
 
 
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+async def test_hnsw_failover_chain(df_factory: DflyInstanceFactory, document_type: str):
+    """
+    Primary → replica1 → REPLTAKEOVER → attach replica2 to promoted node.
+    The promoted node must still serve KNN, and a freshly attached replica
+    must rebuild the HNSW index from the promoted node's data.
+    """
+    master = df_factory.create(proactor_threads=2)
+    replica1 = df_factory.create(proactor_threads=2)
+    replica2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica1, replica2])
+
+    c_master = master.client()
+    c1 = replica1.client()
+    c2 = replica2.client()
+
+    seeder = HnswSearchSeeder(num_initial_docs=300, num_dims=8, document_type=document_type)
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    await c1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c1)
+    await check_all_replicas_finished([c1], c_master)
+    await seeder.verify(c_master, c1)
+
+    # Promote replica1. The master exits after REPLTAKEOVER completes.
+    await c1.execute_command("REPLTAKEOVER 5")
+    assert (await c1.execute_command("role"))[0] == "master"
+
+    # Attach replica2 to the promoted node and verify it rebuilds HNSW.
+    await c2.execute_command(f"REPLICAOF localhost {replica1.port}")
+    await wait_available_async(c2)
+    await check_all_replicas_finished([c2], c1)
+    await seeder.verify(c1, c2)
+
+
 async def test_rm_replication(df_factory: DflyInstanceFactory):
     """Test that RM command propagates deletions to replica and is rejected on replica."""
     master = df_factory.create(proactor_threads=2)

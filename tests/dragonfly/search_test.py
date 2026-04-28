@@ -15,6 +15,8 @@ except ModuleNotFoundError:
 from redis.commands.search.query import Query
 
 from . import dfly_args
+from .instance import DflyInstanceFactory
+from .seeder import HnswSearchSeeder
 from .utility import *
 
 TEST_DATA = [
@@ -403,6 +405,90 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
         assert set(expected_ids) == set(got_ids)
 
     await i3.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
+@pytest.mark.parametrize("algo_type", ["HNSW", "FLAT"])
+async def test_vector_empty_and_update(async_client: aioredis.Redis, index_type, algo_type):
+    """KNN on an empty index returns no results; overwriting a vector moves the doc."""
+    idx = async_client.ft("vec_ops_" + str(index_type))
+    vector_field = VectorField(
+        "pos",
+        algorithm=algo_type,
+        attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2"},
+    )
+    await idx.create_index(
+        fix_schema_naming(index_type, [vector_field]),
+        definition=IndexDefinition(index_type=index_type),
+    )
+
+    async def set_pos(key, val):
+        if index_type == IndexType.HASH:
+            await async_client.hset(
+                key, mapping={"pos": np.array([val], dtype=np.float32).tobytes()}
+            )
+        else:
+            await async_client.json().set(key, "$", {"pos": [val]})
+
+    # Empty index: KNN must return no results, not crash.
+    assert await knn_query(idx, "* => [KNN 5 @pos $vec]", [0.0]) == set()
+
+    # Populate docs on the axis; k_target sits at 0.0.
+    await set_pos("k_target", 0.0)
+    for i in range(1, 10):
+        await set_pos(f"k{i}", float(i * 100))
+
+    # Before update: k_target is nearest to 0.0.
+    assert "k_target" in await knn_query(idx, "* => [KNN 1 @pos $vec]", [0.0])
+
+    # Overwrite k_target's vector to 1000.0 — it must move in the index.
+    await set_pos("k_target", 1000.0)
+    assert "k_target" in await knn_query(idx, "* => [KNN 1 @pos $vec]", [1000.0])
+    assert "k_target" not in await knn_query(idx, "* => [KNN 1 @pos $vec]", [0.0])
+
+    await idx.dropindex()
+
+
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+@pytest.mark.parametrize("start_threads, reload_threads", [(4, 4), (4, 2), (2, 4)])
+async def test_hnsw_reload_different_threads(
+    df_factory: DflyInstanceFactory, document_type, start_threads, reload_threads
+):
+    """HNSW KNN must still work after SAVE + restart with a different thread count."""
+    dbfilename = f"hnsw_threads_{tmp_file_name()}"
+    inst = df_factory.create(proactor_threads=start_threads, dbfilename=dbfilename)
+    inst.start()
+    client = inst.client()
+
+    seeder = HnswSearchSeeder(num_initial_docs=50, num_dims=8, document_type=document_type)
+    await seeder.create_index(client)
+    await seeder.seed_initial_docs(client)
+
+    query_vec = seeder._make_embedding().tobytes()
+    k = 10
+    _, before_ids = await seeder._search_knn(client, query_vec, k)
+
+    await client.execute_command("SAVE")
+    inst.stop()
+
+    inst2 = df_factory.create(proactor_threads=reload_threads, dbfilename=dbfilename)
+    inst2.start()
+    client2 = inst2.client()
+    await wait_available_async(client2)
+
+    assert await client2.dbsize() == seeder.num_initial_docs
+    _, after_ids = await seeder._search_knn(client2, query_vec, k)
+
+    # HNSW is approximate, so the top-k may shift across restarts. Docs that
+    # appear only post-reload are approximation noise — what matters for
+    # correctness is that every doc previously in top-k is still indexed. For
+    # each one missing from the reloaded top-k, confirm it with a TAG-filtered
+    # KNN (bypasses approximation).
+    for key in before_ids - after_ids:
+        assert await seeder._search_knn_filtered(
+            client2, query_vec, key, k=1
+        ), f"doc {key} lost from index after reload"
 
 
 @dfly_args({"proactor_threads": 4})
