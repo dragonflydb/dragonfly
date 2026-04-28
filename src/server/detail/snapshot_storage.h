@@ -21,6 +21,7 @@
 
 #include "io/io.h"
 #include "server/execution_state.h"
+#include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/utils.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"
@@ -157,7 +158,7 @@ class AzureSnapshotStorage : public SnapshotStorage {
 
   std::error_code CheckPath(const std::string& path) final;
 
-  std::unique_ptr<util::cloud::CredentialsProvider> creds_provider_;
+  std::unique_ptr<util::cloud::azure::Credentials> creds_provider_;
   SSL_CTX* ctx_ = NULL;
 };
 
