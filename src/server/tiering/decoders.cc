@@ -89,7 +89,9 @@ Decoder::UploadMetrics SerializedMapDecoder::GetMetrics() const {
   return UploadMetrics{.modified = modified_, .estimated_mem_usage = bytes};
 }
 
-void SerializedMapDecoder::Upload(CompactObj* obj) {
+void SerializedMapDecoder::Upload(void* robj) {
+  auto* obj = static_cast<CompactObj*>(robj);
+
   if (std::holds_alternative<std::unique_ptr<SerializedMap>>(map_))
     MakeOwned();
 

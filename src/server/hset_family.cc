@@ -272,8 +272,8 @@ auto ExecuteW(Transaction* tx, F&& f,
         hw.Launder(*res);
       };
 
-      es->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
-                                 std::move(read_cb));
+      es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb), false);
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -523,8 +523,8 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key, CmdA
       fut.Resolve(created);
     };
 
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, pv.GetExternalSlice(), D{},
-                                          std::move(read_cb));
+    op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
+                                          pv.GetExternalSlice(), D{}, std::move(read_cb), false);
     return CbVariant<uint32_t>{std::move(fut)};
   }
 
