@@ -134,6 +134,10 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
 }
 
 void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
+  // Fast path: nothing buffered and no buffer resize requested.
+  if (vecs_.empty() && (expected_buffer_cap == 0))
+    return;
+
   if (!vecs_.empty())
     Send();
 

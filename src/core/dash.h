@@ -348,7 +348,7 @@ class DashTable : public detail::DashTableBase {
   // Unlike Traverse, TraverseBuckets calls cb once on bucket iterator and not on each entry in
   // bucket. TraverseBuckets is stable during table mutations. It guarantees traversing all buckets
   // that existed at the beginning of traversal.
-  template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb, bool keep_empty = false);
+  template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb, bool visit_empty = false);
 
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
   // segment by segment over physical backets.
@@ -460,16 +460,16 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   uint32_t seg_id_;
   detail::PhysicalBid bucket_id_;
   uint8_t slot_id_;
-  bool done_ = false;
+  bool done_;
 
   friend class DashTable;
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid, uint8_t sid)
-      : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid) {
+      : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid), done_(false) {
   }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid)
-      : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(0) {
+      : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(0), done_(false) {
     Seek2Occupied();
   }
 
@@ -487,7 +487,8 @@ class DashTable<_Key, _Value, Policy>::Iterator {
       : owner_(other.owner_),
         seg_id_(other.seg_id_),
         bucket_id_(other.bucket_id_),
-        slot_id_(other.slot_id_) {
+        slot_id_(other.slot_id_),
+        done_(other.done_) {
   }
 
   // Copy constructor from iterator to bucket_iterator and vice versa.
@@ -566,10 +567,11 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
-    if (lhs.owner_ == nullptr && rhs.owner_ == nullptr)
+    if (lhs.done_ && rhs.done_)
       return true;
     return lhs.owner_ == rhs.owner_ && lhs.seg_id_ == rhs.seg_id_ &&
-           lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_;
+           lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_ &&
+           lhs.done_ == rhs.done_;
   }
 
   friend bool operator!=(const Iterator& lhs, const Iterator& rhs) {
@@ -1166,7 +1168,7 @@ auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) ->
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb, bool keep_empty)
+auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb, bool visit_empty)
     -> Cursor {
   if (SegmentType::OutOfRange(cursor.bucket_id()))  // sanity.
     return Cursor::end();
@@ -1181,7 +1183,7 @@ auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb, bo
     assert(s);
     if (bid < s->num_buckets()) {
       const auto& bucket = s->GetBucket(bid);
-      if (keep_empty || bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
+      if (visit_empty || bucket.GetBusy()) {
         cb(BucketIt(sid, bid));
         invoked = true;
       }

@@ -73,12 +73,32 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
-  auto serialize_entry = [&](decltype(delayed_entries_)::iterator it) {
-    auto& entry = it->second;
+  // Extract ahead because of possible iterator invalidation during suspension (Get/Serialize)
+  // if multiple fibers progress on delayed entries
+  std::vector<decltype(delayed_entries_)::node_type> targets;
+
+  // Flush all entries of bucket if provided
+  if (flush_bucket) {
+    auto [it, end] = delayed_entries_.equal_range(flush_bucket);
+    while (it != end)
+      targets.push_back(delayed_entries_.extract(it++));
+  }
+
+  // Serialize the delayed entries that are resolved, or all if force it true
+  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
+    if (!force && !it->second->value.IsResolved())
+      it++;
+    else
+      targets.push_back(delayed_entries_.extract(it++));
+  }
+
+  // Serialize all targets
+  for (auto& target : targets) {
+    auto& entry = target.mapped();
     auto value = entry->value.Get();
 
     if (!value.has_value()) {
-      deps_.Decrement(it->first);
+      deps_.Decrement(target.key());
       cntx->ReportError(make_error_code(std::errc::io_error),
                         absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
       return;
@@ -87,25 +107,8 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
     PrimeValue pv{*value};
     SerializeFetchedEntry(*entry, pv);
 
-    deps_.Decrement(it->first);
-    delayed_entries_.erase(it++);
+    deps_.Decrement(target.key());
   };
-
-  // Flush all entries of bucket
-  if (flush_bucket) {
-    auto range = delayed_entries_.equal_range(flush_bucket);
-    for (auto it = range.first; it != range.second;) {
-      serialize_entry(it++);
-    }
-  }
-
-  // Serialize the delayed entries that are resolved, or all if force it true.
-  for (auto it = delayed_entries_.begin(); it != delayed_entries_.end();) {
-    if (!force && !it->second->value.IsResolved())
-      it++;
-    else
-      serialize_entry(it++);
-  }
 }
 
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
@@ -141,25 +144,20 @@ void SerializerBase::UnregisterChangeListener() {
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                    bool on_update) {
-  std::lock_guard guard(big_value_mu_);
-  return ProcessBucketInternal(db_index, it, on_update);
-}
-
-bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                           bool on_update) {
-  DCHECK(big_value_mu_.is_locked());
-
   // Check if this bucket is stale
   if (it.GetVersion() >= snapshot_version_) {
     stats_.buckets_skipped++;
+
+    // Update versions for empty buckets
+    if (it.GetVersion() < snapshot_version_)
+      it.SetVersion(snapshot_version_);
 
     // Force flush all delayed entries in the touched bucket
     if (EngineShard::tlocal()->tiered_storage() != nullptr && on_update)
       ProcessDelayedEntries(false, it.bucket_address(), base_cntx_);
 
-    // Expected to be fully serialized due to big_value_mu_ guarding all paths
-    // Otherwise, this needs to be changed to a wait
-    DCHECK(!BucketDependencies::DEBUG_IsBusy(it.bucket_address()));
+    // Wait for all dependencies to be resolved
+    BucketDependencies::Wait(it.bucket_address());
     return false;
   }
 
@@ -180,6 +178,10 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
     db_guard.emplace(*db_slice_->GetLatch());
   }
 
+  // The block above with updating earlier callbacks is not exlusive - check version again
+  if (it.GetVersion() >= snapshot_version_)
+    return ProcessBucket(db_index, it, on_update);  // for the false path
+
   // We call it before SerializeBucketLocked because it dchecks on bucket version.
   it.SetVersion(snapshot_version_);
   BucketDependencies::Increment(it.bucket_address());
@@ -189,15 +191,6 @@ bool SerializerBase::ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_
   stats_.buckets_on_change += unsigned(on_update);
 
   BucketDependencies::Decrement(it.bucket_address());
-
-  // Assert the version is equal to a snapshot version (might be a different concurrent one),
-  // to prove no concurrent modifications are possible (they would've assigned a different version)
-#if !defined(NDEBUG)
-  DCHECK_GE(it.GetVersion(), snapshot_version_);
-  auto current_snapshots = db_slice_->SnapshotVersions();
-  DCHECK(std::ranges::find(current_snapshots, it.GetVersion()) != current_snapshots.end())
-      << absl::StrJoin(current_snapshots, " ") << " does not contain " << it.GetVersion();
-#endif
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
@@ -218,15 +211,10 @@ void SerializerBase::OnChangeBlocking(DbIndex db_index, PrimeTable::bucket_itera
   ProcessBucket(db_index, it, true);
 }
 
-void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& set) {
-  // We must acquire the mutex ahead and process all buckets under the same lock.
-  // This ensures that bucket processing and the table insertion that invoked this callback
-  // will be operating on the same state as all writes are linarly ordered by this mutex.
-  std::unique_lock lk{big_value_mu_};
-
+void SerializerBase::OnChangeBlocking(DbIndex db_index, const PrimeTable::BucketSet& bucket_set) {
   // We call Process even for up-to-date buckets to ensure all operations (delayed) are finished.
-  for (auto it : set.buckets())
-    ProcessBucketInternal(db_index, it, true);
+  for (auto it : bucket_set.buckets())
+    ProcessBucket(db_index, it, true);
 }
 
 }  // namespace dfly

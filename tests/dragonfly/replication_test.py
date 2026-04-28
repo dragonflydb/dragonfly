@@ -261,6 +261,11 @@ async def test_replication_all(
         print("total omits", info["total_journal_omits"])
         assert info["total_journal_omits"] > 0
 
+    # Assert select calls are properly optimized
+    for replica in c_replicas:
+        select_calls = (await replica.info("ALL"))["cmdstat_select"]["calls"]
+        assert select_calls < 16
+
 
 """
 Regression test for the double-apply bug during full sync.
@@ -4411,6 +4416,42 @@ async def test_hnsw_search_replication_with_network_disruptions(
         await proxy.close(proxy_task)
 
 
+@pytest.mark.parametrize("document_type", ["HASH", "JSON"])
+async def test_hnsw_failover_chain(df_factory: DflyInstanceFactory, document_type: str):
+    """
+    Primary → replica1 → REPLTAKEOVER → attach replica2 to promoted node.
+    The promoted node must still serve KNN, and a freshly attached replica
+    must rebuild the HNSW index from the promoted node's data.
+    """
+    master = df_factory.create(proactor_threads=2)
+    replica1 = df_factory.create(proactor_threads=2)
+    replica2 = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica1, replica2])
+
+    c_master = master.client()
+    c1 = replica1.client()
+    c2 = replica2.client()
+
+    seeder = HnswSearchSeeder(num_initial_docs=300, num_dims=8, document_type=document_type)
+    await seeder.create_index(c_master)
+    await seeder.seed_initial_docs(c_master)
+
+    await c1.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c1)
+    await check_all_replicas_finished([c1], c_master)
+    await seeder.verify(c_master, c1)
+
+    # Promote replica1. The master exits after REPLTAKEOVER completes.
+    await c1.execute_command("REPLTAKEOVER 5")
+    assert (await c1.execute_command("role"))[0] == "master"
+
+    # Attach replica2 to the promoted node and verify it rebuilds HNSW.
+    await c2.execute_command(f"REPLICAOF localhost {replica1.port}")
+    await wait_available_async(c2)
+    await check_all_replicas_finished([c2], c1)
+    await seeder.verify(c1, c2)
+
+
 async def test_rm_replication(df_factory: DflyInstanceFactory):
     """Test that RM command propagates deletions to replica and is rejected on replica."""
     master = df_factory.create(proactor_threads=2)
@@ -4633,3 +4674,51 @@ async def test_hnsw_external_vector_replication_crash(df_factory: DflyInstanceFa
     await traffic_task
 
     await check_all_replicas_finished([c_replica], c_master, timeout=60)
+
+
+async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
+    dbfilename = f"dump_{tmp_file_name()}"
+
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # Populate initial data and save a snapshot.
+    seeder = DebugPopulateSeeder(key_target=1000, data_size=100)
+    await seeder.run(c_master)
+    await c_master.execute_command("SAVE", "DF", dbfilename)
+    await c_master.execute_command("FLUSHALL")
+
+    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
+    await wait_available_async(c_replica)
+
+    # Stream writes during DFLY LOAD to exercise the race between journal
+    # writes and the load that bypasses the journal. LOADING state rejects
+    # seeder Lua scripts, so the seeder task may fail.
+    stream_seeder = SeederV2(key_target=500)
+    seed_task = asyncio.create_task(stream_seeder.run(c_master, target_deviation=0.1))
+    await asyncio.sleep(
+        0.5
+    )  # Let the seeder start and write some data before we load the snapshot.
+
+    await c_master.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
+
+    await asyncio.sleep(0.5)  # Let the seeder fail because of the loading state.
+    seed_task.cancel()
+    try:
+        await seed_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    # Wait for the replica to complete the new full sync.
+    await wait_for_replicas_state(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    master_capture = await DebugPopulateSeeder.capture(c_master)
+    replica_capture = await DebugPopulateSeeder.capture(c_replica)
+    assert master_capture == replica_capture
+
+    await c_replica.execute_command("REPLICAOF", "NO", "ONE")

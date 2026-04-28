@@ -181,7 +181,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
       snapshot_cursor_ = pt->TraverseBuckets(
           snapshot_cursor_,
-          [this, snapshot_db_indx](auto it) { ProcessBucket(snapshot_db_indx, it, false); }, true);
+          [this, snapshot_db_indx](auto it) { ProcessBucket(snapshot_db_indx, it, false); },
+          true /* include empty buckets */);
 
       if (use_background_mode_) {
         // Yielding for background fibers has low overhead if the time slice isn't used up.
@@ -198,12 +199,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
     } while (snapshot_cursor_);
 
-    DVLOG(2) << "after loop " << ThisFiber::GetName();
     // Wait for all the outstanding delayed entries and serialize them as well.
-    {
-      std::lock_guard guard(big_value_mu_);
-      ProcessDelayedEntries(true, 0, cntx_);
-    }
+    ProcessDelayedEntries(true, 0, cntx_);
 
     PushSerialized(true);
   }  // for (dbindex)
@@ -246,6 +243,7 @@ unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::buck
 }
 
 void SliceSnapshot::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  std::lock_guard lk{stream_mu_};
   auto res = serializer_->SaveEntry(tde.key, pv, tde.expire, tde.mc_flags, tde.dbid);
   CHECK(res);
 }
@@ -263,6 +261,7 @@ void SliceSnapshot::SerializeEntry(BucketIdentity bucket, DbIndex db_indx, const
     EnqueueOffloaded(bucket, db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
+    std::lock_guard lk{stream_mu_};
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
@@ -273,7 +272,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   if (data.empty())
     return;
 
-  if (big_value_mu_.is_locked()) {
+  if (stream_mu_.is_locked()) {
     ++stats_.flushed_under_lock;
   }
   size_t serialized = data.size();
@@ -345,7 +344,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
 // guaranteed by call order on the mutation fiber (OnChange precedes ConsumeJournalChange);
 // big_value_mu_ is not needed for that ordering.
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
-  std::lock_guard barrier(big_value_mu_);
+  std::lock_guard lk{stream_mu_};
 
   // remove when we support interleaving chunks.
   LOG_IF(DFATAL, serialize_bucket_running_)

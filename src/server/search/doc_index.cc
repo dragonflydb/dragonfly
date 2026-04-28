@@ -807,7 +807,8 @@ optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
   if (!it || !IsValid(*it))
     return std::nullopt;
 
-  return {{key, GetAccessor(op_args.db_cntx, (*it)->second)}};
+  // Pass key so StringMapAccessor can clean up if lazy expiry empties the hash.
+  return {{key, GetAccessor(op_args.db_cntx, (*it)->second, key)}};
 }
 
 vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
@@ -872,8 +873,13 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   bool skip_sort = false;
   if (auto ko = search_algo->GetKnnScoreSortOption(); ko) {
     skip_sort = !params.sort_option || params.sort_option->IsSame(*ko);
-    if (!skip_sort)
+    if (skip_sort) {
+      // Caller (SearchReply) will globally reorder by knn_score. Don't cut at the
+      // shard level — otherwise multi-shard top-K-by-distance can drop true winners.
+      limit = numeric_limits<size_t>::max();
+    } else {
       limit = max(limit, ko->limit);
+    }
   }
 
   // We don't apply limit if this is prefilter HNSW KNN search
@@ -904,7 +910,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     // If we sorted with knn_scores present, rearrange them
     if (!sort_scores.empty() && !result.knn_scores.empty()) {
-      unordered_map<DocId, size_t> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
+      unordered_map<DocId, float> score_lookup(result.knn_scores.begin(), result.knn_scores.end());
       for (size_t i = 0; i < min(limit, result.ids.size()); i++)
         result.knn_scores[i] = {result.ids[i], score_lookup[result.ids[i]]};
     }
@@ -913,6 +919,11 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   // Cut off unnecessary items
   result.ids.resize(min(result.ids.size(), limit));
 
+  // Build text score lookup (DocId -> score) if available
+  absl::flat_hash_map<search::DocId, float> text_score_map;
+  for (const auto& [doc, score] : result.text_scores)
+    text_score_map[doc] = score;
+
   // Serialize documents
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
@@ -920,12 +931,15 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
     float knn_score = result.knn_scores.empty() ? 0 : result.knn_scores[i].second;
+    float text_score = 0;
+    if (auto it = text_score_map.find(result.ids[i]); it != text_score_map.end())
+      text_score = it->second;
     auto sort_score = sort_scores.empty() ? std::monostate{} : std::move(sort_scores[i]);
 
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
       string_view key = key_index_.Get(result.ids[i]);
-      out.push_back({result.ids[i], string{key}, {}, knn_score, sort_score});
+      out.push_back({result.ids[i], string{key}, {}, knn_score, text_score, sort_score});
       continue;
     }
 
@@ -944,7 +958,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     auto more_fields = accessor->Serialize(base_->schema, return_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
-    out.push_back({result.ids[i], string{key}, std::move(fields), knn_score, sort_score});
+    out.push_back(
+        {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
   }
 
   return {result.total - expired_count, std::move(out), std::move(result.profile)};
@@ -969,13 +984,22 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
       knn_score_map[doc_id] = dist;
   }
 
-  return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map);
+  // Build text score lookup for ADDSCORES injection (keyed by DocId, safe across expired docs)
+  absl::flat_hash_map<DocId, float> text_score_map;
+  if (params.add_scores && !search_results.text_scores.empty()) {
+    text_score_map.reserve(search_results.text_scores.size());
+    for (auto& [doc_id, score] : search_results.text_scores)
+      text_score_map[doc_id] = score;
+  }
+
+  return LoadDocEntriesWithScores(op_args, params, search_results.ids, score_alias, knn_score_map,
+                                  text_score_map);
 }
 
 vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
-    absl::Span<const std::pair<search::DocId, float>> doc_distances,
-    std::string_view score_alias) const {
+    absl::Span<const std::pair<search::DocId, float>> doc_distances, std::string_view score_alias,
+    const absl::flat_hash_map<search::DocId, float>& text_score_map) const {
   vector<DocId> ids;
   absl::flat_hash_map<DocId, float> score_map;
   ids.reserve(doc_distances.size());
@@ -984,13 +1008,13 @@ vector<SearchDocData> ShardDocIndex::LoadHnswRangeDocsForAggregator(
     ids.push_back(doc_id);
     score_map[doc_id] = dist;
   }
-  return LoadDocEntriesWithScores(op_args, params, ids, score_alias, score_map);
+  return LoadDocEntriesWithScores(op_args, params, ids, score_alias, score_map, text_score_map);
 }
 
 vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
-    std::string_view score_alias,
-    const absl::flat_hash_map<search::DocId, float>& score_map) const {
+    std::string_view score_alias, const absl::flat_hash_map<search::DocId, float>& score_map,
+    const absl::flat_hash_map<search::DocId, float>& text_score_map) const {
   auto [fields_to_load, sort_indicies] =
       PreprocessAggregateFields(base_->schema, params, params.load_fields);
 
@@ -1016,6 +1040,11 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
       auto it = score_map.find(doc);
       if (it != score_map.end())
         out.back()[string{score_alias}] = static_cast<double>(it->second);
+    }
+
+    if (!text_score_map.empty()) {
+      if (auto it = text_score_map.find(doc); it != text_score_map.end())
+        out.back()["__score"] = static_cast<double>(it->second);
     }
   }
   return out;

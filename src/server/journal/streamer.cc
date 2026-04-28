@@ -495,10 +495,7 @@ void RestoreStreamer::Run() {
   } while (cursor);
 
   // Force serialize of all delayed entries.
-  {
-    std::lock_guard guard(big_value_mu_);
-    ProcessDelayedEntries(true, 0, cntx_);
-  }
+  ProcessDelayedEntries(true, 0, cntx_);
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
@@ -601,6 +598,7 @@ unsigned RestoreStreamer::SerializeBucketLocked(DbIndex /* unused */,
 }
 
 void RestoreStreamer::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
+  std::lock_guard lk{stream_mu_};
   cmd_serializer_->SerializeEntry(tde.key.ToString(), tde.key, pv, tde.expire);
 }
 
@@ -618,6 +616,7 @@ void RestoreStreamer::WriteEntry(BucketIdentity bucket, string_view key, const P
       EnqueueOffloaded(bucket, 0, PrimeKey{key}, pv, expire_ms, mc_flags);
     }
   } else {
+    std::lock_guard lk{stream_mu_};
     stats_.commands += cmd_serializer_->SerializeEntry(key, pk, pv, expire_ms);
   }
 }

@@ -44,7 +44,8 @@ struct SerializedSearchDoc {
   search::DocId id;
   std::string key;
   SearchDocData values;
-  float knn_score;
+  float knn_score = 0;
+  float text_score = 0;
   search::SortableValue sort_score;
 };
 
@@ -129,6 +130,9 @@ struct SearchParams {
 
   search::QueryParams query_params;
 
+  bool with_scores = false;           // WITHSCORES flag
+  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
+
   bool ShouldReturnAllFields() const {
     return !return_fields.has_value();
   }
@@ -191,6 +195,9 @@ struct AggregateParams {
 
   std::optional<std::vector<FieldReference>> load_fields;
   std::vector<aggregate::AggregationStep> steps;
+
+  bool add_scores = false;            // ADDSCORES flag
+  search::ScorerFn scorer = nullptr;  // SCORER parameter (null = not set)
 };
 
 // Stores basic info about a document index.
@@ -358,8 +365,8 @@ class ShardDocIndex {
   // from the global HNSW index rather than a per-shard search.
   std::vector<SearchDocData> LoadHnswRangeDocsForAggregator(
       const OpArgs& op_args, const AggregateParams& params,
-      absl::Span<const std::pair<search::DocId, float>> doc_distances,
-      std::string_view score_alias) const;
+      absl::Span<const std::pair<search::DocId, float>> doc_distances, std::string_view score_alias,
+      const absl::flat_hash_map<search::DocId, float>& text_score_map) const;
 
   // Methods needed for join operation
   join::Vector<join::OwnedEntry> PreagregateDataForJoin(
@@ -473,8 +480,8 @@ class ShardDocIndex {
   // Loads, serializes, and (optionally) injects the YIELD_DISTANCE_AS alias for each doc.
   std::vector<SearchDocData> LoadDocEntriesWithScores(
       const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
-      std::string_view score_alias,
-      const absl::flat_hash_map<search::DocId, float>& score_map) const;
+      std::string_view score_alias, const absl::flat_hash_map<search::DocId, float>& score_map,
+      const absl::flat_hash_map<search::DocId, float>& text_score_map) const;
 
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);

@@ -18,6 +18,7 @@
 namespace dfly {
 
 class ExecutionState;
+struct TestDriver;
 
 // Opaque identity for a physical DashTable bucket — its memory address.
 // Unique across all databases/segments for the lifetime of a serialization.
@@ -66,6 +67,8 @@ struct DelayedEntryHandler {
   }
 
  private:
+  friend struct TestDriver;
+
   BucketDependencies& deps_;
 
   // Entries that are waiting for tiered storage reads to complete before they can be serialized.
@@ -125,13 +128,13 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   DbTableArray db_array_;
 
   uint64_t snapshot_version_ = 0;
-  ThreadLocalMutex big_value_mu_;
   Stats stats_;
 
- private:
-  // Process single bucket and call SerializeBucket. Return true if processed, false if skipped
-  bool ProcessBucketInternal(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
+  // Guards output stream (serializer) to not be used from multiple fibers
+  // as buffered changes can be flushed amid writing a value (logical stream)
+  ThreadLocalMutex stream_mu_;
 
+ private:
   uint64_t change_cb_id_ = 0;
 };
 

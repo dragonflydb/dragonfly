@@ -34,6 +34,15 @@ void StartInThreadAtLsn(LSN lsn) {
   journal_slice.SetStartingLSN(lsn);
 }
 
+void ClearBuffer() {
+  journal_slice.ResetRingBuffer();
+  // Advance LSN so that any stale LSN from a pre-clear replica no longer
+  // matches journal::GetLsn(); otherwise the partial-sync fast path in
+  // DflyCmd::IsLSNInPartialSyncBuffer would let a reconnecting replica skip
+  // full sync even though the buffer is empty.
+  journal_slice.SetStartingLSN(journal_slice.cur_lsn() + 1);
+}
+
 error_code Close() {
   VLOG(1) << "Journal::Close";
 

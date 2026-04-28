@@ -146,6 +146,8 @@ class Coordinator::CrossShardClient : public ProtocolClient {
   }
 
  private:
+  ExecutionState exec_st_;
+
   std::queue<std::shared_ptr<CrossShardRequest>> send_queue_;
   std::queue<std::shared_ptr<CrossShardRequest>> resp_queue_;
 

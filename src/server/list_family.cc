@@ -945,6 +945,15 @@ void BLMove(CmdArgList args, CommandContext* cmd_cntx) {
   }
 }
 
+KeyReadyResult ListKeyChecker(EngineShard* owner, const DbContext& context, std::string_view key) {
+  auto res = context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST);
+  if (res.ok())
+    return KeyReadyResult::kReady;
+  if (res.status() == OpStatus::WRONG_TYPE)
+    return KeyReadyResult::kNotReady;
+  return KeyReadyResult::kKeyNotFound;
+}
+
 BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir)
     : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
 }
@@ -986,13 +995,8 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     return op_res;
   }
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
-                              std::string_view key) -> bool {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
-  };
-
   // Block
-  auto status = tx->WaitOnWatch(tp, pop_key_, key_checker, &(cntx->blocked), &(cntx->paused));
+  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &(cntx->blocked), &(cntx->paused));
   if (status != OpStatus::OK)
     return status;
 
@@ -1012,16 +1016,11 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
     return op_res;
   }
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
-                              std::string_view key) -> bool {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
-  };
-
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  if (auto status = tx->WaitOnWatch(tp, pop_key_, key_checker, &cntx->blocked, &cntx->paused);
+  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &cntx->blocked, &cntx->paused);
       status != OpStatus::OK)
     return status;
 
@@ -1163,8 +1162,7 @@ void CmdLMPop(CmdArgList args, CommandContext* cmd_cntx) {
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
   size_t pop_count = 1;
-  if (parser.Check("COUNT"))
-    pop_count = parser.Next<size_t>();
+  parser.Check("COUNT", &pop_count);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1252,8 +1250,7 @@ void CmdBLMPop(CmdArgList args, CommandContext* cmd_cntx) {
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
   size_t pop_count = 1;
-  if (parser.Check("COUNT"))
-    pop_count = parser.Next<size_t>();
+  parser.Check("COUNT", &pop_count);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -1320,38 +1317,19 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
   auto [key, elem] = parser.Next<string_view, string_view>();
 
   int rank = 1;
-  uint32_t count = 1;
+  std::optional<uint32_t> count;
   uint32_t max_len = 0;
-  bool skip_count = true;
 
-  while (parser.HasNext()) {
-    if (parser.Check("RANK")) {
-      rank = parser.Next<int>();
-      continue;
-    }
+  parser.ApplyOrSkip(Tag("RANK", &rank), Tag("COUNT", &count), Tag("MAXLEN", &max_len));
 
-    if (parser.Check("COUNT")) {
-      count = parser.Next<uint32_t>();
-      skip_count = false;
-      continue;
-    }
-
-    if (parser.Check("MAXLEN")) {
-      max_len = parser.Next<uint32_t>();
-      continue;
-    }
-
-    parser.Skip(1);
-  }
+  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (rank == 0)
     return rb->SendError(kInvalidIntErr);
 
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
   auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
-    return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
+    return OpPos(t->GetOpArgs(shard), key, elem, rank, count.value_or(1), max_len);
   };
 
   Transaction* trans = cmd_cntx->tx();
@@ -1363,7 +1341,7 @@ void CmdLPos(CmdArgList args, CommandContext* cmd_cntx) {
     return rb->SendError(result.status());
   }
 
-  if (skip_count) {
+  if (!count.has_value()) {
     if (result->empty()) {
       rb->SendNull();
     } else {

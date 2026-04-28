@@ -12,6 +12,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -35,6 +36,10 @@ struct SbfParams {
 
 using AddResult = absl::InlinedVector<OpResult<bool>, 4>;
 using ExistsResult = absl::InlinedVector<bool, 4>;
+
+bool IsBeingLoaded(const SBF* sbf) {
+  return sbf->num_filters() == 0;
+}
 
 OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
@@ -64,6 +69,9 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList ite
   }
 
   SBF* sbf = pv.GetSBF();
+  if (IsBeingLoaded(sbf))
+    return OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS;
+
   AddResult result(items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     result[i] = sbf->Add(ToSV(items[i]));
@@ -79,6 +87,9 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
   auto it = (*op_res);
 
   const SBF* sbf = it->second.GetSBF();
+  if (IsBeingLoaded(sbf))
+    return OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS;
+
   ExistsResult result(items.size());
 
   for (size_t i = 0; i < items.size(); ++i) {
@@ -86,6 +97,54 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
   }
 
   return result;
+}
+
+OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_view key,
+                     int64_t cursor) {
+  auto& db_slice = op_args.GetDbSlice();
+
+  if (cursor == 1) {  // Init phase
+    auto load_result = LoadSBFHeader(blob, CompactObj::memory_resource());
+    if (!load_result.has_value()) {
+      LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid header"
+                               << " key=" << key << " cursor=" << cursor
+                               << " blob_size=" << blob.size()
+                               << " load_res=" << ToString(load_result.error());
+      return OpStatus::INVALID_VALUE;
+    }
+
+    // type set to nullopt to find any type key and overwrite it, not just SBF
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
+    if (!op_res) {
+      CompactObj::DeleteMR<SBF>(load_result.value());
+      return op_res.status();
+    }
+
+    // LOADCHUNK overwrites existing key
+    if (!op_res->is_new) {
+      // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
+      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
+      db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
+    }
+
+    op_res->it->second.SetSBF(load_result.value());
+    return OpStatus::OK;
+  }  // cursor == 1 (Init phase)
+
+  // Continue loading chunks into not-yet-fully-loaded filter.
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SBF);
+  if (!op_res)
+    return op_res.status();
+
+  SBF* sbf = op_res->it->second.GetSBF();
+  if (auto load_res = LoadSBFChunk(cursor, blob, sbf); load_res != SBFLoadResult::kOk) {
+    LOG_EVERY_T(WARNING, 10) << "BF.LOADCHUNK invalid chunk"
+                             << " key=" << key << " cursor=" << cursor
+                             << " blob_size=" << blob.size() << " load_res=" << ToString(load_res);
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  return OpStatus::OK;
 }
 
 void CmdReserve(CmdArgList args, CommandContext* cmd_cntx) {
@@ -140,6 +199,10 @@ void CmdExists(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
+
+  if (!res && res.status() == OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS)
+    return cmd_cntx->SendError(res.status());
+
   return cmd_cntx->SendLong(res ? res->front() : 0);
 }
 
@@ -153,9 +216,8 @@ void CmdMAdd(CmdArgList args, CommandContext* cmd_cntx) {
 
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (!res) {
+  if (!res)
     return rb->SendError(res.status());
-  }
   const AddResult& add_res = *res;
 
   RedisReplyBuilder::ArrayScope scope{rb, add_res.size()};
@@ -186,20 +248,48 @@ void CmdScanDump(CmdArgList args, CommandContext* cmd_cntx) {
       return op_res.status();
 
     const SBF* sbf = op_res.value()->second.GetSBF();
+    if (IsBeingLoaded(sbf))
+      return OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS;
+
     SBFDumpIterator it(*sbf, cursor);
     return it.Next();
   };
 
   OpResult<SBFChunk> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  if (!res) {
+  if (!res)
     return rb->SendError(res.status());
-  }
 
   RedisReplyBuilder::ArrayScope scope{rb, 2};
   rb->SendLong(res->cursor);
   if (res->cursor == 0)
     DCHECK(res->data.empty()) << " scan ended with inconsistent state";
   rb->SendBulkString(res->data);
+}
+
+void CmdLoadChunk(CmdArgList args, CommandContext* cmd_cntx) {
+  CmdArgParser parser(args);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  const std::string_view key = parser.Next();
+
+  const int64_t cursor = parser.Next<int64_t>();
+  if (const auto err = parser.TakeError(); err)
+    return rb->SendError(err.MakeReply());
+
+  if (cursor <= 0)
+    return rb->SendError(kInvalidIntErr);
+
+  const std::string_view blob = parser.Next();
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpLoadChunk(t->GetOpArgs(shard), blob, key, cursor);
+  };
+
+  const OpStatus res = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (res == OpStatus::OK)
+    return rb->SendOk();
+  if (res == OpStatus::INVALID_VALUE)
+    return rb->SendError("INVALIDOBJ invalid bloom dump payload");
+  return rb->SendError(res);
 }
 
 void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
@@ -211,8 +301,11 @@ void CmdMExists(CmdArgList args, CommandContext* cmd_cntx) {
   };
 
   OpResult res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  if (!res && res.status() == OpStatus::BLOOM_FILTER_LOAD_IN_PROGRESS)
+    return rb->SendError(res.status());
+
   RedisReplyBuilder::ArrayScope scope{rb, args.size()};
   for (size_t i = 0; i < args.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);
@@ -228,14 +321,15 @@ using CI = CommandId;
 void RegisterBloomFamily(CommandRegistry* registry) {
   registry->StartFamily();
 
-  *registry << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
-                   Reserve)
-            << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
-            << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(
-                   MAdd)
-            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
-            << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump);
+  *registry
+      << CI{"BF.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
+             Reserve)
+      << CI{"BF.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
+      << CI{"BF.MADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MAdd)
+      << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
+      << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists)
+      << CI{"BF.SCANDUMP", CO::READONLY, 3, 1, 1, acl::BLOOM}.HFUNC(ScanDump)
+      << CI{"BF.LOADCHUNK", CO::JOURNALED | CO::DENYOOM, 4, 1, 1, acl::BLOOM}.HFUNC(LoadChunk);
 };
 
 }  // namespace dfly

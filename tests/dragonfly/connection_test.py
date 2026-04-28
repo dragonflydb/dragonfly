@@ -12,16 +12,29 @@ import async_timeout
 import pytest
 import redis as base_redis
 from redis import asyncio as aioredis
-from redis.cache import CacheConfig
 from redis.backoff import NoBackoff
-from redis.retry import Retry
+from redis.cache import CacheConfig
 from redis.exceptions import ConnectionError, ResponseError
+from redis.retry import Retry
 
 from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory
 from .utility import tick_timer, assert_eventually
 
 BASE_PORT = 1111
+
+
+def is_io_loop_v2(server: DflyInstance) -> bool:
+    """Check if the server is running with experimental_io_loop_v2 enabled.
+
+    When the flag is passed as a bare flag (--experimental_io_loop_v2), the test runner
+    stores its value as None instead of "true". This function checks both has_arg() and
+    != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
+    """
+    return (
+        server.has_arg("experimental_io_loop_v2")
+        and server.args.get("experimental_io_loop_v2") != "false"
+    )
 
 
 @dataclass(frozen=True)
@@ -47,10 +60,32 @@ class CollectingMonitor:
             async for message in monitor.listen():
                 self.messages.append(CollectedRedisMsg(message["command"], message["client_type"]))
 
+    async def _wait_monitor_ready(self):
+        probe = aioredis.Redis(connection_pool=self.client.connection_pool)
+        try:
+            # is bound by timeout of 5
+            while True:
+                marker = f"__monitor_ready__:{time.monotonic_ns()}"
+                expected = CollectedRedisMsg(f"ECHO {marker}")
+                await probe.echo(marker)
+                # only try a few times, retry if ECHO ran before MONITOR
+                for _ in range(10):
+                    if self._monitor_task.done():
+                        await self._monitor_task
+                        raise AssertionError("monitor task exited before MONITOR was registered")
+                    # monitor is set up now
+                    if expected in self.messages:
+                        self.messages.clear()
+                        return
+                    await asyncio.sleep(0.05)
+        finally:
+            await probe.aclose()
+
     async def start(self):
         if self._monitor_task is None:
             self._monitor_task = asyncio.create_task(self._monitor())
-        await asyncio.sleep(0.1)
+        async with async_timeout.timeout(5):
+            await self._wait_monitor_ready()
 
     async def stop(self, timeout=0.1):
         if self._monitor_task:
@@ -667,15 +702,22 @@ async def test_reply_count(df_server: DflyInstance):
     for _ in range(100):
         e.incr("num-1")
 
-    # one - for MULTI-OK, one for the rest. Depends on the squashing efficiency,
-    # can be either 1 or 2 replies.
-    assert await measure(e.execute()) <= 2
+    # MULTI-OK + the EXEC array.
+    # V1 (dual-fiber) is aggressive (<=2).
+    # V2 (single-fiber cycle) flushes slightly more often (<=3).
+    is_v2 = is_io_loop_v2(df_server)
+    multi_limit = 3 if is_v2 else 2
+    assert await measure(e.execute()) <= multi_limit
 
     # Just pipeline
     p = async_client.pipeline(transaction=False)
     for _ in range(100):
         p.incr("num-1")
-    assert await measure(p.execute()) <= 2
+
+    # V1: aggressive squashing across dual fibers (<=2).
+    # V2: single-fiber loop flushes based on OS scheduling and batch boundaries (<=12).
+    pipe_limit = 12 if is_v2 else 2
+    assert await measure(p.execute()) <= pipe_limit
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
@@ -1246,10 +1288,16 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
 
 
 # Test that the cache pipeline does not grow or shrink under constant pipeline load.
+# This test relies on SquashPipeline() memory lifecycle (V1/AsyncFiber only).
+# V2's single-fiber ExecuteBatch() releases commands incrementally, so the cache
+# is non-empty during execution. Skip when V2 is explicitly enabled.
 @dfly_args({"proactor_threads": 1, "pipeline_squash": 9, "max_busy_read_usec": 50000})
 async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
     server = df_factory.create()
     server.start()
+
+    if is_io_loop_v2(server):
+        pytest.skip("V2 does not use SquashPipeline; cache lifecycle differs")
 
     client = server.client()
     await client.ping()  # Make sure the connection and the protocol were established
@@ -2110,3 +2158,56 @@ async def test_pubsub_pipeline_starvation(df_server: DflyInstance):
         await flood_task
         writer.close()
         await writer.wait_closed()
+
+
+async def test_blocking_command_close_eof(df_server: DflyInstance):
+    """Server must drop a connection that is parked on a blocking command
+    when the client closes its socket.
+
+    Without this handling, the connection's reader fiber is suspended waiting
+    for the blocking-command wakeup and does not observe the socket EOF, so
+    the FD lingers until the command times out or the client is CLIENT KILL'd.
+    Symptom: client sockets accumulate in FIN_WAIT_2 (server in CLOSE_WAIT),
+    matching the reaper-driven leak seen in production with a Sidekiq/Puma
+    connection-pool reaper that closes idle conns. The race only manifests
+    under sustained concurrent open+close churn against BLPOP-parked conns;
+    a single batch is handled correctly. Plain valkey closes its half
+    immediately on FIN even mid-BLPOP.
+    """
+    client = df_server.client()
+    baseline = int((await client.info("clients"))["connected_clients"])
+
+    workers = 8
+    conns_per_cycle = 25
+    cycles = 4
+    blpop_cmd = b"*3\r\n$5\r\nBLPOP\r\n$10\r\n__no_queue\r\n$1\r\n0\r\n"
+
+    def churn():
+        for _ in range(cycles):
+            socks = []
+            try:
+                for _ in range(conns_per_cycle):
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.connect(("127.0.0.1", df_server.port))
+                    s.sendall(blpop_cmd)
+                    socks.append(s)
+                    time.sleep(0.1)
+            finally:
+                for s in socks:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+
+    threads = [Thread(target=churn) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    await asyncio.to_thread(lambda: [t.join() for t in threads])
+
+    @assert_eventually(timeout=5)
+    async def wait_disconnected():
+        info = await client.info("clients")
+        assert int(info["connected_clients"]) <= baseline, info["connected_clients"]
+        assert int(info["blocked_clients"]) == 0, info["blocked_clients"]
+
+    await wait_disconnected()

@@ -14,7 +14,6 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
-#include "core/search/stateless_allocator.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
@@ -347,10 +346,11 @@ TEST_F(SearchFamilyTest, Stats) {
   EXPECT_EQ(metrics.search_stats.num_indices, 2);
   EXPECT_EQ(metrics.search_stats.num_entries, 50 * 2);
 
+  // Per-entry overhead includes: rax nodes, block list headers, CSS varint-encoded diffs + freqs,
+  // and per-field BM25 stats (field_doc_lengths_ vector, counters).
   size_t expected_usage = 2 * (50 + 3 /* number of distinct words*/) * (24 + 48 /* kv size */) +
                           50 * 2 * 1 /* posting list entries */;
   EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
-  // Upper bound accounts for index data + DocKeyIndex + FieldIndices overhead
   EXPECT_LE(metrics.search_stats.used_memory, 4 * expected_usage);
 }
 
@@ -397,6 +397,41 @@ TEST_F(SearchFamilyTest, MemoryTrackingDocKeyIndex) {
   EXPECT_LT(mem_after_delete, mem_after) << "Memory should decrease after removing documents";
   EXPECT_GE(mem_after_delete - mem_before, (kNumDocs / 2) * kMinPerDoc)
       << "Remaining half should still be tracked";
+}
+
+// Verify that HNSW index memory is accounted for in both search_stats.used_memory
+// (surfaced as search_used class of dragonfly_memory_by_class_bytes) and in
+// heap_used_bytes (surfaced as dragonfly_memory_used_bytes). See issue #7110.
+TEST_F(SearchFamilyTest, MemoryTrackingHnsw) {
+  constexpr size_t kDim = 16;
+  constexpr size_t kCapacity = 1024;
+
+  size_t search_mem_before = GetMetrics().search_stats.used_memory;
+  size_t heap_mem_before = GetMetrics().heap_used_bytes;
+
+  EXPECT_EQ(Run({"FT.CREATE", "hnsw_idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "HNSW", "8",
+                 "TYPE", "FLOAT32", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2",
+                 "INITIAL_CAP", absl::StrCat(kCapacity)}),
+            "OK");
+
+  auto metrics = GetMetrics();
+  // Guard against unsigned underflow if a gauge somehow ticks down between snapshots.
+  ASSERT_GE(metrics.search_stats.used_memory, search_mem_before);
+  ASSERT_GE(metrics.heap_used_bytes, heap_mem_before);
+  size_t search_delta = metrics.search_stats.used_memory - search_mem_before;
+  size_t heap_delta = metrics.heap_used_bytes - heap_mem_before;
+
+  // The level-0 block alone allocates capacity * size_data_per_element_ bytes.
+  // With M=16 (default), maxM0_ = 32, size_data_per_element_ >= 32*4 + 8 = 136 bytes,
+  // so 1024 * 100 is a safe lower bound.
+  constexpr size_t kMinLevel0Bytes = kCapacity * 100;
+  EXPECT_GE(search_delta, kMinLevel0Bytes) << "HNSW index creation must bump search_used memory";
+  EXPECT_GE(heap_delta, kMinLevel0Bytes) << "HNSW index creation must bump heap_used_bytes";
+  // The HNSW contribution is added to both gauges. heap_used_bytes also rolls up
+  // other shard-local state (ShardDocIndices::GetUsedMemory, mimalloc heap, etc.),
+  // so it can grow strictly more than search_used; exact equality is too strict.
+  EXPECT_GE(heap_delta, search_delta)
+      << "heap_used_bytes must include the HNSW contribution counted in search_used";
 }
 
 // Test how asynchronous indexing indexes documents and reports its progress
@@ -2366,11 +2401,11 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
 }
 
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
-  auto resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.text", "AS", "text", "TEXT"});
-  EXPECT_EQ(resp, "OK");
-
   Run({"JSON.SET", "json1", "$", R"({"text":"2"})"});
   Run({"JSON.SET", "json2", "$", R"({"text":"1"})"});
+
+  auto resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.text", "AS", "text", "TEXT"});
+  EXPECT_EQ(resp, "OK");
 
   auto expect_expr = [](std::string_view text_field) {
     return IsArray(2, "json2", IsMap(text_field, "1", "$", R"({"text":"1"})"), "json1",
@@ -4440,6 +4475,52 @@ TEST_F(SearchFamilyTest, HnswVectorRangeWithoutYieldDistanceAs) {
   EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
 }
 
+// Regression: FLAT VECTOR_RANGE must inject the YIELD_DISTANCE_AS alias into FT.SEARCH
+// replies. Default order is unchanged (no implicit reorder by distance — matches Redis
+// Stack); SORTBY <alias> opts in to distance ordering.
+TEST_F(SearchFamilyTest, FlatVectorRangeYieldDistanceAs) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", F(static_cast<float>(i))});
+
+  string vec = F(5.0f);
+
+  auto extract = [](const RespExpr& resp) {
+    std::map<string, double> out;
+    auto& arr = resp.GetVec();
+    for (size_t i = 1; i + 1 < arr.size(); i += 2) {
+      auto& flds = arr[i + 1].GetVec();
+      for (size_t j = 0; j + 1 < flds.size(); j += 2) {
+        if (flds[j].GetString() == "dist")
+          out[arr[i].GetString()] = std::stod(flds[j + 1].GetString());
+      }
+    }
+    return out;
+  };
+
+  // Default RETURN: alias must be present alongside the indexed field.
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "v", vec});
+  ASSERT_EQ(resp.GetVec()[0].GetInt(), 3);
+  auto d = extract(resp);
+  EXPECT_DOUBLE_EQ(d["k4"], 1.0);
+  EXPECT_DOUBLE_EQ(d["k5"], 0.0);
+  EXPECT_DOUBLE_EQ(d["k6"], 1.0);
+
+  // Explicit RETURN of the alias.
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "v", vec, "RETURN", "1", "dist"});
+  EXPECT_EQ(extract(resp).size(), 3u);
+
+  // SORTBY on the alias yields distance ASC (k5 closest).
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
+  EXPECT_EQ(resp.GetVec()[1].GetString(), "k5");
+}
+
 TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   auto FloatToBytes = [](float f) -> string {
     return string(reinterpret_cast<const char*>(&f), sizeof(float));
@@ -5398,6 +5479,211 @@ TEST_F(SearchFamilyTest, InfoIndexDefaultStopwordsOmitted) {
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, _, _, "num_docs", _, "indexing", _, _, _));
 }
 
+// Verify that BM25 text scores survive document expiration correctly:
+// expired docs must not cause score injection into wrong documents.
+TEST_F(SearchFamilyTest, SearchWithScoresExpiredDoc) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world hello"});
+  Run({"hset", "d:2", "title", "hello there"});
+  Run({"hset", "d:3", "title", "hello universe"});
+  Run({"pexpire", "d:2", "50"});
+
+  // All 3 docs match before expiry
+  auto resp = Run({"ft.search", "i1", "hello", "WITHSCORES"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  // With WITHSCORES: [total, key, score, fields, key, score, fields, ...]
+  // Each doc takes 3 slots (key + score + field-array), plus 1 for total
+  EXPECT_GE(results.size(), 1 + 3 * 3u);
+
+  // Wait for d:2 to expire
+  AdvanceTime(60);
+  ThisFiber::SleepFor(5ms);
+
+  // Now only d:1 and d:3 should match; scores must be positive and assigned to correct docs
+  resp = Run({"ft.search", "i1", "hello", "WITHSCORES"});
+  results = resp.GetVec();
+  ASSERT_GE(results.size(), 1 + 3 * 2u);
+
+  // First element is total hits count
+  EXPECT_THAT(results[0], IntArg(2));
+
+  // Verify each returned doc has a positive score (not 0, not misassigned)
+  for (size_t i = 1; i < results.size(); i += 3) {
+    std::string key = results[i].GetString();
+    std::string score_str = results[i + 1].GetString();
+    double score = std::stod(score_str);
+    EXPECT_GT(score, 0.0) << "Doc " << key << " should have positive BM25 score";
+    EXPECT_TRUE(key == "d:1" || key == "d:3") << "Unexpected key: " << key;
+  }
+
+  Run({"flushall"});
+}
+
+// Verify ADDSCORES injects __score in FT.AGGREGATE and survives GROUPBY + REDUCE SUM
+TEST_F(SearchFamilyTest, AggregateAddScoresGroupBy) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "category", "TAG"}),
+            "OK");
+
+  // Two docs in category "a", one in "b" — all match "hello"
+  Run({"hset", "d:1", "title", "hello world hello", "category", "a"});
+  Run({"hset", "d:2", "title", "hello there", "category", "a"});
+  Run({"hset", "d:3", "title", "hello universe", "category", "b"});
+
+  // ADDSCORES should inject __score, then GROUPBY + REDUCE SUM aggregates them
+  auto resp = Run({"ft.aggregate", "i1", "hello", "ADDSCORES", "GROUPBY", "1", "@category",
+                   "REDUCE", "SUM", "1", "@__score", "AS", "total_score"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+
+  // FT.AGGREGATE returns [count, group1, group2, ...] — skip element [0]
+  ASSERT_GE(results.size(), 3u);  // count + 2 groups
+
+  // Parse groups: extract (category -> total_score)
+  std::map<std::string, double> group_scores;
+  for (size_t g = 1; g < results.size(); g++) {
+    auto group_vec = results[g].GetVec();
+    std::string cat;
+    double total = 0;
+    for (size_t j = 0; j < group_vec.size(); j += 2) {
+      auto key = group_vec[j].GetString();
+      if (key == "category")
+        cat = group_vec[j + 1].GetString();
+      else if (key == "total_score")
+        total = std::stod(group_vec[j + 1].GetString());
+    }
+    ASSERT_FALSE(cat.empty());
+    group_scores[cat] = total;
+  }
+
+  ASSERT_EQ(group_scores.size(), 2u);
+  EXPECT_GT(group_scores["a"], 0.0) << "Group 'a' should have positive total score";
+  EXPECT_GT(group_scores["b"], 0.0) << "Group 'b' should have positive total score";
+  // Group "a" has 2 docs matching "hello", group "b" has 1 — sum should be higher
+  EXPECT_GT(group_scores["a"], group_scores["b"])
+      << "Group with more matching docs should have higher total score";
+}
+
+// Verify WITHSCORES returns positive BM25 scores for basic text search
+TEST_F(SearchFamilyTest, SearchWithScoresBasic) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world hello hello"});  // TF=3
+  Run({"hset", "d:2", "title", "hello there"});              // TF=1
+
+  auto resp = Run({"ft.search", "i1", "hello", "WITHSCORES"});
+  auto results = resp.GetVec();
+  // [total_hits, key, score, fields, key, score, fields]
+  ASSERT_GE(results.size(), 1 + 3 * 2u);
+  EXPECT_THAT(results[0], IntArg(2));
+
+  // Collect (key -> score)
+  std::map<std::string, double> scores;
+  for (size_t i = 1; i < results.size(); i += 3) {
+    scores[results[i].GetString()] = std::stod(results[i + 1].GetString());
+  }
+
+  EXPECT_GT(scores["d:1"], 0.0);
+  EXPECT_GT(scores["d:2"], 0.0);
+  // d:1 has higher TF -> should score higher
+  EXPECT_GT(scores["d:1"], scores["d:2"]) << "Doc with higher TF should score higher";
+}
+
+// Verify ADDSCORES injects __score for simple (non-KNN) FT.AGGREGATE
+TEST_F(SearchFamilyTest, AggregateAddScoresSimple) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world hello hello"});  // TF=3
+  Run({"hset", "d:2", "title", "hello there"});              // TF=1
+  Run({"hset", "d:3", "title", "goodbye world"});            // no match
+
+  auto resp = Run({"ft.aggregate", "i1", "hello", "ADDSCORES", "SORTBY", "2", "@__score", "DESC"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+
+  // FT.AGGREGATE returns [count, result1, result2, ...] — skip element [0]
+  ASSERT_GE(results.size(), 3u);  // count + 2 results
+
+  // Results should be sorted descending by __score
+  auto first = results[1].GetVec();
+  auto second = results[2].GetVec();
+
+  // Find __score values
+  double score1 = 0, score2 = 0;
+  for (size_t j = 0; j < first.size(); j += 2) {
+    if (first[j].GetString() == "__score")
+      score1 = std::stod(first[j + 1].GetString());
+  }
+  for (size_t j = 0; j < second.size(); j += 2) {
+    if (second[j].GetString() == "__score")
+      score2 = std::stod(second[j + 1].GetString());
+  }
+
+  EXPECT_GT(score1, 0.0) << "First result should have positive score";
+  EXPECT_GT(score2, 0.0) << "Second result should have positive score";
+  EXPECT_GE(score1, score2) << "Results should be sorted by score DESC";
+}
+
+// Verify per-field BM25 scoring: a long "body" field shouldn't penalize a short "title" match
+TEST_F(SearchFamilyTest, SearchWithScoresPerField) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "body", "TEXT"}),
+            "OK");
+
+  // d:1 — short title match, very long body (unrelated)
+  Run({"hset", "d:1", "title", "hello", "body",
+       "the quick brown fox jumps over the lazy dog and many other words here to make body long"});
+  // d:2 — short title match, short body
+  Run({"hset", "d:2", "title", "hello", "body", "short"});
+
+  auto resp = Run({"ft.search", "i1", "@title:hello", "WITHSCORES"});
+  auto results = resp.GetVec();
+  ASSERT_GE(results.size(), 1 + 3 * 2u);
+
+  // Collect scores
+  std::map<std::string, double> scores;
+  for (size_t i = 1; i < results.size(); i += 3) {
+    scores[results[i].GetString()] = std::stod(results[i + 1].GetString());
+  }
+
+  EXPECT_GT(scores["d:1"], 0.0);
+  EXPECT_GT(scores["d:2"], 0.0);
+  // With per-field scoring, both docs have the same title field content ("hello", TF=1)
+  // and same title field length (1), so scores should be equal regardless of body length.
+  EXPECT_DOUBLE_EQ(scores["d:1"], scores["d:2"])
+      << "Per-field scoring: body length should not affect title-only query score";
+}
+
+// Verify ADDSCORES makes __score visible even without explicit LOAD or pipeline steps
+TEST_F(SearchFamilyTest, AggregateAddScoresAutoVisible) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+
+  Run({"hset", "d:1", "title", "hello world"});
+
+  // ADDSCORES with no LOAD, no SORTBY, no GROUPBY — __score should still be visible
+  auto resp = Run({"ft.aggregate", "i1", "hello", "ADDSCORES"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto results = resp.GetVec();
+  ASSERT_GE(results.size(), 2u);  // count + at least 1 result
+
+  auto row = results[1].GetVec();
+  bool found_score = false;
+  for (size_t j = 0; j < row.size(); j += 2) {
+    if (row[j].GetString() == "__score") {
+      double score = std::stod(row[j + 1].GetString());
+      EXPECT_GT(score, 0.0);
+      found_score = true;
+    }
+  }
+  EXPECT_TRUE(found_score) << "__score should be visible with ADDSCORES even without LOAD/pipeline";
+}
+
 // DocKeyIndex: empty-key documents must survive Serialize/Restore and not be
 // confused with freed slots (which also have keys_[id] == "").
 
@@ -5442,6 +5728,28 @@ TEST_F(DocKeyIndexTest, RestoreRoundTripsEmptyKey) {
   EXPECT_TRUE(restored.IsValid(id2));
   EXPECT_EQ(restored.Get(id1), "");
   EXPECT_EQ(restored.Add("doc3"), id0);  // freed slot is reused
+}
+
+// FT.SEARCH loads documents via GetAccessor → GetStringMap (set_time) → Serialize
+// which iterates the StringMap triggering lazy field expiry.  If all fields expired,
+// the hash must be cleaned up — not left as a zombie that crashes SAVE.
+TEST_F(SearchFamilyTest, SearchDeletesEmptyHash) {
+  Run({"ft.create", "idx", "PREFIX", "1", "d:", "SCHEMA", "foo", "TEXT"});
+
+  // Create documents with field-level TTL.
+  for (int i = 0; i < 10; ++i) {
+    Run({"HSETEX", absl::StrCat("d:", i), "1", "foo", absl::StrCat("bar", i)});
+  }
+
+  AdvanceTime(2000);
+
+  // FT.SEARCH triggers GetStringMap(set_time) + Serialize which iterates all fields.
+  // Lazy expiry deletes them.  Without fix, empty hashes remain as zombies.
+  Run({"ft.search", "idx", "*"});
+
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_EQ(0, CheckedInt({"EXISTS", absl::StrCat("d:", i)}));
+  }
 }
 
 }  // namespace dfly
