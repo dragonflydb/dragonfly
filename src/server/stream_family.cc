@@ -1212,6 +1212,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
             << " during the XADD command";
   }
 
+  // Must update before RecordJournal, which can preempt and cause evictions that change
+  // zmalloc_used_memory_tl, corrupting the diff computed by UpdateStreamSize.
+  mem_tracker.UpdateStreamSize(it->second);
+  std::move(on_exit).Cancel();
+
   if (op_args.shard->journal()) {
     std::string result_id_as_string = StreamsIdToString(result_id);
     const bool stream_is_empty = stream_inst->length == 0;
