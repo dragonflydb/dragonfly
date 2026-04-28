@@ -346,12 +346,6 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
   }
 }
 
-void ServerState::UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::ChannelsSubMap& sub_map,
-                                                        ChannelStore* replacement) {
-  channel_store_->UnsubscribeConnectionsFromDeletedSlots(sub_map, thread_index_);
-  channel_store_ = replacement;
-}
-
 void ServerState::RecordCmd(bool is_main_conn) {
   if (is_main_conn) {
     ++tl_connection_stats()->command_cnt_main;

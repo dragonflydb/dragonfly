@@ -505,7 +505,6 @@ void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
       },
       true);
 
-  auto* channel_store = ServerState::tlocal()->channel_store();
   auto deleted = SlotSet(slots_ranges);
   channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
 }
