@@ -2948,6 +2948,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   // to global pipeline-backpressure relief notifications.
   util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
 
+  const uint32_t async_dispatch_quota = GetFlag(FLAGS_async_dispatch_quota);
+
   do {
     HandleMigrateRequest();
 
@@ -2992,12 +2994,29 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     phase_ = PROCESS;
     bool reached_capacity = io_buf_.AppendLen() == 0;
 
-    // Temporary: Handle dispatch queue items (Control Path) one by one blocking command execution
+    // Handle dispatch queue items (Control Path) with a bounded quota to prevent
+    // starvation of the data path:
+    // - Under a PubSub flood, dispatch_q_ can accumulate thousands of messages.
+    // - Without a quota, the fiber would drain them all before parsing any new data from the
+    //   socket, starving GET/SET and other pipeline commands.
+    // - This mirrors V1's async_dispatch_quota / prefer_pipeline_execution mechanism in AsyncFiber.
     if (!dispatch_q_.empty()) {
+      uint32_t dispatched{};
+      bool quota_reached = false;
+
       while (!dispatch_q_.empty()) {
+        // Quota reached: stop draining the dispatch queue and fall through to the data path.
+        if ((async_dispatch_quota > 0) && (dispatched >= async_dispatch_quota)) {
+          quota_reached = true;
+          LOG_EVERY_T(INFO, 1) << "[" << id_ << "] V2 dispatch_q_ quota reached (" << dispatched
+                               << "/" << async_dispatch_quota << "), falling through to data path";
+          break;
+        }
+
         auto msg = std::move(dispatch_q_.front());
         dispatch_q_.pop_front();
         UpdateDispatchStats(msg, false /* subtract */);
+        dispatched++;
 
         // If a MigrationRequestMessage arrives via the dispatch queue, stop processing
         // and let the loop iterate back to HandleMigrateRequest() at the top.
@@ -3006,15 +3025,19 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         }
 
         std::visit(AsyncOperations{reply_builder_.get(), this}, msg.handle);
-      }
+      }  // while
 
-      // Note: No flush needed here: the `continue` below re-enters the loop, which either
-      // hits the data path (ParseLoop flushes via ReplyBatch) or the idle-await block
-      // (Flush 1), which always flushes before sleeping.
-
-      // TODO: Properly handle backpressure
       GetQueueBackpressure().pubsub_ec.notifyAll();
-      continue;
+
+      // Starvation prevention: if quota was hit, fall through to the data path so
+      // pipelined commands get a turn. Otherwise `continue` back to the top.
+      //
+      // No flush here: both paths reach a flush before sleeping via the idle-await block
+      // at the top of the loop, allowing PubSub and command replies to be coalesced into
+      // one sendmsg syscall.
+      if (!quota_reached) {
+        continue;
+      }
     }
 
     // Handle Parsed Commands Queue (Data Path)
