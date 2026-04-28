@@ -2686,6 +2686,7 @@ Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* 
     : key(cmd->Blocker()->OnCompletion(w)) {
 }
 
+// Dummt comment
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
   cstats.pipelined_cmd_cnt = 0;
