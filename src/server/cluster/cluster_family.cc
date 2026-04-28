@@ -504,7 +504,6 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
-  auto* channel_store = ServerState::tlocal()->channel_store();
   auto deleted = SlotSet(slots_ranges);
   channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
 }
