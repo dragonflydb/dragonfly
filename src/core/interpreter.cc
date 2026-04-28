@@ -15,9 +15,11 @@
 
 #include <cstring>
 #include <optional>
-#include <regex>
 #include <set>
 #include <variant>
+
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 
 #include "base/flags.h"
 #include "core/interpreter_polyfill.h"
@@ -798,7 +800,6 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 void Interpreter::SetGlobalArray(const char* name, SliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
-
 optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   // We want to detect `redis.call` expressions with unused return values, i.e. they are a
   // standalone statement, not part of a expression, condition, function call or assignment.
@@ -809,7 +810,19 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   //
   // If we need to check the previous line, we search for the last word (before comments, if it has
   // one).
-  static const regex kRegex{"(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)"};
+
+  // Using PCRE2 instead of std::regex to avoid stack overflow on fiber stacks (64KB).
+  // PCRE2 with heap-based recursion uses negligible stack space.
+  static pcre2_code* kRe = [] {
+    int errnum;
+    PCRE2_SIZE erroffset;
+    // PCRE2_MULTILINE makes ^ match at line starts, PCRE2_DOTALL makes . match \n
+    const char* pattern = "(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)";
+    pcre2_code* re = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern), PCRE2_ZERO_TERMINATED,
+                                   PCRE2_MULTILINE, &errnum, &erroffset, nullptr);
+    CHECK(re) << "PCRE2 compile error at offset " << erroffset;
+    return re;
+  }();
 
   // Taken from https://www.lua.org/manual/5.4/manual.html - 3.1 - Lexical conventions
 
@@ -823,11 +836,10 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
                                                "if",     "in",     "local",  "not",  "or",
                                                "repeat", "return", "until",  "while"};
 
-  auto last_n = [](const string& s, size_t n) {
+  auto last_n = [](string_view s, size_t n) -> string_view {
     return s.size() < n ? s : s.substr(s.size() - n, n);
   };
 
-  smatch sm;
   string body{body_sv};
   vector<size_t> targets;
 
@@ -835,21 +847,46 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   if (body.find("--[[") != string::npos)
     return {};
 
-  sregex_iterator it{body.begin(), body.end(), kRegex};
-  sregex_iterator end{};
+  pcre2_match_data* match_data = pcre2_match_data_create_from_pattern(kRe, nullptr);
+  if (!match_data)
+    return {};
 
-  for (; it != end; it++) {
-    auto last_word = it->str(1);
+  PCRE2_SIZE offset = 0;
+  PCRE2_SPTR subject = reinterpret_cast<PCRE2_SPTR>(body.data());
+  PCRE2_SIZE subject_len = body.size();
 
-    if (kContOperators.count(last_n(last_word, 2)) > 0 ||
-        kContOperators.count(last_n(last_word, 1)) > 0)
-      continue;
+  while (offset <= subject_len) {
+    int rc = pcre2_match(kRe, subject, subject_len, offset, 0, match_data, nullptr);
+    if (rc < 0)
+      break;
 
-    if (kContTokens.count(last_word) > 0)
-      continue;
+    PCRE2_SIZE* ovector = pcre2_get_ovector_pointer(match_data);
 
-    targets.push_back(it->position(it->size() - 1));
+    // Group 1 = (\S+) - last word on previous line
+    string_view last_word;
+    if (ovector[2] != PCRE2_UNSET) {
+      last_word = string_view(body.data() + ovector[2], ovector[3] - ovector[2]);
+    }
+
+    // Group 6 = (p*call) - the call/pcall token
+    PCRE2_SIZE call_start = ovector[12];  // group 6 start
+
+    // Advance past the current match for the next iteration
+    offset = ovector[1];  // end of full match
+
+    if (!last_word.empty()) {
+      if (kContOperators.contains(last_n(last_word, 2)) ||
+          kContOperators.contains(last_n(last_word, 1)))
+        continue;
+
+      if (kContTokens.contains(last_word))
+        continue;
+    }
+
+    targets.push_back(call_start);
   }
+
+  pcre2_match_data_free(match_data);
 
   if (targets.empty())
     return nullopt;
