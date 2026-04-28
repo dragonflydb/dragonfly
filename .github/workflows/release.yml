@@ -16,12 +16,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create Release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@v1.21.0
         with:
           allowUpdates: true
           omitBody: true
+          skipIfReleaseExists: true
           prerelease: true
           draft: true
+          generateReleaseNotes: true
+          updateOnlyUnreleased: true
+          commit: ${{ github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
   build-arm:
@@ -51,7 +55,7 @@ jobs:
         path: |
           ${{ env.RELEASE_DIR }}/dragonfly-*tar.gz
           ${{ env.RELEASE_DIR }}/dragonfly_*.deb
-          ${{ env.RELEASE_DIR }}/dfly_bench-*tar.gz
+          ${{ env.RELEASE_DIR }}/dfly_bench-*.tar.gz
 
   build-native:
     runs-on: ubuntu-latest
@@ -177,11 +181,13 @@ jobs:
       - name: See all the artifacts
         run: |
           ls -lR artifacts/
-      - uses: ncipollo/release-action@v1
+      - uses: ncipollo/release-action@v1.21.0
         with:
           artifacts: "artifacts/dragonfly-*/*"
           allowUpdates: true
           draft: true
+          updateOnlyUnreleased: true
+          skipIfReleaseExists: true
           prerelease: true
           omitNameDuringUpdate: true
           token: ${{ secrets.GITHUB_TOKEN }}
