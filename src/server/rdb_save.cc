@@ -1537,13 +1537,14 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
           !(finfo.flags & search::SchemaField::NOINDEX)) {
         if (auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, finfo.short_name);
             hnsw_index) {
+          // Empty graph: enterpoint_node_ is -1 (wraps to UINT32_MAX as tableint); skip
+          // emission so the load path doesn't receive a garbage entry point.
+          if (hnsw_index->GetNodeCount() == 0)
+            break;
           auto meta = hnsw_index->GetMetadata();
           TmpJson meta_json;
           meta_json["index_name"] = index_name;
           meta_json["field_name"] = finfo.short_name;
-          meta_json["max_elements"] = meta.max_elements;
-          meta_json["cur_element_count"] = meta.cur_element_count;
-          meta_json["maxlevel"] = meta.maxlevel;
           meta_json["enterpoint_node"] = meta.enterpoint_node;
           hnsw_index_metadata->emplace_back(meta_json.to_string());
           break;

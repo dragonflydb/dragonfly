@@ -132,35 +132,13 @@ struct HnswlibAdapter {
   HnswIndexMetadata GetMetadata() const {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     HnswIndexMetadata metadata;
-    metadata.max_elements = world_.max_elements_;
-    metadata.cur_element_count = world_.cur_element_count.load();
-    metadata.maxlevel = world_.maxlevel_;
     metadata.enterpoint_node = world_.enterpoint_node_;
     return metadata;
   }
 
-  void SetMetadata(const HnswIndexMetadata& metadata) {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    absl::WriterMutexLock resize_lock(&resize_mutex_);
-
-    // SetMetadata is only called during deserialization before the index is used.
-    // Assert the index is empty to ensure no concurrent operations are possible.
-    DCHECK_EQ(world_.cur_element_count.load(), 0u)
-        << "SetMetadata should only be called on an empty index during deserialization";
-
-    // Runtime check for release builds to prevent silent corruption
-    if (world_.cur_element_count.load() != 0) {
-      LOG(ERROR) << "SetMetadata called on non-empty HNSW index with "
-                 << world_.cur_element_count.load() << " elements, ignoring";
-      return;
-    }
-
-    // Pre-allocate capacity based on expected element count, but don't set cur_element_count.
-    // cur_element_count will be set by RestoreFromNodes when the actual nodes are restored.
-    if (world_.max_elements_ < metadata.cur_element_count) {
-      world_.resizeIndex(metadata.cur_element_count);
-    }
-    // Note: Don't set cur_element_count here - RestoreFromNodes will set it after restoring nodes.
+  int GetMaxLevel() const {
+    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    return world_.maxlevel_;
   }
 
   size_t GetNodeCount() const {
@@ -280,13 +258,15 @@ struct HnswlibAdapter {
   }
 
  public:
-  // Restore HNSW graph structure from serialized nodes with metadata
-  void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
+  // Restore HNSW graph structure from serialized nodes with metadata.
+  // Returns false if the input is inconsistent (e.g. entry point not in node set) —
+  // caller should fall back to rebuilding the index from the keyspace.
+  bool RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
     absl::WriterMutexLock resize_lock(&resize_mutex_);
 
     if (nodes.empty()) {
-      return;
+      return true;
     }
 
     // RestoreFromNodes is only called during deserialization on a freshly created index.
@@ -294,17 +274,25 @@ struct HnswlibAdapter {
     DCHECK_EQ(world_.cur_element_count.load(), 0u)
         << "RestoreFromNodes should only be called on an empty index during deserialization";
 
-    // Ensure we have enough capacity.
-    // Metadata may have been captured before the snapshot read-lock, so
-    // cur_element_count can be smaller than actual node internal_ids when
-    // concurrent writes happen.  Compute the real requirement from nodes.
+    // hnswlib pairs enterpoint_node_ with maxlevel_; node levels are immutable after
+    // creation, so the entry point's level in the serialized set equals the live
+    // maxlevel at metadata capture. max(node.level) would risk OOB reads when a
+    // concurrent Add raised maxlevel between capture and node serialization.
     size_t max_internal_id = 0;
+    int entrypoint_level = -1;
     for (const auto& node : nodes) {
       max_internal_id = std::max<size_t>(max_internal_id, node.internal_id);
+      if (node.internal_id == metadata.enterpoint_node)
+        entrypoint_level = node.level;
     }
-    size_t required_capacity = std::max(metadata.cur_element_count, max_internal_id + 1);
-    if (world_.max_elements_ < required_capacity) {
-      world_.resizeIndex(required_capacity);
+    if (entrypoint_level < 0) {
+      LOG(ERROR) << "HNSW restore: entry point internal_id=" << metadata.enterpoint_node
+                 << " not present in serialized node set (" << nodes.size()
+                 << " nodes); skipping restore — index will be rebuilt from the keyspace";
+      return false;
+    }
+    if (world_.max_elements_ < max_internal_id + 1) {
+      world_.resizeIndex(max_internal_id + 1);
     }
 
     // Restore each node - directly set up memory and fields
@@ -378,12 +366,13 @@ struct HnswlibAdapter {
     }
 
     // Set the metadata for the graph
-    world_.maxlevel_ = metadata.maxlevel;
+    world_.maxlevel_ = entrypoint_level;
     world_.enterpoint_node_ = metadata.enterpoint_node;
 
     VLOG(1) << "Restored HNSW index with " << restored_count
-            << " nodes, maxlevel=" << metadata.maxlevel
+            << " nodes, maxlevel=" << entrypoint_level
             << ", enterpoint=" << metadata.enterpoint_node;
+    return true;
   }
 
   // Update vector data for an existing node (used after RestoreFromNodes).
@@ -502,8 +491,8 @@ HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
   return adapter_->GetMetadata();
 }
 
-void HnswVectorIndex::SetMetadata(const HnswIndexMetadata& metadata) {
-  adapter_->SetMetadata(metadata);
+int HnswVectorIndex::GetMaxLevel() const {
+  return adapter_->GetMaxLevel();
 }
 
 size_t HnswVectorIndex::GetNodeCount() const {
@@ -514,9 +503,9 @@ std::vector<HnswNodeData> HnswVectorIndex::GetNodesRange(size_t start, size_t en
   return adapter_->GetNodesRange(start, end);
 }
 
-void HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
+bool HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
                                        const HnswIndexMetadata& metadata) {
-  adapter_->RestoreFromNodes(nodes, metadata);
+  return adapter_->RestoreFromNodes(nodes, metadata);
 }
 
 bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,

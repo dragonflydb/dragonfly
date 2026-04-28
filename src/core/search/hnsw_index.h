@@ -11,16 +11,12 @@
 
 namespace dfly::search {
 
-// Metadata structure for HNSW index serialization
-// Contains the key parameters needed to restore the index state
+// Wire format for HNSW index AUX. Only the entry point is persisted: capacity is
+// derived from max(internal_id)+1 in the node set and maxlevel from the entry-point
+// node's level (hnswlib pairs enterpoint_node_ with maxlevel_, and node levels are
+// immutable after creation).
 struct HnswIndexMetadata {
-  size_t max_elements = 0;  // Maximum number of elements the index can hold
-  // Note: cur_element_count may be smaller than actual node count during concurrent writes,
-  // so we compute the real requirement from nodes during restoration.
-  // TODO: consider removing it from metadata and rely entirely on node data for restoration.
-  size_t cur_element_count = 0;  // Current number of elements in the index
-  int maxlevel = -1;             // Maximum level of the graph
-  size_t enterpoint_node = 0;    // Entry point node for the graph
+  size_t enterpoint_node = 0;
 };
 
 // Node data structure for HNSW serialization
@@ -75,8 +71,9 @@ class HnswVectorIndex {
   // Get metadata for serialization
   HnswIndexMetadata GetMetadata() const;
 
-  // Set metadata (used during restoration)
-  void SetMetadata(const HnswIndexMetadata& metadata);
+  // Current graph maxlevel_. Exposed for introspection and tests that need to
+  // verify invariants preserved by RestoreFromNodes (entry point must sit at maxlevel).
+  int GetMaxLevel() const;
 
   // Get total number of nodes in the index
   size_t GetNodeCount() const;
@@ -85,10 +82,12 @@ class HnswVectorIndex {
   // Returns vector of node data for serialization
   std::vector<HnswNodeData> GetNodesRange(size_t start, size_t end) const;
 
-  // Restore graph structure from serialized nodes with metadata
-  // This restores the HNSW graph links but NOT the vector data
-  // Vector data must be populated separately via UpdateVectorData
-  void RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata);
+  // Restore graph structure from serialized nodes with metadata.
+  // Restores links only; vector data must be populated separately via UpdateVectorData.
+  // Returns false if the metadata is inconsistent with the node set (e.g. the entry
+  // point is missing from the serialized nodes) — caller should then leave the index
+  // empty and let the higher-level rebuild path repopulate it from the keyspace.
+  bool RestoreFromNodes(const std::vector<HnswNodeData>& nodes, const HnswIndexMetadata& metadata);
 
   // Update vector data for an existing node (used after RestoreFromNodes)
   // This populates the vector data for a node that already has graph links

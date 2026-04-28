@@ -127,9 +127,19 @@ absl::flat_hash_set<std::string> RemapAndRestoreHnswGraphs(
         break;
       }
     }
-    DCHECK(phm_ptr) << "HNSW metadata missing for " << pn.index_name << ":" << pn.field_name;
+    if (!phm_ptr) {
+      LOG(ERROR) << "HNSW metadata missing for " << pn.index_name << ":" << pn.field_name
+                 << ". Will rebuild from scratch.";
+      failed_indices.insert(pn.index_name);
+      continue;
+    }
 
-    hnsw_index->RestoreFromNodes(pn.nodes, phm_ptr->metadata);
+    if (!hnsw_index->RestoreFromNodes(pn.nodes, phm_ptr->metadata)) {
+      LOG(WARNING) << "HNSW graph restore rejected for " << pn.index_name << ":" << pn.field_name
+                   << ". Will rebuild from scratch.";
+      failed_indices.insert(pn.index_name);
+      continue;
+    }
     LOG(INFO) << "Restored HNSW index " << pn.index_name << ":" << pn.field_name << " with "
               << pn.nodes.size() << " nodes (" << remapped << " global_ids remapped)";
   }
