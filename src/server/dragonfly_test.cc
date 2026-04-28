@@ -711,7 +711,7 @@ TEST_F(DflyEngineTest, Bug496) {
     // RegisterOnChange requires the shard lock to be held (see #7153).
     shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
     uint32_t cb_id =
-        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+        db.RegisterOnChange(false, [&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
     {

@@ -93,7 +93,7 @@ class SerializerBase : public BucketDependencies, public DelayedEntryHandler {
   virtual ~SerializerBase();
 
   // Register db_slice change listener and save snapshot version.
-  void RegisterChangeListener();
+  void RegisterChangeListener(bool replica);
 
   // Unregisters the callback.  Safe to call if already unregistered.
   void UnregisterChangeListener();

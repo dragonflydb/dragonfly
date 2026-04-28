@@ -74,6 +74,9 @@ struct SliceEvents {
   // how many updates and insertions of keys between snapshot intervals
   size_t update = 0;
 
+  // how many journal omit optimizations were performed
+  size_t journal_omit = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -248,6 +251,10 @@ class DbSlice {
     Iterator it;
     AutoUpdater post_updater;
     bool is_new = false;
+
+    // Set if DbContext::is_omittable_operation was set and the conditions were met.
+    // Means that the journal write should NOT be performed.
+    bool omitted_journal = false;
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -393,7 +400,7 @@ class DbSlice {
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
-  uint64_t RegisterOnChange(ChangeCallback cb);
+  uint64_t RegisterOnChange(bool replica, ChangeCallback cb);
 
   bool HasRegisteredCallbacks() const {
     return !change_cb_.empty();
@@ -543,6 +550,9 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
+  // Returns true if this write could be ignored during replication without losing consistency
+  bool IsOmittableWrite(const Context& cntx, ChangeReq req);
+
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
     kMutableStats,
@@ -608,7 +618,7 @@ class DbSlice {
   mutable absl::flat_hash_set<uint64_t, FpHasher> uniq_fps_;
 
   // ordered from the smallest to largest version.
-  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::list<std::tuple<uint64_t, bool /* replica */, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   // This set is used to hold fingerprints of key accessed during the run of
