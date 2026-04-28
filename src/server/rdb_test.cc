@@ -5,7 +5,6 @@
 
 extern "C" {
 #include "redis/crc64.h"
-#include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
@@ -19,6 +18,7 @@ extern "C" {
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
+#include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/test_utils.h"
@@ -1214,6 +1214,167 @@ TEST_F(RdbTest, TopkSerializationDecayParameter) {
 
   auto resp2 = Run({"TOPK.LIST", "topk_decay_high"});
   EXPECT_THAT(resp2, RespArray(ElementsAre("item3", "item4")));
+}
+
+void AssertTaggedData(std::string_view blob, std::string_view expected, uint32_t expected_id = 1) {
+  using namespace absl::little_endian;
+
+  ASSERT_EQ(blob.size(), MemBufController::kHeaderSize + expected.size());
+  EXPECT_EQ(static_cast<uint8_t>(blob[0]), RDB_OPCODE_TAGGED_CHUNK);
+
+  auto id = Load32(reinterpret_cast<const uint8_t*>(blob.data()) + 1);
+  auto len = Load32(reinterpret_cast<const uint8_t*>(blob.data()) + 5);
+
+  EXPECT_EQ(id, expected_id);
+  EXPECT_EQ(len, expected.size());
+  EXPECT_EQ(blob.substr(MemBufController::kHeaderSize), expected);
+}
+
+class MemBufControllerTest : public Test {
+ protected:
+  MemBufController controller_;
+
+  bool HasSplitEntries() const {
+    return !controller_.split_entries_.empty();
+  }
+
+  std::string Flush() {
+    auto current = controller_.CurrentBuffer()->InputBuffer();
+    const auto blob = controller_.BuildBlob(current);
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    return blob;
+  }
+
+  void Write(std::string_view s) {
+    controller_.CurrentBuffer()->WriteAndCommit(s.data(), s.size());
+  }
+
+  void AssertDefaultState() const {
+    EXPECT_EQ(controller_.active_id_, 0u);
+    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.default_buffer_);
+  }
+
+  void MarkMidFlush() {
+    controller_.MarkEntrySplit();
+    EXPECT_TRUE(controller_.split_entries_.contains(controller_.active_id_));
+  }
+
+  MemBufController::EntryId SplitAndSuspend(std::string_view payload, uint32_t expected_id) {
+    controller_.StartEntry();
+    EXPECT_EQ(controller_.active_id_, expected_id);
+    Write(payload);
+    MarkMidFlush();
+    AssertTaggedData(Flush(), payload, expected_id);
+
+    const auto saved_id = controller_.SaveStateBeforeConsume();
+    EXPECT_EQ(saved_id, expected_id);
+    AssertDefaultState();
+    EXPECT_EQ(controller_.FlushableSize(), 0);
+    return saved_id;
+  }
+
+  void Restore(MemBufController::EntryId id) {
+    controller_.RestoreStateAfterConsume(id);
+    EXPECT_EQ(controller_.active_id_, id);
+    EXPECT_EQ(controller_.CurrentBuffer(), &controller_.entry_buffer_);
+  }
+};
+
+TEST_F(MemBufControllerTest, TaggedData) {
+  controller_.SetTagEntries(true);
+
+  const std::string_view data = "a_a_a_";
+  const auto saved_id = SplitAndSuspend(data, 1);
+  EXPECT_TRUE(HasSplitEntries());
+
+  Write("a");
+  Restore(saved_id);
+  EXPECT_EQ(controller_.FlushableSize(), 1);
+
+  Write("b");
+  EXPECT_EQ(controller_.FlushableSize(), 2);
+  controller_.FinishEntry();
+  EXPECT_FALSE(HasSplitEntries());
+
+  const std::string blob = Flush();
+
+  EXPECT_EQ(blob.size(), MemBufController::kHeaderSize + 2);
+  EXPECT_EQ(blob[0], 'a');
+  AssertTaggedData(blob.substr(1), "b");
+}
+
+TEST_F(MemBufControllerTest, NestedInterleaving) {
+  controller_.SetTagEntries(true);
+
+  const auto saved_id_a = SplitAndSuspend("aaa", 1);
+  const auto saved_id_b = SplitAndSuspend("bbb", 2);
+
+  controller_.StartEntry();
+  Write("ccc");
+  controller_.FinishEntry();
+  AssertDefaultState();
+
+  EXPECT_EQ(controller_.FlushableSize(), 3);
+
+  EXPECT_EQ(Flush(), "ccc");
+
+  Restore(saved_id_b);
+  Write("x");
+  controller_.FinishEntry();
+
+  AssertTaggedData(Flush(), "x", 2);
+
+  Restore(saved_id_a);
+  Write("y");
+  controller_.FinishEntry();
+  EXPECT_FALSE(HasSplitEntries());
+
+  AssertTaggedData(Flush(), "y");
+}
+
+TEST_F(MemBufControllerTest, BuildBlobEdgeCases) {
+  controller_.SetTagEntries(true);
+
+  Write("p");
+  controller_.StartEntry();
+  Write("x");
+  MarkMidFlush();
+
+  const std::string blob = Flush();
+  ASSERT_FALSE(blob.empty());
+  EXPECT_EQ(blob[0], 'p');
+  AssertTaggedData(blob.substr(1), "x");
+
+  controller_.FinishEntry();
+  AssertDefaultState();
+}
+
+TEST_F(MemBufControllerTest, UnsplitEntry) {
+  controller_.SetTagEntries(true);
+
+  controller_.StartEntry();
+  Write("hello");
+  controller_.FinishEntry();
+  AssertDefaultState();
+
+  EXPECT_EQ(controller_.FlushableSize(), 5);
+  EXPECT_EQ(Flush(), "hello");
+}
+
+TEST_F(MemBufControllerTest, TaggingDisabled) {
+  controller_.StartEntry();
+  Write("abc");
+  MarkMidFlush();
+
+  EXPECT_EQ(Flush(), "abc");
+
+  const auto saved_id = controller_.SaveStateBeforeConsume();
+  Restore(saved_id);
+
+  Write("def");
+  controller_.FinishEntry();
+
+  EXPECT_EQ(Flush(), "def");
 }
 
 }  // namespace dfly
