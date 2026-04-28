@@ -236,6 +236,10 @@ class RdbLoaderBase {
     return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
   }
 
+  // Called to validate that the current chunk is fully consumed, after validation resets current
+  // chunk state.
+  std::error_code FinishCurrentChunk();
+
   static void CopyStreamId(const StreamID& src, struct streamID* dest);
 
   base::IoBuf* mem_buf_ = nullptr;
