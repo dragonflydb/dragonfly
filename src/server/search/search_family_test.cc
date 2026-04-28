@@ -4475,6 +4475,52 @@ TEST_F(SearchFamilyTest, HnswVectorRangeWithoutYieldDistanceAs) {
   EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
 }
 
+// Regression: FLAT VECTOR_RANGE must inject the YIELD_DISTANCE_AS alias into FT.SEARCH
+// replies. Default order is unchanged (no implicit reorder by distance — matches Redis
+// Stack); SORTBY <alias> opts in to distance ordering.
+TEST_F(SearchFamilyTest, FlatVectorRangeYieldDistanceAs) {
+  auto F = [](float f) { return string(reinterpret_cast<const char*>(&f), sizeof(float)); };
+
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", F(static_cast<float>(i))});
+
+  string vec = F(5.0f);
+
+  auto extract = [](const RespExpr& resp) {
+    std::map<string, double> out;
+    auto& arr = resp.GetVec();
+    for (size_t i = 1; i + 1 < arr.size(); i += 2) {
+      auto& flds = arr[i + 1].GetVec();
+      for (size_t j = 0; j + 1 < flds.size(); j += 2) {
+        if (flds[j].GetString() == "dist")
+          out[arr[i].GetString()] = std::stod(flds[j + 1].GetString());
+      }
+    }
+    return out;
+  };
+
+  // Default RETURN: alias must be present alongside the indexed field.
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "v", vec});
+  ASSERT_EQ(resp.GetVec()[0].GetInt(), 3);
+  auto d = extract(resp);
+  EXPECT_DOUBLE_EQ(d["k4"], 1.0);
+  EXPECT_DOUBLE_EQ(d["k5"], 0.0);
+  EXPECT_DOUBLE_EQ(d["k6"], 1.0);
+
+  // Explicit RETURN of the alias.
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "v", vec, "RETURN", "1", "dist"});
+  EXPECT_EQ(extract(resp).size(), 3u);
+
+  // SORTBY on the alias yields distance ASC (k5 closest).
+  resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $v]=>{$YIELD_DISTANCE_AS: dist}",
+              "PARAMS", "2", "v", vec, "SORTBY", "dist", "ASC", "RETURN", "1", "dist"});
+  EXPECT_EQ(resp.GetVec()[1].GetString(), "k5");
+}
+
 TEST_F(SearchFamilyTest, VectorRangeAggregate) {
   auto FloatToBytes = [](float f) -> string {
     return string(reinterpret_cast<const char*>(&f), sizeof(float));
