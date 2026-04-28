@@ -70,6 +70,9 @@ class ChannelStore {
   ChannelStore() = default;
   ~ChannelStore();
 
+  ChannelStore(const ChannelStore&) = delete;
+  ChannelStore& operator=(const ChannelStore&) = delete;
+
   // Send messages to channel, block on connection backpressure.
   unsigned SendMessages(std::string_view channel, facade::ArgRange messages, bool sharded) const;
 
@@ -83,11 +86,11 @@ class ChannelStore {
 
   void UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& deleted_slots);
 
-  using ChannelsSubMap =
-      absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>>;
-
  private:
   using ThreadId = unsigned;
+
+  using ChannelsSubMap =
+      absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>>;
 
   // Subscribers for a single channel/pattern: connection context → owning thread-id.
   using SubscribeMap = absl::flat_hash_map<ConnectionContext*, ThreadId>;
@@ -103,6 +106,9 @@ class ChannelStore {
 
     UpdatablePointer(const UpdatablePointer& other);
     UpdatablePointer(UpdatablePointer&& other) noexcept;
+
+    UpdatablePointer& operator=(const UpdatablePointer&) = delete;
+    UpdatablePointer& operator=(UpdatablePointer&&) = delete;
 
     SubscribeMap* Get() const;
     void Set(SubscribeMap* sm) const;

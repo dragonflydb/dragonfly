@@ -19,6 +19,7 @@ using namespace std;
 
 namespace {
 
+// Build functor for sending messages to connection
 auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = false,
                  bool unsubscribe = false) {
   absl::FixedArray<string_view, 1> views(messages.Size());
@@ -52,20 +53,20 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool sharded = 
 ChannelStore* channel_store = nullptr;
 
 ChannelStore::UpdatablePointer::UpdatablePointer(const UpdatablePointer& other) {
-  ptr.store(other.ptr.load(memory_order_acquire), memory_order_release);
+  ptr.store(other.ptr.load(memory_order_relaxed), memory_order_relaxed);
 }
 
 ChannelStore::UpdatablePointer::UpdatablePointer(UpdatablePointer&& other) noexcept {
-  ptr.store(other.ptr.load(memory_order_acquire), memory_order_release);
-  other.ptr.store(nullptr, memory_order_release);
+  ptr.store(other.ptr.load(memory_order_relaxed), memory_order_relaxed);
+  other.ptr.store(nullptr, memory_order_relaxed);
 }
 
 ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::Get() const {
-  return ptr.load(memory_order_acquire);
+  return ptr.load(memory_order_acquire);  // sync pointed memory
 }
 
 void ChannelStore::UpdatablePointer::Set(ChannelStore::SubscribeMap* sm) const {
-  ptr.store(sm, memory_order_release);
+  ptr.store(sm, memory_order_release);  // sync pointed memory
 }
 
 ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::operator->() const {
@@ -96,14 +97,23 @@ unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messag
   if (subscribers.empty())
     return 0;
 
+  // Make sure none of the threads publish buffer limits is reached. We don't reserve memory ahead
+  // and don't prevent the buffer from possibly filling, but the approach is good enough for
+  // limiting fast producers. Most importantly, we can use DispatchBrief below as we block here
   int32_t last_thread = -1;
+
   for (auto& sub : subscribers) {
     int sub_thread = sub.LastKnownThreadId();
     DCHECK_LE(last_thread, sub_thread);
-    if (last_thread == sub_thread)
+    if (last_thread == sub_thread)  // skip same thread
       continue;
+
     if (sub.IsExpired())
       continue;
+
+    // Make sure the connection thread has enough memory budget to accept the message.
+    // This is a heuristic and not entirely hermetic since the connection memory might
+    // get filled again.
     facade::Connection::EnsureMemoryBudget(sub_thread);
     last_thread = sub_thread;
   }
@@ -119,9 +129,13 @@ unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messag
     }
   };
   shard_set->pool()->DispatchBrief(std::move(cb));
+
   return subscribers_ptr->size();
 }
 
+// Note: This function is not atomic. The underlying channel and pattern stores
+// may be modified concurrently, so the result may not reflect a fully consistent state.
+// This trade-off for avoiding synchronization is acceptable for pub/sub use cases.
 vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view channel) const {
   vector<Subscriber> res;
 
@@ -140,6 +154,8 @@ vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view chan
 void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<Subscriber>* out) {
   out->reserve(out->size() + src.size());
   for (const auto [cntx, thread_id] : src) {
+    // `cntx` is expected to be valid as it unregisters itself from the channel_store before
+    // closing.
     CHECK(cntx->conn_state.subscribe_info);
     Subscriber sub{cntx->conn()->Borrow(), pattern};
     out->push_back(std::move(sub));
@@ -195,12 +211,11 @@ void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& 
 
 void ChannelStore::RemoveAllSubscribers(bool pattern, string_view channel) {
   ChannelMap& map = pattern ? patterns_ : channels_;
-  string key{channel};
-  map.Mutate(key, [&](const auto& m, auto AcquireReadExclusiveLock) {
-    auto it = m.find(key);
+  map.Mutate(channel, [&](const auto& m, auto LockReaders) {
+    auto it = m.find(channel);
     if (it == m.end())
       return;
-    auto locked_map = AcquireReadExclusiveLock();
+    auto locked_map = LockReaders();
     delete it->second.Get();
     locked_map.map.erase(it);
   });
@@ -209,12 +224,14 @@ void ChannelStore::RemoveAllSubscribers(bool pattern, string_view channel) {
 void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map,
                                                           uint32_t idx) {
   for (const auto& [channel, subscribers] : sub_map) {
+    // ignored by pub sub handler because should_unsubscribe is true
     std::string msg = "__ignore__";
     auto send = BuildSender(channel, {facade::ArgSlice{msg}}, false, true);
 
     auto it = lower_bound(subscribers.begin(), subscribers.end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers.end() && it->LastKnownThreadId() == idx) {
+      // if ptr->cntx() is null, a connection might have closed or be in the process of closing
       if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr) {
         DCHECK(it->pattern.empty());
         send(ptr, it->pattern);
@@ -268,11 +285,18 @@ void ChannelStoreUpdater::Apply() {
         } else {
           if (it == m.end())
             continue;
+          DCHECK(!it->second->empty());
           if (it->second->size() == 1) {
+            // If a channel is being deleted because the last subscriber is leaving,
+            // make sure the one leaving is actually that last subscriber.
+            DCHECK(it->second->begin()->first == cntx_);
             needs_map_change[i] = true;
             has_map_change = true;
           } else {
             auto* old_sm = it->second.Get();
+            // You cannot unsubscribe from a channel if you aren't subscribed to it in the first
+            // place.
+            DCHECK(old_sm->contains(cntx_));
             auto* new_sm = new ChannelStore::SubscribeMap{*old_sm};
             new_sm->erase(cntx_);
             it->second.Set(new_sm);
@@ -290,14 +314,13 @@ void ChannelStoreUpdater::Apply() {
           }
           std::string_view key = shard_keys[i];
           if (to_add_) {
+            DCHECK(!locked_map.map.contains(key));
             locked_map.map.emplace(std::string{key},
                                    ChannelStore::UpdatablePointer{
                                        new ChannelStore::SubscribeMap{{cntx_, thread_id_}}});
           } else {
             auto it = locked_map.map.find(key);
-            if (it == locked_map.map.end()) {
-              continue;
-            }
+            DCHECK(it != locked_map.map.end());
             delete it->second.Get();
             locked_map.map.erase(it);
           }
