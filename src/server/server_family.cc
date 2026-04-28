@@ -157,6 +157,9 @@ ABSL_FLAG(string, availability_zone, "",
           "server availability zone, used by clients to read from local-zone replicas");
 
 ABSL_FLAG(bool, keep_legacy_memory_metrics, true, "legacy metrics format");
+ABSL_FLAG(uint32_t, tls_reload_interval_secs, 0,
+          "If non-zero, periodically checks whether the TLS cert/key files on disk have changed "
+          "and reloads them automatically. Interval in seconds (minimum 60). 0 to disable.");
 // TODO deprecate when flipped in production
 ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
@@ -165,6 +168,8 @@ ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
+ABSL_DECLARE_FLAG(string, tls_cert_file);
+ABSL_DECLARE_FLAG(string, tls_key_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
@@ -1208,6 +1213,11 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
         return true;
       });
   create_snapshot_schedule_fb();
+
+  // Launch the TLS cert hot-reload fiber. It exits immediately when the
+  // interval is 0, so there is no cost when the feature is disabled.
+  tls_reload_fb_ =
+      service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { TlsReloadScheduling(); });
 }
 
 void ServerFamily::LoadFromSnapshot() {
@@ -1257,6 +1267,9 @@ void ServerFamily::Shutdown() {
   load_fiber_.JoinIfNeeded();
 
   JoinSnapshotSchedule();
+
+  tls_reload_done_.Notify();
+  tls_reload_fb_.JoinIfNeeded();
 
   bg_save_fb_.JoinIfNeeded();
 
@@ -1495,6 +1508,76 @@ void ServerFamily::SnapshotScheduling() {
     if (ec) {
       loading_stats_.failed_backup_count++;
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
+    }
+  }
+}
+
+namespace {
+
+time_t FileMtime(const std::string& path) {
+  if (path.empty())
+    return 0;
+  struct stat st;
+  if (stat(path.c_str(), &st) != 0)
+    return 0;
+  return st.st_mtim.tv_sec;
+}
+
+}  // namespace
+
+void ServerFamily::TlsReloadScheduling() {
+  uint32_t interval = absl::GetFlag(FLAGS_tls_reload_interval_secs);
+  if (interval == 0)
+    return;
+
+  if (!absl::GetFlag(FLAGS_tls)) {
+    LOG(WARNING) << "tls_reload_interval_secs is set but TLS is not enabled; "
+                    "ignoring";
+    return;
+  }
+
+  if (interval < 60) {
+    LOG(WARNING) << "tls_reload_interval_secs must be >= 60, got " << interval << "; clamping";
+    interval = 60;
+  }
+
+  LOG(INFO) << "TLS cert hot reload enabled, checking every " << interval << "s";
+
+  // Snapshot the initial mtimes so we only reload on change.
+  time_t last_cert_mtime = FileMtime(absl::GetFlag(FLAGS_tls_cert_file));
+  time_t last_key_mtime = FileMtime(absl::GetFlag(FLAGS_tls_key_file));
+  time_t last_ca_cert_mtime = FileMtime(absl::GetFlag(FLAGS_tls_ca_cert_file));
+
+  while (true) {
+    if (tls_reload_done_.WaitFor(chrono::seconds(interval))) {
+      break;
+    }
+
+    time_t cert_mtime = FileMtime(absl::GetFlag(FLAGS_tls_cert_file));
+    time_t key_mtime = FileMtime(absl::GetFlag(FLAGS_tls_key_file));
+    time_t ca_cert_mtime = FileMtime(absl::GetFlag(FLAGS_tls_ca_cert_file));
+
+    if (cert_mtime == last_cert_mtime && key_mtime == last_key_mtime &&
+        ca_cert_mtime == last_ca_cert_mtime) {
+      continue;
+    }
+
+    LOG(INFO) << "TLS cert/key file change detected, reloading";
+
+    bool ok = true;
+    for (facade::Listener* l : listeners_) {
+      if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
+        LOG(WARNING) << "TLS hot reload failed on a listener";
+        ok = false;
+        break;
+      }
+    }
+
+    if (ok) {
+      LOG(INFO) << "TLS certs reloaded successfully";
+      last_cert_mtime = cert_mtime;
+      last_key_mtime = key_mtime;
+      last_ca_cert_mtime = ca_cert_mtime;
     }
   }
 }

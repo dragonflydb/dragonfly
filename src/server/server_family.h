@@ -393,6 +393,11 @@ class ServerFamily {
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
+  // Periodically checks whether the TLS cert/key files on disk have changed
+  // (by mtime) and calls ReconfigureTLS() on every listener when they have.
+  // Driven by --tls_reload_interval_secs. Exits immediately if the flag is 0.
+  void TlsReloadScheduling();
+
   void SendInvalidationMessages() const;
 
   std::optional<SaveCmdOptions> GetSaveCmdOpts(CmdArgList args, CommandContext* cmd_cntx);
@@ -420,6 +425,7 @@ class ServerFamily {
   void ChangeConnectionAccept(bool accept);
 
   util::fb2::Fiber snapshot_schedule_fb_;
+  util::fb2::Fiber tls_reload_fb_;
   util::fb2::Fiber load_fiber_;
 
   Service& service_;
@@ -450,6 +456,7 @@ class ServerFamily {
   bool save_on_shutdown_{true};
 
   util::fb2::Done schedule_done_;
+  util::fb2::Done tls_reload_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
