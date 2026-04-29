@@ -605,6 +605,32 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
   bc->Wait();
 }
 
+using EmptyContainerVec = vector<pair<DbIndex, string>>;
+
+void DeleteEmptyContainers(ConnectionContext* cntx, vector<EmptyContainerVec>& per_shard) {
+  util::fb2::BlockingCounter bc{0};
+  for (uint32_t i = 0; i < shard_set->size(); ++i) {
+    if (per_shard[i].empty())
+      continue;
+    bc->Add(1);
+    shard_set->Add(i, [&, i, bc]() mutable {
+      auto& db_slice = cntx->ns->GetDbSlice(i);
+      for (const auto& [dbid, key] : per_shard[i]) {
+        DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+        auto res = db_slice.FindReadOnly(db_cntx, key);
+        if (!IsValid(res) || res->second.Encoding() != kEncodingStrMap2 || res->second.Size() != 0)
+          continue;
+        if (res->second.ObjType() == OBJ_SET)
+          SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, res->second);
+        else if (res->second.ObjType() == OBJ_HASH)
+          HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, res->second);
+      }
+      bc->Dec();
+    });
+  }
+  bc->Wait();
+}
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
@@ -1266,7 +1292,8 @@ void DebugCmd::TxAnalysis(CommandContext* cmd_cntx) {
 
 void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
-  auto cb = [&obj_hist_map_arr, cntx = cntx_](DbIndex dbid, PrimeIterator it) {
+  vector<EmptyContainerVec> empty_keys(shard_set->size());
+  auto cb = [&obj_hist_map_arr, &empty_keys](DbIndex dbid, PrimeIterator it) {
     unsigned obj_type = it->second.ObjType();
     auto& hist_ptr = obj_hist_map_arr[EngineShard::tlocal()->shard_id()][obj_type];
     if (!hist_ptr) {
@@ -1274,20 +1301,17 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
     }
     AddObjHist(it, hist_ptr.get());
 
-    // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
-    // in the currently traversed DB (not the connection-selected one).
+    // IterateMap/IterateSet may trigger lazy expiry leaving an empty container.
+    // Collect for deferred deletion — cannot delete here because the "Debug/Traverse"
+    // fiber is not allowed to call FindMutable while a snapshot is in progress.
     if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
-      auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET)
-        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
-      else if (obj_type == OBJ_HASH)
-        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+      empty_keys[EngineShard::tlocal()->shard_id()].emplace_back(dbid, std::move(key));
     }
   };
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
+  DeleteEmptyContainers(cntx_, empty_keys);
 
   for (size_t i = shard_set->size() - 1; i > 0; --i) {
     MergeObjHistMap(std::move(obj_hist_map_arr[i]), &obj_hist_map_arr[0]);
@@ -1746,7 +1770,8 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
   using PerShardStats = std::array<std::unique_ptr<UniqueStrings>, OBJ_HASH + 1>;
 
   vector<PerShardStats> all_shards(shard_set->size());
-  auto cb = [&all_shards, cntx = cntx_](DbIndex dbid, PrimeIterator it) {
+  vector<EmptyContainerVec> empty_keys(shard_set->size());
+  auto cb = [&all_shards, &empty_keys](DbIndex dbid, PrimeIterator it) {
     const unsigned obj_type = it->second.ObjType();
     if (obj_type != OBJ_HASH && obj_type != OBJ_LIST && obj_type != OBJ_SET &&
         obj_type != OBJ_ZSET) {
@@ -1767,21 +1792,18 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
     else if (obj_type == OBJ_ZSET)
       entry->AddZSet(it->second);
 
-    // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
-    // in the currently traversed DB (not the connection-selected one).
+    // IterateMap/IterateSet may trigger lazy expiry leaving an empty container.
+    // Collect for deferred deletion — cannot delete here because the "Debug/Traverse"
+    // fiber is not allowed to call FindMutable while a snapshot is in progress.
     if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
-      auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET)
-        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
-      else if (obj_type == OBJ_HASH)
-        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+      empty_keys[EngineShard::tlocal()->shard_id()].emplace_back(dbid, std::move(key));
     }
   };
 
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
+  DeleteEmptyContainers(cntx_, empty_keys);
 
   std::array<UniqueStrings, OBJ_HASH + 1> summary;
   for (const PerShardStats& shard_stat : all_shards) {
