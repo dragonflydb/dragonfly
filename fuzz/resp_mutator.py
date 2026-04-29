@@ -120,11 +120,12 @@ COMMANDS = [
     (b"MONITOR", 0, 0), (b"RESET", 0, 0), (b"HELLO", 0, 5),
     (b"WAIT", 2, 2), (b"BGSAVE", 0, 1), (b"SAVE", 0, 0),
     (b"OBJECT", 2, 2), (b"LATENCY", 1, 2), (b"SLOWLOG", 1, 2),
+    (b"DEBUG", 1, 4), (b"FLUSHDB", 0, 1), (b"FLUSHALL", 0, 1),
     # Bitops
     (b"SETBIT", 3, 3), (b"GETBIT", 2, 2), (b"BITCOUNT", 1, 4),
     (b"BITOP", 3, 5), (b"BITPOS", 2, 5), (b"BITFIELD", 2, 8),
     # Search
-    (b"FT.CREATE", 3, 15), (b"FT.SEARCH", 2, 10), (b"FT.DROPINDEX", 1, 2),
+    (b"FT.CREATE", 3, 20), (b"FT.SEARCH", 2, 16), (b"FT.DROPINDEX", 1, 2),
     (b"FT.INFO", 1, 1), (b"FT.ALTER", 3, 8),
     # Throttle
     (b"CL.THROTTLE", 5, 5),
@@ -164,7 +165,7 @@ COMMANDS = [
     (b"JSON.MSET", 3, 9), (b"JSON.NUMMULTBY", 3, 3),
     (b"JSON.DEBUG", 1, 3), (b"JSON.FORGET", 1, 2),
     # Search (additional)
-    (b"FT.AGGREGATE", 2, 12), (b"FT.PROFILE", 3, 12),
+    (b"FT.AGGREGATE", 2, 18), (b"FT.PROFILE", 3, 12),
     (b"FT.TAGVALS", 2, 2), (b"FT.SYNDUMP", 1, 1),
     (b"FT.SYNUPDATE", 3, 6), (b"FT.CONFIG", 2, 4),
 ]
@@ -172,7 +173,70 @@ COMMANDS = [
 
 KEYS = [b"k", b"key", b"k1", b"k2", b"k3", b"src", b"dst", b"mylist", b"myset", b"myhash"]
 VALUES = [b"v", b"val", b"hello", b"0", b"1", b"-1", b"100", b"3.14", b"", b"a b"]
-SPECIAL = [b"*", b"?", b"[", b"NX", b"XX", b"EX", b"PX", b"GT", b"LT", b"KEEPTTL"]
+SPECIAL = [
+    b"*",
+    b"?",
+    b"[",
+    b"NX",
+    b"XX",
+    b"EX",
+    b"PX",
+    b"GT",
+    b"LT",
+    b"KEEPTTL",
+    # DEBUG subcommands — let the mutator occasionally produce a valid DEBUG dispatch.
+    b"OBJECT",
+    b"OBJHIST",
+    b"RELOAD",
+    b"POPULATE",
+    b"WATCHED",
+    b"TX",
+    b"STACKTRACE",
+    b"SHARDS",
+    b"COMPRESSION",
+    b"SEGMENTS",
+    b"COMPACT-TABLE",
+    b"UNIQ-STRS",
+    b"IOSTATS",
+    b"KEYS",
+    b"VALUES",
+    # FLUSH modifiers
+    b"SYNC",
+    b"ASYNC",
+    # Search/vector tokens — let the mutator splice valid VECTOR query fragments.
+    b"VECTOR",
+    b"FLAT",
+    b"HNSW",
+    b"TYPE",
+    b"FLOAT32",
+    b"FLOAT64",
+    b"DIM",
+    b"DISTANCE_METRIC",
+    b"L2",
+    b"IP",
+    b"COSINE",
+    b"M",
+    b"EF_CONSTRUCTION",
+    b"EF_RUNTIME",
+    b"INITIAL_CAP",
+    b"DIALECT",
+    b"PARAMS",
+    b"SCHEMA",
+    b"SCORER",
+    b"WITHSCORES",
+    b"ADDSCORES",
+    b"KNN",
+    b"VECTOR_RANGE",
+    b"YIELD_DISTANCE_AS",
+    b"BM25STD",
+    b"TFIDF",
+    b"TFIDF.DOCNORM",
+    # Common vector query string fragments (whole query goes in one bulk).
+    b"*=>[KNN 3 @v $vec]",
+    b"*=>[KNN 5 @v $vec AS score]",
+    b"@v:[VECTOR_RANGE 1.5 $vec]",
+    b"@v:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+]
 JSON_VALUES = [b'{"a":1}', b"[1,2,3]", b'"str"', b"42", b"null", b"true"]
 JSON_PATHS = [b"$", b"$.a", b"$.*", b"$.arr[0]", b"."]
 SCORE_VALUES = [b"0", b"1", b"-inf", b"+inf", b"(1", b"(5", b"3.14"]

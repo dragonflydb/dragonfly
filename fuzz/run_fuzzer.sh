@@ -121,9 +121,6 @@ write_repro_env() {
         echo "--dbfilename=${DB_FILENAME}"
         echo "--omit_basic_usage"
         echo "--rename_command=SHUTDOWN="
-        echo "--rename_command=DEBUG="
-        echo "--rename_command=FLUSHALL="
-        echo "--rename_command=FLUSHDB="
         echo "--max_bulk_len=1048576"
         [[ "$TARGET" == "memcache" ]] && echo "--memcached_port=11211"
     } > "$out"
@@ -159,9 +156,6 @@ run_fuzzer() {
         --dbfilename="${DB_FILENAME}"
         --omit_basic_usage
         --rename_command=SHUTDOWN=
-        --rename_command=DEBUG=
-        --rename_command=FLUSHALL=
-        --rename_command=FLUSHDB=
         --max_bulk_len=1048576
     )
 
