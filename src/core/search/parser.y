@@ -59,6 +59,7 @@ double toDouble(string_view src);
   RCURLBR     "}"
   OR_OP       "|"
   COMMA       ","
+  TILDE       "~"
   KNN         "KNN"
   AS          "AS"
   EF_RUNTIME  "EF_RUNTIME"
@@ -75,7 +76,7 @@ double toDouble(string_view src);
 %precedence TERM TAG_VAL
 %left OR_OP
 %left AND_OP
-%right NOT_OP
+%right NOT_OP TILDE
 %precedence LPAREN RPAREN
 
 %token <std::string> DOUBLE "double"
@@ -188,13 +189,14 @@ search_or_expr:
   | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 search_unary_expr:
-  LPAREN search_expr RPAREN           { $$ = std::move($2);                }
-  | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
-  | TERM                              { $$ = AstTermNode(std::move($1));   }
-  | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
-  | SUFFIX                            { $$ = AstSuffixNode(std::move($1)); }
-  | INFIX                             { $$ = AstInfixNode(std::move($1));  }
-  | UINT32                            { $$ = AstTermNode(std::move($1));   }
+  LPAREN search_expr RPAREN           { $$ = std::move($2);                  }
+  | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
+  | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
+  | TERM                              { $$ = AstTermNode(std::move($1));     }
+  | PREFIX                            { $$ = AstPrefixNode(std::move($1));   }
+  | SUFFIX                            { $$ = AstSuffixNode(std::move($1));   }
+  | INFIX                             { $$ = AstInfixNode(std::move($1));    }
+  | UINT32                            { $$ = AstTermNode(std::move($1));     }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
@@ -202,6 +204,7 @@ field_cond:
   | UINT32                                              { $$ = AstTermNode(std::move($1));   }
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
+  | TILDE field_cond                                    { $$ = AstOptionalNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET bracket_filter_expr RBRACKET               { $$ = std::move($2); }
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
@@ -273,10 +276,11 @@ field_or_expr:
   | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 field_unary_expr:
-  LPAREN field_cond_expr RPAREN { $$ = std::move($2);                }
-  | NOT_OP field_unary_expr     { $$ = AstNegateNode(std::move($2)); }
-  | TERM                        { $$ = AstTermNode(std::move($1));   }
-  | UINT32                      { $$ = AstTermNode(std::move($1));   }
+  LPAREN field_cond_expr RPAREN { $$ = std::move($2);                  }
+  | NOT_OP field_unary_expr     { $$ = AstNegateNode(std::move($2));   }
+  | TILDE field_unary_expr      { $$ = AstOptionalNode(std::move($2)); }
+  | TERM                        { $$ = AstTermNode(std::move($1));     }
+  | UINT32                      { $$ = AstTermNode(std::move($1));     }
 
 tag_list:
   tag_list_element                       { $$ = AstTagsNode(std::move($1));                }

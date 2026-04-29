@@ -3207,5 +3207,254 @@ TEST_F(ScoringTest, ScorerTopKCutoff) {
   }
 }
 
+TEST_F(SearchTest, MatchOptional) {
+  // ~term returns ALL documents, not just matching ones
+  PrepareQuery("~hello");
+
+  ExpectAll("hello world", "no match here", "something else");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalWithRequired) {
+  // "foo ~bar" means: must match "foo", optionally match "bar"
+  PrepareQuery("foo ~bar");
+
+  ExpectAll("foo", "foo bar", "foo and something");
+  ExpectNone("bar only", "nothing");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalScoreBoost) {
+  // ~hello: all docs returned, but docs with "hello" get higher score
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument doc_with("hello world");
+  MockedDocument doc_without("goodbye world");
+
+  index.Add(0, doc_with);
+  index.Add(1, doc_without);
+  index.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("~hello", &params));
+  algo.SetScorer(&BM25Std);
+
+  auto result = algo.Search(&index);
+
+  // Both docs are returned (optional never filters)
+  ASSERT_EQ(result.ids.size(), 2u);
+
+  // Use optional<float> so an absent score is distinguishable from 0.
+  std::optional<float> score_with, score_without;
+  for (auto& [doc, score] : result.text_scores) {
+    if (doc == 0)
+      score_with = score;
+    if (doc == 1)
+      score_without = score;
+  }
+  ASSERT_TRUE(score_with.has_value()) << "doc:0 must have a score entry";
+  ASSERT_TRUE(score_without.has_value()) << "doc:1 must have a score entry";
+  EXPECT_GT(*score_with, 0.0f) << "Doc matching the optional term should score > 0";
+  EXPECT_GT(*score_with, *score_without) << "Matching doc must score higher than non-matching";
+}
+
+TEST_F(SearchTest, MatchDoubleOptional) {
+  // ~foo ~bar: all docs returned
+  PrepareQuery("~foo ~bar");
+
+  ExpectAll("foo bar", "only foo", "only bar", "neither one");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalNonExistentTerm) {
+  // ~xyznonexistent: term never matches anything, but all docs still returned
+  PrepareQuery("~xyznonexistent");
+
+  ExpectAll("anything goes", "another doc", "third one");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchNestedOptional) {
+  // ~~hello: double optional should still return all docs
+  PrepareQuery("~~hello");
+
+  ExpectAll("hello world", "no match here", "third doc");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalWithOr) {
+  // ~hello | world: '~hello' is all docs; OR with anything is still all docs
+  PrepareQuery("~hello | world");
+
+  ExpectAll("hello there", "world peace", "neither term", "both hello world");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchFieldOptionalUnparen) {
+  // @field:~hello (no parens) — was a parser fix, ensure it executes correctly
+  PrepareQuery("@field:~hello");
+
+  ExpectAll("hello there", "no match", "another");
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchOptionalSwallowsInnerErrors) {
+  // ~@invalid_field:hello: ~ is a soft boost, not a filter. Inner errors
+  // (missing/NOINDEX field) must NOT poison the outer query — return all docs
+  // without error, matching Redis's silent no-op semantics.
+  Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument doc{Map{{"text", "anything"}}};
+  index.Add(0, doc);
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("~@invalid_field:hello", &params));
+  auto result = algo.Search(&index);
+  EXPECT_TRUE(result.error.empty()) << "~ should swallow inner errors, got: " << result.error;
+  EXPECT_EQ(result.ids.size(), 1u) << "~ should still return all docs";
+}
+
+TEST_F(SearchTest, MatchEscapedTermLiteral) {
+  // \X escape: lexer must produce a TERM with the literal char, not a separate
+  // operator token. The actual tokenizer typically strips punctuation when
+  // building the index, so these searches usually return 0 docs — the point of
+  // this test is the *parse + search* path doesn't error or return the wrong
+  // docs through misinterpreting `\~` as TILDE.
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument plain("hello world");
+  index.Add(0, plain);
+  index.FinalizeInitialization();
+
+  for (auto* query : {"\\~hello", "foo\\~bar", "\\-test", "\\|word", "\\(group\\)"}) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    ASSERT_TRUE(algo.Init(query, &params)) << "should parse: " << query;
+    auto result = algo.Search(&index);
+    EXPECT_TRUE(result.error.empty()) << "no error for escaped query: " << query;
+  }
+}
+
+TEST_F(SearchTest, MatchNestedOptionalNoDoubleScore) {
+  // ~~hello: nested optionals should not double-count "hello" in scoring.
+  // matched_text_terms_ uses a set keyed by (index, term) so the second
+  // OPT(hello) shouldn't add an extra cursor; doc with one "hello" must score
+  // the same as a plain ~hello.
+  Schema schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument doc_hello("hello world");
+  index.Add(0, doc_hello);
+  index.FinalizeInitialization();
+
+  auto run = [&](const char* query) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    EXPECT_TRUE(algo.Init(query, &params));
+    algo.SetScorer(&BM25Std);
+    return algo.Search(&index);
+  };
+
+  auto single = run("~hello");
+  auto nested = run("~~hello");
+
+  ASSERT_EQ(single.text_scores.size(), 1u);
+  ASSERT_EQ(nested.text_scores.size(), 1u);
+  EXPECT_NEAR(single.text_scores[0].second, nested.text_scores[0].second, 1e-6)
+      << "Nested optionals must not inflate the score";
+}
+
+TEST_F(SearchTest, MatchNegateErrorPropagation) {
+  // -@invalid_field:hello: pre-existing AstNegateNode pattern, error must propagate
+  Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("-@invalid_field:hello", &params));
+  auto result = algo.Search(&index);
+  EXPECT_FALSE(result.error.empty()) << "error from negated subtree must propagate";
+}
+
+TEST_F(SearchTest, MatchOptionalFieldScopedReturnsAllDocs) {
+  Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}, {"other", SchemaField::TEXT}});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  MockedDocument with_text{Map{{"text", "hello"}}};
+  MockedDocument without_text{Map{{"other", "world"}}};  // no "text" field
+  index.Add(0, with_text);
+  index.Add(1, without_text);
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@text:~hello", &params));
+  auto result = algo.Search(&index);
+
+  EXPECT_TRUE(result.error.empty()) << result.error;
+  EXPECT_EQ(result.ids.size(), 2u)
+      << "@field:~term must return all docs, including ones without the field";
+}
+
+TEST_F(SearchTest, MatchOptionalFieldScopedSortableNoIndex) {
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup mr_cleanup{[] { InitTLSearchMR(nullptr); }};
+
+  Schema schema = MakeSimpleSchema({{"txt", SchemaField::TEXT}});
+  schema.fields["txt"].flags = SchemaField::SORTABLE | SchemaField::NOINDEX;
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  MockedDocument doc{Map{{"txt", "hello"}}};
+  index.Add(0, doc);
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@txt:~hello", &params));
+  auto result = algo.Search(&index);
+
+  EXPECT_TRUE(result.error.empty()) << "SORTABLE+NOINDEX field must not error: " << result.error;
+}
+
+TEST_F(SearchTest, MatchOptionalKnnIdsScoresAligned) {
+  auto schema = MakeSimpleSchema({{"text", SchemaField::TEXT}, {"vec", SchemaField::VECTOR}});
+  schema.fields["vec"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  // 4 docs with different text and 1-D vector positions.
+  for (size_t i = 0; i < 4; ++i) {
+    MockedDocument doc{Map{{"text", i == 0 || i == 3 ? "hello world" : "other"},
+                           {"vec", ToBytes({float(i + 1)})}}};
+    index.Add(i, doc);
+  }
+  index.FinalizeInitialization();
+
+  SearchAlgorithm algo;
+  QueryParams params;
+  params["v"] = ToBytes({2.5f});  // closest is doc:1 (pos=2) and doc:2 (pos=3)
+  ASSERT_TRUE(algo.Init("~hello => [KNN 4 @vec $v]", &params));
+  algo.SetScorer(&BM25Std);
+  auto result = algo.Search(&index);
+
+  ASSERT_TRUE(result.error.empty()) << result.error;
+  ASSERT_EQ(result.ids.size(), result.knn_scores.size())
+      << "ids and knn_scores must have matching size";
+  for (size_t i = 0; i < result.ids.size(); ++i) {
+    EXPECT_EQ(result.ids[i], result.knn_scores[i].first)
+        << "ids[" << i << "] (" << result.ids[i] << ") must align with knn_scores[" << i
+        << "].first (" << result.knn_scores[i].first << ")";
+  }
+}
+
 }  // namespace search
 }  // namespace dfly
